@@ -200,8 +200,8 @@ inline int platform7_interface_version(DeviceType t) {
 }
 
 inline const char* invalid_probe_reason_for(DeviceType t) {
+    // A camera has static probes since #2259 (duration, bin, NumX/NumY and StartX/StartY).
     switch (t) {
-        case DeviceType::Camera:
         case DeviceType::Focuser:  // every focuser clamps a Move to 0..MaxStep (with_clamping_focuser says so)
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";

@@ -1068,6 +1068,67 @@ header > .server-clock {
 }
 
 /* ---- states ---- */
+/* Issue #1764: the stale-data banner, shown while the bridge does not answer
+   the device status poll. Text, not colour, carries the message. */
+.link-banner {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 13px;
+}
+
+.link-banner[hidden] {
+    display: none;
+}
+
+/* A dot whose state is from the last good poll: hollow, so the marker is a
+   shape and not colour alone; its label starts "Stale". */
+.status-dot.stale {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--status-dot-color);
+}
+
+.status-dot.stale::before {
+    display: none;
+}
+
+/* Issue #1764: the device list's loading state, a skeleton row. */
+.device-card.skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+}
+
+.skeleton-line {
+    display: block;
+    height: 12px;
+    width: 60%;
+    border-radius: 4px;
+    background: var(--line);
+}
+
+.skeleton-line.skeleton-title {
+    width: 35%;
+    height: 16px;
+}
+
+/* Text for screen readers only. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .loading {
     text-align: center;
     color: var(--dim);

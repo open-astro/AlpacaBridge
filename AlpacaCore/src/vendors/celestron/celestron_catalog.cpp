@@ -21,6 +21,7 @@
 #include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
+#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
 #include <optional>
@@ -106,6 +107,11 @@ void register_celestron_factory(DeviceCatalog& catalog) {
         return vendor::celestron::create_celestron_focuser(device_number, config.get(kCelestronFocuserPortPath));
     };
     catalog.add(std::move(focuser));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"celestron", DeviceType::Telescope}, vendor::celestron::celestron_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

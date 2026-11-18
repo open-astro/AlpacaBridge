@@ -121,13 +121,15 @@ Checks:
      follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
      fakes that are not a driver's connect path, each with a reason, and a
      helper that has since been given a roster row is itself a finding.
- 14. Every std::regex in AlpacaHTTP/src/http/router.cpp is a static object
-     (issue #657, from #646). Router::route once built a std::regex per
+ 14. Every std::regex in AlpacaHTTP/src/http/router.cpp and in each per-type
+     routes source, AlpacaHTTP/src/http/routes/*.cpp (issue #2081), is a static
+     object (issue #657, from #646). Router::route once built a std::regex per
      request, which made a device-path request about 14x a management request
      (30x under ASan). This replaces a wall-clock ratio test, which was coarse
      in Release and flaky under load. A construction with no `static` in its
      statement, or an unnamed temporary, is a finding, and so is finding no
-     construction at all (the extractor is stale or the regexes moved).
+     construction in any of those files together (the extractor is stale or the
+     regexes moved); a routes source with no regex is not a finding.
  15. The README headline ("N validated devices. <Word> brands. One server."
      plus the brand list) agrees with SUPPORTED-DRIVERS.md (issue #684). N is
      recomputed with the row filter this script owns, count_validated_device_rows
@@ -244,7 +246,15 @@ Checks:
      check list: `// NOLINT(bugprone-empty-catch): the poll retries` (issue
      #2059). A suppression with no reason cannot be reviewed, and `git grep
      NOLINT` shows only that line. NOLINTEND is exempt.
- 29. The fake ConformU run list, scripts/conformu_fake_runs.tsv, agrees with
+ 29. A serial device's USB identity has one home (issue #2312): the wrapper's
+     `<x>_usb_tokens()`. Under AlpacaCore/src/vendors, no raw-node filter
+     passes a braced token list to usb_tty_descriptor_matches(); every
+     `<x>_usb_tokens()` a wrapper defines is matched by that wrapper's own
+     filter and registered by a *_catalog.cpp through add_usb_serial_identity();
+     and every name a catalog registers is defined. Otherwise the
+     attacheddevices listing and the connect-time scan could disagree about
+     which adapters a device ships with, or the listing could miss a device.
+ 30. The fake ConformU run list, scripts/conformu_fake_runs.tsv, agrees with
      kFakeConnectableRoster in both directions (issue #2078). Every roster row
      has one record (vendor, deviceType, fakeHeader) whose status is `run` or
      `pending`, and every such record has a roster row, so a new fake cannot
@@ -619,10 +629,11 @@ def _strip_comments(text):
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
     as a method signature. Written for the two QHY headers, which hold no raw
-    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
-    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
-    that line; that is harmless only while no std::regex sits on such a line or
-    after a stray /* -- re-check both if the gate ever misses one."""
+    string literals. Check 14 also runs it over router.cpp and routes/*.cpp; the
+    router does hold them (R"(...)" regexes) and "://" (origin.find), so
+    LINE_COMMENT_RE blanks the rest of that line; that is harmless only while no
+    std::regex sits on such a line or after a stray /* -- re-check both if the
+    gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -1819,9 +1830,10 @@ HELPER_FAKES = {
     "fake_celestron_handset.h": "stateful NexStar hand-controller responder plugged into FakeMountServer for the Celestron async cases; the Celestron roster row stays on fake_mount_server.h",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
-    "fake_weewx_fetcher.h": "scripted WeeWxFetcher injected through the WeeWX factory overload; no transport of its own to roster",
+    "fake_http_client.h": "scripted util::HttpClient injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
+    "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
 }
 
 
@@ -1873,7 +1885,7 @@ def check_fake_roster_matches_disk(root=ROOT):
     return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
 
 
-# Check 29 (issue #2078): the fake ConformU run list is data, one record per
+# Check 30 (issue #2078): the fake ConformU run list is data, one record per
 # roster row, kept in step with the roster both ways.
 
 CONFORMU_RUNS_PATH = "scripts/conformu_fake_runs.tsv"
@@ -1886,7 +1898,7 @@ CONFORMU_REPORT_RE = re.compile(r"^AlpacaCore/conformu/[^/]+/Fake/(Fake-[^/]+\.t
 
 
 def _conformu_run_list_findings(header_text, tsv_text, report_exists=lambda path: True):
-    """Check 29 over the roster header and the run list. Pure, so --self-test can drive it."""
+    """Check 30 over the roster header and the run list. Pure, so --self-test can drive it."""
     findings = []
     m = ROSTER_ARRAY_RE.search(_strip_comments(header_text))
     roster = ROSTER_ROW_RE.findall(m.group(1)) if m else []
@@ -1961,7 +1973,12 @@ STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
 STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
 
 
-def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
+ROUTER_SOURCE = "AlpacaHTTP/src/http/router.cpp"
+ROUTES_GLOB = "AlpacaHTTP/src/http/routes/*.cpp"
+
+
+def _static_regex_scan(text, path):
+    """(findings, constructions seen) for one source; the floor is the caller's."""
     code = _strip_comments(text)
     findings = []
     seen = 0
@@ -1979,13 +1996,32 @@ def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
             findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
                             "management request (#646); the gate wants the static keyword and does not model "
                             "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
+    return findings, seen
+
+
+def _static_regex_findings(text, path=ROUTER_SOURCE):
+    findings, seen = _static_regex_scan(text, path)
     if seen == 0:
         findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
     return findings
 
 
 def check_router_regexes_static(root=ROOT):
-    return _static_regex_findings(read("AlpacaHTTP/src/http/router.cpp", root))
+    """The router and every per-type routes source (#2081). A routes source with no
+    regex is not a finding: the floor applies to the union, so it still fires when
+    the regexes leave every scanned file."""
+    paths = [ROUTER_SOURCE] + sorted(Path(p).relative_to(root).as_posix()
+                                     for p in glob.glob(str(root / ROUTES_GLOB)))
+    findings = []
+    seen = 0
+    for path in paths:
+        f, n = _static_regex_scan(read(path, root), path)
+        findings.extend(f)
+        seen += n
+    if seen == 0:
+        findings.append("no std::regex construction found in %s or %s: the extractor is stale or the "
+                        "regexes moved" % (ROUTER_SOURCE, ROUTES_GLOB))
+    return findings
 
 # --- check 15: README headline counts vs SUPPORTED-DRIVERS.md (issue #684) --
 #
@@ -3263,6 +3299,75 @@ def check_nolint_reasons(root=ROOT):
     return _nolint_reason_findings(files)
 
 
+# --- check 29: a serial device's USB identity has one home (issue #2312) ------
+
+USB_TOKENS_DEF_RE = re.compile(r"^const std::vector<std::string>& (\w+_usb_tokens)\(\) \{", re.MULTILINE)
+USB_TOKENS_NAME_RE = re.compile(r"\b(\w+_usb_tokens)\(\)")
+USB_MATCH_CALL_RE = re.compile(r"\busb_tty_descriptor_matches\(")
+USB_IDENTITY_CALL_RE = re.compile(r"\badd_usb_serial_identity\(")
+
+
+def _call_args(code, pattern):
+    """(start, argument text) of each call to `pattern`, the arguments read up
+    to the matching parenthesis, so a call inside an `if (...)` is whole."""
+    calls = []
+    for m in pattern.finditer(code):
+        depth = 0
+        for i in range(m.end() - 1, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append((m.start(), code[m.end():i]))
+                    break
+    return calls
+# A floor, not a count: 17 wrappers define a list today. Lower it when one goes.
+MIN_USB_TOKEN_LISTS = 15
+
+
+def _usb_identity_findings(wrappers, catalogs, floor=MIN_USB_TOKEN_LISTS):
+    """Check 29 over {path: text} maps of wrapper and catalog sources. Pure, so
+    --self-test can drive it."""
+    findings = []
+    defined = {}
+    for path, text in sorted(wrappers.items()):
+        code = _strip_comments(text)
+        matched = set()
+        for start, args in _call_args(code, USB_MATCH_CALL_RE):
+            if "{" in args:
+                findings.append("%s:%d: a raw-node filter passes a braced token list to usb_tty_descriptor_matches(); "
+                                "move it into the wrapper's <x>_usb_tokens() so the catalog's USB identity reads the "
+                                "same list (#2312)" % (path, code.count("\n", 0, start) + 1))
+            matched.update(USB_TOKENS_NAME_RE.findall(args))
+        for name in USB_TOKENS_DEF_RE.findall(code):
+            defined[name] = path
+            if name not in matched:
+                findings.append("%s defines %s() but its raw-node filter does not match it: the listing and the "
+                                "connect-time scan would read different lists" % (path, name))
+    registered = set()
+    for _, text in sorted(catalogs.items()):
+        for _, args in _call_args(_strip_comments(text), USB_IDENTITY_CALL_RE):
+            registered.update(USB_TOKENS_NAME_RE.findall(args))
+    for name in sorted(set(defined) - registered):
+        findings.append("%s defines %s() but no *_catalog.cpp registers it with add_usb_serial_identity(): the "
+                        "attacheddevices listing would miss that device" % (defined[name], name))
+    for name in sorted(registered - set(defined)):
+        findings.append("a *_catalog.cpp registers %s() but no wrapper under AlpacaCore/src/vendors defines it" % name)
+    if len(defined) < floor:
+        findings.insert(0, "found only %d <x>_usb_tokens() definition(s) under AlpacaCore/src/vendors (floor %d): "
+                           "the definition pattern or the file listing regressed" % (len(defined), floor))
+    return findings
+
+
+def check_usb_identity_single_source(root=ROOT):
+    wrappers, catalogs = {}, {}
+    for path in sorted(Path(root).glob("AlpacaCore/src/vendors/*/*.cpp")):
+        rel = path.relative_to(root).as_posix()
+        (catalogs if rel.endswith("_catalog.cpp") else wrappers)[rel] = read(rel, root)
+    return _usb_identity_findings(wrappers, catalogs)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -3278,7 +3383,7 @@ CHECKS = [
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
     ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
     ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
-    ("Every std::regex in router.cpp is built once (static)", check_router_regexes_static),
+    ("Every std::regex in router.cpp and routes/*.cpp is built once (static)", check_router_regexes_static),
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
@@ -3294,6 +3399,7 @@ CHECKS = [
     ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
     ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
     ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
+    ("Each serial device's USB identity is its wrapper's token list", check_usb_identity_single_source),
     ("Fake ConformU run list matches the fake-connectable roster", check_conformu_run_list_matches_roster),
 ]
 
@@ -3909,6 +4015,29 @@ def self_test():
     f = _static_regex_findings("int x = 1;\n")
     check("static regex: no construction at all is a floor finding, not a pass",
           len(f) == 1 and "extractor is stale" in f[0])
+    # #2081: the per-type dispatch moves to AlpacaHTTP/src/http/routes/<type>_routes.cpp, so the
+    # check reads the router and every routes source, with the floor over the union.
+    with tempfile.TemporaryDirectory() as rx_tmp:
+        rx_root = Path(rx_tmp)
+        rx_http = rx_root / "AlpacaHTTP" / "src" / "http"
+        (rx_http / "routes").mkdir(parents=True)
+        (rx_http / "router.cpp").write_text(rx_ok, encoding="utf-8")
+        (rx_http / "routes" / "dome_routes.cpp").write_text("int dispatch = 0;\n", encoding="utf-8")
+        check("static regex: a routes source with no regex adds no finding",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('const std::regex kF("a");\n', encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: a non-static regex in a routes source is reported with its path",
+              len(f) == 1 and "routes/focuser_routes.cpp:1" in f[0] and "kF is not static" in f[0])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('static const std::regex kF("a");\n',
+                                                               encoding="utf-8")
+        (rx_http / "router.cpp").write_text("int x = 1;\n", encoding="utf-8")
+        check("static regex: the floor counts the routes sources too (a regex there is a construction)",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text("int y = 2;\n", encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: no construction in the router or any routes source is one floor finding",
+              len(f) == 1 and "extractor is stale" in f[0] and "routes" in f[0])
 
     # check 15: README headline vs SUPPORTED-DRIVERS.md (issue #684).
     hl_map = {"Alpha": "Alpha", "Beta Motor": "Beta", "Beta Handset": "Beta", "GPhoto": "DSLRs (via libgphoto2)"}
@@ -4678,6 +4807,32 @@ def self_test():
     check("cgx writers: a new writer call is reported", any("sync() calls write_frame() 1 time(s), pinned 0" in x for x in f))
     f = _cgx_frame_writer_findings(writer_src, {**writer_pins, ("gone", "write_frame"): (1, "")})
     check("cgx writers: a pinned caller that no longer writes is reported", any("gone() calls write_frame() 0" in x for x in f))
+
+    # check 29: one home for a serial device's USB identity (literal fixtures).
+    usb_wrapper = ("namespace {\nbool raw(const D& d) {\n    // usb_tty_descriptor_matches(d, {\"x\"}); in a comment\n"
+                   "    return util::usb_tty_descriptor_matches(*d, foo_usb_tokens());\n}\n}  // namespace\n"
+                   "const std::vector<std::string>& foo_usb_tokens() {\n    static const std::vector<std::string> t{\"1a86\"};\n"
+                   "    return t;\n}\n")
+    usb_catalog = "    catalog.add_usb_serial_identity({DeviceKey{\"foo\", DeviceType::Focuser}, vendor::foo::foo_usb_tokens(), {}});\n"
+    check("usb identity: a wrapper list matched by its filter and registered by a catalog is clean",
+          _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=1) == [])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper + "bool r2(const D& d) {\n    return usb_tty_descriptor_matches(\n"
+                                "        *d, {\"CH340\", \"USB_Serial\"});\n}\n"}, {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a braced token list in a filter is reported by file and line",
+          len(f) == 1 and f[0].startswith("w.cpp:12:") and "braced token list" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": ""}, floor=1)
+    check("usb identity: a token list no catalog registers is reported",
+          len(f) == 1 and "no *_catalog.cpp registers it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper},
+                               {"c_catalog.cpp": usb_catalog + usb_catalog.replace("foo_usb", "bar_usb")}, floor=1)
+    check("usb identity: a registered name no wrapper defines is reported",
+          len(f) == 1 and "bar_usb_tokens() but no wrapper" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper.replace("matches(*d, foo_usb_tokens())", "matches(*d, other)")},
+                               {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a token list its own filter does not match is reported",
+          len(f) == 1 and "does not match it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=2)
+    check("usb identity: fewer definitions than the floor is a finding", len(f) == 1 and "floor 2" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

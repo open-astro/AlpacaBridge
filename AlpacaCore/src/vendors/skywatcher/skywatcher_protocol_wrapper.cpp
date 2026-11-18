@@ -452,9 +452,7 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     // Wave-series mounts expose an STM32 CDC-ACM virtual COM port (0483:5740,
     // /dev/ttyACM*); also accept the classic EQDIRECT cable chips.
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
-                      "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, skywatcher_usb_tokens());
 }
 }  // namespace
 #endif  // _WIN32
@@ -2098,6 +2096,13 @@ uint32_t SkyWatcherProtocolWrapper::get_feature(int axis, uint32_t inquiry) {
 
 void SkyWatcherProtocolWrapper::set_feature(int axis, uint32_t command) {
     send_command('W', axis, encode_u24(command));
+}
+
+const std::vector<std::string>& skywatcher_usb_tokens() {
+    static const std::vector<std::string> tokens{
+        "STM32", "STMicroelectronics", "0483",       "Prolific",  "PL2303", "067b", "FTDI", "CP210", "CH340", "CH341",
+        "1a86",  "Silicon_Labs",       "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::skywatcher

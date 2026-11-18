@@ -115,8 +115,8 @@ author must do. Read the docstring before changing a gate.
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
   equal to `alpaca_errors.h` (check 17); never state a count of the
-  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` `static`;
-  and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
+  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` and the
+  per-type `routes/*.cpp` sources `static`; and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
   check list (`// NOLINT(bugprone-empty-catch): the poll retries`; check 28).
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors-shard` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
@@ -128,7 +128,7 @@ author must do. Read the docstring before changing a gate.
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for every `run`
   row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount`). The run
   list has one record per `kFakeConnectableRoster` row (`run`, or `pending` with the slice of #2078 that runs it)
-  and a `no-fake` record per driver with no fake; docs-drift check 29 holds it to the roster both ways, so a PR
+  and a `no-fake` record per driver with no fake; docs-drift check 30 holds it to the roster both ways, so a PR
   that adds a roster row adds its record. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
   workflow's `paths:` list (the Sky-Watcher driver, the fake mount and server, the telescope interface, the HTTP
   layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides

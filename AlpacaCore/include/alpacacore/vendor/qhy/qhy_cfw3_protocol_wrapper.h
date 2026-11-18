@@ -86,6 +86,11 @@ std::optional<int> cfw3_parse_slot(char reply);
  */
 std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms = 25000);
 
+/// The USB descriptor tokens of a QHY CFW3 adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& cfw3_usb_tokens();
+
 /**
  * @brief Protocol wrapper for the QHYCFW3 USB serial protocol.
  *

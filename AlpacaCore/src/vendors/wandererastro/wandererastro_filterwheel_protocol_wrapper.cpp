@@ -262,7 +262,7 @@ bool probe_port(const std::string& port_path, FilterWheelPortInfo& info) {
 bool raw_port_looks_like_filterwheel_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wanderer_filterwheel_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -857,5 +857,10 @@ std::optional<std::string> WandererFilterWheelProtocolWrapper::get_firmware_date
 void WandererFilterWheelProtocolWrapper::select_filter(int slot) { impl_->select_filter(slot); }
 
 void WandererFilterWheelProtocolWrapper::calibrate() { impl_->calibrate(); }
+
+const std::vector<std::string>& wanderer_filterwheel_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::wandererastro

@@ -509,6 +509,34 @@ TEST_CASE("QHY Q-Focuser Driver - explicit disconnect after lost link clears sta
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Issue #2262: the Q-Focuser's latch is now the shared util::SerialLink verdict. EBADF on its own fd stays a lost
+// link (this wrapper already counted it), and an explicit disconnect() now clears the verdict as decision 0009
+// rule 5 asks; before #2262 only the next connect() did, so link_alive() read false on a wrapper the client had
+// already disconnected.
+// Falsified by: qhy_qfocuser_protocol_wrapper.cpp disconnect() without link_.clear_loss() (the last CHECK fails), or
+// transact_locked() writing through util::tty_write_all(serial_fd_, ...) instead of link_.write_all() (no latch).
+TEST_CASE("QHY Q-Focuser wrapper - EBADF is a lost link and a disconnect clears the verdict",
+          "[qhy][focuser][unit][link-lost][issue2262]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    alpacacore::vendor::qhy::QFocuserProtocolWrapper wrapper;
+    alpacacore::vendor::qhy::QFocuserConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    (void)wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(wrapper.link_alive());
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&]() { (void)wrapper.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK_FALSE(wrapper.is_connected());
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released at the loss
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+}
+
 // #2030, pinned hardware-free by #2040: the auto-detect probe treats a port that is not taking data as "not this
 // device" within its bounded drains, even though the fake behind it would answer the handshake.
 TEST_CASE("QHY Q-Focuser Driver - the probe skips a port that is not taking data", "[qhy][focuser][unit]") {

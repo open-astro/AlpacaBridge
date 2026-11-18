@@ -34,6 +34,13 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- **The link owns the lost-link verdict** (#2262, [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)
+  point 2a): a migrated wrapper reads and writes through `SerialLink::read()`, `SerialLink::write_all()` and
+  `util::read_until(SerialLink&, ...)`, which classify a failure with `util::is_serial_loss_errno()` (`EIO`, `ENXIO`,
+  `ENODEV`, `EBADF`; an `EBADF` logs one error line, since an unusable fd is our bug) and latch `lost()`. The wrapper
+  reads `lost()` for `link_alive()` and `fault()` for `link_fault()`, keeps its own `close()` under its I/O lock, and
+  calls `clear_loss()` on Disconnect and after a connect's handshake (a hangup its retries absorbed is not a loss).
+  No wrapper keeps its own latch, fault mutex or errno list once migrated.
 - **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written loop
   around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a length,
   an idle gap or the first of a terminator and an idle gap, drops CR/LF, caps the length, keeps one `steady_clock`
@@ -258,7 +265,12 @@ independently broken the same way, before it was centralised:
   (`USB_Serial`), but the raw sysfs strings keep their spaces (`USB Serial`) —
   the helper matches patterns against both spellings, so udev-style patterns
   copied from a by-id name filter are fine, but don't "simplify" that
-  double-match away.
+  double-match away. Pass the wrapper's own `<x>_usb_tokens()` list, never a
+  braced list: the vendor's `<vendor>_catalog.cpp` registers the same list as the
+  device's USB identity (`DeviceCatalog::add_usb_serial_identity`), which
+  `GET /management/v1/attacheddevices` matches ports against without opening them
+  (issue #2312), and docs-drift check 29 fails on a braced list or a list no
+  catalog registers.
 - **`alpacacore::util::path_exists(path)`** instead of bare
   `std::filesystem::exists(path)` anywhere in an `enumerate_*` scan. The plain
   overload throws `filesystem_error` on a traversal error (e.g. EACCES on a

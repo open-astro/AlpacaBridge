@@ -142,7 +142,8 @@ AlpacaHTTP/
 |   |-- http/
 |   |   |-- server.cpp
 |   |   |-- session.cpp
-|   |   `-- router.cpp
+|   |   |-- router.cpp
+|   |   `-- routes/          # one <type>_routes.cpp per device type's method dispatch
 |   |
 |   |-- core/
 |   |   |-- request.cpp

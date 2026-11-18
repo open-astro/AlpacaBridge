@@ -7,7 +7,7 @@
 # and the run script are generic: scripts/run_fake_conformu.sh walks every
 # `run` row of scripts/conformu_fake_runs.tsv (today the Sky-Watcher UDP
 # mount only; the other roster rows are pending, one slice per device type),
-# and check 29 of scripts/check_docs_drift.py keeps that list in step with
+# and check 30 of scripts/check_docs_drift.py keeps that list in step with
 # kFakeConnectableRoster. The paths list is the
 # fake_conformu_server target's own sources and the headers they include
 # (found by a depfile sweep of the built target), plus the shared telescope

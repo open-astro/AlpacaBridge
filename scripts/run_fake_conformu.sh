@@ -7,7 +7,7 @@
 #   scripts/run_fake_conformu.sh <fake_conformu_server> <conformu-binary> <output-dir> [run-list]
 #
 # The run list defaults to scripts/conformu_fake_runs.tsv (columns vendor,
-# deviceType, fakeHeader, status, slice, reportPath; check 29 of
+# deviceType, fakeHeader, status, slice, reportPath; check 30 of
 # scripts/check_docs_drift.py keeps it in step with kFakeConnectableRoster).
 # Each row writes <output-dir>/<reportPath below AlpacaCore/conformu/>, whose
 # first line is "FAKE REPORT: ..." (see scripts/check_conformu_reports.py),
@@ -112,7 +112,7 @@ failed=0
 # The list is read on fd 3, so nothing a row runs can read it from stdin.
 while IFS=$'\t' read -r vendor device_type fake_header status _slice report_path <&3; do
   [ "$vendor" = "vendor" ] && continue  # the header
-  case "$vendor" in "" | "#"*) continue ;; esac  # blank and comment lines, as check 29 skips them
+  case "$vendor" in "" | "#"*) continue ;; esac  # blank and comment lines, as check 30 skips them
   [ "$status" = "run" ] || continue
   rows=$((rows + 1))
   echo "== ConformU: $vendor $device_type over $fake_header -> $report_path"

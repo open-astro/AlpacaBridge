@@ -17,6 +17,7 @@
 // ALPACACORE_ENABLE_ONSTEP (unlike onstep_schema.cpp), so the vendor header is
 // fine here.
 
+#include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
 #include <algorithm>
@@ -82,6 +83,11 @@ void register_onstep_factory(DeviceCatalog& catalog) {
         return telescope;
     };
     catalog.add(std::move(factory));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"onstep", DeviceType::Telescope}, vendor::onstep::onstep_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

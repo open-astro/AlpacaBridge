@@ -137,7 +137,7 @@ inline int read_wait_ms(const ReadSpec& spec, std::chrono::steady_clock::time_po
     return std::min(wait, static_cast<int>(std::max<std::chrono::milliseconds::rep>(spec.cancel_poll.count(), 1)));
 }
 
-inline bool tty_hangup_errno(int e) { return e == EIO || e == ENXIO || e == ENODEV || e == EBADF; }
+inline bool tty_hangup_errno(int e) { return is_serial_loss_errno(e); }  // the one serial rule (#2262)
 inline bool socket_hangup_errno(int e) { return e == ENOTCONN || e == ECONNRESET || e == EPIPE || e == ENOTSOCK; }
 
 /// One byte from a socket, waiting at most @p timeout_ms: 1, 0 on timeout, -1
@@ -286,6 +286,15 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
 inline ReadResult read_until(int tty_fd, const ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
     return detail::read_until_impl([tty_fd](char* c, int timeout_ms) { return tty_read(tty_fd, c, 1, timeout_ms); },
                                    detail::tty_hangup_errno, spec, deadline);
+}
+
+/// read_until() on @p link's fd that also feeds the link's loss verdict
+/// (issue #2262): a LinkDead outcome on an open link sets link.lost() before
+/// the return. The helper still never closes or throws; the wrapper decides.
+inline ReadResult read_until(SerialLink& link, const ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+    ReadResult res = read_until(link.fd(), spec, deadline);
+    if (res.outcome == ReadOutcome::LinkDead) link.note_error(res.err);
+    return res;
 }
 
 /// The same read over a connected stream socket. Hangup errnos: ENOTCONN,

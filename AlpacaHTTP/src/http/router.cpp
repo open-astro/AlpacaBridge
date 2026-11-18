@@ -1499,6 +1499,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "attachedcameras";
         return match;
     }
+    if (path == "/management/v1/attacheddevices" || path == "/management/attacheddevices") {
+        match.is_management = true;
+        match.management_endpoint = "attacheddevices";
+        return match;
+    }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
         match.is_management = true;
         match.management_endpoint = "configuredevice";
@@ -1633,6 +1638,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_thermal_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "attachedcameras") {
         return handle_attached_cameras(request, server_tx_id);
+    } else if (match.management_endpoint == "attacheddevices") {
+        return handle_attached_devices(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -4003,73 +4010,6 @@ Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver
     });
 }
 
-Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-                                             const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("filter wheel method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "position") {
-                return call.ok(filterwheel->get_position());
-            } else if (method_name == "names") {
-                nlohmann::json names = nlohmann::json::array();
-                for (const auto& name : filterwheel->get_names()) {
-                    names.push_back(name);
-                }
-                return call.ok(names);
-            } else if (method_name == "focusoffsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (int offset : filterwheel->get_focus_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "position") {
-                int value = call.get_int("Position");
-                filterwheel->set_position(value);
-                return call.ok_void();
-            } else if (method_name == "names") {
-                const auto* names_val = call.json_field("Names");
-                if (!names_val) {
-                    throw_bad_request("Missing parameter: Names");
-                }
-                if (!names_val->is_array()) {
-                    throw_bad_request("Names must be an array of strings");
-                }
-                for (const auto& name : *names_val) {
-                    if (!name.is_string()) {
-                        throw_bad_request("Names must be an array of strings");
-                    }
-                }
-                std::vector<std::string> names = names_val->get<std::vector<std::string>>();
-                filterwheel->set_names(names);
-                return call.ok_void();
-            } else if (method_name == "focusoffsets") {
-                const auto* offsets_val = call.json_field("FocusOffsets");
-                if (!offsets_val) {
-                    throw_bad_request("Missing parameter: FocusOffsets");
-                }
-                if (!offsets_val->is_array()) {
-                    throw_bad_request("FocusOffsets must be an array of integers");
-                }
-                std::vector<int> offsets;
-                offsets.reserve(offsets_val->size());
-                for (const auto& offset : *offsets_val) {
-                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
-                }
-                filterwheel->set_focus_offsets(offsets);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for FilterWheel");
-    });
-}
-
 Response Router::dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser,
                                          const std::string& method_name, const DeviceCall& call) {
     const Request& request = call.request();
@@ -4258,52 +4198,6 @@ Response Router::dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> do
     });
 }
 
-Response Router::dispatch_covercalibrator_method(std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
-                                                 const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("cover calibrator method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "brightness") {
-                return call.ok(covercalibrator->get_brightness());
-            } else if (method_name == "calibratorchanging") {
-                return call.ok(covercalibrator->get_calibrator_changing());
-            } else if (method_name == "calibratorstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_calibrator_state()));
-            } else if (method_name == "covermoving") {
-                return call.ok(covercalibrator->get_cover_moving());
-            } else if (method_name == "coverstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_cover_state()));
-            } else if (method_name == "maxbrightness") {
-                return call.ok(covercalibrator->get_max_brightness());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "calibratoron") {
-                int brightness = call.get_int("Brightness");
-                covercalibrator->calibrator_on(brightness);
-                return call.ok_void();
-            } else if (method_name == "calibratoroff") {
-                covercalibrator->calibrator_off();
-                return call.ok_void();
-            } else if (method_name == "opencover") {
-                covercalibrator->open_cover();
-                return call.ok_void();
-            } else if (method_name == "closecover") {
-                covercalibrator->close_cover();
-                return call.ok_void();
-            } else if (method_name == "haltcover") {
-                covercalibrator->halt_cover();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for CoverCalibrator");
-    });
-}
-
 Response Router::dispatch_observingconditions_method(
     std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
     const DeviceCall& call) {
@@ -4389,25 +4283,6 @@ Response Router::dispatch_observingconditions_method(
 
         return call.error(util::ErrorCode::NOT_IMPLEMENTED,
                           "Method '" + method_name + "' not yet implemented for ObservingConditions");
-    });
-}
-
-Response Router::dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
-                                               const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    // No SafetyMonitor method reads a parameter today, so the 400 text path of run()
-    // is unreachable here. Kept so a method that adds one answers 400 text like the
-    // other dispatchers.
-    return call.run("safety monitor method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "issafe") {
-                return call.ok(safetymonitor->get_is_safe());
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for SafetyMonitor");
     });
 }
 
@@ -4648,6 +4523,128 @@ Response Router::handle_attached_cameras(const Request& request, std::uint32_t s
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error listing attached cameras: " + log_what(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+namespace {
+
+const char* attached_kind_name(alpacacore::catalog::AttachedKind kind) {
+    switch (kind) {
+        case alpacacore::catalog::AttachedKind::Serial:
+            return "serial";
+        case alpacacore::catalog::AttachedKind::Hid:
+            return "hid";
+        case alpacacore::catalog::AttachedKind::Camera:
+            return "camera";
+    }
+    return "serial";
+}
+
+}  // namespace
+
+// What is plugged in, for a setup flow (#2312): GET /management/v1/attacheddevices.
+// Serial ports come from the by-id directory and sysfs without opening a port
+// or taking a claim; each lists every catalog entry its USB identity matches,
+// with the config a configuredevice call needs. A lister that throws is
+// reported in Errors beside what the others found.
+Response Router::handle_attached_devices(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for attacheddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
+        return response;
+    }
+
+    try {
+        load_persisted_devices();
+        std::vector<nlohmann::json> persisted_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            persisted_snapshot = persisted_devices_;
+        }
+        // The configured devices as the catalog reads them. An entry the
+        // catalog cannot read (unknown type, wrong-typed field) cannot hold a
+        // port this listing could match, so it is skipped.
+        std::vector<alpacacore::catalog::ConfiguredDevice> configured;
+        for (const auto& entry : persisted_snapshot) {
+            const auto key = persisted_key(entry);
+            if (!key || key->vendor.empty()) continue;
+            try {
+                const alpacacore::catalog::DeviceKey device_key{key->vendor, string_to_device_type(key->device_type)};
+                const auto view = catalog_.describe(device_key);
+                if (!view) continue;
+                configured.push_back(
+                    {device_key, key->device_number, catalog_json::config_from_json(entry, view->fields)});
+            } catch (const std::exception& e) {
+                util::log_debug("attacheddevices: skipping configured entry " + util::escape_for_log(key->vendor) +
+                                " " + util::escape_for_log(key->device_type) + " " +
+                                std::to_string(key->device_number) + ": " + log_what(e));
+            }
+        }
+
+        const auto listed = alpacacore::catalog::list_attached_devices(catalog_, configured, attached_device_roots_);
+
+        nlohmann::json devices = nlohmann::json::array();
+        for (const auto& device : listed.devices) {
+            nlohmann::json candidates = nlohmann::json::array();
+            for (const auto& candidate : device.candidates) {
+                std::string type_lower = alpacacore::device_type_to_string(candidate.key.type);
+                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                nlohmann::json config = catalog_json::json_from_config(candidate.config);
+                config["vendor"] = candidate.key.vendor;
+                config["deviceType"] = type_lower;
+                candidates.push_back({{"Vendor", candidate.key.vendor},
+                                      {"DeviceType", alpacacore::device_type_to_string(candidate.key.type)},
+                                      {"Config", std::move(config)}});
+            }
+            nlohmann::json configured_as = nlohmann::json::array();
+            for (const auto& ref : device.configured_as) {
+                configured_as.push_back(
+                    {{"DeviceType", alpacacore::device_type_to_string(ref.type)}, {"DeviceNumber", ref.device_number}});
+            }
+            nlohmann::json item{{"Kind", attached_kind_name(device.kind)},
+                                {"Name", device.name},
+                                {"Candidates", std::move(candidates)},
+                                {"Configured", !configured_as.empty()},
+                                {"ConfiguredAs", std::move(configured_as)}};
+            if (device.kind == alpacacore::catalog::AttachedKind::Camera) {
+                item["Index"] = device.camera_index;
+                item["SerialNumber"] = device.serial_number;
+            } else {
+                item["Port"] = device.port;
+                if (!device.node.empty()) item["Node"] = device.node;
+            }
+            devices.push_back(std::move(item));
+        }
+        nlohmann::json errors = nlohmann::json::array();
+        for (const auto& error : listed.errors) {
+            // INFO, not WARNING: a client's GET triggers the listing (decision 0007 rule 9).
+            util::log_info("attacheddevices: " + error.source + " failed: " + util::escape_for_log(error.message));
+            errors.push_back({{"Source", error.source}, {"Message", error.message}});
+        }
+
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = nlohmann::json{{"Devices", std::move(devices)}, {"Errors", std::move(errors)}};
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error listing attached devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);

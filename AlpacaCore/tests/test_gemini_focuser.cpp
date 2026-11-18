@@ -438,3 +438,42 @@ TEST_CASE("Gemini protocol wrapper - a hangup before the reply throws serial lin
     } catch (...) {
     }
 }
+
+// Issue #2262: EBADF on the focuser's own fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 this wrapper's comment said "EBADF is not one": the write failed with
+// DriverException "Write failed", link_alive() stayed true and Connected kept reading true over a dead fd.
+// Falsified by: gemini_protocol_wrapper.cpp write_data() calling util::tty_write_all(link_.fd(), ...) instead of
+// link_.write_all() (no verdict), or serial_link.h is_serial_loss_errno() leaving EBADF out.
+TEST_CASE("Gemini protocol wrapper - EBADF on a command write is a lost link with the errno",
+          "[gemini][focuser][unit][link-lost][issue2262]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    std::string what;
+    require_alpaca_error(
+        [&]() {
+            try {
+                wrapper.get_position();
+            } catch (const alpacacore::AlpacaException& ex) {
+                what = ex.what();
+                throw;
+            }
+        },
+        alpacacore::AlpacaError::NotConnected);
+    CHECK(what == "Serial link lost (errno 9)");
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK(wrapper.link_fault() == "Serial link lost (errno 9)");
+    // The port was released at the loss (the fd number now names nothing of ours); the reason stays.
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+    CHECK(wrapper.link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}

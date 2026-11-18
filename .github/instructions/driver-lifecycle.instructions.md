@@ -201,9 +201,15 @@ vendor-agnostic; do them in the driver from the start.
 - A runtime register write during a live exposure corrupts the frame. Guard it with
   an exposure-in-progress state, checked **under the same lock that publishes it**.
   GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
-  under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
-  sets `exposure_starting_` under `mutex_` until `session_.start()` (which runs without the lock)
-  publishes Exposing, and the setters' `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
+  under the same lock. A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
+  under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
+  lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
+  or a failed body still returning), and an AbortExposure that finds only a reservation calls
+  `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
+  exposure starts
+  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260). Player One does this;
+  ZWO, SVBONY and ToupTek still keep their own `exposure_starting_` flag until #2260 moves them. Checking the
+  state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).
@@ -378,9 +384,15 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
   `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
   even before the node lookup reflects it: a tty returns those only when its device is gone or
-  the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
+  the fd is unusable. Silence with the node still present keeps the rules above. On a serial link
+  `util::SerialLink` owns that verdict (#2262): its `read()`, `write_all()` and `read_until(SerialLink&, ...)` classify
+  every failure with `util::is_serial_loss_errno()`, set a lock-free `lost()` once and keep the text that set it
+  (`fault()`, "Serial link lost (errno N)") across the wrapper's port-release `close()` until a new link is moved in or
+  the wrapper calls `clear_loss()` on Disconnect; the wrapper still closes the port under its own I/O lock. Adopted by
+  the Gemini focuser and the QHY Q-Focuser; the other serial wrappers move to it one vendor per PR (#2262), so until
+  then their own latch and classifier stand. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
+  lock-free latch the getter reads (the link's `lost()` since #2262); since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`), and over its TCP network link
   since #2220, where a hangup of the connection is the evidence (`OnStep network -` cases in the same file). The ZWO EAF follows it since #1500 for its

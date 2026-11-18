@@ -1593,3 +1593,25 @@ TEST_CASE("ZWO fake SDK - a geometry write is refused while exposing and drops a
     CHECK(camera->get_last_exposure_duration() == 0.001);
     CHECK(camera->get_last_exposure_start_time() == start);
 }
+
+// Issue #2259: a duration of 0 (a bias frame) and one below the camera's shortest exposure are accepted and run at
+// ExposureMin, as on the other cameras; ZWO refused both with InvalidValue. The exposure register the body writes is
+// the minimum.
+TEST_CASE("ZWO Camera Driver - StartExposure below ExposureMin runs at the minimum", "[zwo][camera][unit][fakesdk]") {
+    FakeZWOSDK sdk;
+    double duration = 0.0;
+    SECTION("duration 0 at the SDK's 1 us minimum") {}
+    SECTION("duration 0 on a camera whose minimum is 32 us") { sdk.exposure_min_us = 32; }
+    SECTION("a duration below a 32 us minimum") {
+        sdk.exposure_min_us = 32;
+        duration = 0.00001;
+    }
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    CHECK(camera->get_exposure_min() == static_cast<double>(sdk.exposure_min_us) / 1'000'000.0);
+    CHECK(error_code([&] { camera->start_exposure(duration, true); }) == -1);
+    REQUIRE(alpacacore::test::wait_exposure_end(*camera));
+    REQUIRE(camera->get_image_ready());
+    CHECK(sdk.control_value(FakeZWOSDK::ControlType::Exposure) == sdk.exposure_min_us);
+    camera->set_connected(false);
+}

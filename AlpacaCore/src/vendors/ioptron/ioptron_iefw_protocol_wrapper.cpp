@@ -156,8 +156,7 @@ namespace {
 bool raw_port_looks_like_iefw_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor,
-                                                        {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, iefw_usb_tokens());
 }
 }  // namespace
 #endif
@@ -594,6 +593,11 @@ std::int32_t IefwProtocolWrapper::get_stored_offset(std::int32_t slot) { return 
 
 void IefwProtocolWrapper::set_stored_offset(std::int32_t slot, std::int32_t offset) {
     impl_->set_stored_offset(slot, offset);
+}
+
+const std::vector<std::string>& iefw_usb_tokens() {
+    static const std::vector<std::string> tokens{"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::ioptron

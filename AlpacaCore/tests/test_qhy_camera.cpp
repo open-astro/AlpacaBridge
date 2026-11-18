@@ -3855,3 +3855,19 @@ TEST_CASE("QHY Camera Driver - Capability members throw NotConnected while disco
     require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, not_connected);
     require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, not_connected);
 }
+
+// Issue #2259: a StartExposure of 0 s (a bias frame) runs at ExposureMin, as on every other camera. QHY wrote 0 us
+// to the SDK. FakeQHYSDK's exposure range starts at 100 us.
+TEST_CASE("QHY Camera Driver - StartExposure below ExposureMin runs at the minimum", "[qhy][camera][unit][fakesdk]") {
+    auto fake = make_fake();
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_exposure_min() == Catch::Approx(0.0001));
+    driver->start_exposure(0.0, true);
+    driver->abort_exposure();  // joins the worker before the fake's params are read
+    driver->set_connected(false);
+    CHECK(fake.params[alpacacore::vendor::qhy::control::EXPOSURE] == Catch::Approx(100.0));
+}

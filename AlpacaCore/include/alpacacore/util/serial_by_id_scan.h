@@ -32,7 +32,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -154,11 +156,16 @@ inline std::string udev_mangle(std::string value) {
  * build by-id names, so a raw-node fallback can be filtered exactly as
  * narrowly as its by-id counterpart. Returns std::nullopt -- never probe --
  * if the descriptor can't be read.
+ *
+ * @p tty_class_dir is the sysfs tty class directory; a test points it at a
+ * fake tree (the attacheddevices listing's tests, #2312). It reads sysfs
+ * only and never opens @p port_path.
  */
-inline std::optional<UsbTtyDescriptor> read_raw_tty_usb_descriptor(const std::string& port_path) {
+inline std::optional<UsbTtyDescriptor> read_raw_tty_usb_descriptor(
+    const std::string& port_path, const std::filesystem::path& tty_class_dir = "/sys/class/tty") {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path dir = fs::canonical(fs::path("/sys/class/tty") / fs::path(port_path).filename() / "device", ec);
+    fs::path dir = fs::canonical(tty_class_dir / fs::path(port_path).filename() / "device", ec);
     if (ec) return std::nullopt;
 
     // The tty's immediate sysfs node is a USB interface directory; the
@@ -193,8 +200,7 @@ inline std::optional<UsbTtyDescriptor> read_raw_tty_usb_descriptor(const std::st
  * udev-mangled form (issue #181 -- the underscore patterns could never
  * match otherwise).
  */
-inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor,
-                                       std::initializer_list<std::string> patterns) {
+inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor, std::span<const std::string> patterns) {
     const std::string mangled_manufacturer = detail::udev_mangle(descriptor.manufacturer);
     const std::string mangled_product = detail::udev_mangle(descriptor.product);
     for (const auto& pattern : patterns) {
@@ -205,6 +211,17 @@ inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor,
         if (mangled_product.find(pattern) != std::string::npos) return true;
     }
     return false;
+}
+
+/// The same check over a wrapper's token list (`<x>_usb_tokens()`, #2312).
+inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor, const std::vector<std::string>& patterns) {
+    return usb_tty_descriptor_matches(descriptor, std::span<const std::string>(patterns));
+}
+
+/// The same check over a braced pattern list.
+inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor,
+                                       std::initializer_list<std::string> patterns) {
+    return usb_tty_descriptor_matches(descriptor, std::span<const std::string>(patterns.begin(), patterns.size()));
 }
 
 }  // namespace alpacacore::util
