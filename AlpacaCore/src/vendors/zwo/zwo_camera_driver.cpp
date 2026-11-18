@@ -560,7 +560,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
-            if (exposure_starting_) {
+            if (session_.starting()) {
                 throw AlpacaException::asked_too_early("Exposure start is in progress");
             }
             image = session_.image();
@@ -574,7 +574,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        if (exposure_starting_) {
+        if (session_.starting()) {
             return false;  // the new start discards the previous frame
         }
         return session_.image_ready();
@@ -846,6 +846,9 @@ public:
         const long exposure_us = std::max(static_cast<long>(std::lround(exposure_us_value)), caps.min_value);
 
         ExposureRequest request;
+        // Decision 0020 rule 9: reserved under mutex_ with the frame snapshot, so a geometry write cannot slip in
+        // before session_.start() has published Exposing; a second start or an exposure running is refused.
+        util::CaptureReservation reservation;
         request.exposure_us = exposure_us;
         request.is_dark = !light;
         {
@@ -857,9 +860,7 @@ public:
             if (!camera_id_.has_value()) {
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
-            if (exposure_starting_) {
-                throw AlpacaException("An exposure start is already in progress", AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             request.camera_id = camera_id_.value();
             request.frame = ExposureFrame{num_x_,
                                           num_y_,
@@ -873,17 +874,7 @@ public:
                                           image_type_};
             request.formats = camera_info_.supported_formats;
             request.usb3 = camera_info_valid_ && camera_info_.is_usb3;
-            // Holds the geometry setters (ensure_frame_geometry_mutable_locked) from this snapshot until
-            // session_.start() has published Exposing.
-            exposure_starting_ = true;
         }
-        struct StartingDone {
-            ZWOCameraDriver& driver;
-            ~StartingDone() {
-                std::lock_guard<std::mutex> lock(driver.mutex_);
-                driver.exposure_starting_ = false;
-            }
-        } starting_done{*this};
 
         const double exposure_s = static_cast<double>(exposure_us) / 1'000'000.0;
         // Decision 0020 rule 4: the deadline holds the first attempt, both retries, their pacing, the USB 2.0 settle
@@ -891,7 +882,12 @@ public:
         const auto margin = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::duration<double>(kExposureRetries * exposure_s)) +
                             kWatchdogGrace;
-        session_.start(exposure_s, [this, request](util::CaptureControl& c) { run_exposure(c, request); }, margin);
+        // An AbortExposure recorded while the start was reserved ends it here, before any body runs (rule 9).
+        if (session_.start(
+                std::move(reservation), exposure_s,
+                [this, request](util::CaptureControl& c) { run_exposure(c, request); }, margin)) {
+            ALPACA_LOG_DEBUG("ZWO", "StartExposure ended by an AbortExposure that arrived while it started");
+        }
     }
 
     void stop_exposure() override { stop_exposure_impl(false); }
@@ -1138,6 +1134,13 @@ private:
             }
             stop_id = camera_id_.value();
         }
+        // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that start
+        // publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran. Recorded before the
+        // state is read: a start that publishes Exposing in between makes record_abort() false and the read below
+        // sees that exposure, where a read first saw Idle and the abort was dropped.
+        if (abort && session_.record_abort()) {
+            return;
+        }
         const CameraState state = session_.camera_state();
         if (state == CameraState::Download) {
             if (abort) {
@@ -1147,7 +1150,7 @@ private:
             return;  // StopExposure is ignored once readout is in progress.
         }
         if (state != CameraState::Exposing) {
-            return;
+            return;  // nothing running and no start reserved (an abort in a start window was recorded above)
         }
         {
             std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
@@ -1227,8 +1230,6 @@ private:
     int start_x_;
     int start_y_;
 
-    // True from a StartExposure's settings snapshot until session_.start() has published Exposing (under mutex_).
-    bool exposure_starting_{false};
     static constexpr int kExposureRetries = 2;
     // See settle_after_usb2_download(): the body waits up to this long before the trigger.
     static constexpr std::chrono::milliseconds kUsb2PostDownloadSettle{600};
@@ -1490,19 +1491,9 @@ private:
     // Decision 0020 rule 8: geometry is refused while an exposure starts, exposes or downloads, and while a cancelled
     // or failed body is still returning (it may still be in the SDK); a Ready frame is dropped by the write
     // (session_.discard_image(), which keeps LastExposure*). Caller holds mutex_.
-    void ensure_frame_geometry_mutable_locked() const {
-        const CameraState state = session_.camera_state();
-        bool frame_ready = false;
-        try {
-            frame_ready = session_.image_ready();
-        } catch (const AlpacaException&) {
-            frame_ready = false;  // a kept failure: not ready
-        }
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
-            (session_.busy() && !frame_ready)) {
-            throw AlpacaException("Cannot change camera ROI during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Decision 0020 rule 9: the session answers for the reservation, Exposing, Download and a failed or cancelled
+    // body still returning with no frame ready. Called by the geometry setters only (ZWO's narrower scope).
+    void ensure_frame_geometry_mutable_locked() const { session_.ensure_settings_unlocked(); }
 
     // The SDK's ROI and start readback must match the exposure's frame. Takes no driver lock (the body calls it).
     void validate_frame_format(int camera_id, const ExposureFrame& frame, const std::vector<ZWOImageType>& formats) {
@@ -1521,7 +1512,6 @@ private:
 
     void reset_exposure_state_locked() {
         last_download_ns_.store(kNoDownload);
-        exposure_starting_ = false;
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
         pulse_guiding_.store(false);

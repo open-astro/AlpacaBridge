@@ -955,9 +955,18 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
+            // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that
+            // start publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran. Recorded
+            // before the state is read: a start that publishes Exposing in between makes record_abort() false and
+            // the read below sees that exposure, where a read first saw Idle and the abort was dropped.
+            if (!capture_stop_failed_ && session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             exposing = state == CameraState::Exposing || state == CameraState::Download;
-            if (!exposing && !capture_stop_failed_) return;
+            if (!exposing && !capture_stop_failed_) {
+                return;  // nothing running and no start reserved
+            }
             // The check, the stopping mark and the SDK stop in one hold of mutex_, which the body's capture start
             // also takes: the stop meets the exposure that was checked, never one a racing StartExposure began.
             if (exposing) session_.set_stopping(true);  // a read the stop breaks is not a failure (#1745)
@@ -1073,13 +1082,14 @@ public:
 
         int active_camera_id = -1;
         FrameConfig frame_config;
+        // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot, so a gain/offset/geometry write
+        // cannot slip in before session_.start() has published Exposing (M15); a second start is refused.
+        util::CaptureReservation reservation;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
             validate_exposure_roi_locked();
-            if (exposure_starting_) {
-                throw AlpacaException("SVBONY: an exposure is already starting", AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             if (capture_stop_failed_) {
                 throw AlpacaException(
                     "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before "
@@ -1088,17 +1098,7 @@ public:
             }
             active_camera_id = camera_id_;
             frame_config = frame_config_locked();
-            // Holds the settings (ensure_not_exposing_locked) from this snapshot until session_.start() has
-            // published Exposing, so a gain/offset/geometry write cannot slip in between (M15).
-            exposure_starting_ = true;
         }
-        struct StartingDone {
-            SVBONYCameraDriver& driver;
-            ~StartingDone() {
-                std::lock_guard<std::mutex> lock(driver.mutex_);
-                driver.exposure_starting_ = false;
-            }
-        } starting_done{*this};
 
         // Decision 0020: the exposure body, run by the session's one slot, so the previous body has returned before
         // this one writes the exposure register or starts a capture. Deferred SDK writes (Exposure, ROI,
@@ -1299,7 +1299,10 @@ public:
             }
         };
         // The rounded and clamped exposure register is the duration (LastExposureDuration, issue #1477).
-        session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
+        // An AbortExposure recorded while the start was reserved ends it here, before any body runs (rule 9).
+        if (session_.start(std::move(reservation), static_cast<double>(exposure_us) / 1'000'000.0, std::move(body))) {
+            ALPACA_LOG_DEBUG("SVBONY", "StartExposure ended by an AbortExposure that arrived while it started");
+        }
     }
 
     void stop_exposure() override {
@@ -1379,8 +1382,6 @@ private:
     // Bumped by every capture-stop result the driver records outside a body (AbortExposure, Disconnect, Connect),
     // under mutex_: a body's own stop result, read before a newer one, never overwrites it.
     mutable std::uint64_t capture_stop_epoch_{0};
-    // True from a StartExposure's settings snapshot until session_.start() has published Exposing (under mutex_).
-    bool exposure_starting_{false};
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
@@ -1794,26 +1795,11 @@ private:
         on_link(LinkCaller::StateLocked, [&] { sdk_.set_control_value(camera_id_, type, value, false); });
     }
 
-    // Reject runtime sensor-register / geometry writes while an exposure body
-    // may be applying deferred SDK settings or acquiring a frame: those writes
-    // must not race it. Requires mutex_ held — the lock start_exposure sets
-    // exposure_starting_ under (TOCTOU rule, driver-lifecycle.instructions.md;
-    // the Player One form, M15). A cancelled or failed body can still be in the
-    // SDK, so the settings stay locked while the session is busy, except once
-    // the frame is Ready (the body is only returning then).
-    void ensure_not_exposing_locked() const {
-        const CameraState state = session_.camera_state();
-        bool frame_ready = false;
-        try {
-            frame_ready = session_.image_ready();
-        } catch (const AlpacaException&) {
-            frame_ready = false;  // a kept failure: not ready
-        }
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
-            (session_.busy() && !frame_ready)) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Reject runtime sensor-register / geometry writes while an exposure body may be applying deferred SDK settings
+    // or acquiring a frame. Requires mutex_ held, the lock start_exposure reserves its start under (M15; decision
+    // 0020 rule 9): the session answers for the reservation, Exposing, Download and a failed or cancelled body still
+    // returning with no frame ready.
+    void ensure_not_exposing_locked() const { session_.ensure_settings_unlocked(); }
 
     void ensure_connected_locked() const {
         if (!link_.is_open()) {
@@ -1907,7 +1893,7 @@ private:
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
         // Geometry write: rejected mid-exposure, checked under the same
-        // mutex_ hold that start_exposure sets exposure_starting_ under (M15).
+        // mutex_ hold that start_exposure reserves its start under (M15; decision 0020 rule 9).
         ensure_settings_safe_locked();
         if (bin_x_ == bin_x && bin_y_ == bin_y) {
             return;
