@@ -41,6 +41,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_pty_write.h"
 #include "fake_skywatcher_serial_board.h"
 
 using alpacacore::test::FakeMountProfile;
@@ -825,6 +826,38 @@ TEST_CASE("SkyWatcher serial - read errors on a present node lose the link", "[s
     require_alpaca_error([&] { protocol.inquire_position(1); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(protocol.link_alive());
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+}
+
+// Issue #2262: over serial the errno verdict is the shared util::SerialLink one, so EBADF on the
+// wrapper's own fd, met by its own write (no seam), is a lost link (the wrapper already counted it in
+// a list of its own, now gone): the command fails NotConnected, link_alive(), which the driver's
+// Connected reads, goes false, the port is released, and the next connect starts clean. The fd is
+// found with fds_open_on()/new_fd() and made unwritable in place; the flush before the write fails
+// on it unchecked, as it always did, and the node check still sees a present node.
+TEST_CASE("SkyWatcher serial - EBADF on the wrapper's own fd is a lost link until the next connect",
+          "[skywatcher][serial][unit][link-lost][issue2262]") {
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper protocol;
+    const auto info = serial_info(board.slave_path());
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    const auto before = alpacacore::test::fds_open_on(board.slave_path());
+    REQUIRE(protocol.connect(info));
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(board.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    REQUIRE(protocol.link_alive());
+
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+    require_alpaca_error([&] { protocol.inquire_position(sw::kAxisRa); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(protocol.link_alive());
+    CHECK_FALSE(protocol.is_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+
+    protocol.disconnect();
+    REQUIRE(protocol.connect(info));
+    CHECK(protocol.link_alive());
+    CHECK_NOTHROW(protocol.inquire_position(sw::kAxisRa));
+    protocol.disconnect();
 }
 
 // ── open-astro#505: a board that stops answering on a healthy link ──────────
