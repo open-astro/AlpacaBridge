@@ -124,13 +124,17 @@ author must do. Read the docstring before changing a gate.
   passes, so a red suite publishes nothing. It also installs the `.deb` it
   builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does before
   every merge, so a nightly `.deb` that fails the check is never published.
-- **ConformU against the fake Sky-Watcher mount** (`.github/workflows/conformu-fake.yml`, issue #1637): the
-  test-only `fake_skywatcher_server` over `FakeSkyWatcherMount`, driven by `scripts/run_fake_conformu.sh`. It is not
-  a job in `ci.yml`: it runs on a PR only when the PR touches the workflow's `paths:` list (the Sky-Watcher driver,
-  the fake mount and server, the telescope interface, the HTTP layer, the run script and
-  `scripts/check_conformu_reports.py`, which decides whether the run passes), nightly on `main` at 04:47 UTC, and on
-  dispatch. Keep that list in step with the `fake_skywatcher_server` sources and the run script's imports. Its report is fake evidence, filed
-  under a `Fake*` path with a `FAKE REPORT:` first line. `scheduled-failure.yml` watches it by workflow name.
+- **ConformU against the fake Sky-Watcher mount** (`.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
+  test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for every `run`
+  row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount`). The run
+  list has one record per `kFakeConnectableRoster` row (`run`, or `pending` with the slice of #2078 that runs it)
+  and a `no-fake` record per driver with no fake; docs-drift check 30 holds it to the roster both ways, so a PR
+  that adds a roster row adds its record. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
+  workflow's `paths:` list (the Sky-Watcher driver, the fake mount and server, the telescope interface, the HTTP
+  layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
+  whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the
+  `fake_conformu_server` sources and the run script's imports. Its reports are fake evidence, filed under a `Fake*`
+  path with a `FAKE REPORT:` first line. `scheduled-failure.yml` watches it by workflow name.
 - **Weekly link check** (`.github/workflows/link-check.yml`, issue #1362): lychee over the Markdown
   files, relative links offline and then `http(s)` links, Mondays and on dispatch only; a host it
   cannot check goes in `.lycheeignore` with a reason line. `scheduled-failure.yml` watches it by

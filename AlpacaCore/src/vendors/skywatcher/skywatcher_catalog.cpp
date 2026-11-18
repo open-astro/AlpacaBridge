@@ -85,7 +85,7 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
             if (type == "network") {
                 info.type = vendor::skywatcher::ConnectionType::Network;
                 info.host = config.get(kSkyWatcherHost);
-                info.udp_port = static_cast<int>(config.get(kSkyWatcherUdpPort));
+                info.udp_port = network_port_or_zero(config.get(kSkyWatcherUdpPort));
             } else {
                 info.type = vendor::skywatcher::ConnectionType::Serial;
                 info.port_path = config.get(kSkyWatcherPortPath);

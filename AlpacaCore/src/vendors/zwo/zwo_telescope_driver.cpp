@@ -675,15 +675,17 @@ public:
                     }
                 }
                 if (!guide_rate_set) {
-                    const double fallback_multiple = 1.00;
-                    const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
-                    ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
-                    guide_rate = {fallback_deg_per_sec, fallback_deg_per_sec};
+                    ALPACA_LOG_WARN("ZWO",
+                                    "Unable to read guide rate; GuideRate is unavailable until a reconnect reads it or "
+                                    "a write sets it");
                 }
                 {
+                    // #2314: no reading means no rate. The getters raise until a write sets one; guide_rate_ keeps
+                    // its last value only for the pulse-guide estimate.
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (guide_rate_writes_ == guide_rate_writes_seen) {
-                        guide_rate_ = guide_rate;
+                        if (guide_rate_set) guide_rate_ = guide_rate;
+                        guide_rate_known_ = guide_rate_set;
                     }
                 }
 
@@ -966,6 +968,10 @@ public:
         update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected_locked();
+        if (!guide_rate_known_) {
+            throw AlpacaException("GuideRate is unknown: the mount did not answer the guide-rate read at connect",
+                                  AlpacaError::DriverException);
+        }
         return guide_rate_;
     }
 
@@ -996,12 +1002,14 @@ public:
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
             std::lock_guard<std::mutex> lock(mutex_);
             guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+            guide_rate_known_ = true;
             ++guide_rate_writes_;
             return;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = {effective, effective};
+        guide_rate_known_ = true;
         ++guide_rate_writes_;
     }
 
@@ -3333,6 +3341,8 @@ private:
     mutable GuideRate guide_rate_;
     // Bumped under mutex_ by every set_guide_rate(); the connect publishes its reading only when unchanged.
     std::uint64_t guide_rate_writes_{0};
+    // False after a connect that could not read the rate and saw no write meanwhile (#2314); guarded by mutex_.
+    bool guide_rate_known_{true};
     mutable int tracking_rate_cached_;
     mutable bool tracking_rate_valid_;
     mutable bool tracking_state_cached_;

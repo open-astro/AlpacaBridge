@@ -73,7 +73,7 @@ void register_synscan_factory(DeviceCatalog& catalog) {
             if (type == "network") {
                 info.type = vendor::synscan::ConnectionType::Network;
                 info.host = config.get(kSynScanHost);
-                info.tcp_port = static_cast<int>(config.get(kSynScanTcpPort));
+                info.tcp_port = network_port_or_zero(config.get(kSynScanTcpPort));
             } else {
                 info.type = vendor::synscan::ConnectionType::Serial;
                 info.port_path = config.get(kSynScanPortPath);

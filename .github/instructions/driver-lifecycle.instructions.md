@@ -205,7 +205,8 @@ vendor-agnostic; do them in the driver from the start.
   under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
   lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
   or a failed body still returning), and an AbortExposure that finds only a reservation calls
-  `session_.record_abort()`, which `start()` reports so the driver stops the exposure once it runs
+  `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
+  exposure starts
   ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260). Player One does this;
   ZWO, SVBONY and ToupTek still keep their own `exposure_starting_` flag until #2260 moves them. Checking the
   state *before* taking that lock is a TOCTOU.

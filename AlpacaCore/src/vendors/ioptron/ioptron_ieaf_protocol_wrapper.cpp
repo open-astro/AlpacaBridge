@@ -425,8 +425,8 @@ private:
         fault_ = text;
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd: the util::SerialLink verdict, #2262):
+    // decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
     // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
     // latched: the handshake retries and connect() closes the port itself.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
@@ -450,9 +450,9 @@ private:
 
     void write_data(const std::string& data) {
 #ifndef _WIN32
-        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
+        if (!link_.write_all(data)) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV) {
+            if (link_.lost()) {
                 fail_link_locked("iEAF serial link lost (errno " + std::to_string(err) + ")");
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
@@ -468,8 +468,7 @@ private:
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
         const auto r = util::read_until(
-            link_.fd(), spec,
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
         switch (r.outcome) {
             case util::ReadOutcome::Terminator:
                 response = r.bytes;
@@ -516,7 +515,7 @@ private:
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
         const auto r = util::read_until(
-            link_.fd(), spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
         if (r.outcome == util::ReadOutcome::Length) {
             if (r.bytes != "1") {
                 ALPACA_LOG_WARN("iOptron", std::string("iEAF unexpected ack byte: ") + r.bytes);

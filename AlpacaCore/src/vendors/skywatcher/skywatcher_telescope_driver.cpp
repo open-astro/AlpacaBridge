@@ -24,6 +24,7 @@
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -126,6 +127,19 @@ constexpr double kSlowModeFloorPad = 1.02;
 constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
+// The Sky-Watcher argument limits and texts for the telescope command gate (#2258); the guide rate is finite and 0
+// to 1x sidereal on both axes, checked before the connection (open-astro#1786).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.guide_rate_ra_min = limits.guide_rate_dec_min = 0.0;
+    limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegPerSec;
+    limits.texts.pulse_duration = "PulseGuide duration must be >= 0";
+    limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
+    limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
+    return limits;
+}();
 // Above ~128x sidereal the controller needs high-speed (fast) mode.
 constexpr double kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
@@ -1099,8 +1113,8 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        validate_guide_rate(rate.ra);
-        validate_guide_rate(rate.dec);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_ = rate;
@@ -1109,14 +1123,14 @@ public:
     // One axis under one lock: the base default reads the pair and writes it back under a second acquisition, which
     // lets a concurrent write to the other axis be overwritten with the stale value.
     void set_guide_rate_right_ascension(double value) override {
-        validate_guide_rate(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_.ra = value;
     }
 
     void set_guide_rate_declination(double value) override {
-        validate_guide_rate(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_.dec = value;
@@ -1758,12 +1772,7 @@ public:
 
     void pulse_guide(int direction, int duration) override {
         // #2257: the argument checks run first, before the writable gate and the parked check.
-        if (duration < 0) {
-            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-        }
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         // open-astro#620: serialize against the other async initiators
         // (Park, SlewToCoordinatesAsync) so PulseGuide's own
         // check -> reap -> spawn sequence cannot interleave with theirs.
@@ -2640,7 +2649,7 @@ public:
     void move_axis(int axis, double rate) override {
         // #2257: the arguments are checked first, before the gate and the parked check; nothing indexes the
         // per-axis stop slots before they have been.
-        validate_move_axis(axis, rate);
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         constexpr double kStopEpsilon = 1e-9;
         // A stop is sent on a faulted link, a start is refused (open-astro#2068).
         const bool is_stop = std::abs(rate) <= kStopEpsilon;
@@ -3054,29 +3063,6 @@ private:
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
-        }
-    }
-
-    // One axis of a guide-rate write: finite and 0 to 1x sidereal, checked before the connection (open-astro#1786).
-    static void validate_guide_rate(double deg_per_sec) {
-        if (!std::isfinite(deg_per_sec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
-        const double fraction = deg_per_sec / kSiderealDegPerSec;
-        if (fraction < 0.0 || fraction > 1.0) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
-        }
-    }
-
-    static void validate_move_axis(int axis, double rate) {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (std::isnan(rate) || std::isinf(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
     }
 

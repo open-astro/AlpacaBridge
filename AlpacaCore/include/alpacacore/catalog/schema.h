@@ -32,6 +32,7 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/catalog/device_config.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -47,6 +48,33 @@ namespace alpacacore::catalog {
 
 enum class Source : std::uint8_t { Api, Persisted };
 enum class Role : std::uint8_t { Plain, EnumerationIndex, DeviceId, PortPath, Host, Secret, Discriminator };
+
+// open-astro#2292 (ADR 0007 rule 4): normalize refuses a Role::Host string
+// longer than a DNS name can be, and a Role::PortPath string longer than a
+// Linux path (PATH_MAX less its NUL), from the API. A saved one is kept with a
+// warning, so its connect refuses it rather than fall back to a search.
+inline constexpr std::size_t kMaxHostBytes = 253;
+inline constexpr std::size_t kMaxPortPathBytes = 4095;
+
+// open-astro#2292: the TCP or UDP port of a network device. A vendor normalize
+// checks it for a network entry only (a serial entry's port is unused), with
+// the per-field range wording; a saved port out of range is kept, with the
+// warning, and the factory connects to 0, which no connect accepts (the OnStep
+// rule, #2220).
+inline constexpr std::int64_t kMinNetworkPort = 1;
+inline constexpr std::int64_t kMaxNetworkPort = 65535;
+
+/// "<key> is out of range (min 1) (max 65535)" for a port outside the range, else empty.
+inline std::string network_port_fault(std::string_view key, std::int64_t port) {
+    if (port >= kMinNetworkPort && port <= kMaxNetworkPort) return {};
+    return std::string(key) + " is out of range (min " + std::to_string(kMinNetworkPort) + ") (max " +
+           std::to_string(kMaxNetworkPort) + ")";
+}
+
+/// The port a factory hands its driver: `port` in range, else 0. Never a narrowing wrap (ADR 0007 rule 4).
+inline int network_port_or_zero(std::int64_t port) {
+    return port >= kMinNetworkPort && port <= kMaxNetworkPort ? static_cast<int>(port) : 0;
+}
 
 struct DeviceKey {
     std::string vendor;

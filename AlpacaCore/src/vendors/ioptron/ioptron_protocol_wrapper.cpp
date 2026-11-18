@@ -1113,7 +1113,7 @@ public:
         spec.skip.clear();  // every byte is an ack byte, CR/LF included
         spec.max_len = kMaxReplyLen;
         // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
-        const auto r = util::read_until(link_.fd(), spec,
+        const auto r = util::read_until(link_, spec,
                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
                                             spec.idle_gap * static_cast<int>(spec.max_len));
         if (r.outcome == util::ReadOutcome::LinkDead) {
@@ -1461,7 +1461,7 @@ private:
         }
         return true;
 #else
-        return util::tty_write_all(link_.fd(), data.c_str(), data.length());
+        return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
 #endif
     }
 
@@ -1496,7 +1496,7 @@ private:
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(link_.fd(), spec, deadline);
+            return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
 #else
@@ -1518,12 +1518,12 @@ private:
         throw AlpacaException(reason);
     }
 
-    // A failed serial write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
-    // a socket errno instead, so the network link keeps its fault latch.
+    // A failed serial write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the
+    // util::SerialLink verdict, #2262) is the port gone: the link is lost at once. A write timeout is not; a TCP send
+    // fails with a socket errno instead, so the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
 #ifndef _WIN32
-        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
+        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
             fail_link_locked("iOptron mount serial link lost (write): " + util::errno_string(err));
         }
 #else

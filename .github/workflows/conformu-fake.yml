@@ -3,8 +3,13 @@
 # This used to be a job in ci.yml that ran on every PR (20 to 21 minutes on
 # the arm64 runner, measured over 15 CI runs). It now runs only when a PR
 # touches a file that can change the fake telescope's Alpaca answers (the
-# `paths:` list below), nightly on main, and on demand. The paths list is the
-# fake_skywatcher_server target's own sources and the headers they include
+# `paths:` list below), nightly on main, and on demand. Since #2078 the server
+# and the run script are generic: scripts/run_fake_conformu.sh walks every
+# `run` row of scripts/conformu_fake_runs.tsv (today the Sky-Watcher UDP
+# mount only; the other roster rows are pending, one slice per device type),
+# and check 30 of scripts/check_docs_drift.py keeps that list in step with
+# kFakeConnectableRoster. The paths list is the
+# fake_conformu_server target's own sources and the headers they include
 # (found by a depfile sweep of the built target), plus the shared telescope
 # and HTTP layers its answers pass through, and the run script with the
 # report checker that decides whether the run passes. It leaves out on purpose the other
@@ -25,14 +30,14 @@ on:
       - "AlpacaCore/src/vendors/skywatcher/**"
       - "AlpacaCore/include/alpacacore/vendor/skywatcher/**"
       # The fake mount, its serial board, clocks and the ConformU factory
-      # that fake_skywatcher_server includes.
+      # that fake_conformu_server includes.
       - "AlpacaCore/tests/fake_skywatcher_*.h"
       - "AlpacaCore/tests/skywatcher_fake_clock.h"
       - "AlpacaCore/tests/conformu_skywatcher_factory.h"
       - "AlpacaCore/tests/fake_pty_write.h"
       - "AlpacaCore/tests/fake_task_clock.h"
       # The test-only server target and the CMake that builds it.
-      - "AlpacaHTTP/tests/fake_skywatcher_server.cpp"
+      - "AlpacaHTTP/tests/fake_conformu_server.cpp"
       - "AlpacaHTTP/CMakeLists.txt"
       - "AlpacaCore/CMakeLists.txt"
       # The telescope device interface and the core code behind it.
@@ -57,9 +62,13 @@ on:
       - "AlpacaHTTP/src/core/**"
       - "AlpacaHTTP/src/util/**"
       - "AlpacaHTTP/include/alpacahttp/**"
-      # The run script, the report checker whose check_text() decides whether
-      # the run passes, the committed fake report and this workflow.
+      # The run script, the run list it walks and the roster that list is
+      # pinned to (a roster change can change what runs), the report checker
+      # whose check_text() decides whether a run passes, the committed fake
+      # report and this workflow.
       - "scripts/run_fake_conformu.sh"
+      - "scripts/conformu_fake_runs.tsv"
+      - "AlpacaCore/tests/contract_sweep.h"
       - "scripts/check_conformu_reports.py"
       - "AlpacaCore/conformu/Sky-Watcher/Fake/**"
       - ".github/workflows/conformu-fake.yml"
@@ -76,11 +85,12 @@ permissions:
 
 jobs:
   conformu-fake:
-    # Hardware-free ConformU: the Sky-Watcher driver over FakeSkyWatcherMount,
-    # served by the test-only fake_skywatcher_server (not installed or packaged).
-    # The report is a CI artifact (Fake-Linux-arm64.txt, "FAKE REPORT:" first line)
-    # and a copy is committed under AlpacaCore/conformu/Sky-Watcher/Fake/. It is never
-    # hardware validation.
+    # Hardware-free ConformU: every `run` row of scripts/conformu_fake_runs.tsv
+    # (today the Sky-Watcher driver over FakeSkyWatcherMount), served by the
+    # test-only fake_conformu_server (not installed or packaged). Each report is
+    # a CI artifact under <Vendor>/Fake/ ("FAKE REPORT:" first line) and a copy
+    # is committed at the row's reportPath under AlpacaCore/conformu/. It is
+    # never hardware validation.
     name: ConformU against the fake Sky-Watcher mount (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
@@ -112,7 +122,7 @@ jobs:
             -DALPACAHTTP_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=OFF \
             -DALPACACORE_ENABLE_SKYWATCHER=ON
-          cmake --build AlpacaHTTP/build --target fake_skywatcher_server --parallel "$(nproc)"
+          cmake --build AlpacaHTTP/build --target fake_conformu_server --parallel "$(nproc)"
 
       - name: Install ConformU 4.6.0-rc.1 (pinned release, sha256-checked)
         # The standard in .github/instructions/testing.instructions.md; the same
@@ -128,12 +138,12 @@ jobs:
           chmod +x conformu
           ./conformu --version | tail -1
 
-      - name: Run ConformU against the fake telescope
+      - name: Run ConformU against every run-list row's fake
         # Fails when ConformU exits non-zero or its log lacks the clean-pass line
-        # or shows a response-time finding (the checker's own rules).
+        # or shows a response-time finding (the checker's own rules), for any row.
         run: |
           scripts/run_fake_conformu.sh \
-            AlpacaHTTP/build/fake_skywatcher_server \
+            AlpacaHTTP/build/fake_conformu_server \
             "$RUNNER_TEMP/conformu/conformu" \
             "$RUNNER_TEMP/fake-conformu"
 

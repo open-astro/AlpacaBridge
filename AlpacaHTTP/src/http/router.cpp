@@ -774,6 +774,24 @@ constexpr const char* kAnonymousClientKey = "<anonymous>";
 // device refreshes its registration, so ordinary polling keeps it alive.
 constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
 
+// open-astro#2292 (ADR 0007 rules 4 and 10): the most (address, ClientID)
+// registrations one device holds. A uint32 ClientID per request (#1738) still
+// let one host add an entry per request for the whole stale window; past this
+// a new client's Connected=true is refused until an entry leaves or goes
+// stale. A rig has a handful of clients per device.
+constexpr std::size_t kMaxClientsPerDevice = 256;
+
+// The answer to a Connected=true past kMaxClientsPerDevice. Returned, not
+// thrown: a client can cause it, so it logs at DEBUG (ADR 0007 rule 9), where
+// a thrown InvalidOperation logs at ERROR.
+alpacahttp::Response refuse_full_client_registry(const alpacahttp::DeviceCall& call) {
+    const std::string message = "Connected refused: " + std::to_string(kMaxClientsPerDevice) +
+                                " clients already hold this device; a client that stops polling is dropped after 10 "
+                                "minutes";
+    alpacahttp::util::log_debug(message);
+    return call.error(alpacacore::AlpacaError::InvalidOperation, message);
+}
+
 // Issue #1764: the web UI marks its own device requests (the Celestron
 // calibration action) with this header, so they never refresh a client's
 // registration and the Devices dot shows only real client activity. Kept in
@@ -925,6 +943,10 @@ void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono
 // route() refuses anything longer before a regex sees it. The longest valid
 // path today is under 100 bytes; 2048 stays far below the crash depth.
 constexpr std::size_t kMaxRequestPathBytes = 2048;
+
+// open-astro#2292 (ADR 0007 rule 10): the most entries configuredevice keeps.
+// A new entry past it is refused; replacing an entry is not. A rig has tens.
+constexpr std::size_t kMaxConfiguredDevices = 128;
 
 // open-astro#392: the host part of a Host header or an http.allowed_hosts
 // entry: port removed, lowercased, one trailing dot removed. A bracketed IPv6
@@ -1857,6 +1879,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             const std::optional<std::string> new_location = read_string_field({"Location", "location"});
             const std::optional<std::string> new_profile_name =
                 read_string_field({"ProfileName", "profileName", "profile_name"});
+            if (new_location) refuse_over_long("Location", *new_location, kMaxNameBytes);
+            if (new_profile_name) refuse_over_long("ProfileName", *new_profile_name, kMaxNameBytes);
 
             std::optional<bool> new_sync_clock;
             for (const char* key :
@@ -2516,11 +2540,14 @@ void prune_stale_client_connections(std::unordered_map<std::string, std::chrono:
 
 }  // namespace
 
-std::size_t Router::register_client_connection(const void* device, const std::string& client_key) {
+std::optional<std::size_t> Router::register_client_connection(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto& clients = client_connections_[device];
     const auto now = client_clock_();
     prune_stale_client_connections(clients, now);
+    if (clients.size() >= kMaxClientsPerDevice && clients.find(client_key) == clients.end()) {
+        return std::nullopt;
+    }
     clients[client_key] = now;
     return clients.size();
 }
@@ -2745,7 +2772,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         throw alpacacore::AlpacaException("Device has been removed",
                                                           alpacacore::AlpacaError::InvalidOperation);
                     }
-                    register_client_connection(device.get(), client_key);
+                    if (!register_client_connection(device.get(), client_key)) {
+                        return refuse_full_client_registry(call);
+                    }
                 }
 
                 // get_connecting() is read first at every step here: a
@@ -2891,7 +2920,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (action_name.empty()) {
                     throw_bad_request("Missing parameter: Action");
                 }
-                
+                refuse_over_long("Action", action_name, kMaxActionNameBytes);
+                refuse_over_long("Parameters", action_parameters, kMaxActionParametersBytes);
+
                 std::string result = device->action(action_name, action_parameters);
                 return call.ok(result);
             }
@@ -2927,7 +2958,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 device->command_blind(command, raw);
                 return call.ok_void();
             }
@@ -2963,7 +2995,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 bool result = device->command_bool(command, raw);
                 return call.ok(result);
             }
@@ -2999,7 +3032,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 std::string result = device->command_string(command, raw);
                 return call.ok(result);
             }
@@ -3023,7 +3057,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                     throw alpacacore::AlpacaException("Device has been removed",
                                                       alpacacore::AlpacaError::InvalidOperation);
                 }
-                register_client_connection(device.get(), extract_client_key(request).key);
+                if (!register_client_connection(device.get(), extract_client_key(request).key)) {
+                    return refuse_full_client_registry(call);
+                }
                 // get_connecting() first (see PUT connected): a mid-task
                 // connect goes to the driver, whose base class reconciles it.
                 if (device->get_connecting() || !device->get_connected()) {
@@ -4000,6 +4036,7 @@ Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver
             } else if (method_name == "setswitchname") {
                 int id = call.get_int("Id");
                 std::string name = call.get_string("Name");
+                refuse_over_long("Name", name, kMaxNameBytes);
                 sw->set_switch_name(id, name);
                 return call.ok_void();
             }
@@ -4007,73 +4044,6 @@ Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver
 
         return call.error(util::ErrorCode::NOT_IMPLEMENTED,
                           "Method '" + method_name + "' not yet implemented for Switch");
-    });
-}
-
-Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-                                             const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("filter wheel method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "position") {
-                return call.ok(filterwheel->get_position());
-            } else if (method_name == "names") {
-                nlohmann::json names = nlohmann::json::array();
-                for (const auto& name : filterwheel->get_names()) {
-                    names.push_back(name);
-                }
-                return call.ok(names);
-            } else if (method_name == "focusoffsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (int offset : filterwheel->get_focus_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "position") {
-                int value = call.get_int("Position");
-                filterwheel->set_position(value);
-                return call.ok_void();
-            } else if (method_name == "names") {
-                const auto* names_val = call.json_field("Names");
-                if (!names_val) {
-                    throw_bad_request("Missing parameter: Names");
-                }
-                if (!names_val->is_array()) {
-                    throw_bad_request("Names must be an array of strings");
-                }
-                for (const auto& name : *names_val) {
-                    if (!name.is_string()) {
-                        throw_bad_request("Names must be an array of strings");
-                    }
-                }
-                std::vector<std::string> names = names_val->get<std::vector<std::string>>();
-                filterwheel->set_names(names);
-                return call.ok_void();
-            } else if (method_name == "focusoffsets") {
-                const auto* offsets_val = call.json_field("FocusOffsets");
-                if (!offsets_val) {
-                    throw_bad_request("Missing parameter: FocusOffsets");
-                }
-                if (!offsets_val->is_array()) {
-                    throw_bad_request("FocusOffsets must be an array of integers");
-                }
-                std::vector<int> offsets;
-                offsets.reserve(offsets_val->size());
-                for (const auto& offset : *offsets_val) {
-                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
-                }
-                filterwheel->set_focus_offsets(offsets);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for FilterWheel");
     });
 }
 
@@ -5078,6 +5048,10 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         // (same vendor, type and number, as add_or_replace_persisted_device()
         // matches) is not another entry. The choice is reserved until this call
         // stores its entry or fails.
+        // open-astro#2292: a call that adds an entry counts against
+        // kMaxConfiguredDevices with the adding calls still in flight
+        // (pending_new_entries_), so concurrent calls cannot pass it together.
+        bool adds_entry = true;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             std::set<std::string> taken = reserved_unique_ids_;
@@ -5086,19 +5060,29 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 const auto key = persisted_key(entry);
                 if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
                     key->device_number == replaced->device_number) {
+                    adds_entry = false;
                     continue;
                 }
                 if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
             }
+            if (adds_entry && persisted_devices_.size() + pending_new_entries_ >= kMaxConfiguredDevices) {
+                response.set_body(make_error_response(
+                    client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                    "The server holds " + std::to_string(kMaxConfiguredDevices) +
+                        " configured devices, the most it keeps; remove one before adding another"));
+                return response;
+            }
             config["uniqueId"] = choose_unique_id(config, taken);
             reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
+            if (adds_entry) ++pending_new_entries_;
         }
         struct UniqueIdReservation {
             std::function<void()> release;
             ~UniqueIdReservation() { release(); }
-        } reservation{[this, unique_id = config["uniqueId"].get<std::string>()] {
+        } reservation{[this, adds_entry, unique_id = config["uniqueId"].get<std::string>()] {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             reserved_unique_ids_.erase(unique_id);
+            if (adds_entry) --pending_new_entries_;
         }};
 
         std::string error_message;

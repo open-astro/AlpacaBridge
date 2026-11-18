@@ -446,7 +446,8 @@ private:
     // disconnects. Keyed by driver instance; the inner map records each
     // ClientID's last-seen time so registrations from vanished clients can
     // expire instead of pinning the device connected forever.
-    std::size_t register_client_connection(const void* device, const std::string& client_key);
+    // nullopt when the device already holds kMaxClientsPerDevice other clients (#2292).
+    std::optional<std::size_t> register_client_connection(const void* device, const std::string& client_key);
     std::size_t unregister_client_connection(const void* device, const std::string& client_key);
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
@@ -525,6 +526,10 @@ private:
     // so two concurrent calls sending one ID cannot both keep it. Guarded by
     // persisted_devices_mutex_.
     std::set<std::string> reserved_unique_ids_;
+    // open-astro#2292: configuredevice calls that add an entry and have not
+    // stored it yet, counted against the entry cap. Guarded by
+    // persisted_devices_mutex_.
+    std::size_t pending_new_entries_ = 0;
 
     // #1969: what the bind hook said about a device that did register (a ZWO
     // camera that learned no identity), keyed by type and number, shown as

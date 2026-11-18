@@ -1041,3 +1041,27 @@ TEST_CASE("iOptron iEFW - offsets stored on the wheel seed FocusOffsets at conne
     CHECK(driver->get_focus_offsets() == std::vector<int>{120, 0, -45, 0, 0});
     driver->set_connected(false);
 }
+
+// Issue #2262: EBADF on the wheel's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the move failed with DriverException "Write failed"
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iEFW Link - EBADF on a command write loses the link at once",
+          "[ioptron][filterwheel][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    ReplugPort port(fake);
+    auto driver = make_replug_wheel(port);
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->set_position(2); }, kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "iEFW serial link lost (errno 9)");
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
+}

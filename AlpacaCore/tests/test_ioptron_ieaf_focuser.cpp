@@ -481,6 +481,29 @@ TEST_CASE("iEAF Link - a write to a pulled focuser loses the link at once and Di
     CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
 }
 
+// Issue #2262: EBADF on the focuser's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException "Write failed"
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iEAF Link - EBADF on a command write loses the link at once",
+          "[ioptron][focuser][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path(), "ieaf", clock);
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->halt(); }, kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "iEAF serial link lost (errno 9)");
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
+}
+
 TEST_CASE("iEAF Link - a status frame cached before the loss is not served",
           "[ioptron][focuser][unit][fake][link-lost]") {
     alpacacore::test::FakeTaskClock clock;  // never advanced: the cached frame stays inside its 100 ms

@@ -62,9 +62,9 @@ constexpr const char* kSerialOwner = "WandererRotator";
 constexpr int kReadWindowMs = 500;
 
 #ifndef _WIN32
-// The errnos a tty returns once its device is gone (decision 0009 point 2(a)).
-// EBADF is not one: the wrapper only meets it on an fd it closed itself.
-bool is_hangup_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV; }
+// A read error that ends the connected link's read loop: the one serial rule (util::SerialLink, #2262: EIO, ENXIO,
+// ENODEV, EBADF). The connected paths feed it to serial_link_.note_error(), which keeps the verdict on the link.
+bool is_hangup_errno(int err) { return util::is_serial_loss_errno(err); }
 
 // 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
 // adapter asserts DTR on open, which pulses the rotator's MCU reset line;
@@ -684,9 +684,9 @@ private:
     void write_command_locked(const std::string& code, bool terminator) {
         const std::string payload = terminator ? code + "\n" : code;
         ALPACA_LOG_TRACE("WandererAstro", "Rotator command: " + code);
-        if (!util::tty_write_all(serial_link_.fd(), payload)) {
+        if (!serial_link_.write_all(payload)) {
             const int err = errno;
-            if (is_hangup_errno(err)) {
+            if (serial_link_.lost()) {  // the link's verdict (#2262)
                 const std::string reason = "Serial link lost (errno " + std::to_string(err) + ")";
                 latch_loss_locked(reason);
                 if (monitor_reading_) {
@@ -735,7 +735,8 @@ private:
             // disconnect()'s join returns promptly (#1202).
             int read_errno = 0;
             auto token = read_section(fd, 600, carry, read_errno);
-            if (is_hangup_errno(read_errno)) {
+            if (is_hangup_errno(read_errno) &&
+                serial_link_.note_error(read_errno)) {  // the link's verdict (#2262); not after our own close
                 hangup = true;
                 hangup_errno = read_errno;
                 break;
