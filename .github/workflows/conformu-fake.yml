@@ -5,8 +5,10 @@
 # touches a file that can change the fake telescope's Alpaca answers (the
 # `paths:` list below), nightly on main, and on demand. Since #2078 the server
 # and the run script are generic: scripts/run_fake_conformu.sh walks every
-# `run` row of scripts/conformu_fake_runs.tsv (today the Sky-Watcher UDP
-# mount only; the other roster rows are pending, one slice per device type),
+# `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and,
+# since slice 2, its serial motor board; a row runs only when its fake can pass
+# ConformU on merit, and every other roster row is pending with its reason),
+# one matrix job per row,
 # and check 30 of scripts/check_docs_drift.py keeps that list in step with
 # kFakeConnectableRoster. The paths list is the
 # fake_conformu_server target's own sources and the headers they include
@@ -84,16 +86,64 @@ permissions:
   contents: read
 
 jobs:
+  runs:
+    # The run rows of scripts/conformu_fake_runs.tsv as the matrix of the job below (issue #2078 slice 2). One job per
+    # row, in parallel: a telescope row takes about 20 minutes of ConformU on the arm64 runner and the build 42 s
+    # (measured), so walking the rows in one job would outgrow its bound with the second row.
+    name: List the fake ConformU run rows
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      rows: ${{ steps.list.outputs.rows }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: List the run rows
+        id: list
+        # vendor/deviceType/fakeHeader keys the row for the run script; the CMake option builds its vendor; the slug
+        # names its artifact (the Sky-Watcher UDP row keeps conformu-fake-skywatcher).
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          rows = []
+          with open("scripts/conformu_fake_runs.tsv", encoding="utf-8") as f:
+              for line in f:
+                  if not line.strip() or line.startswith("#"):
+                      continue
+                  cells = line.rstrip("\n").split("\t")
+                  if cells[0] == "vendor" or cells[3] != "run":
+                      continue
+                  vendor, dtype, fake = cells[0], cells[1], cells[2]
+                  stem = fake[:-2] if fake.endswith(".h") else fake
+                  legacy = (vendor, dtype, fake) == ("skywatcher", "telescope", "fake_skywatcher_mount.h")
+                  rows.append({
+                      "key": "%s/%s/%s" % (vendor, dtype, fake),
+                      "option": "ALPACACORE_ENABLE_%s" % vendor.upper(),
+                      "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
+                  })
+          print("rows=" + json.dumps(rows))
+          PY
+
   conformu-fake:
-    # Hardware-free ConformU: every `run` row of scripts/conformu_fake_runs.tsv
-    # (today the Sky-Watcher driver over FakeSkyWatcherMount), served by the
-    # test-only fake_conformu_server (not installed or packaged). Each report is
-    # a CI artifact under <Vendor>/Fake/ ("FAKE REPORT:" first line) and a copy
-    # is committed at the row's reportPath under AlpacaCore/conformu/. It is
-    # never hardware validation.
-    name: ConformU against the fake Sky-Watcher mount (arm64)
+    # Hardware-free ConformU: one `run` row of scripts/conformu_fake_runs.tsv per
+    # job (today the Sky-Watcher driver over FakeSkyWatcherMount and over
+    # FakeSkyWatcherSerialBoard), served by the test-only fake_conformu_server
+    # (not installed or packaged). Each report is a CI artifact under
+    # <Vendor>/Fake/ ("FAKE REPORT:" first line) and a copy is committed at the
+    # row's reportPath under AlpacaCore/conformu/. It is never hardware
+    # validation.
+    name: ConformU against ${{ matrix.row.key }} (arm64)
+    needs: runs
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJSON(needs.runs.outputs.rows) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -115,13 +165,15 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build the fake server (core + HTTP, Sky-Watcher only)
+      - name: Build the fake server (core + HTTP, the row's vendor only)
+        env:
+          VENDOR_OPTION: ${{ matrix.row.option }}
         run: |
           set -euo pipefail
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DALPACAHTTP_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=OFF \
-            -DALPACACORE_ENABLE_SKYWATCHER=ON
+            "-D${VENDOR_OPTION}=ON"
           cmake --build AlpacaHTTP/build --target fake_conformu_server --parallel "$(nproc)"
 
       - name: Install ConformU 4.6.0-rc.1 (pinned release, sha256-checked)
@@ -138,19 +190,23 @@ jobs:
           chmod +x conformu
           ./conformu --version | tail -1
 
-      - name: Run ConformU against every run-list row's fake
+      - name: Run ConformU against the row's fake
         # Fails when ConformU exits non-zero or its log lacks the clean-pass line
-        # or shows a response-time finding (the checker's own rules), for any row.
+        # or shows a response-time finding (the checker's own rules).
+        env:
+          ROW_KEY: ${{ matrix.row.key }}
         run: |
           scripts/run_fake_conformu.sh \
             AlpacaHTTP/build/fake_conformu_server \
             "$RUNNER_TEMP/conformu/conformu" \
-            "$RUNNER_TEMP/fake-conformu"
+            "$RUNNER_TEMP/fake-conformu" \
+            scripts/conformu_fake_runs.tsv \
+            "$ROW_KEY"
 
       - name: Upload the ConformU log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: conformu-fake-skywatcher
+          name: conformu-fake-${{ matrix.row.slug }}
           path: ${{ runner.temp }}/fake-conformu/
           if-no-files-found: warn
