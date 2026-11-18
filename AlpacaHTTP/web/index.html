@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=35">
+    <link rel="stylesheet" href="/web/style.css?v=36">
 </head>
 <body>
     <div class="container">
@@ -27,6 +27,10 @@
             <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><a id="header-build-badge" class="build-badge" hidden title="" href="#" target="_blank" rel="noopener"></a><span id="header-profile" class="profile-name"></span></h1>
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
         </header>
+
+        <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
+             when the bridge stops answering; a polite live region. -->
+        <div id="link-banner" class="link-banner" role="status" aria-live="polite" hidden></div>
 
         <nav class="tabs" role="tablist" aria-label="Sections">
             <button class="tab active" type="button" role="tab" id="devices-tab-button" data-tab="devices" aria-selected="true" aria-controls="devices-tab" onclick="showTab('devices')">Devices</button>
@@ -38,7 +42,7 @@
         <div id="devices-tab" class="tab-content active" role="tabpanel" aria-labelledby="devices-tab-button">
             <h2>Configured Devices</h2>
             <div id="devices-list" class="devices-list">
-                <p class="loading">Loading devices...</p>
+                <div class="device-card skeleton" role="status" aria-busy="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="visually-hidden">Loading devices</span></div>
             </div>
         </div>
 
@@ -2218,8 +2222,8 @@
     </dialog>
     <div id="toast-region" class="toast-region"></div>
 
-    <script src="/web/format.js?v=19"></script>
+    <script src="/web/format.js?v=20"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=52"></script>
+    <script src="/web/app.js?v=53"></script>
 </body>
 </html>

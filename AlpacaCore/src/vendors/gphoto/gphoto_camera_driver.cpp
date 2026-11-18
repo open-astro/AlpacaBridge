@@ -591,26 +591,6 @@ public:
         sdk.close_camera(close_handle);
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
     // --- CameraDriver: sensor geometry ---
     //
     // Unlike SDK-enumerated CMOS cameras, libgphoto2 does not report sensor
@@ -862,13 +842,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return num_x_;
     }
-    void set_num_x(int num_x) override { set_roi_dimension_locked(&num_x_, num_x); }
+    void set_num_x(int num_x) override { set_roi_dimension_locked(&num_x_, num_x, 1); }
 
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
-    void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y); }
+    void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y, 1); }
 
     int get_offset() const override {
         ensure_connected();
@@ -948,13 +928,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return start_x_;
     }
-    void set_start_x(int start_x) override { set_roi_dimension_locked(&start_x_, start_x); }
+    void set_start_x(int start_x) override { set_roi_dimension_locked(&start_x_, start_x, 0); }
 
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
-    void set_start_y(int start_y) override { set_roi_dimension_locked(&start_y_, start_y); }
+    void set_start_y(int start_y) override { set_roi_dimension_locked(&start_y_, start_y, 0); }
 
     double get_sub_exposure_duration() const override {
         ensure_connected();
@@ -1290,12 +1270,15 @@ private:
         return *best;
     }
 
-    void set_roi_dimension_locked(int* field, int value) {
+    // #2259 canonical order: the static value check (a NumX or NumY of 0 or less, a negative StartX or StartY)
+    // precedes the connection check. The sensor bound stays at StartExposure. No exposing check here yet (#1982).
+    void set_roi_dimension_locked(int* field, int value, int minimum) {
+        if (value < minimum) {
+            throw AlpacaException(minimum > 0 ? "ROI size must be positive" : "ROI start must be non-negative",
+                                  AlpacaError::InvalidValue);
+        }
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (value < 0) {
-            throw AlpacaException("ROI value must be non-negative", AlpacaError::InvalidValue);
-        }
         *field = value;
     }
 

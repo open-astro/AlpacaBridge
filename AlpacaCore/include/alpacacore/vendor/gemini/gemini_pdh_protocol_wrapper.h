@@ -132,6 +132,11 @@ struct GeminiPdhPortInfo {
  */
 std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports();
 
+/// The USB descriptor tokens of a Gemini PDH adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& gemini_pdh_usb_tokens();
+
 /**
  * @brief The auto-detect identity probe of one serial port (>H# at 19200 baud).
  *
@@ -242,7 +247,7 @@ public:
     /**
      * @brief Connect: handshake, firmware gate, first status frame.
      *
-     * A hangup on the port during the connect (a read, or EIO/ENXIO/ENODEV
+     * A hangup on the port during the connect (a read, or EIO/ENXIO/ENODEV/EBADF
      * on a write) fails it with NotConnected "Gemini power hub link lost
      * during connect" and latches nothing: link_fault() stays empty.
      * @param config Connection configuration
@@ -274,7 +279,7 @@ public:
      * @brief False once the link is lost (decision 0009), until the next
      * connect() or disconnect(). Lock-free; never waits on the wire.
      *
-     * Lost: a hangup on a read, EIO/ENXIO/ENODEV on a command or poll write,
+     * Lost: a hangup on a read, EIO/ENXIO/ENODEV/EBADF on a command or poll write,
      * or a link fault that has stood for util::kLinkStalenessBound on the
      * task clock. The cached state and firmware are cleared before this
      * turns false, the reader stops and the port is released (by the reader,

@@ -320,6 +320,28 @@ std::optional<std::vector<AttachedCamera>> DeviceCatalog::list_cameras(std::stri
     return std::nullopt;
 }
 
+std::vector<std::string> DeviceCatalog::camera_lister_vendors() const {
+    std::vector<std::string> vendors;
+    for (const auto& entry : camera_listers_) {
+        if (entry.second) vendors.push_back(entry.first);
+    }
+    return vendors;
+}
+
+void DeviceCatalog::add_usb_serial_identity(UsbSerialIdentity identity) {
+    usb_serial_identities_.push_back(std::move(identity));
+}
+
+void DeviceCatalog::add_hid_lister(DeviceKey key, HidLister lister) {
+    for (auto& entry : hid_listers_) {
+        if (entry.first == key) {
+            entry.second = std::move(lister);
+            return;
+        }
+    }
+    hid_listers_.emplace_back(std::move(key), std::move(lister));
+}
+
 const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
     for (const Schema& s : schemas_) {
         if (s.key == key) return &s;

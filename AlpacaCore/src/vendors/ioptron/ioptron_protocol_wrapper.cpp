@@ -354,8 +354,7 @@ uint32_t get_interface_gateway(const std::string& iface_name) {
 bool raw_port_looks_like_ioptron_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "Silicon_Labs", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, ioptron_mount_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -2269,6 +2268,12 @@ void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {
         << std::setfill('0') << std::setw(2) << dec_value << "#";
     // Some mounts do not respond to :RG; fire-and-forget to avoid timeouts.
     send_command_blind(cmd.str());
+}
+
+const std::vector<std::string>& ioptron_mount_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",       "067b",       "FTDI",
+                                                 "CP210",    "Silicon_Labs", "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::ioptron

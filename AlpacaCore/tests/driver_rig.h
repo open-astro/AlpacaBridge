@@ -76,6 +76,18 @@ inline void require_alpaca_error(const std::function<void()>& fn, int expected_c
     }
 }
 
+// The message of the AlpacaException fn throws, after requiring expected_code.
+inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+        return ex.what();
+    }
+    FAIL("Expected AlpacaException");
+    return {};
+}
+
 // True once a Park has ended: the mount is parked, or a read reports the failure.
 inline bool park_done(alpacacore::TelescopeDriver& d) {
     try {

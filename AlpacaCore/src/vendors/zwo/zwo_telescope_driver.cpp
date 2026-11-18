@@ -737,16 +737,6 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override {
-        return false;
-    }
-
     std::string command_blind(std::string_view command, bool) override {
         check_connected();
         protocol_.send_command_blind(std::string(command));

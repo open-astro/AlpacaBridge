@@ -18,6 +18,7 @@
 // is fine here.
 
 #include <alpacacore/util/alignment_mode.h>
+#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
@@ -95,6 +96,11 @@ void register_synscan_factory(DeviceCatalog& catalog) {
         return telescope;
     };
     catalog.add(std::move(factory));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"synscan", DeviceType::Telescope}, vendor::synscan::synscan_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

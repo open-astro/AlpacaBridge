@@ -23,6 +23,7 @@
 
 namespace {
 
+using alpacacore::test::alpaca_error_message;
 using alpacacore::test::require_alpaca_error;
 
 }  // namespace
@@ -99,6 +100,21 @@ TEST_CASE("ToupTek StellaVita Switch Driver - value range is InvalidValue while 
     // A read-only port: the value checks, then the connection check, then NotImplemented once connected.
     require_alpaca_error([&]() { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_switch_value(0, 1.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Falsified by: touptek_switch_driver.cpp stellavita_profile() editing not_connected_message or a port's range_error.
+TEST_CASE("ToupTek StellaVita Switch Driver - error texts", "[touptek][switch][unit]") {
+    auto cfg = alpacacore::vendor::touptek::default_stellavita_config();
+    cfg.ports[1].pwm_enabled = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(alpaca_error_message([&]() { driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected) ==
+          "StellaVita not connected");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,1]");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(1, 101.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,100]");
 }
 
 // 4. Unsupported actions

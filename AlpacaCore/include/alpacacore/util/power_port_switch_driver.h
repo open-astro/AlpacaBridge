@@ -61,13 +61,14 @@ inline const char* power_port_mode_text(bool pwm_enabled) { return pwm_enabled ?
 // The Switch driver of the GPIO power-port boards that share one behaviour:
 // the ASIAIR Pro and Plus CM4, the ASIAIR Plus RK3568, the iMate PowerBox
 // (issue #2264) and the ToupTek StellaVita. Wrapper is the board's port wrapper: open(), close(),
-// is_open(), get_value(index) and set_value(index, int). It is built in place
+// is_open(), port_count(), get_value(index) and set_value(index, int). It is built in place
 // from the arguments after the profile, so each factory passes what its
 // wrapper's constructor takes. The general rules are in the GPIO section of
 // ascom-contract.instructions.md and in decision 0021. A board added from a
 // new vendor directory also goes into SHARED_DRIVER_HEADERS in
-// scripts/check_docs_drift.py and DELEGATING_FACTORIES in
-// scripts/check_stress_registration.py, or those gates miss it.
+// scripts/check_docs_drift.py (check 5 fails until it is listed) and
+// DELEGATING_FACTORIES in scripts/check_stress_registration.py, or that gate
+// misses it.
 template <typename Wrapper>
 class PowerPortSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -80,6 +81,13 @@ public:
           device_number_(device_number),
           profile_(std::move(profile)),
           wrapper_(std::forward<WrapperArgs>(wrapper_args)...) {
+        // port_count() is read here, before open(): every wrapper takes its port table from the config. A wrapper that
+        // learns its ports only when opened would be refused, so it needs its own check instead of this one.
+        if (wrapper_.port_count() != profile_.ports.size()) {
+            throw AlpacaException(profile_.name + ": the port wrapper has " + std::to_string(wrapper_.port_count()) +
+                                      " ports but the profile lists " + std::to_string(profile_.ports.size()),
+                                  AlpacaError::InvalidValue);
+        }
         switch_names_.reserve(profile_.ports.size());
         for (const auto& p : profile_.ports) {
             switch_names_.emplace_back(p.name);
@@ -202,26 +210,6 @@ public:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(profile_.log_category, std::string("Could not apply the power-on state: ") + e.what());
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("CommandBlind not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("CommandBool not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
     int get_max_switch() const override { return static_cast<int>(profile_.ports.size()); }

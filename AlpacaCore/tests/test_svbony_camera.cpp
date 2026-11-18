@@ -1102,3 +1102,20 @@ TEST_CASE("SVBONY Camera Driver - a Disconnect queued against a Connect in fligh
     CHECK(sdk.call_count("close_camera") == 2);  // the loss, then the queued Disconnect
     sdk.before_call = nullptr;
 }
+
+// Issue #2259: the supported bins are the connected camera's, so a disconnected bin write answers NotConnected, not
+// "Bin value not supported" (the bin check ran before the connection check); a bin of 0 or less is InvalidValue before
+// it. Both the never-connected driver and one after a Disconnect (which clears the camera info).
+TEST_CASE("SVBONY Camera Driver - a disconnected bin write answers NotConnected", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    std::unique_ptr<alpacacore::CameraDriver> camera;
+    SECTION("never connected") { camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk); }
+    SECTION("after a Disconnect") {
+        camera = svbony_connected_camera(sdk);
+        camera->set_connected(false);
+    }
+    REQUIRE_FALSE(camera->get_connected());
+    require_alpaca_error([&] { camera->set_bin_x(2); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { camera->set_bin_y(1); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { camera->set_bin_x(0); }, alpacacore::AlpacaError::InvalidValue);
+}

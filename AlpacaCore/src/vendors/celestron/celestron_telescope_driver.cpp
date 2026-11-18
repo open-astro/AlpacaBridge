@@ -2046,13 +2046,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         // An initiator like the motion commands: its write and its publish stay one step to them (the sync used
         // to hold mutex_ across the write, which kept them out).
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {

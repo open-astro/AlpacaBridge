@@ -228,6 +228,7 @@ public:
                 pulse_generation_.bump();
                 pulse_guiding_ = false;
                 slewing_cached_ = false;
+                slew_hold_.clear();  // decision 0022 rule 2
                 reset_snapshot_state_locked();
                 lock.unlock();
                 status_poll_.cancel_all_and_join();
@@ -328,6 +329,7 @@ public:
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
+            slew_hold_.clear();  // decision 0022 rule 2
             link_lost_ = false;
             reset_snapshot_state_locked();
             manual_axis_slewing_[0] = false;
@@ -343,18 +345,6 @@ public:
             status_poll_.cancel_all_and_join();
             pulse_guide_op_.cancel_all_and_join();
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
-
-    std::string action(std::string_view action_name, std::string_view /*action_parameters*/) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view /*action_name*/) const override {
-        return false;
     }
 
     std::string command_blind(std::string_view command, bool /*raw*/) override {
@@ -937,11 +927,18 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
 
+        // Decision 0022 rule 2: Slewing is true from before the command goes out.
+        const SlewStart start = begin_slew_locked();
         lock.unlock();
-        protocol.slew_to_ra_dec(ra, dec);
+        try {
+            protocol.slew_to_ra_dec(ra, dec);
+        } catch (...) {
+            lock.lock();
+            undo_failed_slew_locked(start);
+            throw;
+        }
         lock.lock();
-        note_slew_started_locked();
-        const uint64_t epoch = slew_epoch_;
+        const uint64_t epoch = start.epoch;
         ilock.unlock();
 
         // Wait for completion.
@@ -967,10 +964,15 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
 
+        const SlewStart start = begin_slew_locked();  // see slew_to_coordinates()
         lock.unlock();
-        protocol.slew_to_ra_dec(ra, dec);
-        lock.lock();
-        note_slew_started_locked();
+        try {
+            protocol.slew_to_ra_dec(ra, dec);
+        } catch (...) {
+            lock.lock();
+            undo_failed_slew_locked(start);
+            throw;
+        }
     }
 
     void slew_to_target() override {
@@ -1191,6 +1193,16 @@ public:
         slew_complete_hook_ = std::move(hook);
     }
 
+    bool slew_hold_active_for_testing() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return slew_hold_.active(clock_.now());
+    }
+
+    bool slew_hold_cleared_for_testing() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return slew_hold_.until() == util::HoldWindow::mono::min();
+    }
+
 private:
     // One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
     // disconnected (open-astro#1786). open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
@@ -1318,6 +1330,39 @@ private:
         slew_poll_error_.clear();
         slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
         drop_poll_in_flight_locked();
+    }
+
+    // The slew state a SlewToRaDec replaces (decision 0022 rule 2). The window and Slewing are armed before the
+    // command goes out; a command TheSkyX refused started nothing, so undo_failed_slew_locked() puts back what an
+    // accepted earlier slew had: its window, its Slewing, its kept poll error and its epoch, so a SlewToCoordinates
+    // still waiting for that slew lowers Slewing when it lands. The caller holds initiator_mutex_ from the arm to
+    // the undo, as every slew_epoch_ writer does, so no other slew start or abort lands in between.
+    struct SlewStart {
+        util::HoldWindow hold;
+        bool slewing = false;
+        std::string poll_error;
+        int poll_error_code = AlpacaError::DriverException;
+        uint64_t epoch_before = 0;
+        uint64_t epoch = 0;  // slew_epoch_ once this slew is armed
+    };
+
+    SlewStart begin_slew_locked() {
+        SlewStart start{slew_hold_, slewing_cached_, slew_poll_error_, slew_poll_error_code_, slew_epoch_, 0};
+        note_slew_started_locked();
+        start.epoch = slew_epoch_;
+        return start;
+    }
+
+    // Unless a disconnect, a connect or a landing has lowered Slewing since the arm: the state those wrote stands.
+    void undo_failed_slew_locked(const SlewStart& start) {
+        if (slew_epoch_ != start.epoch || !slewing_cached_) {
+            return;
+        }
+        slew_hold_ = start.hold;
+        slewing_cached_ = start.slewing;
+        slew_poll_error_ = start.poll_error;
+        slew_poll_error_code_ = start.poll_error_code;
+        slew_epoch_ = start.epoch_before;
     }
 
     // One sample, taken without mutex_ (the protocol wrapper serialises each exchange). The position is
@@ -1711,6 +1756,7 @@ private:
                 lock.lock();
                 if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
                     slewing_cached_ = false;
+                    slew_hold_.clear();  // landed: decision 0022 rule 2
                 }
                 if (slew_settle_time_seconds_ > 0) {
                     lock.unlock();
@@ -1847,6 +1893,20 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_slew_complete_hook_for_testing(std::move(hook));
     }
+}
+
+bool slew_hold_active_for_testing(TelescopeDriver& driver) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        return bisque->slew_hold_active_for_testing();
+    }
+    return false;
+}
+
+bool slew_hold_cleared_for_testing(TelescopeDriver& driver) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        return bisque->slew_hold_cleared_for_testing();
+    }
+    return false;
 }
 
 } // namespace alpacacore::vendor::bisque

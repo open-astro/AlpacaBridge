@@ -54,14 +54,18 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace alpacacore::test {
 
@@ -195,6 +199,63 @@ inline std::size_t pty_write_bounded(int fd, const char* data, std::size_t len, 
         }
     }
     return written;
+}
+
+/// The fds of this process open on @p path (a pty slave), read from /proc/self/fd. A test takes this set before
+/// and after a wrapper's connect to find the wrapper's own fd, which it cannot otherwise see (issue #2262).
+inline std::set<int> fds_open_on(const std::string& path) {
+    std::set<int> fds;
+    std::error_code ec;
+    const auto target = std::filesystem::canonical(path, ec);
+    if (ec) return fds;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code link_ec;
+        const auto points_at = std::filesystem::read_symlink(entry.path(), link_ec);
+        if (link_ec || points_at != target) continue;
+        try {
+            fds.insert(std::stoi(entry.path().filename().string()));
+        } catch (const std::exception&) {
+        }
+    }
+    return fds;
+}
+
+/// The one fd in @p after that is not in @p before, or -1 when there is not exactly one.
+inline int new_fd(const std::set<int>& before, const std::set<int>& after) {
+    int found = -1;
+    for (const int fd : after) {
+        if (before.count(fd) != 0) continue;
+        if (found >= 0) return -1;
+        found = fd;
+    }
+    return found;
+}
+
+/// Make @p fd unusable for writing while keeping its number valid: a read-only /dev/null takes its place, so the
+/// owner's next write fails with EBADF (the fd can no longer be written) and its later close() closes that
+/// stand-in, never a number another thread has reused. The EBADF shape of issue #2262, without a double close.
+/// TIOCEXCL is released first: the owner's close() now reaches the stand-in, so it could not release it, and the
+/// keep-alive fd would hold the tty exclusive against the next open.
+inline bool make_fd_unwritable(int fd) {
+    (void)::ioctl(fd, TIOCNXCL);
+    const int nul = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (nul < 0) return false;
+    const bool ok = ::dup2(nul, fd) == fd;
+    ::close(nul);
+    return ok;
+}
+
+/// Make @p fd unusable for reads and writes alike while keeping its number valid: an O_PATH descriptor takes its
+/// place, so the owner's next read() and write() both fail with EBADF (a poll() reports it ready, then the call
+/// fails). For an owner with a reader thread, which make_fd_unwritable() would hand an end-of-file (an EIO) before
+/// its own write met the EBADF (issue #2262). TIOCEXCL is released first, as there.
+inline bool make_fd_unusable(int fd) {
+    (void)::ioctl(fd, TIOCNXCL);
+    const int path_only = ::open("/dev/null", O_PATH | O_CLOEXEC);
+    if (path_only < 0) return false;
+    const bool ok = ::dup2(path_only, fd) == fd;
+    ::close(path_only);
+    return ok;
 }
 
 inline std::size_t pty_write_bounded(int fd, const std::string& data, const std::atomic<bool>& stop,

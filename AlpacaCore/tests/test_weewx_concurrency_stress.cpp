@@ -11,10 +11,10 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the WeeWX
-// ObservingConditions driver (issue #101). The HTTP fetch is injected through
-// FakeWeeWxFetcher (issue #1070), so connect succeeds and the poll thread that
-// fills last_snapshot_ runs during the storm instead of the connect failing in
-// fetch_snapshot().
+// ObservingConditions driver (issue #101). The HTTP fetch is injected as
+// FakeHttpClient behind LockedHttpClient (issues #1070, #1753), so connect
+// succeeds and the poll thread that fills last_snapshot_ runs during the storm
+// instead of the connect failing in fetch_snapshot().
 
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/util/link_health.h>
@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <ctime>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -33,12 +35,26 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "driver_rig.h"
+#include "fake_http_client.h"
 #include "fake_task_clock.h"
-#include "fake_weewx_fetcher.h"
+#include "locked_http_client.h"
 
 using alpacacore::AlpacaDriver;
 
 namespace {
+
+// The scripted client's canned feed: temperature (50 F = 10 C) and humidity, observed now.
+std::string canned_feed() {
+    const long long now = static_cast<long long>(std::time(nullptr));
+    return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},"outHumidity":{"value":40.0},"dateTime":{"value":)" +
+           std::to_string(now) + "}}}}";
+}
+
+// The fake behind the test-only locked decorator (decision 0015 rule 2): the driver's connect and poll threads
+// reach it through one mutex, as the stress runs of the SDK seams do. The fake must outlive the driver.
+std::shared_ptr<alpacacore::util::HttpClient> locked(alpacacore::test::FakeHttpClient& fake) {
+    return std::make_shared<alpacacore::test::LockedHttpClient>(fake.client());
+}
 
 // Poll interval is the 1 s minimum of its unit; the poll thread fetches once at
 // start, so every successful connect exercises it.
@@ -54,8 +70,8 @@ alpacacore::vendor::weewx::WeeWxHttpConfig fake_config() {
 
 TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate stress",
           "[weewx][observingconditions][stress]") {
-    alpacacore::test::FakeWeeWxFetcher fake;
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+    alpacacore::test::FakeHttpClient fake{canned_feed};
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fake));
 
     // The poll thread is only reachable once a connect lands: assert it does,
     // and that a snapshot is served, before the storm starts.
@@ -114,17 +130,17 @@ TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate st
 
 TEST_CASE("WeeWX observing conditions - destruction races an in-flight connect",
           "[weewx][observingconditions][stress]") {
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     fake.set_delay(std::chrono::milliseconds(2));
     alpacacore::test::run_destruction_during_connect_stress([&fake]() {
-        return alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+        return alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fake));
     });
 }
 
 TEST_CASE("WeeWX observing conditions - disconnect races a slow in-flight fetch",
           "[weewx][observingconditions][stress]") {
-    alpacacore::test::FakeWeeWxFetcher fake;
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+    alpacacore::test::FakeHttpClient fake{canned_feed};
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fake));
     driver->set_connected(true);
     REQUIRE(driver->get_connected() == true);
 
@@ -151,10 +167,10 @@ TEST_CASE("WeeWX observing conditions - disconnect races a slow in-flight fetch"
 }
 
 TEST_CASE("WeeWX observing conditions - racing disconnect is never dropped", "[weewx][observingconditions][stress]") {
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     // A slow fetch keeps each connect in flight while the disconnect lands.
     fake.set_delay(std::chrono::milliseconds(20));
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fake));
 
     CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
     CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false) == false);
@@ -165,8 +181,8 @@ TEST_CASE("WeeWX observing conditions - racing disconnect is never dropped", "[w
 
 TEST_CASE("WeeWX observing conditions - poll survives scripted fetch failures",
           "[weewx][observingconditions][stress]") {
-    alpacacore::test::FakeWeeWxFetcher fake;
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+    alpacacore::test::FakeHttpClient fake{canned_feed};
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fake));
     driver->set_connected(true);
     REQUIRE(driver->get_connected() == true);
 
@@ -209,15 +225,15 @@ TEST_CASE("WeeWX observing conditions - staleness losses race connects, disconne
     alpacacore::test::FakeTaskClock clock;  // first: it outlives the driver
     std::atomic<int> mode{0};               // 0 answers, 1 fails every fetch, 2 answers one in 25
     std::atomic<int> fetches{0};
-    alpacacore::vendor::weewx::WeeWxFetcher fetcher = [&](const std::string&, std::chrono::milliseconds) {
+    alpacacore::test::FakeHttpClient fetcher{[&]() -> std::string {
         const int n = fetches.fetch_add(1);
         const int m = mode.load();
         if (m == 1 || (m == 2 && n % 25 != 0)) {
             throw alpacacore::AlpacaException("scripted WeeWX fetch failure", alpacacore::AlpacaError::DriverException);
         }
-        return alpacacore::test::FakeWeeWxFetcher::canned_payload();
-    };
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fetcher, clock);
+        return canned_feed();
+    }};
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), locked(fetcher), clock);
 
     std::atomic<int> losses{0};
     // Restores the previous sink on every exit, a failed REQUIRE included, so no later log line reaches `losses`

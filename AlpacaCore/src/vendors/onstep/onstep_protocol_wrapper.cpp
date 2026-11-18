@@ -374,10 +374,13 @@ MountStatus parse_status(const std::string& raw) {
         is_code_char(raw.back())) {
         status.general_error = raw.back() - '0';
     }
-    // 'F' takes the place of p/I/P when a park failed (OnStepX PS_PARK_FAILED, OnStep 4.x ParkFailed); no other
-    // :GU# flag is an uppercase F.
+    // Verified against both :GU# builders (OnStepX Status.command.cpp, OnStep 4.x Command.ino): 'F' is written only
+    // for the park state (OnStepX PS_PARK_FAILED, 4.x "pIPF"[parkStatus], in place of p/I/P) and 'w' only for a GOTO
+    // paused at home (OnStepX goTo.isHomePaused(), 4.x waitingHome). No other letter is either one (the pier side west
+    // is 'W', the PEC character one of "/,~;^"), and the three closing characters are '0' plus a rate selection or an
+    // error code of at most 15, so they cannot be either. A find() over the frame is therefore as safe as it is for the
+    // mount type (#2214, #2296).
     status.is_park_failed = raw.find('F') != std::string::npos;
-    // 'w' is the only lowercase w in both firmwares' :GU# (the pier side west is 'W').
     status.is_waiting_at_home = raw.find('w') != std::string::npos;
     if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
@@ -478,9 +481,7 @@ std::string probe_onstep_port(const std::string& port_path, std::string& version
 bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340", "CH341",
-                      "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, onstep_usb_tokens());
 }
 
 // Lists /dev entries whose filename starts with prefix (e.g. "ttyUSB"),
@@ -962,6 +963,39 @@ public:
 
     std::optional<int> get_axis1_limit_degrees(bool maximum) {
         return parse_whole_number(send_command(maximum ? ":GXEw#" : ":GXEe#", true, kSetAckTimeoutMs));
+    }
+
+    // A bare '1'/'0' with no '#' (OnStep 4.x suppresses the frame; OnStepX answers numerically). Anything else is
+    // unknown.
+    std::optional<bool> get_bare_flag(const char* command) {
+        const std::string reply = send_command(command, false, kSetAckTimeoutMs);
+        if (reply == "1") {
+            return true;
+        }
+        if (reply == "0") {
+            return false;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<bool> get_tangent_arm() { return get_bare_flag(":GXEF#"); }
+
+    std::optional<bool> get_sector_gear() { return get_bare_flag(":GXEG#"); }
+
+    std::optional<double> get_base_slew_degrees_per_second() {
+        const auto us_per_step = parse_decimal(send_command(":GX93#", true, kSetAckTimeoutMs), false);
+        if (!us_per_step || !std::isfinite(*us_per_step) || !(*us_per_step > 0.0)) {
+            return std::nullopt;
+        }
+        const auto steps_per_degree = parse_decimal(send_command(":GXE4#", true, kSetAckTimeoutMs), false);
+        if (!steps_per_degree || !std::isfinite(*steps_per_degree) || !(*steps_per_degree > 0.0)) {
+            return std::nullopt;
+        }
+        const double rate = 1e6 / (*us_per_step * *steps_per_degree);
+        if (!std::isfinite(rate) || !(rate > 0.0)) {
+            return std::nullopt;
+        }
+        return rate;
     }
 
     Position get_position() {
@@ -1856,6 +1890,14 @@ std::optional<int> OnStepProtocolWrapper::get_axis1_limit_degrees(bool maximum) 
     return pimpl_->get_axis1_limit_degrees(maximum);
 }
 
+std::optional<bool> OnStepProtocolWrapper::get_tangent_arm() { return pimpl_->get_tangent_arm(); }
+
+std::optional<bool> OnStepProtocolWrapper::get_sector_gear() { return pimpl_->get_sector_gear(); }
+
+std::optional<double> OnStepProtocolWrapper::get_base_slew_degrees_per_second() {
+    return pimpl_->get_base_slew_degrees_per_second();
+}
+
 std::string OnStepProtocolWrapper::goto_current_position_on_side(char side) {
     return pimpl_->goto_current_position_on_side(side);
 }
@@ -1951,5 +1993,12 @@ void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
     link_loss_hook() = std::move(hook);
 }
 }  // namespace detail
+
+const std::vector<std::string>& onstep_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",         "FTDI",    "0403",
+                                                 "CP210",    "10c4",       "Silicon_Labs", "CH340",   "CH341",
+                                                 "1a86",     "USB_Serial", "USB Serial",   "Arduino", "Teensy"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::onstep

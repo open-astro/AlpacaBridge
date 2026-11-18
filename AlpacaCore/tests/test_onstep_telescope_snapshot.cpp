@@ -20,6 +20,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
@@ -38,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -138,6 +140,10 @@ struct SnapshotMount {
     std::string ge_code;              // :GE# when not empty, e.g. "15#"
     std::string mn_reply = "0";       // :MNe#/:MNw# (empty: no reply)
     std::string ra_text;              // :GRa# when not empty
+    std::string gxef = "0";           // :GXEF# tangent arm, a bare digit
+    std::string gxeg = "0";           // :GXEG# sector gear, a bare digit
+    std::string gx93;                 // :GX93# base slew period, us/step (empty: "0#")
+    std::string gxe4;                 // :GXE4# axis 1 steps per degree (empty: "0#")
     std::string dec_text;             // :GDe# when not empty
     std::string status = "NpEW180#";  // tracking, no GOTO, not parked (under `mutex`)
     std::vector<std::string> log;     // under `mutex`
@@ -251,6 +257,10 @@ struct SnapshotMount {
             return version + "#";
         }
         if (chunk.rfind(":GXEE", 0) == 0) return "1";
+        if (chunk.rfind(":GXEF", 0) == 0 || chunk.rfind(":GXEG", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return chunk.rfind(":GXEF", 0) == 0 ? gxef : gxeg;  // bare, no '#'
+        }
         if (chunk.rfind(":GX96", 0) == 0 || chunk.rfind(":GX94", 0) == 0 || chunk.rfind(":GXE9", 0) == 0 ||
             chunk.rfind(":GXEA", 0) == 0 || chunk.rfind(":GXEe", 0) == 0 || chunk.rfind(":GXEw", 0) == 0) {
             std::lock_guard<std::mutex> lock(mutex);
@@ -312,11 +322,13 @@ struct SnapshotMount {
             return refuse_park.load() ? "22#" : "00#";
         }
         if (chunk.rfind(":GT", 0) == 0 || chunk.rfind(":GXTR", 0) == 0 || chunk.rfind(":GXTD", 0) == 0 ||
-            chunk.rfind(":GX90", 0) == 0) {
+            chunk.rfind(":GX90", 0) == 0 || chunk.rfind(":GX93", 0) == 0 || chunk.rfind(":GXE4", 0) == 0) {
             std::lock_guard<std::mutex> lock(mutex);
             const std::string& value = chunk.rfind(":GT", 0) == 0     ? gt
                                        : chunk.rfind(":GXTR", 0) == 0 ? gxtr
                                        : chunk.rfind(":GXTD", 0) == 0 ? gxtd
+                                       : chunk.rfind(":GX93", 0) == 0 ? gx93
+                                       : chunk.rfind(":GXE4", 0) == 0 ? gxe4
                                                                       : gx90;
             return value.empty() ? "0#" : value + "#";
         }
@@ -3819,6 +3831,375 @@ TEST_CASE("OnStep limit stop - the next motion command or a reconnect clears a k
         rig.driver->set_connected(false);
         connect_paused(rig);
         CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
+namespace {
+
+// Counts the OnStep WARN and INFO lines that contain `needle`, at an Info log level; restores the sink and the level
+// when it goes (the level filters lines before the sink sees them).
+class LevelCounter {
+public:
+    explicit LevelCounter(std::string needle) : needle_(std::move(needle)) {
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Info);
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (component != "OnStep" || message.find(needle_) == std::string_view::npos) return;
+                if (level == alpacacore::logging::LogLevel::Warn) ++warn_;
+                if (level == alpacacore::logging::LogLevel::Info) ++info_;
+            });
+    }
+    ~LevelCounter() {
+        alpacacore::logging::set_log_sink(previous_sink_);
+        alpacacore::logging::set_log_level(previous_level_);
+    }
+    LevelCounter(const LevelCounter&) = delete;
+    LevelCounter& operator=(const LevelCounter&) = delete;
+
+    int warn() const { return warn_.load(); }
+    int info() const { return info_.load(); }
+
+private:
+    alpacacore::logging::LogSink previous_sink_ = alpacacore::logging::get_log_sink();
+    alpacacore::logging::LogLevel previous_level_ = alpacacore::logging::get_log_level();
+    std::string needle_;
+    std::atomic<int> warn_{0};
+    std::atomic<int> info_{0};
+};
+
+// The mount tracks again (a client's Tracking write) and the driver starts another GOTO to 2 h +20, past its grace.
+void goto_again(Rig& rig, const char* before) {
+    show(rig, before);
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.clock.advance(seconds(3));
+}
+
+// The mount's base slew rate replies (:GX93# us/step, :GXE4# steps per degree), set before the connect reads them.
+void base_rate(Rig& rig, const char* us_per_step, const char* steps_per_degree) {
+    std::lock_guard<std::mutex> lock(rig.mount->mutex);
+    rig.mount->gx93 = us_per_step;
+    rig.mount->gxe4 = steps_per_degree;
+}
+
+}  // namespace
+
+// #2296 leftover: a mount built with a tangent arm (OnStep 4.x, OnStepX) or a sector gear (OnStepX) centres that axis
+// on FindHome, and neither firmware then reports 'H' (4.x MoveTo.ino sets atHome only without a tangent arm; OnStepX
+// Home::request() and guideDone() leave no home state). So that home is not watched: AtHome stays false and no failure
+// is kept. The flags are read once a session, at the first FindHome that sends a home; a reply that is neither '1' nor
+// '0' leaves them unknown, so that home is watched and the next FindHome reads them again.
+// A firmware whose version did not read at connect is asked :GXEG# too: only one identified as 4.x has no sector gear.
+// Falsified by: finish_park_or_home_locked() watching every home again (dropping the home_moves_one_axis_ check),
+// read_home_geometry_locked() caching a reply that is neither digit as false (the fourth section), or asking :GXEG#
+// only when onstepx_ is set (the last), or get_bare_flag() comparing a '#'-framed reply with its '#' (the fifth).
+TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome ends without AtHome and is not failed",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("OnStep 4.x tangent arm, home as a GOTO") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxef = "1";
+        }
+        connect_rates(rig, "4.24s");
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nphEW180#");  // the home GOTO to the arm centre
+        show(rig, "nNpEW180#");  // ended, with no 'H'
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_FALSE(rig.driver->get_at_home());
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+    SECTION("OnStepX sector gear, home with switches") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxeg = "1";
+        }
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nNphgEW180#");
+        show(rig, "nNpEW180#");
+        rig.clock.advance(std::chrono::minutes(21));  // past the 20-minute bound
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+    SECTION("a mount without either is still watched, and the flags are read once") {
+        connect_rates(rig, "4.24s");
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_home(); }).second,
+                       "the mount ended the home without reaching home"));
+        show(rig, "nNpEW180#");
+        rig.driver->find_home();
+        CHECK(rig.mount->count(":GXEF") == 1);
+        CHECK(rig.mount->count(":GXEG") == 0);  // OnStep 4.x is not asked
+    }
+    SECTION("a flag reply that is neither digit is read again at the next FindHome") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxef = "x";  // a garbled first reply from a tangent-arm mount
+        }
+        connect_rates(rig, "4.24s");
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");  // unknown: watched, as before
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_home(); }).second,
+                       "the mount ended the home without reaching home"));
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxef = "1";
+        }
+        rig.driver->find_home();
+        CHECK(rig.mount->count(":GXEF") == 2);
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");  // ended, with no 'H'
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_FALSE(rig.driver->get_at_home());
+    }
+    SECTION("a flag answered with a '#' is read as the digit, and leaves nothing behind") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxef = "1#";  // a build that frames the reply: the bare read stops at the '#' and drops it
+        }
+        connect_rates(rig, "4.24s");
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");
+        // Not watched (read as a tangent arm), and the home and status exchanges after the flag read are not shifted
+        // by a stray '#': a leftover would end the next '#' reply at once and fail the home.
+        CHECK(rig.mount->count(":GXEF") == 1);
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_FALSE(rig.driver->get_at_home());
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+    SECTION("an OnStepX sector gear whose firmware version did not read is still asked") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxeg = "1";
+        }
+        connect_rates(rig, "");  // :GVN# gives no version: onstepx_ stays false
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        CHECK(rig.mount->count(":GXEG") == 1);
+        show(rig, "nNphgEW180#");
+        show(rig, "nNpEW180#");
+        rig.clock.advance(std::chrono::minutes(21));  // past the 20-minute bound
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+}
+
+// Decision 0007 rule 9 with #2296: OnStepX keeps the meridian code (7) while the mount stands past the limit and still
+// accepts :MS# (Goto::validate() leaves the meridian out of isGotoError()), then stops each GOTO at once. A client that
+// repeats the GOTO gets the failure every time, but the log has one WARN per reason and code, whichever member started
+// it; the repeats are INFO, and a status with another code arms the WARN again.
+// Falsified by: fail_watched_motion_locked() and the landed path logging every stop at WARN again (no
+// log_motion_stop_locked()), log_motion_stop_locked() keyed on the code alone (the third section), keeping only the
+// last key logged at WARN (the fourth), or keyed on the whole message, which names the member (the last).
+TEST_CASE("OnStep limit stop - GOTOs repeated into a standing meridian limit log one WARN, the repeats at INFO",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("repeats at INFO, re-armed by another code") {
+        goto_started(rig);
+        LevelCounter counter("meridian limit");
+        show(rig, "nNpEW187#");
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        for (int i = 0; i < 3; ++i) {
+            goto_again(rig, "NpEW187#");  // the limit still stands
+            show(rig, "nNpEW187#");
+            const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+            CHECK(code == alpacacore::AlpacaError::DriverException);
+            CHECK(contains(message, "meridian limit"));
+        }
+        CHECK(counter.warn() == 1);
+        CHECK(counter.info() == 3);
+        show(rig, "nNpEW180#");  // back inside the limit
+        goto_again(rig, "NpEW180#");
+        show(rig, "nNpEW187#");
+        CHECK(counter.warn() == 2);
+    }
+    SECTION("landings at the target with a standing code") {
+        goto_started(rig);
+        rig.mount->set_position(2.0, 20.0);
+        LevelCounter counter("reached its target");
+        show(rig, "nNpEW182#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        goto_again(rig, "NpEW182#");
+        show(rig, "nNpEW182#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        CHECK(counter.warn() == 1);
+        CHECK(counter.info() == 1);
+    }
+    SECTION("a 4.x stop after a landing with the same latched code still warns") {
+        goto_started(rig, "4.24s");
+        rig.mount->set_position(2.0, 20.0);
+        LevelCounter counter("stopped the GOTO");
+        show(rig, "nNpEW187#");  // landed, with the code: WARN "reached its target"
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        rig.mount->set_position(12.0, 45.0);
+        goto_again(rig, "NpEW187#");
+        show(rig, "nNpEW187#");  // stopped short, with the same code
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        CHECK(counter.warn() == 1);
+    }
+    SECTION("a client alternating a landing GOTO and a stopped one gets one WARN for each") {
+        goto_started(rig);
+        LevelCounter counter("general error 7");
+        for (int i = 0; i < 3; ++i) {
+            rig.mount->set_position(2.0, 20.0);  // at the target: lands, with the code
+            if (i > 0) {
+                goto_again(rig, "NpEW187#");
+            }
+            show(rig, "nNpEW187#");
+            CHECK_NOTHROW(rig.driver->get_slewing());
+            rig.mount->set_position(12.0, 45.0);  // away from it: stopped short
+            goto_again(rig, "NpEW187#");
+            show(rig, "nNpEW187#");
+            CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first ==
+                  alpacacore::AlpacaError::DriverException);
+        }
+        CHECK(counter.warn() == 2);
+        CHECK(counter.info() == 4);
+    }
+    SECTION("a client alternating SlewToCoordinatesAsync and SlewToTargetAsync gets one WARN") {
+        goto_started(rig);
+        LevelCounter counter("meridian limit");
+        show(rig, "nNpEW187#");
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        for (int i = 0; i < 2; ++i) {
+            show(rig, "NpEW187#");
+            rig.driver->set_target_right_ascension(2.0);
+            rig.driver->set_target_declination(20.0);
+            rig.driver->slew_to_target_async();
+            rig.clock.advance(seconds(3));
+            show(rig, "nNpEW187#");
+            CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "SlewToTargetAsync failed"));
+            goto_again(rig, "NpEW187#");
+            show(rig, "nNpEW187#");
+            CHECK(
+                contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "SlewToCoordinatesAsync failed"));
+        }
+        CHECK(counter.warn() == 1);
+        CHECK(counter.info() == 4);
+    }
+}
+
+// #2296 leftover: the park and home bound relies on the status poll reading :GU# for as long as the driver is
+// connected (expire_watched_motion_locked()), so the end frame of a park is read before the bound passes. This runs
+// the real poll on the task clock: it reads the parking and parked frames, and goes on reading while parked, so a park
+// that finished is never failed at 20 minutes.
+// Falsified by: run_status_poller()/poll_status_once() skipping the :GU# sample while a park is pending or watched, or
+// while the frame shows parked.
+TEST_CASE(
+    "OnStep park watch - the status poll reads :GU# through a park and while parked, so a finished park "
+    "outlives the bound",
+    "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    rig.mount->set_status("NpEW180#");
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));  // the poll is parked
+    rig.driver->park();
+    REQUIRE(rig.mount->count(":hP#") == 1);  // sent from the call: the mount showed no motion to stop first
+    const auto step = [&](std::chrono::milliseconds by) {
+        rig.clock.advance(by);
+        REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+        REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
+    };
+    rig.mount->set_status("nIEW180#");  // parking
+    step(seconds(1));
+    rig.mount->set_status("nNPEW180#");  // parked
+    step(seconds(1));
+    const auto reads = rig.mount->count(":GU");
+    for (int i = 0; i < 21; ++i) {
+        step(std::chrono::minutes(1));
+    }
+    CHECK(rig.mount->count(":GU") >= reads + 21);  // a read every tick while parked
+    CHECK_NOTHROW(rig.driver->get_at_park());
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.mount->count(":Q") == 0);
+}
+
+// #2296 leftover: a slow mount can take more than 20 minutes for a healthy park or home (OnStep 4.x searches for its
+// home switches at a quarter of the base rate at the slowest preset). The bound is 2160 s divided by the base slew
+// rate (:GX93# us/step, :GXE4# steps per degree, read at connect), never under 20 minutes and never over 24 hours
+// (capped in double before the cast), and a watch keeps the bound
+// it was taken with, so a relink that reads the rate again after judging the carried watch does not shorten it.
+// Falsified by: expire_watched_motion_locked() comparing against the fixed 20-minute floor again (the first three
+// sections), a session-level bound that the relink's reset_session_state_locked() puts back to the floor before the
+// carried watch is judged (the third), seed_park_home_bound_locked() dropping the floor (the fourth), or
+// dropping the std::min cap (the last), or kParkHomeTravelSeconds back at 1080 (the first: 72 minutes). A rate that
+// does not read keeps 20 minutes: the default mount answers "0#" to both, as in "OnStep park watch - a park ended
+// without parking or never ended fails AtPark, a slow park parks".
+TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's base slew rate, never under 20 minutes",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("a 0.25 deg/s base gives 144 minutes") {
+        base_rate(rig, "1000.000", "4000");
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        const auto parked_at = rig.clock.now();
+        show(rig, "nIEW180#");
+        rig.clock.advance(std::chrono::minutes(20) + seconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        rig.clock.advance(std::chrono::minutes(144) - (rig.clock.now() - parked_at) - milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        rig.clock.advance(milliseconds(1));
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                       "did not finish the park within 144 minutes"));
+        CHECK(rig.mount->count(":Q") == 0);
+    }
+    SECTION("a FindHome on the same mount") {
+        base_rate(rig, "1000.000", "4000");
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nNphgEW180#");  // a home with switches
+        rig.clock.advance(std::chrono::minutes(21));
+        CHECK_NOTHROW(rig.driver->get_at_home());
+    }
+    SECTION("a park a relink carries over keeps its bound") {
+        PreserveWindow window(milliseconds(0));  // the #1289 rule leaves a park running
+        base_rate(rig, "1000.000", "4000");
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        rig.mount->set_status("nIEW180#");
+        rig.clock.advance(std::chrono::minutes(30));
+        lose_and_relink(rig);
+        REQUIRE(rig.mount->count(":Q") == 0);
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        show(rig, "nNPEW180#");
+        CHECK(rig.driver->get_at_park());
+    }
+    SECTION("a fast mount keeps the floor") {
+        base_rate(rig, "100.000", "4000");  // 2.5 deg/s: 864 s, under the floor
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        show(rig, "nIEW180#");
+        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        rig.clock.advance(milliseconds(1));
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                       "did not finish the park within 20 minutes"));
+    }
+    SECTION("a very slow mount is capped at 24 hours") {
+        base_rate(rig, "1000000.000", "4000");  // 0.00025 deg/s: 50 days of travel
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        show(rig, "nIEW180#");
+        rig.clock.advance(std::chrono::hours(24) - milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        rig.clock.advance(milliseconds(1));
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                       "did not finish the park within 1440 minutes"));
     }
 }
 

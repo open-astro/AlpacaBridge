@@ -31,6 +31,10 @@ struct CelestronPortInfo {
 // probes each with NexStar echo command to identify Celestron mounts.
 std::vector<CelestronPortInfo> enumerate_celestron_ports();
 
+/// The USB descriptor tokens of a Celestron mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& celestron_usb_tokens();
 
 enum class ConnectionType {
     Serial,

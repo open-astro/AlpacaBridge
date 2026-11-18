@@ -32,6 +32,11 @@ struct OnStepPortInfo {
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports();
 
+/// The USB descriptor tokens of a OnStep mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& onstep_usb_tokens();
+
 /**
  * @brief Connection type for the OnStep protocol wrapper.
  *
@@ -288,6 +293,33 @@ public:
      * std::nullopt for any other reply. OnStepX only.
      */
     std::optional<int> get_axis1_limit_degrees(bool maximum);
+
+    /**
+     * @brief Whether the mount was built with a tangent arm on axis 2 (:GXEF#, FindHome on such a mount).
+     *
+     * One bare digit, no '#': '1' or '0'. OnStep 4.x answers it with the frame suppressed (Command.ino); OnStepX gives
+     * a numeric reply (Mount.command.cpp, AXIS2_TANGENT_ARM). A firmware without the command answers the
+     * unknown-command '0'. Returns std::nullopt for any other reply, or none.
+     */
+    std::optional<bool> get_tangent_arm();
+
+    /**
+     * @brief Whether the mount was built with a sector gear on axis 1 (:GXEG#, FindHome on such a mount).
+     *
+     * One bare digit, no '#': '1' or '0', OnStepX only (Mount.command.cpp, AXIS1_SECTOR_GEAR); OnStep 4.x answers the
+     * unknown-command '0'. Returns std::nullopt for any other reply, or none.
+     */
+    std::optional<bool> get_sector_gear();
+
+    /**
+     * @brief The mount's base slew rate in degrees per second (the park and home bound, #2296).
+     *
+     * Sends :GX93# (the base slew period in microseconds per step: OnStepX usPerStepBase, Goto.command.cpp; OnStep
+     * 4.x maxRateBaseActual, Command.ino) and :GXE4# (axis 1 steps per degree: OnStepX Mount.command.cpp, OnStep 4.x
+     * Command.ino), both '#'-terminated, and returns 1e6 / (us per step x steps per degree). std::nullopt when either
+     * reply is not a number greater than 0 (a firmware without the command answers '0') or the rate is not finite.
+     */
+    std::optional<double> get_base_slew_degrees_per_second();
 
     /**
      * @brief Get current RA/Dec position.

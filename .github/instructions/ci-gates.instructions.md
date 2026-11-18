@@ -115,8 +115,8 @@ author must do. Read the docstring before changing a gate.
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
   equal to `alpaca_errors.h` (check 17); never state a count of the
-  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` `static`;
-  and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
+  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` and the
+  per-type `routes/*.cpp` sources `static`; and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
   check list (`// NOLINT(bugprone-empty-catch): the poll retries`; check 28).
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors-shard` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
