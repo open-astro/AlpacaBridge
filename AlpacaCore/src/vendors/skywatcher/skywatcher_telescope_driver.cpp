@@ -6312,6 +6312,8 @@ private:
     // MotionOwner::finished() when the operation ends, on every exit, a throw included, so a PulseGuide is
     // accepted again. Declared after the operation's StateLock, so the end lands under the same lock hold that
     // clears the operation's Slewing flags: a client that reads Slewing false is never refused.
+    // Invariant: each slew body runs on its own slot thread, and the synchronous slew clears it on exit
+    // (~SlewClaimScope), so no other command ever runs on a thread where it is set.
     static inline thread_local util::MotionClaim* slew_claim_ = nullptr;
 
     struct SlewClaimScope {

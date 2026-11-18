@@ -1,6 +1,6 @@
 ### Breaking changes
 
-- **Sky-Watcher: a PulseGuide during a slew or FindHome is refused** (AlpacaCore, issue #2263): it answers `InvalidOperation` ("PulseGuide is not allowed while a slew, park or home is running") and changes nothing, where it used to be accepted and its guide motion took the axis from the slew. A PulseGuide during a Park was already refused (`InvalidWhileParked`) and still is. **After upgrading:** a client waits for Slewing to read false before it pulse-guides, as ConformU and the guiding programs already do.
+- **Sky-Watcher: a PulseGuide during a slew or FindHome is refused** (AlpacaCore, issue #2263): it answers `InvalidOperation` ("PulseGuide is not allowed while a slew, park or home is running") and changes nothing, where it used to be accepted and its guide motion took the axis from the slew. A PulseGuide during a Park was already refused (`InvalidWhileParked`) and still is. Once another thread's one-axis command (a Tracking=false write, the limit guard) takes one axis from a running slew, a PulseGuide is accepted again even though Slewing stays true. **After upgrading:** a client waits for Slewing to read false before it pulse-guides, as ConformU and the guiding programs already do.
 
 ### Changed
 
