@@ -1,0 +1,2 @@
+### Changed
+- **Sky-Watcher telescope: the PulseGuide, MoveAxis and guide-rate argument checks run through the telescope command gate** (AlpacaCore), issue #2258. Their ranges and texts are a limits value; the driver keeps its own state checks (the writable and stop-allowed gates). A PulseGuide call with both a bad direction and a negative duration now names the direction (the gate checks it first); the code is InvalidValue either way. No other error code, message, limit or order changes.
