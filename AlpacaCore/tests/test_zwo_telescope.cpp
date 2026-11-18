@@ -252,7 +252,7 @@ TEST_CASE("ZWO Mount Telescope Driver - PulseGuide with a bad direction and dura
     conn.port_path = "/dev/null";
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
     const std::string text = alpacacore::test::alpaca_error_message([&] { driver->pulse_guide(5, -1); },
-                                                                     alpacacore::AlpacaError::InvalidValue);
+                                                                    alpacacore::AlpacaError::InvalidValue);
     CHECK(text.find("PulseGuide direction must be 0..3") != std::string::npos);
     CHECK(text.find("duration") == std::string::npos);
 }
@@ -267,7 +267,7 @@ TEST_CASE("ZWO Mount Telescope Driver - GuideRate with a negative RA and a NaN D
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const std::string text = alpacacore::test::alpaca_error_message([&] { driver->set_guide_rate({-1.0, nan}); },
-                                                                     alpacacore::AlpacaError::InvalidValue);
+                                                                    alpacacore::AlpacaError::InvalidValue);
     CHECK(text.find("GuideRate must not be negative") != std::string::npos);
     CHECK(text.find("finite") == std::string::npos);
 }
