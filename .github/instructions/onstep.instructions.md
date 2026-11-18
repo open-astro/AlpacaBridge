@@ -768,9 +768,10 @@ command channel. Nothing scans the network; the host is typed in.
   `pulse_measurement_running_for_testing()`, `set_pulse_guide_gap_hook_for_testing()`. Tests: `test_onstep_telescope_snapshot.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1449, the shape of Sky-Watcher's #1530). Order: `transition_mutex_` (`set_connected()` against
-  `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> `mutex_` (the state lock, a
-  leaf) -> the shared link's sequence lock, then its wire lock (#2223; the sequence lock is taken with `mutex_`
-  released, through `Wire`); the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
+  `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> the shared link's sequence
+  lock (#2223, taken with `mutex_` released, through `Wire`) -> `mutex_` (the state lock, a leaf, retaken
+  inside a held sequence after each exchange); the link's wire lock is taken under the sequence lock and never
+  under `mutex_`; the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
   Every command, and each poll tick, holds `io_mutex_` for the whole command through a `StateLock`
   (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places that let
   other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through `Wire`

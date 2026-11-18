@@ -160,6 +160,10 @@ public:
         }
     }
 
+    // DeviceState's TimeStamp is when the served frame was measured, not the request time (decision 0010): the frame
+    // can be a poll period or two old on a healthy link, and older while a fault stands.
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
+
     std::string get_link_fault() const override {
         const auto link = link_.load();
         if (link) {

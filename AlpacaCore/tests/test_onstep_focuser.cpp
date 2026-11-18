@@ -27,7 +27,9 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -159,6 +161,40 @@ TEST_CASE("OnStep Focuser Driver - Device specifics once connected", "[onstep][f
     CHECK(has("Position"));
     CHECK(has("Temperature"));
     CHECK(has("TimeStamp"));
+    driver->set_connected(false);
+}
+
+// Decision 0010: DeviceState's TimeStamp is when the served frame was measured. The poll is paused after one fresh
+// frame and the fake clock moved 900 ms, so a request-time stamp is ~0 ms behind and the frame's is ~900 ms behind.
+// Falsified by: onstep_focuser_driver.cpp device_state_age() delete the override (the TimeStamp is the request time).
+TEST_CASE("OnStep Focuser Driver - DeviceState TimeStamp is when the frame was measured",
+          "[onstep][focuser][snapshot][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    Controller controller;
+    auto driver = onstep::create_onstep_focuser(0, controller.info(), 1, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*driver, true);
+    onstep::poll_onstep_focuser_now_for_testing(*driver);  // a frame measured at the fake clock's now
+    clock.advance(std::chrono::milliseconds(900));         // paused: no poll, the frame ages
+
+    std::string stamp;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "TimeStamp") stamp = std::get<std::string>(entry.value);
+    }
+    const auto taken = std::chrono::system_clock::now();
+    REQUIRE_FALSE(stamp.empty());
+    std::tm tm{};
+    int ms = 0;
+    REQUIRE(std::sscanf(stamp.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour,
+                        &tm.tm_min, &tm.tm_sec, &ms) == 7);
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    const auto stamped = std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+    const auto behind = std::chrono::duration_cast<std::chrono::milliseconds>(taken - stamped);
+    INFO("TimeStamp is " << behind.count() << " ms behind now");
+    CHECK(behind >= std::chrono::milliseconds(800));  // the 900 ms frame age; a request-time stamp is ~0
+    CHECK(behind < std::chrono::milliseconds(5000));
     driver->set_connected(false);
 }
 

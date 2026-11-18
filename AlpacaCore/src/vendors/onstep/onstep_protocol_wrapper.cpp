@@ -485,15 +485,15 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     // One candidate, in scan order (#1202). A port another vendor's connected
     // device holds is never opened. A port a connected OnStep mount holds is
     // not probed either, but keeps its place in the results so the auto-detect
-    // index of every other mount stays stable; a driver that picks it is
-    // refused by its link claim, which names the holder.
+    // index of every other mount stays stable; a driver that picks it joins
+    // that open link through acquire() (#2223), as the focuser's auto-detect does.
     auto consider = [&results](const std::string& resolved, const std::string& name) {
         switch (util::serial_candidate_use(resolved, kSerialOwner)) {
             case util::SerialCandidateUse::HeldByOther:
                 ALPACA_LOG_DEBUG("OnStep", "Skipping " + resolved + ": held by another connected device");
                 return;
             case util::SerialCandidateUse::HeldBySibling:
-                ALPACA_LOG_DEBUG("OnStep", "Not probing " + resolved + ": a connected OnStep mount holds it");
+                ALPACA_LOG_DEBUG("OnStep", "Not probing " + resolved + ": a connected OnStep device holds it");
                 results.push_back({resolved, name, ""});
                 return;
             case util::SerialCandidateUse::Free:
@@ -580,8 +580,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         // A lost link whose fd could not be closed when the loss was found
-        // (an exchange held the mutex) is closed here, so a reconnect is not
-        // refused as a second mount.
+        // (an exchange held the mutex) is closed here, so a reconnect opens a
+        // fresh link instead of finding the dead one still connected.
         if (connected_ && link_lost_) {
             disconnect_locked();
         }
