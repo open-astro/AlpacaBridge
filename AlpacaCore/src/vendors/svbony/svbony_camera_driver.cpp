@@ -66,6 +66,7 @@ constexpr util::CameraRequestTexts kRequestTexts = [] {
     texts.frame_size_not_positive = "ROI is not valid for exposure";
     return texts;
 }();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 // CWE-117: an SDK error text reaches the log and a client-facing NotConnected message; no control characters.
 std::string printable(std::string text) {

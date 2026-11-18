@@ -216,13 +216,17 @@ tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camer
 deletes its rows.
 
 The value checks of that order live in one module, `util/camera_frame_request.h` (#2261): `check_exposure_duration`
-(StartExposure step 1), `exposure_microseconds` (step 3), `check_frame_on_sensor` (step 4), and for the setters
-`check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3). A camera driver
-calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the device
-lookups (ExposureMin and ExposureMax, the supported bins, the sensor size at the current bin) and its own InvalidValue
-texts (`CameraRequestTexts`; the codes are the same on every camera). Only the SDK alignment above and vendor limits
-(GPhoto's 3600 s cap and nearest shutter speed, the iGuider exposure steps) stay in the driver. ZWO, SVBONY and Player
-One (with iCAM) call it; ToupTek/Altair, QHY, GPhoto and iGuider follow in #2261's second pull request.
+(StartExposure step 1), `exposure_microseconds` (step 3), `check_frame_on_sensor` (step 4; `frame_sensor_misfit` is
+the same check as a value, for a driver that answers one text or only skips an SDK write, as ZWO does), and for the
+setters `check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3). A camera
+driver calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the
+device lookups (ExposureMin and ExposureMax, the supported bins, the sensor size at the current bin) and its own
+InvalidValue texts (`CameraRequestTexts`; the codes are the same on every camera). Only the SDK alignment above and
+vendor limits (GPhoto's 3600 s cap and nearest shutter speed, the iGuider exposure steps) stay in the driver. Every
+camera driver calls it: ZWO, SVBONY, Player One (with iCAM), ToupTek (with Altair), QHY, GPhoto and the iGuider. Three
+keep a check for a vendor reason, named at the call: QHY and GPhoto their ExposureMax check in seconds (QHY's range
+may be unreported, GPhoto maps a duration to a shutter speed) and QHY its per-bin SDK query; the iGuider its subframe
+value checks, whose text names the value.
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 

@@ -268,4 +268,9 @@ TEST_CASE("Camera frame request - a frame that fits the sensor has no misfit", "
     CHECK(util::frame_sensor_misfit(full_frame(), 1000, 800) == nullptr);
     CHECK(util::frame_sensor_misfit(frame(1, 1, 1, 999, 799), 1000, 800) == nullptr);
     CHECK(util::frame_sensor_misfit(frame(1, 1001, 800, 0, 0), 1000, 800, kTexts) == std::string("frame_above_sensor"));
+    // The drivers' static_assert: every default text is set, and a cleared one is caught.
+    STATIC_REQUIRE(util::all_texts_set(CameraRequestTexts{}));
+    CameraRequestTexts cleared;
+    cleared.frame_beyond_sensor = nullptr;
+    CHECK_FALSE(util::all_texts_set(cleared));
 }

@@ -34,6 +34,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/link_health.h>
@@ -112,13 +113,26 @@ struct Roi {
     int num_y = kHeight;
 };
 
-// Whether the subframe lies on the sensor. Subtracts rather than adds: the
-// setters accept any StartX/StartY >= 0 and NumX/NumY >= 1, so start + num can
-// overflow int (StartX = INT_MAX, NumX = 1 wrapped negative and passed).
+// Whether the subframe lies on the sensor (util/camera_frame_request.h, #2261; it never adds start + num, which can
+// overflow int: StartX = INT_MAX, NumX = 1).
 bool roi_fits(const Roi& roi) {
-    return roi.start_x >= 0 && roi.start_y >= 0 && roi.num_x >= 1 && roi.num_y >= 1 &&
-           roi.start_x <= kWidth - roi.num_x && roi.start_y <= kHeight - roi.num_y;
+    return util::frame_sensor_misfit(util::CameraFrame{1, 1, roi.num_x, roi.num_y, roi.start_x, roi.start_y}, kWidth,
+                                     kHeight) == nullptr;
 }
+
+// The frame-request texts (#2261) in the iGuider's words. The duration text names ExposureMax, the longest step.
+static_assert(kIGuiderDurations.back() == 3.5, "the duration text names ExposureMax");
+constexpr const char* kDurationText = "Exposure duration must be between 0 and 3.500000 seconds";
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_invalid = kDurationText;
+    texts.duration_overflow = kDurationText;
+    texts.bin_not_positive = "The iGuider does not bin; BinX/BinY must be 1";
+    texts.bin_not_supported = "The iGuider does not bin; BinX/BinY must be 1";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
+constexpr int kIGuiderBins[] = {1};
 
 ImageArray crop_luma(const std::vector<std::uint8_t>& luma, const Roi& roi) {
     if (luma.size() != static_cast<std::size_t>(kWidth) * kHeight) {
@@ -353,10 +367,11 @@ public:
     void set_sub_exposure_duration(double) override { not_implemented_when_connected("SubExposureDuration"); }
 
     void start_exposure(double duration, bool /*light: no shutter*/) override {
-        if (!std::isfinite(duration) || duration < 0.0 || duration > kIGuiderDurations.back()) {
-            throw AlpacaException(
-                "Exposure duration must be between 0 and " + std::to_string(kIGuiderDurations.back()) + " seconds",
-                AlpacaError::InvalidValue);
+        // #2259 step 1 (util/camera_frame_request.h), then the iGuider's static ExposureMax (a vendor limit: the
+        // discrete exposure steps end at 3.5 s), both before the connection check.
+        util::check_exposure_duration(duration, kRequestTexts);
+        if (duration > kIGuiderDurations.back()) {
+            throw AlpacaException(kDurationText, AlpacaError::InvalidValue);
         }
         std::shared_ptr<const ImageArray> retired_image;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -560,13 +575,17 @@ private:
                               AlpacaError::PropertyNotImplemented);
     }
 
+    // The one bin is known without the camera, so the supported-bin check runs before the connection check.
     void set_bin(int bin) {
-        if (bin != 1) throw AlpacaException("The iGuider does not bin; BinX/BinY must be 1", AlpacaError::InvalidValue);
+        util::check_bin(bin, kRequestTexts);
+        util::check_bin_supported(bin, kIGuiderBins, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_not_exposing_locked();
     }
 
+    // The value checks stay here, not in check_frame_size()/check_frame_start(): the iGuider's text names the value,
+    // and the module's texts are static.
     void set_roi_member(int value, int minimum, int Roi::*member) {
         if (value < minimum) {
             throw AlpacaException("Subframe value " + std::to_string(value) + " is out of range",

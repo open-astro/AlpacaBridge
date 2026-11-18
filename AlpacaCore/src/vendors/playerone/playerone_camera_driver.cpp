@@ -151,6 +151,7 @@ constexpr util::CameraRequestTexts kRequestTexts = [] {
     texts.frame_start_off_sensor = "ROI extends beyond sensor bounds";
     return texts;
 }();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 }  // namespace
 
