@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
@@ -50,6 +51,15 @@ constexpr unsigned kFourCC_BGGR = 0x52474742; // 'B','G','G','R'
 constexpr unsigned kFourCC_GRBG = 0x47425247; // 'G','R','B','G'
 constexpr unsigned kFourCC_GBRG = 0x47524247; // 'G','B','R','G'
 constexpr unsigned kFourCC_YYYY = 0x59595959; // mono
+
+// The frame-request texts (#2261) in ToupTek's words (Altair rides them).
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_invalid = "Exposure duration must be non-negative";
+    texts.frame_start_off_sensor = "ROI extends beyond sensor bounds";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 ToupBayerPattern four_cc_to_bayer(unsigned four_cc) {
     switch (four_cc) {
@@ -1132,14 +1142,9 @@ public:
     void start_exposure(double duration, bool light) override {
         (void)light;
 
-        // #2259 canonical order: a duration invalid whatever the camera is (non-finite, negative, or too large to
-        // convert to microseconds) precedes the connection check.
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
-        }
-        if (duration * 1'000'000.0 >= static_cast<double>(std::numeric_limits<long>::max())) {
-            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h): a duration invalid whatever the camera is
+        // (non-finite, negative, or too large to convert to microseconds) precedes the connection check.
+        const double requested_us = util::check_exposure_duration(duration, kRequestTexts);
         ensure_connected();
 
         auto& sdk = sdk_;
@@ -1148,11 +1153,9 @@ public:
         // (see below).
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
-        const double rounded_us = std::max(std::round(duration * 1'000'000.0), static_cast<double>(range.min_us));
-        if (rounded_us > range.max_us) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
-        const unsigned exposure_us = static_cast<unsigned>(rounded_us);
+        // The range fits unsigned, so the microseconds the module returns do too.
+        const auto exposure_us = static_cast<unsigned>(util::exposure_microseconds(
+            requested_us, static_cast<long>(range.min_us), static_cast<long>(range.max_us), kRequestTexts));
 
         // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot below, so a register or geometry
         // write cannot slip in before session_.start() has published Exposing; a second start is refused.
@@ -1688,18 +1691,11 @@ private:
     // failed or cancelled body still returning with no frame ready.
     void ensure_not_exposing() const { session_.ensure_settings_unlocked(); }
 
+    // The sensor is bounded by its EVEN size (Toupcam_put_Roi needs an even sensor span; see start_exposure).
     void validate_exposure_roi_locked() const {
-        const int max_w = (camera_info_.max_width & ~1) / bin_;
-        const int max_h = (camera_info_.max_height & ~1) / bin_;
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
-        }
-        if (num_x_ > max_w || num_y_ > max_h) {
-            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-        }
-        if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
-            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-        }
+        util::check_frame_on_sensor(util::CameraFrame{bin_, bin_, num_x_, num_y_, start_x_, start_y_},
+                                    (camera_info_.max_width & ~1) / bin_, (camera_info_.max_height & ~1) / bin_,
+                                    kRequestTexts);
     }
 
     // CoolerOn and CoolerPower are "not implemented" on a camera without a cooler (ICameraV4).
@@ -1831,9 +1827,8 @@ private:
     // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
     // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_bin(bin_x, kRequestTexts);
+        util::check_bin(bin_y, kRequestTexts);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -1847,11 +1842,7 @@ private:
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
-        if (std::find(camera_info_.supported_bins.begin(),
-                      camera_info_.supported_bins.end(),
-                      bin_x) == camera_info_.supported_bins.end()) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
+        util::check_bin_supported(bin_x, camera_info_.supported_bins, kRequestTexts);
         ensure_not_exposing();
         if (bin_ == bin_x) return;
         bin_ = bin_x;
@@ -1873,17 +1864,15 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        if (width_opt) util::check_frame_size(*width_opt, kRequestTexts);
+        if (height_opt) util::check_frame_size(*height_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width, kRequestTexts);
+        util::check_frame_size(height, kRequestTexts);
         ensure_not_exposing();
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
@@ -1903,18 +1892,15 @@ private:
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        if (sx_opt) util::check_frame_start(*sx_opt, kRequestTexts);
+        if (sy_opt) util::check_frame_start(*sy_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
-        if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(sx, kRequestTexts);
+        util::check_frame_start(sy, kRequestTexts);
         ensure_not_exposing();
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;

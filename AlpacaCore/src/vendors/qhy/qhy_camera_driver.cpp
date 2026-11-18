@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
@@ -84,6 +85,17 @@ enum class QHYExposureStatus {
     Success,
     Failed
 };
+
+// The frame-request texts (#2261) in QHY's words.
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.frame_size_not_positive = "ROI dimensions are invalid";
+    texts.frame_above_sensor = "ROI exceeds sensor area for current binning";
+    texts.frame_start_off_sensor = "Start position + ROI exceeds sensor area";
+    texts.frame_beyond_sensor = "Start position + ROI exceeds sensor area";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 // ────────────────────────────────────────────────────────────────────────────
 // QHYCameraDriver
@@ -1417,14 +1429,9 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        // #2259 canonical order: a duration invalid whatever the camera is (non-finite, negative, or too large to
-        // convert to microseconds) precedes the connection check.
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
-        }
-        if (duration * 1'000'000.0 >= static_cast<double>(std::numeric_limits<long>::max())) {
-            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h): a duration invalid whatever the camera is
+        // (non-finite, negative, or too large to convert to microseconds) precedes the connection check.
+        util::check_exposure_duration(duration, kRequestTexts);
         ensure_connected();
 
         // Held through the thread spawn at the end: serialises the spawn against
@@ -2206,19 +2213,15 @@ private:
         return range;
     }
 
+    // The frame, then ExposureMax. QHY keeps its own range check (vendor reason): the SDK range is a double that a
+    // model may not report (3600 s then), it is invalid during a mode change, and #1736 rewrites this path.
     void validate_exposure_locked(double duration) const {
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI dimensions are invalid", AlpacaError::InvalidValue);
-        }
+        const util::CameraFrame frame{bin_x_, bin_y_, num_x_, num_y_, start_x_, start_y_};
         if (camera_info_valid_) {
-            const int max_w = static_cast<int>(camera_info_.max_width) / bin_x_;
-            const int max_h = static_cast<int>(camera_info_.max_height) / bin_y_;
-            if (num_x_ > max_w || num_y_ > max_h) {
-                throw AlpacaException("ROI exceeds sensor area for current binning", AlpacaError::InvalidValue);
-            }
-            if (start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
-                throw AlpacaException("Start position + ROI exceeds sensor area", AlpacaError::InvalidValue);
-            }
+            util::check_frame_on_sensor(frame, static_cast<int>(camera_info_.max_width) / bin_x_,
+                                        static_cast<int>(camera_info_.max_height) / bin_y_, kRequestTexts);
+        } else if (num_x_ <= 0 || num_y_ <= 0) {
+            throw AlpacaException(kRequestTexts.frame_size_not_positive, AlpacaError::InvalidValue);
         }
         ensure_exposure_range_valid_locked();
         const double maximum = exposure_range_.available ? exposure_range_.max / 1'000'000.0 : 3600.0;
@@ -2634,9 +2637,9 @@ private:
     // exposing check. While an exposure runs the SDK cannot be asked (the frame call holds the handle), so the
     // bound before the exposing check is the MaxBin cached at connect; the per-bin SDK query follows it.
     void set_bin_locked(int bin_x, int bin_y) {
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_bin(bin_x, kRequestTexts);
+        util::check_bin(bin_y, kRequestTexts);
+        // QHY has no bin list: it asks the SDK per bin (below), so check_bin_supported() does not apply.
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -2683,9 +2686,8 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        if (width_opt) util::check_frame_size(*width_opt, kRequestTexts);
+        if (height_opt) util::check_frame_size(*height_opt, kRequestTexts);
         ensure_connected();
         check_configuration_write();
         // Do not bounds-check against sensor dimensions here: ConformU "Reject Bad XSize/YSize"
@@ -2695,9 +2697,8 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width, kRequestTexts);
+        util::check_frame_size(height, kRequestTexts);
         ensure_connected();
         ensure_not_exposing_locked();
         num_x_ = width;
@@ -2705,9 +2706,8 @@ private:
     }
 
     void set_start_pos_locked(std::optional<int> start_x_opt, std::optional<int> start_y_opt) {
-        if ((start_x_opt && *start_x_opt < 0) || (start_y_opt && *start_y_opt < 0)) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        if (start_x_opt) util::check_frame_start(*start_x_opt, kRequestTexts);
+        if (start_y_opt) util::check_frame_start(*start_y_opt, kRequestTexts);
         ensure_connected();
         check_configuration_write();
         // Do not bounds-check start+ROI against sensor dimensions here: ConformU
@@ -2717,9 +2717,8 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         const int start_x = start_x_opt.value_or(start_x_);
         const int start_y = start_y_opt.value_or(start_y_);
-        if (start_x < 0 || start_y < 0) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(start_x, kRequestTexts);
+        util::check_frame_start(start_y, kRequestTexts);
         ensure_connected();
         ensure_not_exposing_locked();
         start_x_ = start_x;
