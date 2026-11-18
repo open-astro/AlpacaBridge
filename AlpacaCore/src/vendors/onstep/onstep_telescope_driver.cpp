@@ -3428,8 +3428,8 @@ private:
         }
     };
 
-    // (#1377). Same order as the equatorial check: arguments, connected, parked,
-    // fault, then Tracking read as the getter reads it, before anything is sent.
+    // (#1377). Same order as the equatorial slews' util::check_equatorial_slew_state(): arguments, connected,
+    // parked, fault, then Tracking read as the getter reads it, before anything is sent.
     void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
                                   const char* who) const {
         resolve_alt_az_locked(altitude, azimuth, ra_out, dec_out, who);
