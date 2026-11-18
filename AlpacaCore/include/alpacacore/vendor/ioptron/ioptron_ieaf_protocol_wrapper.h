@@ -122,7 +122,7 @@ public:
 
     /**
      * @brief False once an exchange has seen the port gone (a hangup, or
-     * EIO/ENXIO/ENODEV on a write); the port is then already released
+     * EIO/ENXIO/ENODEV/EBADF on a write); the port is then already released
      * (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
      */
     bool link_alive() const noexcept;
