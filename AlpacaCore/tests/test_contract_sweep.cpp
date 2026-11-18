@@ -627,8 +627,7 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
 // Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982). A known
 // row's probe must still not answer InvalidOperation, so a fix that lands without deleting its line fails the sweep. A
-// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned (QHY's second StartExposure
-// supersedes the held worker or times out joining it, #1736).
+// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned.
 struct ExposingRefusalExemption {
     const char* id;
     const char* probe;
@@ -646,9 +645,6 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
     {"gphoto_camera", "set_start_x(StartX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "set_start_y(StartY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "start_exposure(a valid duration)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    // QHY: a second StartExposure cancels and joins the running worker; whether the join ends inside its 2 s bound
-    // decides between a superseded exposure and InvalidOperation, so the probe is not run until #1736.
-    {"qhy_camera", "start_exposure(a valid duration)", "supersedes or times out by timing until #1736", true},
 };
 // clang-format on
 

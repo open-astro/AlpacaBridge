@@ -54,19 +54,15 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  *
  * Every exposure, pulse-guide and reap deadline and every worker wait reads the
  * `clock` argument (decision 0005); a test passes a FakeTaskClock and advance()s
- * instead of sleeping. The clock MUST outlive the returned driver and its
- * detachable exposure worker, like the SDK reference. Pointing time (UTCDate, last
+ * instead of sleeping. The clock MUST outlive the returned driver, like the SDK
+ * reference. Pointing time (UTCDate, last
  * exposure start) stays on the system clock.
  *
- * The SDK reference MUST outlive the returned driver, INCLUDING its exposure
- * worker: that thread joins with a bounded timeout and detaches on expiry, and
- * reaches the SDK through a captured QHYSDK* rather than through `sdk_`. The
- * capture NARROWS the use-after-free window; it does NOT close it, because the
- * worker also dereferences `this` after the SDK call returns. The temperature,
- * telemetry, cooler-off and pulse-guide bodies run in util::AsyncOperation slots
- * that the destructor joins (issue #1736), so destruction waits for a call
- * stuck inside the SDK. See the member comment in qhy_camera_driver.cpp and
- * rule (b) in testing.instructions.md ("Hardware-free driver tests via the SDK seam").
+ * The SDK reference MUST outlive the returned driver. The exposure body runs in a
+ * util::CaptureSession and the temperature, telemetry, cooler-off and pulse-guide
+ * bodies in util::AsyncOperation slots; the driver joins them all (issue #1736), so
+ * a disconnect or the destructor waits for a call stuck inside the SDK. See the member comment in qhy_camera_driver.cpp
+ * and rule (b) in testing.instructions.md ("Hardware-free driver tests via the SDK seam").
  */
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
                                                 util::TaskClock& clock = util::default_task_clock());
