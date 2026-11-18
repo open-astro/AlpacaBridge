@@ -3960,3 +3960,63 @@ TEST_CASE("Builtin catalog - iOptron sanitize keeps the declared fields per devi
     CHECK(kept_camera.has("cameraIndex"));
     CHECK_FALSE(kept_camera.has("connectionType"));
 }
+
+TEST_CASE(
+    "Builtin catalog - a network mount's port outside 1 to 65535 is refused from the API and kept when saved (#2292)",
+    "[catalog][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Row {
+        DeviceKey key;
+        const char* port_key;
+        bool has_connection_type;
+        bool needs_site;  // Sky-Watcher stores no site (decision 0019 rule 3)
+    };
+    const std::vector<Row> rows = {
+        {kBisqueKey, "tcpPort", false, false},          {kCelestronKey, "tcpPort", true, false},
+        {kIoptronTelescopeKey, "tcpPort", true, false}, {kSkyWatcherKey, "udpPort", true, true},
+        {kSynScanKey, "tcpPort", true, false},          {kZwoTelescopeKey, "tcpPort", true, false},
+        {kOnStepKey, "tcpPort", true, false},  // the rule's source (#2220)
+    };
+    for (const Row& row : rows) {
+        INFO(row.key.vendor);
+        DeviceConfig site;
+        if (row.needs_site) {
+            site.set("siteLatitude", 40.0);
+            site.set("siteLongitude", -74.0);
+        }
+        DeviceConfig network = site;
+        if (row.has_connection_type) network.set("connectionType", std::string{"network"});
+        network.set("host", std::string{"mount.local"});
+        for (const std::int64_t port : {std::int64_t{1}, std::int64_t{65535}}) {
+            DeviceConfig edge = network;
+            edge.set(row.port_key, port);
+            CHECK_FALSE(catalog.normalize(row.key, edge, Source::Api).rejection.has_value());
+        }
+        const std::string message = std::string(row.port_key) + " is out of range (min 1) (max 65535)";
+        for (const std::int64_t port : {std::int64_t{0}, std::int64_t{65536}, std::int64_t{-1}}) {
+            INFO(row.port_key << " " << port);
+            DeviceConfig config = network;
+            config.set(row.port_key, port);
+            const auto api = catalog.normalize(row.key, config, Source::Api);
+            REQUIRE(api.rejection.has_value());
+            CHECK(*api.rejection == message);
+            const auto persisted = catalog.normalize(row.key, config, Source::Persisted);
+            CHECK_FALSE(persisted.rejection.has_value());
+            REQUIRE(persisted.warnings.size() == 1);
+            CHECK(persisted.warnings[0] == message);
+            const auto* kept = persisted.config.find_value(row.port_key);  // kept: the factory hands 0, refused
+            REQUIRE(kept != nullptr);
+            CHECK(std::get<std::int64_t>(*kept) == port);
+        }
+        if (row.has_connection_type) {
+            // A serial entry's port is unused, so it is not checked.
+            DeviceConfig serial = site;
+            serial.set("connectionType", std::string{"serial"});
+            serial.set("portPath", std::string{"/dev/ttyUSB0"});
+            serial.set(row.port_key, std::int64_t{0});
+            CHECK_FALSE(catalog.normalize(row.key, serial, Source::Api).rejection.has_value());
+        }
+    }
+}

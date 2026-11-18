@@ -74,7 +74,7 @@ void register_celestron_factory(DeviceCatalog& catalog) {
             if (type == "network") {
                 info.type = vendor::celestron::ConnectionType::Network;
                 info.host = config.get(kCelestronHost);
-                info.tcp_port = static_cast<int>(config.get(kCelestronTcpPort));
+                info.tcp_port = network_port_or_zero(config.get(kCelestronTcpPort));
             } else {
                 info.type = vendor::celestron::ConnectionType::Serial;
                 info.port_path = config.get(kCelestronPortPath);

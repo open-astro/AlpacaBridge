@@ -52,7 +52,7 @@ std::unique_ptr<AlpacaDriver> create_telescope(const DeviceConfig& config, int d
     } else if (type == "network") {
         info.type = vendor::zwo::ConnectionType::Network;
         info.host = config.get(kZwoHost);
-        info.tcp_port = static_cast<int>(config.get(kZwoTcpPort));
+        info.tcp_port = network_port_or_zero(config.get(kZwoTcpPort));
     } else {
         info.type = vendor::zwo::ConnectionType::Serial;
         info.port_path = config.get(kZwoPortPath);

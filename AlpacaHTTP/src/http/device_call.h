@@ -133,4 +133,24 @@ private:
     mutable std::size_t body_parse_count_ = 0;
 };
 
+// open-astro#2292 (ADR 0007 rule 4): byte bounds on the client strings the
+// router hands on. The 64 KiB body cap bounds them all; these hold each one to
+// what its use needs. A longer value parses, so it is InvalidValue (HTTP 200)
+// on the Device API, checked before the driver, and a 400 on the description
+// write, as its other invalid values are (#1476). Here so the route bundles
+// (routes/*.cpp) apply the same bounds as router.cpp.
+inline constexpr std::size_t kMaxCommandBytes = 1024;
+inline constexpr std::size_t kMaxActionNameBytes = 256;
+inline constexpr std::size_t kMaxActionParametersBytes = 8192;
+inline constexpr std::size_t kMaxNameBytes = 256;  // Location, ProfileName, a switch or filter name
+
+/// InvalidValue naming @p field when @p value is longer than @p limit bytes.
+inline void refuse_over_long(const char* field, const std::string& value, std::size_t limit) {
+    if (value.size() > limit) {
+        throw alpacacore::AlpacaException(std::string(field) + " is " + std::to_string(value.size()) +
+                                              " bytes; the limit is " + std::to_string(limit),
+                                          alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
 }  // namespace alpacahttp

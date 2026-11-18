@@ -650,6 +650,47 @@ private:
     bool connected_ = false;
 };
 
+// open-astro#2292: counts the Action and Command* calls that reach the driver,
+// so a test can show a refused field never did.
+class CommandRecordingStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    explicit CommandRecordingStubDriver(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Command Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string fallback_unique_id() const override { return "command-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override {
+        ++calls;
+        return "";
+    }
+    bool can_action(std::string_view) const override { return true; }
+    std::string command_blind(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+    bool command_bool(std::string_view, bool) override {
+        ++calls;
+        return false;
+    }
+    std::string command_string(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+
+    int calls = 0;
+
+private:
+    int number_;
+};
+
 // Mirrors the shape the blocking-driver list in async_connectable.h guards
 // against (that list is empty today; no real driver has it): an
 // AsyncConnectable driver whose get_connected() takes the state mutex that
@@ -11433,6 +11474,163 @@ int main() {
 
         put_connected(router, base, "", false, peer);
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9765);
+    }
+
+    {
+        // case: an over-long Command, Action or Parameters is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<CommandRecordingStubDriver>(9292);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        const std::string base = "/api/v1/covercalibrator/9292";
+        const auto error_of = [](const alpacahttp::Response& response) {
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (const char* method : {"commandblind", "commandbool", "commandstring"}) {
+            const int before = stub->calls;
+            const auto [code, message] =
+                error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1025, 'c')));
+            EXPECT(code == 0x401);
+            EXPECT(message == "Command is 1025 bytes; the limit is 1024");
+            EXPECT(stub->calls == before);
+            EXPECT(error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1024, 'c')))
+                       .first == 0);
+            EXPECT(stub->calls == before + 1);
+        }
+        const int before = stub->calls;
+        const auto [name_code, name_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=" + std::string(257, 'a')));
+        EXPECT(name_code == 0x401);
+        EXPECT(name_message == "Action is 257 bytes; the limit is 256");
+        const auto [params_code, params_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=x&Parameters=" + std::string(8193, 'p')));
+        EXPECT(params_code == 0x401);
+        EXPECT(params_message == "Parameters is 8193 bytes; the limit is 8192");
+        EXPECT(stub->calls == before);
+        EXPECT(error_of(route_request(router, "PUT", base + "/action",
+                                      "Action=" + std::string(256, 'a') + "&Parameters=" + std::string(8192, 'p')))
+                   .first == 0);
+        EXPECT(stub->calls == before + 1);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9292);
+    }
+
+    {
+        // case: an over-long switch name or filter name is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::SwitchStub>(9294)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(9294)));
+        alpacahttp::Router router;
+        const auto error_of = [&router](const std::string& path, const std::string& body) {
+            const auto response = route_request(router, "PUT", path, body);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        const std::string switch_path = "/api/v1/switch/9294/setswitchname";
+        const auto [switch_code, switch_message] = error_of(switch_path, "Id=0&Name=" + std::string(257, 'n'));
+        EXPECT(switch_code == 0x401);
+        EXPECT(switch_message == "Name is 257 bytes; the limit is 256");
+        EXPECT(error_of(switch_path, "Id=0&Name=" + std::string(256, 'n')).first == 0);
+        const std::string names_path = "/api/v1/filterwheel/9294/names";
+        const auto [names_code, names_message] =
+            error_of(names_path, nlohmann::json{{"Names", {"L", std::string(257, 'f')}}}.dump());
+        EXPECT(names_code == 0x401);
+        EXPECT(names_message == "A filter name is 257 bytes; the limit is 256");
+        EXPECT(error_of(names_path, nlohmann::json{{"Names", {"L", std::string(256, 'f')}}}.dump()).first == 0);
+        registry.unregister_device(alpacacore::DeviceType::Switch, 9294);
+        registry.unregister_device(alpacacore::DeviceType::FilterWheel, 9294);
+    }
+
+    {
+        // case: a Location or ProfileName over 256 bytes is refused with 400 and not applied (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const std::string path = "/management/v1/description";
+        const auto described = [&] {
+            const auto json = nlohmann::json::parse(route_request(router, "GET", path).body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return json.value("Value", nlohmann::json::object());
+        };
+        for (const char* field : {"Location", "ProfileName"}) {
+            const nlohmann::json before = described();
+            const auto response =
+                route_request(router, "PUT", path, nlohmann::json{{field, std::string(257, 'l')}}.dump());
+            EXPECT(response.status_code() == 400);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", std::string()) == std::string(field) + " is 257 bytes; the limit is 256");
+            EXPECT(described() == before);
+            const std::string at_limit(256, 'l');
+            EXPECT(route_request(router, "PUT", path, nlohmann::json{{field, at_limit}}.dump()).status_code() == 200);
+            EXPECT(described().value(field, std::string()) == at_limit);
+        }
+    }
+
+    {
+        // case: a device holds at most 256 client registrations and refuses a new client past them (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9293);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        auto now = std::chrono::steady_clock::now();
+        router.set_client_clock_for_test([&now] { return now; });
+        const std::string base = "/api/v1/covercalibrator/9293";
+        for (int id = 1; id <= 256; ++id) {
+            put_connected(router, base, std::to_string(id), true);
+        }
+        const auto refused = route_request(router, "PUT", base + "/connected", "Connected=true&ClientID=257");
+        const auto json = nlohmann::json::parse(refused.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The Platform 7 connect registers the same way and is refused the same way.
+        const auto refused_connect = route_request(router, "PUT", base + "/connect", "ClientID=257");
+        const auto connect_json = nlohmann::json::parse(refused_connect.body(), nullptr, false);
+        EXPECT(!connect_json.is_discarded() && connect_json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The refusal leaves the driver as the 256 clients left it.
+        EXPECT(stub->get_connected());
+        put_connected(router, base, "1", true);  // a registered client still refreshes
+        put_connected(router, base, "1", false);
+        put_connected(router, base, "257", true);  // a slot left, so the newcomer gets it
+        EXPECT(get_connected_value(router, base, "257"));
+        // Registrations past the stale window no longer count.
+        now += std::chrono::minutes(11);
+        put_connected(router, base, "258", true);
+        EXPECT(get_connected_value(router, base, "258"));
+        put_connected(router, base, "258", false);
+        EXPECT(!stub->get_connected());
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9293);
+    }
+
+    {
+        // case: configuredevice keeps at most 128 entries and a removal frees a place (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
+        const auto configure = [&](int number) {
+            const nlohmann::json body = {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", number}};
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (int number = 12000; number < 12128; ++number) {
+            EXPECT(configure(number).first == 0);
+        }
+        const auto [code, message] = configure(12128);
+        EXPECT(code == 0x40B);
+        EXPECT(message ==
+               "The server holds 128 configured devices, the most it keeps; remove one before adding another");
+        EXPECT(listed_entry(router, "Focuser", 12128).is_null());
+        remove_device(router, "zzz", "focuser", 12000);
+        EXPECT(configure(12128).first == 0);
+        for (int number = 12001; number <= 12128; ++number) {
+            remove_device(router, "zzz", "focuser", number);
+        }
     }
 
     std::cout << "All routing tests passed!\n";
