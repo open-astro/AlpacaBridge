@@ -92,6 +92,10 @@ public:
     std::uint64_t token() const { return token_; }
     /// The SDK exposure has begun: stamps LastExposureStartTime and the PercentCompleted base.
     inline void exposure_started();
+    /// Moves the watchdog deadline to at least `from_now` after the task clock's now, for a download whose length
+    /// the body learns only once the exposure has run (QHY's slow readout modes, #1736). It never shortens the
+    /// deadline. False, and nothing changed, when this body no longer owns the session.
+    inline bool extend_deadline(std::chrono::nanoseconds from_now);
     /// The frame is being downloaded: CameraState Download.
     inline void reading_out();
     /// Publishes the frame. False, and the frame dropped, when this body no
@@ -695,6 +699,19 @@ inline void CaptureControl::exposure_started() {
         session_.start_time_ = std::chrono::system_clock::now();
         session_.base_ = session_.clock_.now();
     }
+}
+
+inline bool CaptureControl::extend_deadline(std::chrono::nanoseconds from_now) {
+    std::unique_lock<std::mutex> lock(session_.mutex_);
+    session_.apply_watchdog(lock);
+    if (!session_.owns_locked(token_)) {
+        return false;
+    }
+    const auto at_least = session_.clock_.now() + std::chrono::duration_cast<TaskClock::clock::duration>(from_now);
+    if (at_least > session_.deadline_) {
+        session_.deadline_ = at_least;
+    }
+    return true;
 }
 
 inline void CaptureControl::reading_out() {
