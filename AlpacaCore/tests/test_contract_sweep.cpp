@@ -86,6 +86,7 @@
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -2127,6 +2128,91 @@ Tier2Host tier2_host_onstep_focuser() {
     };
     return h;
 }
+
+// An OnStepX with a rotate-only rotator (OnStepX Rotator.command.cpp, af1d26bf; the controller of
+// test_onstep_rotator.cpp, cut down): travel -180..180, at rest at 30 degrees. `moving` makes :rT# report a move that
+// never ends once :rS is accepted (tier 3). `silent` answers nothing (the tier-3 fault and the snapshot rig's held
+// frame).
+struct OnStepRotatorFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> moving = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> endless = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_rotator_responder(const OnStepRotatorFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":GX98#") return std::string("R#");
+        if (c == ":rT#") {
+            const bool now = moving->load();
+            if (!endless->load()) moving->store(false);  // a move ends at the next status read
+            return std::string(now ? "M3#" : "S3#");
+        }
+        if (c == ":rG#") return std::string("+030*00#");
+        if (c == ":rI#") return std::string("-180#");
+        if (c == ":rM#") return std::string("180#");
+        if (c == ":rD#") return std::string("0.00500#");
+        if (c.rfind(":rS", 0) == 0) {
+            moving->store(true);
+            return std::string("1");
+        }
+        if (c == ":rQ#") {
+            moving->store(false);
+            return std::string();
+        }
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_rotator_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_rotator(0, info, clock);
+}
+
+Hosted onstep_rotator_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepRotatorFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_rotator_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_rotator_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX rotator over FakeMountServer (test_onstep_rotator.cpp): the first reply held for kHold in the hold
+// case, and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_rotator() {
+    Tier2Host h{"onstep_rotator",
+                "onstep",
+                "rotator",
+                "fake_mount_server.h",
+                DeviceType::Rotator,
+                "onstep_rotator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_rotator_hosted(hold, alpacacore::util::default_task_clock(),
+                                     std::make_shared<OnStepRotatorFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_rotator_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -2934,7 +3020,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR)
+#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR) X(onstep_rotator, PRB)
 #else
 #define CS2_ONSTEP(X)
 #endif
@@ -3648,6 +3734,21 @@ Tier3Recipe tier3_recipe_onstep_focuser() {
                         [clock, fake](bool hold) { return onstep_focuser_hosted(hold, *clock, fake); }},
                        DeviceType::Focuser, clock);
 }
+
+// A rotator move that never ends (:rT# keeps answering 'M'), then the controller goes silent with the socket open.
+// Falsified by: onstep_rotator_driver.cpp get_is_moving() answering from the frame while the poll's fault is latched.
+Tier3Recipe tier3_recipe_onstep_rotator() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto fake = std::make_shared<OnStepRotatorFake>();
+    fake->endless->store(true);
+    return t3_on_clock(
+        {[](Hosted& hosted) { dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver).move_absolute(90.0); },
+         [](Hosted& hosted) { t3_fake<OnStepRotatorFake>(hosted).silent->store(true); },
+         [](Hosted& hosted) { t3_fake<OnStepRotatorFake>(hosted).silent->store(false); },
+         "FakeMountServer responder silent mid-move",
+         [clock, fake](bool hold) { return onstep_rotator_hosted(hold, *clock, fake); }},
+        DeviceType::Rotator, clock);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
@@ -4048,7 +4149,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CT3_ONSTEP(X) X(onstep_telescope, OK) X(onstep_focuser, OK)
+#define CT3_ONSTEP(X) X(onstep_telescope, OK) X(onstep_focuser, OK) X(onstep_rotator, OK)
 #else
 #define CT3_ONSTEP(X)
 #endif
@@ -4942,6 +5043,18 @@ constexpr double kSnapshotValueMargin = 0.01;
     return g;
 }
 
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_rotator_getters() {
+    using alpacacore::RotatorDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_ROT(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<RotatorDriver&>(d).call); }});
+    SNAP_ROT("Position", get_position())
+    SNAP_ROT("MechanicalPosition", get_mechanical_position())
+    SNAP_ROT("IsMoving", get_is_moving())
+#undef SNAP_ROT
+    return g;
+}
+
 bool snapshot_has_time_stamp(const AlpacaDriver& driver) {
     const auto state = driver.get_device_state();
     return std::any_of(state.begin(), state.end(), [](const auto& e) { return e.name == "TimeStamp"; });
@@ -5126,6 +5239,21 @@ std::unique_ptr<SnapshotRig> snapshot_rig_onstep_focuser() {
     SnapshotRig& rig = *rig_owner;
     auto fake = std::make_shared<OnStepFocuserFake>();
     Hosted hosted = onstep_focuser_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
+    return rig_owner;
+}
+
+// The OnStepX rotator over the tier-2 fake (test_onstep_rotator.cpp): a silent controller holds the frame, and the
+// poll on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_rotator() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepRotatorFake>();
+    Hosted hosted = onstep_rotator_hosted(false, *rig.clock, fake);
     rig.fake = hosted.fake;
     rig.driver = std::move(hosted.driver);
     rig.driver->set_connected(true);
@@ -5370,7 +5498,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters())
+#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters()) X(onstep_rotator, snapshot_rotator_getters())
 #else
 #define CS3_ONSTEP(X)
 #endif
