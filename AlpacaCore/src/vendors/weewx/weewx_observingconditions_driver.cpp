@@ -307,15 +307,7 @@ public:
         return connected_.load();
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // Decision 0009 rule 5: the one fault text. The latched fault while the feed is faulted, kept after a loss until
     // the next Connect or Disconnect; empty once a fetch has answered.

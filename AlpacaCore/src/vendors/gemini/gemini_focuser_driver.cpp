@@ -136,13 +136,7 @@ public:
     // (decision 0009 rule 2), and Connected reads false without a reconnect.
     bool get_connected() const override { return connected_.load() && link_up(); }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // open-astro#333: the idempotency check below and the protocol_ call

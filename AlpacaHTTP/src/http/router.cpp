@@ -4047,53 +4047,6 @@ Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver
     });
 }
 
-Response Router::dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser,
-                                         const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("focuser method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "absolute") {
-                return call.ok(focuser->get_absolute());
-            } else if (method_name == "ismoving") {
-                return call.ok(focuser->get_is_moving());
-            } else if (method_name == "maxincrement") {
-                return call.ok(focuser->get_max_increment());
-            } else if (method_name == "maxstep") {
-                return call.ok(focuser->get_max_step());
-            } else if (method_name == "position") {
-                return call.ok(focuser->get_position());
-            } else if (method_name == "stepsize") {
-                return call.ok(focuser->get_step_size());
-            } else if (method_name == "tempcompavailable") {
-                return call.ok(focuser->get_temp_comp_available());
-            } else if (method_name == "tempcomp") {
-                return call.ok(focuser->get_temp_comp());
-            } else if (method_name == "temperature") {
-                return call.ok(focuser->get_temperature());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "tempcomp") {
-                bool value = call.get_bool("TempComp");
-                focuser->set_temp_comp(value);
-                return call.ok_void();
-            } else if (method_name == "move") {
-                int position = call.get_int("Position");
-                focuser->move(position);
-                return call.ok_void();
-            } else if (method_name == "halt") {
-                focuser->halt();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Focuser");
-    });
-}
-
 Response Router::dispatch_rotator_method(std::shared_ptr<alpacacore::RotatorDriver> rotator,
                                          const std::string& method_name, const DeviceCall& call) {
     const Request& request = call.request();

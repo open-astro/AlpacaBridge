@@ -134,9 +134,7 @@ public:
     // since the server start without a client connected (decision 0021).
     bool get_connected() const override { return connected_.load(std::memory_order_acquire); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other (issue #528): the

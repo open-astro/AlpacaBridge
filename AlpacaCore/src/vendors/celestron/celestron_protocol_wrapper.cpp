@@ -82,8 +82,9 @@ std::string probe_nexstar_port(const std::string& port_path) {
     const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
-    // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#"
-    if (!util::tty_write_all(fd, std::string{'K', 0x42})) {
+    // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#". The probe reads and writes
+    // through its link (util::SerialLink, #2262); it judges only the bytes it got, as before.
+    if (!link.write_all(std::string{'K', 0x42})) {
         return "";
     }
 
@@ -94,7 +95,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
     spec.terminators = "#";
     spec.skip.clear();
     spec.max_len = 2;
-    const auto echo = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const auto echo = util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     if (echo.bytes.size() < 2 || echo.bytes[0] != 0x42 || echo.bytes[1] != '#') {
         return "";
@@ -102,12 +103,12 @@ std::string probe_nexstar_port(const std::string& port_path) {
 
     // Echo confirmed — now query firmware version with "V" command
     tcflush(fd, TCIOFLUSH);
-    if (!util::tty_write_all(fd, std::string("V"))) {
+    if (!link.write_all(std::string("V"))) {
         return "";
     }
 
     spec.max_len = 3;
-    const auto ver = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const auto ver = util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     link.close();
 
@@ -285,10 +286,7 @@ std::string model_id_to_name(int model_id) {
 
 class CelestronProtocolWrapper::Impl {
 public:
-    Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
-        serial_fd_ = -1;
-        socket_fd_ = -1;
-    }
+    Impl() : connected_(false), connection_type_(ConnectionType::Serial) { socket_fd_ = -1; }
 
     ~Impl() {
         disconnect();
@@ -320,6 +318,8 @@ public:
         last_connect_error_.clear();
         link_lost_.store(false);
         set_fault("");
+        // A connect starts with a clear verdict on the link too; a new port opened below brings its own clear one.
+        link_.clear_loss();
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
@@ -335,6 +335,9 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        // An explicit Disconnect forgets the link's verdict (decision 0009 rule 5); fail_link_locked(), the port
+        // release after a loss, keeps it.
+        link_.clear_loss();
     }
 
     // Tear down the connection. Caller MUST already hold mutex_ (so connect()
@@ -1377,7 +1380,6 @@ private:
             ALPACA_LOG_ERROR("Celestron", last_connect_error_);
             return false;
         }
-        serial_fd_ = link_.fd();
         return true;
     }
 
@@ -1443,10 +1445,7 @@ private:
         return true;
     }
 
-    void disconnect_serial() {
-        serial_fd_ = -1;
-        link_.close();
-    }
+    void disconnect_serial() { link_.close(); }
 
     void disconnect_network() {
         if (socket_fd_ >= 0) {
@@ -1462,7 +1461,8 @@ private:
         return write_network(data);
     }
 
-    bool write_serial(const std::string& data) { return util::tty_write_all(serial_fd_, data); }
+    // The util::SerialLink verdict judges a failed write (#2262); errno is kept.
+    bool write_serial(const std::string& data) { return link_.write_all(data); }
 
     bool write_network(const std::string& data) {
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
@@ -1470,12 +1470,12 @@ private:
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
-    // One reply read for both transports: util::read_until on the tty or
-    // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
-    // old 10 ms pacing sleep is gone.
+    // One reply read for both transports: util::read_until on the serial link
+    // (which judges a LinkDead read, #2262) or util::read_until_socket on the TCP
+    // fd. The wait is poll()-bounded, so the old 10 ms pacing sleep is gone.
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(serial_fd_, spec, deadline);
+            return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
     }
@@ -1490,11 +1490,11 @@ private:
         throw AlpacaException(reason);
     }
 
-    // A failed write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the serial port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
-    // a socket errno instead, so the network link keeps its fault latch.
+    // A failed write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the util::SerialLink
+    // verdict, #2262) is the serial port gone: the link is lost at once. A write timeout is not. Serial only: a TCP
+    // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
-        if (err == EIO || err == ENXIO || err == ENODEV) {
+        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
             fail_link_locked("Celestron serial link lost (write): " + util::errno_string(err));
         }
     }
@@ -1614,8 +1614,10 @@ private:
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
+    // The serial port, and the errno verdict on it (util::SerialLink, #2262); this wrapper keeps no serial errno
+    // list. It still publishes its own link_lost_ and fault text, which the driver reads: the vendor text ("Celestron
+    // serial link lost (write): ...") and a latch that only fail_link_locked() sets, with the port released.
     util::SerialLink link_;
-    int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
     std::string last_connect_error_;
 };

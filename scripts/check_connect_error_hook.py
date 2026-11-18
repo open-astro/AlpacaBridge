@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every AsyncConnectable driver must expose its connect-failure reason.
+"""Every AsyncConnectable driver must expose its connect-failure reason and forwarders.
 
 Issue #358 gave AsyncConnectable a stored reason for a failed connect, and the
 router reports it to the client instead of a bare "Connection failed". The
@@ -16,6 +16,12 @@ that introduced the feature.
 A driver that inherits AsyncConnectable and omits the macro compiles and tests
 green while its operators are told nothing but "Connection failed", so nothing
 except this gate would catch it.
+
+Issue #1757 slice 2b: the three public forwarders every such driver owes
+(connect() and disconnect() to start_connection_task(), get_connecting() to
+connection_task_active()) are one macro, ALPACA_ASYNC_CONNECT_FORWARDERS(), and
+this gate requires it too. Written by hand, one dropped line compiled and tested
+green, with the AlpacaDriver default answering instead of the connection task.
 
 Regex regression guard (no repo state needed):
     python3 scripts/check_connect_error_hook.py --self-test
@@ -48,6 +54,7 @@ CLASS_RE = re.compile(
     re.MULTILINE,
 )
 MACRO = "ALPACA_EXPOSE_CONNECT_ERROR()"
+FORWARDERS_MACRO = "ALPACA_ASYNC_CONNECT_FORWARDERS()"
 
 
 def class_body(text: str, open_brace_index: int) -> str:
@@ -79,6 +86,14 @@ def scan_text(text: str, label: str) -> tuple[list[str], int]:
         body = class_body(text, text.index("{", match.start()))
         line = text[: match.start()].count("\n") + 1
         access = match.group("access") or "private"
+        if FORWARDERS_MACRO not in body:
+            findings.append(
+                f"  {label}:{line}: class {match.group('name')} inherits "
+                f"AsyncConnectable but does not use {FORWARDERS_MACRO}, so connect(), "
+                f"disconnect() and get_connecting() are written by hand and nothing checks "
+                f"that all three reach the connection task (issue #1757). Add it in a "
+                f"public section in place of the hand-written forwarders."
+            )
         if MACRO not in body:
             findings.append(
                 f"  {label}:{line}: class {match.group('name')} inherits "
@@ -121,7 +136,10 @@ def main() -> int:
         print(f"\n{len(findings)} finding(s).")
         return 1
 
-    print(f"Connect-error hook OK -- {checked} AsyncConnectable driver(s) expose their reason.")
+    print(
+        f"Connect-error hook OK -- {checked} AsyncConnectable driver(s) expose their reason "
+        f"and use {FORWARDERS_MACRO}."
+    )
     return 0
 
 
@@ -140,7 +158,7 @@ def self_test() -> int:
         (
             "protected mixin with the macro",
             "class FooDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {\n"
-            "public:\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
+            "public:\n    ALPACA_ASYNC_CONNECT_FORWARDERS()\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
             1,
             True,
         ),
@@ -154,14 +172,14 @@ def self_test() -> int:
         (
             "public mixin is flagged even with the macro",
             "class FooDriver : public TelescopeDriver, public alpacacore::AsyncConnectable {\n"
-            "public:\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
+            "public:\n    ALPACA_ASYNC_CONNECT_FORWARDERS()\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
             1,
             False,
         ),
         (
             "unqualified base name",
             "class FooDriver : public TelescopeDriver, protected AsyncConnectable {\n"
-            "public:\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
+            "public:\n    ALPACA_ASYNC_CONNECT_FORWARDERS()\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
             1,
             True,
         ),
@@ -172,6 +190,30 @@ def self_test() -> int:
             "    public:\n    };\n"
             "}\n",
             1,
+            False,
+        ),
+        (
+            "protected mixin with the connect-error macro but no forwarders macro",
+            "class FooDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {\n"
+            "public:\n    void connect() override { start_connection_task(true); }\n"
+            "    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
+            1,
+            False,
+        ),
+        (
+            "protected mixin with the forwarders macro but no connect-error macro",
+            "class FooDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {\n"
+            "public:\n    ALPACA_ASYNC_CONNECT_FORWARDERS()\n};\n",
+            1,
+            False,
+        ),
+        (
+            "a later class's forwarders macro does not cover an earlier class",
+            "class A : public TelescopeDriver, protected alpacacore::AsyncConnectable {\n"
+            "public:\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n"
+            "class B : public FocuserDriver, protected alpacacore::AsyncConnectable {\n"
+            "public:\n    ALPACA_ASYNC_CONNECT_FORWARDERS()\n    ALPACA_EXPOSE_CONNECT_ERROR()\n};\n",
+            2,
             False,
         ),
         (
