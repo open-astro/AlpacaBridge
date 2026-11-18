@@ -83,6 +83,7 @@
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
@@ -580,6 +581,23 @@ inline ContractEntry contract_entry_onstep_rotator() {
         },
         kSrcAgents);
 }
+// The OnStepX auxiliary features as a Switch on the controller's shared link (#2222). The slots are read at connect,
+// so MaxSwitch and the per-id capabilities are NotConnected while disconnected.
+inline ContractEntry contract_entry_onstep_switch() {
+    return with_switch_caps(make_entry(
+                                "onstep_switch", "onstep", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    vendor::onstep::ConnectionInfo conn;
+                                    conn.type = vendor::onstep::ConnectionType::Network;
+                                    conn.host = "127.0.0.1";
+                                    conn.tcp_port = 9;
+                                    return vendor::onstep::create_onstep_switch(n, conn);
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::NotConnected, DisconnectedRead::NotConnected, 0,
+                            "onstep_switch_driver.cpp slot_at(): the static 0-7 id check, then NotConnected (the "
+                            "slots are read at connect, OnStepX Features.command.cpp :GXY0#)");
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -890,7 +908,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser) X(onstep_rotator)
+#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser) X(onstep_rotator) X(onstep_switch)
 #else
 #define CS_ONSTEP(X)
 #endif
@@ -1032,6 +1050,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "telescope", "fake_mount_server.h"},
     {"onstep", "focuser", "fake_mount_server.h"},  // the focuser on the controller's shared link (#2223)
     {"onstep", "rotator", "fake_mount_server.h"},  // the rotator on the controller's shared link (#2221)
+    {"onstep", "switch", "fake_mount_server.h"},   // the auxiliary features on the controller's shared link (#2222)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
@@ -1083,6 +1102,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"onstep_telescope", "onstep", "AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp"},
     {"onstep_focuser", "onstep", "AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp"},
     {"onstep_rotator", "onstep", "AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp"},
+    {"onstep_switch", "onstep", "AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp"},
     {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
     {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
     {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},

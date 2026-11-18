@@ -12,20 +12,23 @@
 
 #pragma once
 
-// A scripted OnStepX controller (the telescope, its focusers and its rotator) on a loopback FakeMountServer, the
-// Network transport, for the focuser, rotator and shared-link cases (#2223, #2221): test_onstep_focuser.cpp,
-// test_onstep_rotator.cpp and the [stress] registrations in test_onstep_concurrency_stress.cpp. Replies follow OnStepX
-// Focuser.command.cpp and Rotator.command.cpp at af1d26bf.
+// A scripted OnStepX controller (the telescope, its focusers, its rotator and its auxiliary features) on a loopback
+// FakeMountServer, the Network transport, for the focuser, rotator, switch and shared-link cases (#2223, #2221,
+// #2222): test_onstep_focuser.cpp, test_onstep_rotator.cpp, test_onstep_switch.cpp and the [stress] registrations in
+// test_onstep_concurrency_stress.cpp. Replies follow OnStepX Focuser.command.cpp, Rotator.command.cpp and
+// Features.command.cpp at af1d26bf.
 
 #ifndef _WIN32
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/rotator_driver.h>
+#include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
 #include <algorithm>
@@ -88,6 +91,21 @@ struct OnStepXController {
     bool derotating = false;                // :rT# 'D' while stopped; under mutex
     double rotator_step_per_status = 20.0;  // how far a move gets at each :rT#
     std::string rotator_goto_reply = "1";   // :rS...#; under mutex
+
+    // The auxiliary features (Features.command.cpp), slots 1-8; a slot with purpose 0 is off. `power` is the
+    // ";volts,amps,flags" a power-monitor build appends to :GXX<n>#. Under mutex.
+    struct Feature {
+        std::string name;
+        int purpose = 0;
+        long value = 0;
+        std::string power;
+    };
+    std::map<int, Feature> features{{1, {"Camera", 1, 0, ";12.1,0.5,!!!!!"}},
+                                    {2, {"Dew 1", 3, 1, ""}},
+                                    {3, {"Flat", 2, 128, ""}},
+                                    {5, {"Intervalom", 4, 0, ""}},
+                                    {6, {"Hidden", 6, 1, ""}}};
+    std::string feature_set_reply = "1";  // :SXX<n>,V<v>#; under mutex
 
     // Command prefix -> reply, checked before every other reply; under mutex.
     std::map<std::string, std::string> reply_overrides;
@@ -170,6 +188,42 @@ struct OnStepXController {
         return "0";
     }
 
+    std::string feature_reply(const std::string& c) {
+        if (c == ":GXY0#") {
+            std::string map;
+            for (int n = 1; n <= 8; ++n) {
+                const auto it = features.find(n);
+                map += it != features.end() && it->second.purpose != 0 ? '1' : '0';
+            }
+            return map + "#";
+        }
+        const int n = c.size() > 4 ? c[4] - '0' : 0;
+        const auto it = features.find(n);
+        const bool on = it != features.end() && it->second.purpose != 0;
+        if (c.rfind(":GXY", 0) == 0) {
+            if (!on) return "0";  // CE_0
+            const int purpose = it->second.purpose == 5 || it->second.purpose == 7 ? 1 : it->second.purpose;
+            return it->second.name.substr(0, 10) + "," + std::to_string(purpose) + "#";
+        }
+        if (c.rfind(":GXX", 0) == 0) {
+            if (!on) return "0";
+            const Feature& f = it->second;
+            if (f.purpose == 3) return std::to_string(f.value) + ",5.0,15.0,NAN" + f.power + "#";
+            if (f.purpose == 4) return std::to_string(f.value) + ",1.000,1.00,0#";
+            return std::to_string(f.value) + f.power + "#";
+        }
+        // :SXX<n>,V<v>#
+        if (!on) return "0";
+        if (feature_set_reply != "1") return feature_set_reply;
+        const auto v = c.find(",V");
+        if (v == std::string::npos) return "0";
+        const long value = std::lround(std::strtod(c.c_str() + v + 2, nullptr));
+        const long max = it->second.purpose == 2 ? 255 : 1;
+        if (value < 0 || value > max) return "0";
+        it->second.value = value;
+        return "1";
+    }
+
     std::string reply(const std::string& chunk) {
         bool focuser = false;
         std::string out;
@@ -186,6 +240,8 @@ struct OnStepXController {
                 out = focuser_reply(chunk[2] - '0', chunk.substr(3, chunk.size() - 4));
             } else if (chunk.size() >= 4 && chunk.rfind(":r", 0) == 0 && chunk.back() == '#') {
                 out = rotator_reply(chunk.substr(2, chunk.size() - 3));
+            } else if (chunk.rfind(":GXY", 0) == 0 || chunk.rfind(":GXX", 0) == 0 || chunk.rfind(":SXX", 0) == 0) {
+                out = feature_reply(chunk);
             } else if (chunk == ":GX98#") {
                 out = rotator_kind == "0" ? "0" : rotator_kind + "#";
             } else if (chunk.rfind(":GVP", 0) == 0) {
@@ -250,6 +306,7 @@ struct Controller {
     }
     std::unique_ptr<alpacacore::TelescopeDriver> telescope() { return onstep::create_onstep_telescope(0, info()); }
     std::unique_ptr<alpacacore::RotatorDriver> rotator() { return onstep::create_onstep_rotator(0, info()); }
+    std::unique_ptr<alpacacore::SwitchDriver> aux_switch() { return onstep::create_onstep_switch(0, info()); }
 };
 
 // Runs `action` `tries` times on this thread. Before each exchange it makes, the BeforeExchange hook lets another

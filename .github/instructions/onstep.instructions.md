@@ -4,8 +4,9 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 
 ### OnStep
 
-Devices: Telescope, Focuser (OnStepX focusers 1-6, #2223), Rotator (OnStepX, #2221). Every device on one controller
-shares one link (see "Focuser and the shared link" and "Rotator" below).
+Devices: Telescope, Focuser (OnStepX focusers 1-6, #2223), Rotator (OnStepX, #2221), Switch (OnStepX auxiliary
+features, #2222). Every device on one controller shares one link (see "Focuser and the shared link", "Rotator" and
+"Switch" below).
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
 ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
@@ -84,6 +85,10 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:rD#` | rotator degrees per step (`StepSize`, connect) | `n.nnnnn#` | `#`-terminated; a reply that is not a number above 0 makes `StepSize` `PropertyNotImplemented` |
 | `:rSsDDD*MM:SS#` | rotator move to an absolute angle inside the travel | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason (`09`: the rotator is parked) |
 | `:rQ#` | rotator `Halt` | none | blind |
+| `:GXY0#` | auxiliary feature slots (the switch's connect, #2222) | eight `0`/`1`, slot 1 first, `#`; a firmware without the features answers the unknown-command `0` | read without waiting for the `#`; a reply that is not `0`/`1` fails Connect |
+| `:GXY<n>#` | slot n's name and purpose (connect, for each slot the bitmap marks) | `name,purpose#` (name cut to 10 characters; a momentary or cover switch reports purpose 1); `0` for a slot that is off | read without waiting for the `#`; the purpose follows the last `,` |
+| `:GXX<n>#` | slot n's value (every switch poll) | `value#` for a switch or PWM output, `enabled,zero,span,deltaT#` for a dew heater, each with `;volts,amps,flags` appended in a power-monitor build | `#`-terminated; the first field before `,` or `;` is the value |
+| `:SXX<n>,V<v>#` | switch write | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason |
 
 `:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
 `E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
@@ -111,7 +116,7 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
 
 - **Wire turns**: every exchange holds the link's wire lock for its command and reply, as before. A command whose
   error code is read next with `:GE#` (the telescope's `:hP#`/`:hC#`, `:ST`/`:Te#`, `:hQ#`, `:hR#`, `:SXTR`/`:SXTD`;
-  the focuser's `:F<n>s` and `:F<n>c0`/`c1`; the rotator's `:rT#` check and `:rS`, #2221) holds the link's sequence lock (`hold_sequence()`, a recursive mutex
+  the focuser's `:F<n>s` and `:F<n>c0`/`c1`; the rotator's `:rT#` check and `:rS`, #2221; the switch's `:SXX`, #2222) holds the link's sequence lock (`hold_sequence()`, a recursive mutex
   above the wire lock) across both, because OnStep keeps one code per channel and a sibling's command in between
   would replace it. The telescope takes it through `Wire::hold_sequence()`, with `mutex_` released. Nothing else
   holds it, so the telescope's poll, MoveAxis re-send and pulse-guide timing keep their cadence; a focuser exchange
@@ -185,6 +190,38 @@ poll and loss rules, `onstep_rotator_driver.cpp`), and is OnStepX only. Commands
   which use `StepSize` as their tolerance, may need a rotator whose step is at least one arcminute. The ConformU Rotator
   check is tracked in the OnStep test plan, #2126. Tests: `test_onstep_rotator.cpp`, the `[onstep][rotator][stress]`
   cases in `test_onstep_concurrency_stress.cpp`, the contract sweep entry `onstep_rotator`.
+
+#### Switch (#2222)
+
+The OnStepX auxiliary features (up to eight slots: power switches, PWM outputs, dew heaters, intervalometers) are one
+Switch device on the controller's link, joined the way the focuser and the rotator join it
+(`onstep_switch_driver.cpp`), OnStepX only. Commands are from OnStepX `Features.command.cpp` and the purpose codes
+from `Constants.h`, at `af1d26bf`.
+
+- **Connect** reads `:GVP#`, `:GVN#` (below version 10: "The OnStep Switch requires OnStepX firmware"), then the slot
+  bitmap `:GXY0#` and `:GXY<n>#` for each slot it marks. The slot set is fixed until the next connect: switch ids
+  0..N-1 are the included slots in slot order, so a feature reconfigured in the firmware shows at the next Connect.
+- **Purposes** (`detail::aux_switch_kind()`): 1 (switch; also the momentary and cover switches, which `:GXY` reports as
+  1) a 0/1 switch, 2 (analog output) 0-255 (`:SXX<n>,V` takes 0-255 for 0-100 % power), 3 (dew heater) a 0/1 enable of
+  its regulation; all step 1. 4 (intervalometer) and 6 (hidden switch) are left out, and any other code is left out
+  with an INFO line naming the slot. A controller with none of the three is refused ("OnStepX reports no auxiliary
+  feature a Switch can drive").
+- **Values** come from a `util::PolledState` poll (1 s: one `:GXX<n>#` per included slot, the first field, so a dew
+  heater's zero, span and delta-T and any power telemetry are not read), served stale or not, so a change made in the
+  OnStepX web page, or a momentary switch turning itself off, shows at the next poll. `GetSwitch` is the value above 0.
+- **Writes**: an id outside 0-7 (OnStepX has eight slots) or a value that is not a finite number is `InvalidValue`
+  before the connection check; once connected, an id past `MaxSwitch` or a value outside the slot's range is
+  `InvalidValue` with nothing sent. The value is rounded to the step of 1, as the firmware's `lroundf` would, and
+  sent as `:SXX<n>,V<v>#` holding the link's sequence lock, with `:GE#` after a `0` (`InvalidOperation` with the
+  reason); the value is written through. `CanWrite` is true for every switch; `CanAsync` is false (the firmware applies
+  a write at once) and the async members throw `MethodNotImplemented`, as does `SetSwitchName` (the names are the
+  firmware's configuration). `MaxSwitch` and every per-id member answer `NotConnected` while disconnected, after the
+  0-7 id check, since the slots are read at connect.
+- **Descriptions** carry only what the connect read: "OnStepX auxiliary feature <n>: <purpose>". Power telemetry
+  (volts, amps, fault flags), dew heater zero and span and the intervalometer settings are out of scope (#2214).
+- Fake evidence only: no OnStepX with auxiliary features on a rig; the ConformU Switch check is tracked in the OnStep
+  test plan, #2126. Tests: `test_onstep_switch.cpp`, the `[onstep][switch][stress]` cases in
+  `test_onstep_concurrency_stress.cpp`, the contract sweep entry `onstep_switch`.
 
 #### OnStep 4.x and OnStepX
 

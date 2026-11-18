@@ -57,6 +57,7 @@ Symbol: `transition_mutex_`
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
 | OnStep focuser |  | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders `Move`, `Halt` and the `TempComp` write |
 | OnStep rotator |  | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders the moves, `Halt` and `Sync` |
+| OnStep switch |  | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders the writes |
 | Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted |  |  |
 | Player One filter wheel |  | `AlpacaCore/src/vendors/playerone/playerone_filterwheel_driver.cpp` | adopted |  |  |
 | Player One thermal switch |  | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted |  |  |

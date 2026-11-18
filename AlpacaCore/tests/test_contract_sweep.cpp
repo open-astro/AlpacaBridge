@@ -87,6 +87,7 @@
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -2213,6 +2214,75 @@ Tier2Host tier2_host_onstep_rotator() {
     };
     return h;
 }
+
+// An OnStepX with two auxiliary features (OnStepX Features.command.cpp, af1d26bf; the controller of
+// test_onstep_switch.cpp, cut down): slot 1 a switch, off, slot 2 an analog output at 128. `silent` answers nothing
+// (the snapshot rig's held frame).
+struct OnStepSwitchFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_switch_responder(const OnStepSwitchFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":GXY0#") return std::string("11000000#");
+        if (c == ":GXY1#") return std::string("Camera,1#");
+        if (c == ":GXY2#") return std::string("Flat,2#");
+        if (c == ":GXX1#") return std::string("0#");
+        if (c == ":GXX2#") return std::string("128#");
+        if (c.rfind(":SXX", 0) == 0) return std::string("1");
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_switch_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_switch(0, info, clock);
+}
+
+Hosted onstep_switch_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepSwitchFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_switch_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_switch_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX switch over FakeMountServer (test_onstep_switch.cpp): the first reply held for kHold in the hold case,
+// and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_switch() {
+    Tier2Host h{"onstep_switch",
+                "onstep",
+                "switch",
+                "fake_mount_server.h",
+                DeviceType::Switch,
+                "onstep_switch",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_switch_hosted(hold, alpacacore::util::default_task_clock(), std::make_shared<OnStepSwitchFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_switch_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -3020,7 +3090,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR) X(onstep_rotator, PRB)
+#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR) X(onstep_rotator, PRB) X(onstep_switch, PRB)
 #else
 #define CS2_ONSTEP(X)
 #endif
@@ -5055,6 +5125,19 @@ constexpr double kSnapshotValueMargin = 0.01;
     return g;
 }
 
+// The first two switches of the fake (a switch and an analog output); MaxSwitch is served from the connect's slots.
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_switch_getters() {
+    using alpacacore::SwitchDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_SW(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<SwitchDriver&>(d).call); }});
+    SNAP_SW("GetSwitchValue0", get_switch_value(0))
+    SNAP_SW("GetSwitchValue1", get_switch_value(1))
+    SNAP_SW("GetSwitch1", get_switch(1))
+#undef SNAP_SW
+    return g;
+}
+
 bool snapshot_has_time_stamp(const AlpacaDriver& driver) {
     const auto state = driver.get_device_state();
     return std::any_of(state.begin(), state.end(), [](const auto& e) { return e.name == "TimeStamp"; });
@@ -5239,6 +5322,21 @@ std::unique_ptr<SnapshotRig> snapshot_rig_onstep_focuser() {
     SnapshotRig& rig = *rig_owner;
     auto fake = std::make_shared<OnStepFocuserFake>();
     Hosted hosted = onstep_focuser_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
+    return rig_owner;
+}
+
+// The OnStepX switch over the tier-2 fake (test_onstep_switch.cpp): a silent controller holds the frame, and the poll
+// on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_switch() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepSwitchFake>();
+    Hosted hosted = onstep_switch_hosted(false, *rig.clock, fake);
     rig.fake = hosted.fake;
     rig.driver = std::move(hosted.driver);
     rig.driver->set_connected(true);
@@ -5498,7 +5596,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters()) X(onstep_rotator, snapshot_rotator_getters())
+#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters()) X(onstep_rotator, snapshot_rotator_getters()) X(onstep_switch, snapshot_switch_getters())
 #else
 #define CS3_ONSTEP(X)
 #endif

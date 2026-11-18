@@ -1893,6 +1893,56 @@ TEST_CASE("Builtin catalog - the OnStep rotator joins the telescope's connection
 #endif
 }
 
+// #2222: the auxiliary features join the controller's link as one Switch, with the telescope's connection fields.
+// Falsified by: onstep_schema.cpp register_onstep_schema() not adding the switch Schema.
+TEST_CASE("Builtin catalog - the OnStep switch joins the telescope's connection fields",
+          "[catalog][onstep][switch][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Switch};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{
+            "connectionType", "mountIndex", "portPath", "baudRate", "host", "tcpPort", "responseTimeoutMs"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        const auto no_host = catalog.normalize(key, network, Source::Api);
+        REQUIRE(no_host.rejection.has_value());
+        CHECK(*no_host.rejection == "Host IP address is required");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Switch);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_name() == "OnStep Switch");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/null"});
+    auto serial_driver = catalog.create(key, serial, 4);
+    REQUIRE(serial_driver != nullptr);
+    CHECK(serial_driver->get_device_type() == DeviceType::Switch);
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
 // auto-detect factory constructs without a scan (#659), so no port is opened here.

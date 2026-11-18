@@ -3646,12 +3646,13 @@ if (synscanConnectionType) {
     });
 }
 
-// The OnStep block holds the telescope, the focuser (#2223) and the rotator (#2221): show the one the Device Type
-// names, and disable the others' inputs so their values cannot leak into this device's config.
+// The OnStep block holds the telescope, the focuser (#2223), the rotator (#2221) and the switch (#2222): show the one
+// the Device Type names, and disable the others' inputs so their values cannot leak into this device's config.
 function updateOnStepDeviceFields() {
     const sections = {
         focuser: document.getElementById('onstep-focuser-config'),
         rotator: document.getElementById('onstep-rotator-config'),
+        switch: document.getElementById('onstep-switch-config'),
         telescope: document.getElementById('onstep-telescope-config'),
     };
     if (Object.values(sections).some((section) => !section)) {
@@ -3670,6 +3671,7 @@ function updateOnStepDeviceFields() {
     ['onstep-connection-type', 'onstep'],
     ['onstep-focuser-connection-type', 'onstep-focuser'],
     ['onstep-rotator-connection-type', 'onstep-rotator'],
+    ['onstep-switch-connection-type', 'onstep-switch'],
 ].forEach(([id, prefix]) => {
     const select = document.getElementById(id);
     if (select) {
@@ -4586,6 +4588,16 @@ document.getElementById('device-form').addEventListener('submit', async function
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
+        }
+    } else if (deviceData.vendor === 'onstep' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        // The switch's own prefixed names (the FormData collision rule), the telescope's connection fields (#2222).
+        deviceData.connectionType = formData.get('onstepSwitchConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = (formData.get('onstepSwitchPortPath') || '').trim();
+            deviceData.baudRate = parseInt(formData.get('onstepSwitchBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = (formData.get('onstepSwitchHost') || '').trim();
+            deviceData.tcpPort = parseInt(formData.get('onstepSwitchTcpPort')) || 9998;
         }
     } else if (deviceData.vendor === 'onstep' && normalizeDeviceType(deviceData.deviceType) === 'rotator') {
         // The rotator's own prefixed names (the FormData collision rule), the telescope's connection fields (#2221).
