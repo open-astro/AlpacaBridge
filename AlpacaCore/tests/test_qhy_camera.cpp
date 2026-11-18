@@ -1114,7 +1114,7 @@ TEST_CASE("QHY Camera Driver - ImageArray during an exposure is InvalidOperation
 // Waits and deadlines on a FakeTaskClock (issue #1386, decision 0005). Each
 // case below drives one timed site of the camera driver with advance() and
 // never sleeps for it. Declare the clock before the driver: it must outlive
-// the driver and any worker the driver detaches.
+// the driver and every body the driver joins.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -1250,8 +1250,9 @@ struct QhyLogCapture {
 // until `done` holds; returns the virtual time spent. This is what lets a
 // reap loop (which sleeps 20 ms per pass on the clock) make progress. Each
 // step also yields `pace` of real time: a worker that is about to finish needs
-// real time to do so, and without it the loop would run 2 s of virtual reap
-// bound out in microseconds and detach a worker that was seconds from done.
+// real time to do so, and without it the loop would run a 2 s virtual bound (a
+// slot body's reap, a start waiting for an exposure body) out in microseconds
+// and give up on a body that was seconds from done.
 milliseconds step_until(FakeTaskClock& clock, const std::function<bool()>& done,
                         std::chrono::microseconds pace = std::chrono::milliseconds(2), int max_steps = 400) {
     milliseconds spent{0};
@@ -1334,8 +1335,8 @@ struct JoinPumped {
 
 // Disconnects on a helper thread and steps virtual time until it returns. A
 // clean disconnect needs one or two steps; the 10 ms of real time per step
-// gives a worker that is still finishing about a second before the 2 s reap
-// bound can detach it.
+// gives a slot body that is still finishing about a second before the 2 s reap
+// bound leaves it cancelled.
 milliseconds disconnect_stepping(FakeTaskClock& clock, alpacacore::CameraDriver& driver) {
     std::atomic<bool> done{false};
     std::thread t([&] {
@@ -1529,7 +1530,8 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
         JoinPumped joiner{clock, aborter, &gate};
         REQUIRE(eventually([&] { return cancelled.load(); }));
         gate.release = true;
-        // A broken worker can report Idle before the aborter's clock-driven reap has finished.
+        // Step the clock until the aborter returns: AbortExposure joins the body once the cancel releases its frame
+        // call.
         step_until(clock, [&] { return abort_done.load(); });
         REQUIRE(abort_done.load());
         aborter.join();
@@ -2713,10 +2715,9 @@ TEST_CASE("QHY Camera Driver - an unpolled deadline rejects a late successful fr
 }
 
 TEST_CASE("QHY Camera Driver - the exposure watchdog expires on the injected clock", "[qhy][camera][unit][taskclock]") {
-    // Falsified by: qhy_camera_driver.cpp start_exposure() stamping
-    // exposure_deadline_ from steady_clock::now() (virtual time then never
-    // reaches the deadline) or expire_overdue_exposure_locked() comparing
-    // against steady_clock::now().
+    // Falsified by: qhy_camera_driver.cpp building session_ on
+    // util::default_task_clock() instead of the injected clock_ (virtual time
+    // then never reaches the session's watchdog deadline).
     FakeTaskClock clock;
     SdkGate gate;
     auto fake = make_fake();
@@ -2829,9 +2830,9 @@ TEST_CASE("QHY Camera Driver - AbortExposure cancels the SDK exposure behind a w
 
 TEST_CASE("QHY Camera Driver - a download in a slow readout mode extends the watchdog on the injected clock",
           "[qhy][camera][unit][taskclock]") {
-    // Falsified by: qhy_camera_driver.cpp exposure worker computing
-    // extended_deadline from steady_clock::now() (the extension would be
-    // measured from real time, so the deadline stays at 2 s virtual).
+    // Falsified by: qhy_camera_driver.cpp run_exposure() dropping its
+    // CaptureControl::extend_deadline() call (the deadline then stays at 2 s
+    // virtual).
     FakeTaskClock clock;
     SdkGate gate;
     auto fake = make_fake();
@@ -3034,6 +3035,90 @@ TEST_CASE("QHY Camera Driver - destruction stops the SDK exposure and joins a bo
     REQUIRE(destroyed.load());
     CHECK(cancels_while_held.load() == 1);
     CHECK_FALSE(sdk.running->load());
+}
+
+// #1736: a body the watchdog failed can still be inside GetQHYCCDSingleFrame, holding the SDK call mutex every setup
+// write takes. StartExposure stops it (cancel_exposure bypasses that mutex) and waits, at most
+// CaptureSession::kStartTimeout on the task clock, for it to return before the setup.
+TEST_CASE("QHY Camera Driver - StartExposure stops a body the watchdog left in the SDK and starts",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    std::atomic<int> cancels_while_held{0};
+    auto fake = make_fake();
+    fake.read_directly = true;
+    hold_frame_until_cancel(fake, gate, cancels_while_held, milliseconds(0));
+    ExposureObservedSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    clock.advance(seconds(2));  // 0.05 s exposure + 1 s margin: the watchdog fails it, the body stays in the SDK
+    REQUIRE(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
+
+    std::atomic<bool> done{false};
+    int code = -1;
+    std::thread starter([&] {
+        code = error_code_of([&] { driver->start_exposure(0.05, true); });
+        done = true;
+    });
+    JoinPumped joiner{clock, starter, &gate};
+    step_until(clock, [&] { return done.load(); });
+    REQUIRE(done.load());
+    CHECK(code == 0);
+    CHECK(cancels_while_held.load() == 1);
+    CHECK(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+TEST_CASE("QHY Camera Driver - StartExposure is refused while a cancelled body stays in the SDK",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "get_single_frame");  // the cancel does not release it
+    ExposureObservedSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    clock.advance(seconds(2));
+    REQUIRE(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
+    const int writes = fake.call_count("set_param");
+
+    std::atomic<bool> done{false};
+    int code = -1;
+    std::thread starter([&] {
+        code = error_code_of([&] { driver->start_exposure(0.05, true); });
+        done = true;
+    });
+    JoinPumped joiner{clock, starter, &gate};
+    const auto waited = step_until(clock, [&] { return done.load(); });
+    REQUIRE(done.load());
+    CHECK(code == AlpacaError::InvalidOperation);
+    CHECK(waited >= milliseconds(2000));  // CaptureSession::kStartTimeout of task-clock time
+    CHECK(fake.call_count("cancel_exposure") >= 1);
+    CHECK(fake.call_count("set_param") == writes);  // no setup write queued behind the held call
+    gate.release = true;
+    REQUIRE(eventually([&] { return !sdk.running->load(); }));
+    driver->start_exposure(0.05, true);
+    CHECK(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
 // Decision 0020 rule 2 (#2259 step 5): a second StartExposure while one exposes is refused; it neither cancels nor
