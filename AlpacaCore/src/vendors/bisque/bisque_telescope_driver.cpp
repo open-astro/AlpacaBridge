@@ -19,6 +19,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
@@ -88,6 +89,26 @@ constexpr double kMaxMoveAxisRateDegPerSec =
 // Default guide rate: 50% of sidereal, in degrees per second.
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealRateArcsecPerSec / 3600.0;
 
+// Bisque's limits and orders for the telescope command gate (#2258). PulseGuide is capped at 30 s (see pulse_guide());
+// MoveAxis moves axes 0 and 1 at any finite rate (the nearest of the nine presets); the guide rate is 0 to 1x sidereal
+// on both axes (open-astro#775). Every family checks the link fault before the parked check (check_link_locked()).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 30000;
+    limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
+    limits.move_axis_axes = 2;
+    limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
+    limits.slew_order = util::ParkedFaultOrder::FaultFirst;
+    limits.guide_rate_ra_min = 0.0;
+    limits.guide_rate_ra_max = kSiderealRateArcsecPerSec / 3600.0;
+    limits.guide_rate_dec_min = 0.0;
+    limits.guide_rate_dec_max = kSiderealRateArcsecPerSec / 3600.0;
+    limits.texts.pulse_direction = "PulseGuide direction or duration is invalid";
+    limits.texts.pulse_duration = "PulseGuide duration must be at most 30000 ms";
+    limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
+    return limits;
+}();
+
 // Find the closest slewspeed index for a given rate in degrees/sec.
 int rate_to_speed_index(double rate_deg_per_sec) {
     double abs_rate = std::abs(rate_deg_per_sec);
@@ -110,11 +131,8 @@ int rate_to_speed_index(double rate_deg_per_sec) {
 namespace detail {
 
 void validate_move_axis_rate(double rate) {
-    // A NaN rate fails the |rate| < 1e-9 stop test and would reach
-    // rate_to_speed_index().
-    if (!std::isfinite(rate)) {
-        throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-    }
+    // A NaN rate fails the |rate| < 1e-9 stop test and would reach rate_to_speed_index().
+    util::check_move_axis_arguments(kCommandLimits, /*axis=*/0, rate);
 }
 
 }  // namespace detail
@@ -488,26 +506,26 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        validate_guide_rate(rate.ra);
-        validate_guide_rate(rate.dec);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_link_locked();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRate"});
         guide_rate_ = rate;
     }
 
     // One axis under one lock: the base default reads the pair through the connection-checking getter first, so an
     // out-of-range write on a disconnected mount answered NotConnected (open-astro#1786).
     void set_guide_rate_right_ascension(double value) override {
-        validate_guide_rate(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_link_locked();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRateRightAscension"});
         guide_rate_.ra = value;
     }
 
     void set_guide_rate_declination(double value) override {
-        validate_guide_rate(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_link_locked();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRateDeclination"});
         guide_rate_.dec = value;
     }
 
@@ -773,22 +791,18 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        if (direction < 0 || direction > 3 || duration < 0) {
-            throw AlpacaException("PulseGuide direction or duration is invalid", AlpacaError::InvalidValue);
+        if (duration < 0) {  // the gate's duration text is the 30 s cap's; a negative one keeps the shared text
+            throw AlpacaException(kCommandLimits.texts.pulse_direction, AlpacaError::InvalidValue);
         }
-        // Cap: DirectGuide is a synchronous MoveTelescope that holds the
+        // Cap (kCommandLimits.pulse_guide_max_ms): DirectGuide is a synchronous MoveTelescope that holds the
         // protocol wrapper (and so the socket) until TheSkyX replies, and
         // AbortSlew cannot interrupt it without interleaving replies on the
         // same socket. Real guiding pulses are milliseconds to a few seconds;
         // 30 s is well above any guide client's longest pulse, and bounds how
         // long an AbortSlew or any other command can wait behind a guide.
-        constexpr int kMaxPulseGuideMs = 30000;
-        if (duration > kMaxPulseGuideMs) {
-            throw AlpacaException("PulseGuide duration must be at most 30000 ms", AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         std::unique_lock<std::mutex> lock(mutex_);
-        check_link_locked();
-        check_not_parked("PulseGuide");
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
         if (duration == 0) {
             return;
         }
@@ -832,7 +846,7 @@ public:
         // MoveTelescope runs at TheSkyX's fixed speed, so its run time only
         // roughly tracks `duration`; never wait less than the configured bound.
         constexpr int kResponseMarginMs = 1000;
-        const int duration_bound_ms = duration + kResponseMarginMs;  // no overflow: duration <= kMaxPulseGuideMs
+        const int duration_bound_ms = duration + kResponseMarginMs;  // no overflow: duration <= pulse_guide_max_ms
         const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms, duration_bound_ms);
         // The slot's start() runs without the driver mutex (a stale body needs
         // it to return). A guide retired meanwhile (AbortSlew, disconnect) is
@@ -909,14 +923,12 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
         // Initiator lock: the gate, the command and the state write happen in the order of the commands on the
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        check_link_locked();
-        check_not_parked("SlewToCoordinates");
-        check_tracking_for_slew(lock, "SlewToCoordinates");
+        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates", &lock});
         // mutex_ was released for the tracking read: a disconnect or a park may have landed meanwhile (#1838).
         check_link_locked();
         check_not_parked("SlewToCoordinates");
@@ -948,12 +960,10 @@ public:
 
     void slew_to_coordinates_async(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
-        check_link_locked();
-        check_not_parked("SlewToCoordinatesAsync");
-        check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
         // See slew_to_coordinates().
         check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
@@ -1061,22 +1071,22 @@ public:
 
     void move_axis(int axis, double rate) override {
         // #627: argument validation precedes the connection check.
-        if (axis < 0 || axis > 1) {
+        if (axis < 0 || axis > 1) {  // the axis in the text, as get_axis_rate_range() words it
             throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
-        detail::validate_move_axis_rate(rate);
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
+        const bool stop = std::abs(rate) < 1e-9;
 
         // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_link_locked();
-            check_not_parked("MoveAxis");
+            util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
         }
 
         auto& protocol = BisqueProtocolWrapper::instance();
 
-        if (std::abs(rate) < 1e-9) {
+        if (stop) {
             // Stop motion.
             protocol.stop_open_loop_motion();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1204,18 +1214,6 @@ public:
     }
 
 private:
-    // One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
-    // disconnected (open-astro#1786). open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
-    static void validate_guide_rate(double deg_per_sec) {
-        if (!std::isfinite(deg_per_sec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
-        constexpr double kMaxGuideRateDegPerSec = kSiderealRateArcsecPerSec / 3600.0;
-        if (deg_per_sec < 0.0 || deg_per_sec > kMaxGuideRateDegPerSec) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
-        }
-    }
-
     void check_connected() const {
         if (!connected_ || link_lost_) {
             throw AlpacaException("Not connected to TheSkyX", AlpacaError::NotConnected);
@@ -1225,11 +1223,29 @@ private:
     // A lost link (NotConnected) or a latched fault (DriverException, Connected stays true, decision 0009 point 1).
     void check_link_locked() const {
         check_connected();
+        check_no_fault_locked();
+    }
+
+    void check_no_fault_locked() const {
         if (position_link_health_.faulted()) {
             throw AlpacaException("Bisque mount communications compromised: " + position_link_health_.fault(),
                                   AlpacaError::DriverException);
         }
     }
+
+    // The command gate's state checks in Bisque's words (#2258): util/telescope_command_gate.h decides the order,
+    // these answer each step with the driver's own texts and reads. `lock` is the held mutex_ a slew's Tracking check
+    // releases for its TheSkyX read; the other families never call that check.
+    struct GateChecks {
+        BisqueTelescopeDriver& driver;
+        const char* who = nullptr;
+        std::unique_lock<std::mutex>* lock = nullptr;
+
+        void check_connected() const { driver.check_connected(); }
+        void check_not_parked(bool /*stop*/) const { driver.check_not_parked(who); }
+        void check_no_fault() const { driver.check_no_fault_locked(); }
+        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
 
     void check_link_now() const {
         std::lock_guard<std::mutex> lock(mutex_);
