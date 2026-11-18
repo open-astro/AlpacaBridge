@@ -143,6 +143,8 @@ jobs:
           import os
           import re
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
+          # Vendors whose build requires libgpiod >= 2.0, which the runner's apt does not ship (iOptron's is optional).
+          NEEDS_GPIOD = {"zwo"}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY"}
@@ -217,6 +219,7 @@ jobs:
                       "options": " ".join("-DALPACACORE_ENABLE_%s=ON" % o
                                           for o in BUILT_BY.get(vendor, [vendor.upper()])),
                       "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
+                      "gpiod": vendor in NEEDS_GPIOD,
                   })
           print("rows=" + json.dumps(rows))
           PY
@@ -250,6 +253,7 @@ jobs:
             build-essential \
             cmake \
             g++ \
+            meson \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -257,6 +261,28 @@ jobs:
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
+
+      - name: Build libgpiod v2 from source (rows whose vendor needs it)
+        # The ZWO build needs libgpiod >= 2.0 and the runner ships 1.6. The pin is read from ci.yml, the one place it
+        # lives, as nightly-build.yml does.
+        if: matrix.row.gpiod
+        run: |
+          set -euo pipefail
+          gpiod_ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          sha="$(sed -n 's/^  LIBGPIOD_SHA256: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          if [ -z "${gpiod_ver}" ] || [ -z "${sha}" ]; then
+            echo "libgpiod pin not found in ci.yml"
+            exit 1
+          fi
+          cp "AlpacaCore/external/libgpiod/libgpiod-${gpiod_ver}.tar.xz" "$RUNNER_TEMP/libgpiod.tar.xz"
+          echo "${sha}  $RUNNER_TEMP/libgpiod.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/libgpiod"
+          tar -xf "$RUNNER_TEMP/libgpiod.tar.xz" -C "$RUNNER_TEMP/libgpiod" --strip-components=1
+          cd "$RUNNER_TEMP/libgpiod"
+          meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+          meson compile -C build
+          sudo meson install -C build --no-rebuild
+          sudo ldconfig
 
       - name: Build the fake server (core + HTTP, the row's vendor only)
         env:
