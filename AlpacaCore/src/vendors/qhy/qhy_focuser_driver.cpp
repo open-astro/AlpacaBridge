@@ -118,9 +118,7 @@ public:
     // and releases the fd, so this reads false without a reconnect. Both
     // reads are lock-free; this stays a FAST-timing getter.
     bool get_connected() const override { return connected_.load() && link_up(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other, matching the sibling

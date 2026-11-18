@@ -412,15 +412,7 @@ public:
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
     // and the destructor serialize behind it for the duration. Deliberate
     // (base class "COST" note); this driver is the worst case of it.
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // The auto-detect factories need the driver's unique id inside the resolver,
     // and the id is assigned only after the driver exists. Call before the first connect.

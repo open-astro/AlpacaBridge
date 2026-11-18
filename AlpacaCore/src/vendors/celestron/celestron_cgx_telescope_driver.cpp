@@ -183,9 +183,8 @@ public:
         return polled_.link_lost() ? "no answer to the state poll" : std::string();
     }
     void set_connected(bool connected) override;
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
+
     std::string action(std::string_view, std::string_view) override;
     std::string command_blind(std::string_view, bool) override;
     bool command_bool(std::string_view, bool) override;
