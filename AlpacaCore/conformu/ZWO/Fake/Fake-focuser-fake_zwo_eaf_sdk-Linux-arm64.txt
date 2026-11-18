@@ -1,0 +1,88 @@
+FAKE REPORT: ConformU against FakeZWOEAFSDK (simulated EAF SDK, in process), not hardware. Not hardware validation.
+10:37:49.464 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 08:09:42          
+10:37:49.464                                              
+10:37:49.464 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+10:37:49.464                                              
+10:37:49.464 Alpaca device: QHY CFW3 (127.0.0.1:11122 Focuser/0)          
+10:37:49.464                                              
+10:37:49.464 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11122, Alpaca device number: 0
+10:37:49.466 CreateDevice                        INFO     Alpaca device created OK
+10:37:49.466 CreateDevice                        INFO     Successfully created driver
+10:37:50.492 CreateDevice                        OK       Found a valid interface version: 4
+10:37:50.492 CreateDevice                        OK       Driver instance created successfully
+10:37:50.492                                              
+10:37:50.492 Connect to device                            
+10:37:50.556 Connected                           OK       Connected to device successfully using Connected = True
+10:37:51.113 Connected                           OK       Disconnected from device successfully using Connected = False
+10:37:51.117 Connect                             OK       Connected to device successfully using Connect()
+10:37:51.117                                              
+10:37:51.118 Common Driver Methods                        
+10:37:51.118 InterfaceVersion                    OK       4
+10:37:51.119 Connected                           OK       True
+10:37:51.122 Description                         OK       ZWO EAF Focuser Driver
+10:37:51.123 DriverInfo                          OK       AlpacaCore ZWO EAF Focuser Driver
+10:37:51.123 DriverVersion                       OK       5.0.2
+10:37:51.124 Name                                OK       ZWO EAFN
+10:37:51.124                                              
+10:37:51.126 SupportedActions                    OK       Found action: SetZero
+10:37:51.130                                              
+10:37:51.130 Action                              INFO     Conform cannot test the Action method
+10:37:51.130                                              
+10:37:51.133 DeviceState                         OK       Received 4 operational state properties.
+10:37:51.133 DeviceState                         OK         IsMoving = False
+10:37:51.133 DeviceState                         OK         Position = 500
+10:37:51.133 DeviceState                         OK         Temperature = 12.5
+10:37:51.133 DeviceState                         OK         TimeStamp = 11/18/2026 5:37:51 PM
+10:37:51.134 DeviceState                         OK       Found all expected operational properties
+10:37:51.134                                              
+10:37:51.134 Properties                                   
+10:37:51.134 Absolute                            OK       True
+10:37:51.135 IsMoving                            OK       False
+10:37:51.136 MaxStep                             OK       60000
+10:37:51.136 MaxIncrement                        OK       1000
+10:37:51.137 Position                            OK       500
+10:37:51.141 StepSize                            OK       Optional member returned a NotImplementedException error.
+10:37:51.142 TempCompAvailable                   OK       False
+10:37:51.143 TempComp Read                       OK       False
+10:37:51.143 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+10:37:51.149 Temperature                         OK       12.5
+10:37:51.149                                              
+10:37:51.149 Methods                                      
+10:37:51.150 Halt                                OK       Focuser halted OK
+10:37:51.153 Move - TempComp False               OK       Absolute move OK
+10:37:51.156                                              
+10:37:51.156 Disconnect from device                       
+10:37:51.157 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+10:37:51.157                                              
+10:37:51.157 Conformance test has finished                
+10:37:51.157                                              
+10:37:51.157 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+10:37:51.157                                     
+10:37:51.157 Timing Summary                               See Help for further information.
+10:37:51.157 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+10:37:51.157 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+10:37:51.157 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+10:37:51.157 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+10:37:51.157                                              
+10:37:51.157 Connect                                      At 10:37:51.115 Connect                  0.001 seconds. ✓ (STANDARD)
+10:37:51.157 InterfaceVersion                             At 10:37:51.118 InterfaceVersion         0.000 seconds. ✓ (FAST)
+10:37:51.157 Connected                                    At 10:37:51.119 Connected                0.001 seconds. ✓ (FAST)
+10:37:51.157 Description                                  At 10:37:51.122 Description              0.002 seconds. ✓ (FAST)
+10:37:51.157 DriverInfo                                   At 10:37:51.123 DriverInfo               0.001 seconds. ✓ (FAST)
+10:37:51.157 DriverVersion                                At 10:37:51.123 DriverVersion            0.000 seconds. ✓ (FAST)
+10:37:51.157 Name                                         At 10:37:51.124 Name                     0.000 seconds. ✓ (FAST)
+10:37:51.157 SupportedActions                             At 10:37:51.126 SupportedActions         0.002 seconds. ✓ (FAST)
+10:37:51.157 DeviceState                                  At 10:37:51.133 DeviceState              0.003 seconds. ✓ (FAST)
+10:37:51.157 Absolute                                     At 10:37:51.134 Absolute                 0.000 seconds. ✓ (FAST)
+10:37:51.157 IsMoving                                     At 10:37:51.135 IsMoving                 0.000 seconds. ✓ (FAST)
+10:37:51.157 MaxStep                                      At 10:37:51.136 MaxStep                  0.001 seconds. ✓ (FAST)
+10:37:51.157 MaxIncrement                                 At 10:37:51.136 MaxIncrement             0.001 seconds. ✓ (FAST)
+10:37:51.157 Position                                     At 10:37:51.137 Position                 0.000 seconds. ✓ (FAST)
+10:37:51.157 TempCompAvailable                            At 10:37:51.142 TempCompAvailable        0.000 seconds. ✓ (FAST)
+10:37:51.157 TempComp Read                                At 10:37:51.143 TempComp Read            0.000 seconds. ✓ (FAST)
+10:37:51.157 Temperature                                  At 10:37:51.149 Temperature              0.001 seconds. ✓ (FAST)
+10:37:51.157 Halt                                         At 10:37:51.150 Halt                     0.000 seconds. ✓ (STANDARD)
+10:37:51.157 Move to 1500                                 At 10:37:51.151 Move to 1500             0.000 seconds. ✓ (STANDARD)
+10:37:51.157 Disconnect                                   At 10:37:51.156 Disconnect               0.000 seconds. ✓ (STANDARD)
+10:37:51.157                                              
+10:37:51.157 Congratulations, all members returned within their target response times!!          
