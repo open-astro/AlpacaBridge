@@ -905,6 +905,7 @@ public:
     }
 
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override) {
+        run_link_loss_hook(detail::LinkLossHookPoint::BeforeExchange);    // a test lands a sibling's exchange here
         std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);  // no other device's turn inside a Sequence
         std::lock_guard<std::mutex> lock(mutex_);
         require_live_link_locked();

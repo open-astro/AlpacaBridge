@@ -726,8 +726,9 @@ enum class LinkLossHookPoint : std::uint8_t {
     AliveBeforeRecord,      ///< link_alive(): node found gone, loss not yet recorded; no lock held
     AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
     DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
+    BeforeExchange,         ///< send_command(): before this exchange takes the wire; only a caller's Sequence held
 };
-/// Test hook: lets a test land a Disconnect or a reconnect at the points above.
+/// Test hook: lets a test land a Disconnect, a reconnect or a sibling's exchange at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
 /// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.

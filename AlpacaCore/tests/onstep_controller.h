@@ -63,6 +63,7 @@ struct OnStepXController {
     std::string tcf_reply = "1";             // :F<n>c0#/c1#; under mutex
     std::string ge_code = "00#";             // :GE#; under mutex
     std::string set_park_reply = "1";        // :hQ#; under mutex
+    std::string unpark_reply = "1";          // :hR#; under mutex
     std::atomic<int> focuser_latency_ms{0};  // added to every focuser reply
 
     int count(const std::string& prefix) {
@@ -127,6 +128,8 @@ struct OnStepXController {
                 out = ge_code;
             } else if (chunk.rfind(":hQ", 0) == 0) {
                 out = set_park_reply;
+            } else if (chunk.rfind(":hR", 0) == 0) {
+                out = unpark_reply;
             } else {
                 out = mount_reply(chunk);
             }

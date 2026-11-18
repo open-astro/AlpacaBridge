@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -479,6 +480,140 @@ TEST_CASE("OnStep shared link - a focuser poll never lands between a command and
         }
     }
     CHECK(pairs == kSetParks);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+namespace {
+
+// Runs `action` `tries` times on this thread. Before each exchange it makes, the BeforeExchange hook lets another
+// thread ask the shared link for the product name (:GVP#) and waits up to 50 ms for it. A refused command and its
+// :GE# then stay together only if the command holds the link's Sequence: without it, the :GVP# lands between the
+// two every time. Returns the command log for the caller to check the pairs.
+template <typename Action>
+std::vector<std::string> run_with_a_sibling_at_every_exchange(Controller& controller, int tries, Action&& action) {
+    const auto link = onstep::detail::registered_link_for_testing(controller.info());
+    REQUIRE(link);
+    std::mutex m;
+    std::condition_variable cv;
+    bool go = false;
+    bool done = false;
+    bool stop = false;
+    std::atomic<std::thread::id> mover{std::this_thread::get_id()};
+    std::thread sibling([&] {
+        std::unique_lock<std::mutex> lock(m);
+        for (;;) {
+            cv.wait(lock, [&] { return go || stop; });
+            if (stop) return;
+            go = false;
+            lock.unlock();
+            (void)link->get_product_name();  // waits for the wire, and for a Sequence another device holds
+            lock.lock();
+            done = true;
+            cv.notify_all();
+        }
+    });
+    onstep::detail::set_link_loss_hook([&](onstep::detail::LinkLossHookPoint point) {
+        if (point != onstep::detail::LinkLossHookPoint::BeforeExchange || std::this_thread::get_id() != mover.load()) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(m);
+        done = false;
+        go = true;
+        cv.notify_all();
+        cv.wait_for(lock, std::chrono::milliseconds(50), [&] { return done; });  // done only when nothing held it
+    });
+    for (int i = 0; i < tries; ++i) {
+        action();
+    }
+    onstep::detail::set_link_loss_hook({});
+    mover.store(std::thread::id());
+    {
+        std::lock_guard<std::mutex> lock(m);
+        stop = true;
+    }
+    cv.notify_all();
+    sibling.join();
+    return controller.state->commands();
+}
+
+// Checks that every :GE# in `log` follows a command starting with `prefix`, and counts them.
+int ge_pairs_after(const std::vector<std::string>& log, const std::string& prefix) {
+    int pairs = 0;
+    for (std::size_t i = 1; i < log.size(); ++i) {
+        if (log[i] == ":GE#") {
+            ++pairs;
+            CAPTURE(i);
+            CHECK(log[i - 1].rfind(prefix, 0) == 0);  // never another exchange between the command and its :GE#
+        }
+    }
+    return pairs;
+}
+
+}  // namespace
+
+// A refused telescope Unpark (:hR#) and its :GE# stay together on the shared link (#2223 review).
+// Falsified by: onstep_telescope_driver.cpp unpark() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between an Unpark and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->unpark_reply = "0#";  // refused, with the reason read by :GE# right after
+        controller.state->ge_code = "05#";
+    }
+    constexpr int kUnparks = 10;
+    int refused = 0;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kUnparks, [&] {
+        try {
+            telescope->unpark();
+        } catch (const alpacacore::AlpacaException& e) {
+            if (e.error_code() == AlpacaError::InvalidOperation) ++refused;
+        }
+    });
+    CHECK(refused == kUnparks);
+    CHECK(ge_pairs_after(log, ":hR#") == kUnparks);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+// The focuser side: a refused Move (:F1s answered 0) and its :GE# stay together (#2223 review).
+// Falsified by: onstep_focuser_driver.cpp move() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between a focuser Move and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->goto_reply = "0#";  // a '#' ends the bare digit at once
+        controller.state->ge_code = "09#";
+    }
+    constexpr int kMoves = 10;
+    int refused = 0;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kMoves, [&] {
+        try {
+            focuser->move(3000);
+        } catch (const alpacacore::AlpacaException& e) {
+            if (e.error_code() == AlpacaError::InvalidOperation) ++refused;
+        }
+    });
+    CHECK(refused == kMoves);
+    CHECK(ge_pairs_after(log, ":F1s") == kMoves);
     telescope->set_connected(false);
     focuser->set_connected(false);
 }
