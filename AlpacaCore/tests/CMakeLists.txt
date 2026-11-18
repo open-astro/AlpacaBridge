@@ -230,6 +230,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_focuser.cpp)
     # The OnStepX rotator on the same shared link, with its [stress] cases (issue #2221).
     list(APPEND TEST_SOURCES test_onstep_rotator.cpp)
+    # The OnStepX auxiliary features as a Switch on the same link, with its [stress] cases (issue #2222).
+    list(APPEND TEST_SOURCES test_onstep_switch.cpp)
 endif()
 if(TARGET alpacacore_http_client)
     # The util::HttpClient libcurl implementation against a loopback server, and its

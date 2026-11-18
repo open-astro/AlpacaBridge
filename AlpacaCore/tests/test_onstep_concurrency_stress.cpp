@@ -32,6 +32,7 @@
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <unistd.h>
 
@@ -480,6 +481,17 @@ void rotator_operate(alpacacore::test::StressCallGuard& guard, alpacacore::Rotat
     guard([&] { rotator.sync(45.0); });
 }
 
+void switch_operate(alpacacore::test::StressCallGuard& guard, alpacacore::SwitchDriver& aux) {
+    guard([&] { static_cast<void>(aux.get_max_switch()); });
+    guard([&] { static_cast<void>(aux.get_switch_value(2)); });
+    guard([&] { static_cast<void>(aux.get_switch(0)); });
+    guard([&] { static_cast<void>(aux.get_switch_name(1)); });
+    guard([&] { static_cast<void>(aux.get_device_state()); });
+    guard([&] { aux.set_switch_value(2, 64.0); });
+    guard([&] { aux.set_switch(0, true); });
+    guard([&] { aux.set_switch(0, false); });
+}
+
 }  // namespace
 
 TEST_CASE("OnStep focuser - concurrent connect/disconnect/operate stress", "[onstep][focuser][stress]") {
@@ -583,6 +595,58 @@ TEST_CASE("OnStep rotator - a racing disconnect is never dropped", "[onstep][rot
     alpacacore::test::TempSyncOffsetDir dir;
     alpacacore::test::onstep_controller::Controller controller;
     auto driver = controller.rotator();
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+}
+
+// The OnStepX auxiliary features as a Switch (#2222) on the same shared link: its own lifecycle storm, the same storm
+// while the telescope serves on the link, and a racing disconnect (switch_operate() is with focuser_operate() above).
+
+TEST_CASE("OnStep switch - concurrent connect/disconnect/operate stress", "[onstep][switch][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto driver = controller.aux_switch();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](alpacacore::AlpacaDriver& d) {
+        switch_operate(guard, static_cast<alpacacore::SwitchDriver&>(d));
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+// The switch's lifecycle storm while the telescope polls and serves on the same link.
+TEST_CASE("OnStep switch - the switch's lifecycle storm while the telescope uses the same link",
+          "[onstep][switch][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto telescope = controller.telescope();
+    auto aux = controller.aux_switch();
+    REQUIRE(alpacacore::test::settle_connected(*telescope, true));
+    REQUIRE(alpacacore::test::settle_connected(*aux, true));
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::StressCallGuard telescope_guard{std::initializer_list<int>{}};
+    alpacacore::test::run_lifecycle_stress(*aux, [&](alpacacore::AlpacaDriver& d) {
+        switch_operate(guard, static_cast<alpacacore::SwitchDriver&>(d));
+        telescope_guard([&] { static_cast<void>(telescope->get_right_ascension()); });
+        telescope_guard([&] { static_cast<void>(telescope->get_tracking()); });
+    });
+    CHECK(alpacacore::test::settle_connected(*aux, false));
+    CHECK(telescope->get_connected());
+    CHECK(controller.server.accepted_connections() == 1);
+    CHECK(alpacacore::test::settle_connected(*telescope, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    INFO(telescope_guard.report());
+    CHECK(telescope_guard.unexpected_count() == 0);
+    CHECK(telescope_guard.total_calls() > 0);
+}
+
+TEST_CASE("OnStep switch - a racing disconnect is never dropped", "[onstep][switch][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto driver = controller.aux_switch();
     CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));

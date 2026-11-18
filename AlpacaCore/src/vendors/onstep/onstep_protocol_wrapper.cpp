@@ -413,7 +413,17 @@ std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
     return *hook;
 }
 
+// Set while a test hook is installed, so the drivers' connection checks, which run on every member, skip the hook's
+// mutex in production.
+std::atomic<bool>& link_loss_hook_set() {
+    static std::atomic<bool> set{false};
+    return set;
+}
+
 void run_link_loss_hook(detail::LinkLossHookPoint point) {
+    if (!link_loss_hook_set().load(std::memory_order_acquire)) {
+        return;
+    }
     std::function<void(detail::LinkLossHookPoint)> hook;
     {
         std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
@@ -460,6 +470,15 @@ char focuser_digit(int focuser) {
                               AlpacaError::InvalidValue);
     }
     return static_cast<char>('0' + focuser);
+}
+
+// The slot of an auxiliary feature command, 1-8 (OnStepX Features.command.cpp: :GXY1# to :GXY8#).
+std::string aux_slot_digit(int slot) {
+    if (slot < 1 || slot > 8) {
+        throw AlpacaException("Invalid OnStep auxiliary feature slot " + std::to_string(slot) + " (1-8)",
+                              AlpacaError::InvalidValue);
+    }
+    return std::string(1, static_cast<char>('0' + slot));
 }
 
 std::string focuser_command(int focuser, const std::string& body) {
@@ -1449,6 +1468,45 @@ public:
 
     void rotator_halt() { send_command_blind(":rQ#"); }
 
+    // ── Auxiliary features (OnStepX Features.command.cpp, af1d26bf; #2222) ──
+
+    std::optional<std::string> aux_feature_slots() {
+        // numericReply=false: eight '0'/'1', '#'-terminated. A firmware without the features answers a bare "0".
+        std::string reply = send_command(":GXY0#", false, kSetAckTimeoutMs);
+        if (reply.empty() || reply.size() > 8 || reply.find_first_not_of("01") != std::string::npos) {
+            return std::nullopt;
+        }
+        return reply;
+    }
+
+    std::optional<AuxFeature> aux_feature(int slot) {
+        // "name,purpose#", the name cut to 10 characters; a slot that is off answers CE_0, the bare "0". The name may
+        // hold a ',', so the purpose is after the last one.
+        const std::string reply = send_command(":GXY" + aux_slot_digit(slot) + "#", false, kSetAckTimeoutMs);
+        const auto comma = reply.rfind(',');
+        if (comma == std::string::npos) {
+            return std::nullopt;
+        }
+        const auto purpose = parse_steps(reply.substr(comma + 1));
+        if (!purpose || *purpose < 0 || *purpose > 99) {
+            return std::nullopt;
+        }
+        return AuxFeature{reply.substr(0, comma), static_cast<int>(*purpose)};
+    }
+
+    std::optional<long> aux_feature_value(int slot) {
+        // A switch or analog output: "value", a dew heater: "enabled,zero,span,deltaT", each with ";volts,amps,flags"
+        // appended when power monitoring is built in. The first field is the value.
+        const std::string reply = send_command(":GXX" + aux_slot_digit(slot) + "#", true, kSetAckTimeoutMs);
+        return parse_steps(reply.substr(0, reply.find_first_of(",;")));
+    }
+
+    bool set_aux_feature_value(int slot, long value) {
+        const std::string reply =
+            send_command(":SXX" + aux_slot_digit(slot) + ",V" + std::to_string(value) + "#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
 private:
     static std::string normalize_command(const std::string& command) {
         std::string full = command;
@@ -2008,6 +2066,16 @@ bool OnStepProtocolWrapper::rotator_goto(double degrees) { return pimpl_->rotato
 
 void OnStepProtocolWrapper::rotator_halt() { pimpl_->rotator_halt(); }
 
+std::optional<std::string> OnStepProtocolWrapper::aux_feature_slots() { return pimpl_->aux_feature_slots(); }
+
+std::optional<AuxFeature> OnStepProtocolWrapper::aux_feature(int slot) { return pimpl_->aux_feature(slot); }
+
+std::optional<long> OnStepProtocolWrapper::aux_feature_value(int slot) { return pimpl_->aux_feature_value(slot); }
+
+bool OnStepProtocolWrapper::set_aux_feature_value(int slot, long value) {
+    return pimpl_->set_aux_feature_value(slot, value);
+}
+
 bool OnStepProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
 
 void OnStepProtocolWrapper::disconnect() { pimpl_->disconnect(); }
@@ -2152,8 +2220,11 @@ void OnStepProtocolWrapper::flush_input() { pimpl_->flush_input(); }
 namespace detail {
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
     std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+    link_loss_hook_set().store(static_cast<bool>(hook), std::memory_order_release);
     link_loss_hook() = std::move(hook);
 }
+
+void run_connection_check_hook() { run_link_loss_hook(LinkLossHookPoint::AfterConnectionCheck); }
 
 std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info) {
     std::lock_guard<std::mutex> lock(link_registry_mutex());

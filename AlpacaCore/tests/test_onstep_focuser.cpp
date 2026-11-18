@@ -30,12 +30,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -374,6 +376,28 @@ TEST_CASE("OnStep Focuser Driver - only addressed focuser commands are sent", "[
         CHECK(c.rfind(":FA", 0) != 0);
     }
     CHECK(focuser_commands >= 8);
+}
+
+// A member whose connection check passed just before a Disconnect answers NotConnected, never 0 or
+// PropertyNotImplemented from the connect-time values the Disconnect cleared (the #2387 TSan finding, sibling of the
+// switch). Falsified by: onstep_focuser_driver.cpp require_connect_state_locked() never throwing (MaxStep 0).
+TEST_CASE("OnStep Focuser Driver - a member racing a Disconnect answers NotConnected", "[onstep][focuser][unit]") {
+    using alpacacore::test::onstep_controller::code_with_disconnect_after_check;
+    Controller controller;
+    auto driver = controller.focuser();
+    const std::vector<std::pair<const char*, std::function<void()>>> members{
+        {"MaxStep", [&] { (void)driver->get_max_step(); }},
+        {"StepSize", [&] { (void)driver->get_step_size(); }},
+        {"TempCompAvailable", [&] { (void)driver->get_temp_comp_available(); }},
+        {"Temperature", [&] { (void)driver->get_temperature(); }},
+    };
+    for (const auto& [name, member] : members) {
+        CAPTURE(name);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(code_with_disconnect_after_check(*driver, member) == AlpacaError::NotConnected);
+        CHECK_FALSE(driver->get_connected());
+    }
 }
 
 // ── The shared link (#2223) ──────────────────────────────────────────────────────────────────────────────────────

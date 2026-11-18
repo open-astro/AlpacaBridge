@@ -176,6 +176,14 @@ struct FocuserStatus {
 /// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
 /// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
 /// written only while the rotator is stopped.
+/// One OnStepX auxiliary feature slot from :GXY<n># (OnStepX Features.command.cpp, af1d26bf): its name (at most 10
+/// characters) and its purpose code (Constants.h: 1 switch, 2 analog output, 3 dew heater, 4 intervalometer, 6 hidden
+/// switch; :GXY reports a momentary switch, 5, and a cover switch, 7, as 1).
+struct AuxFeature {
+    std::string name;
+    int purpose = 0;
+};
+
 struct RotatorStatus {
     bool moving = false;
     bool derotating = false;
@@ -744,6 +752,20 @@ public:
     /// :rQ#: stop. No reply (sent blind).
     void rotator_halt();
 
+    // ── Auxiliary features (OnStepX, #2222), slots 1-8. Replies from OnStepX Features.command.cpp at af1d26bf.
+
+    /// :GXY0#: one '0'/'1' per slot, slot 1 first ("11010000#"). std::nullopt for anything else (the
+    /// unknown-command "0" of a firmware without the features is read as one absent slot, not as nullopt).
+    std::optional<std::string> aux_feature_slots();
+    /// :GXY<n>#: "name,purpose#". std::nullopt for anything else (a slot that is off answers the bare "0").
+    std::optional<AuxFeature> aux_feature(int slot);
+    /// :GXX<n>#: the slot's value, the first field of the reply ('#'-terminated; a ',' or ';' ends it, so a dew
+    /// heater's zero, span and delta-T and any power telemetry are not read). std::nullopt when it is not a whole
+    /// number.
+    std::optional<long> aux_feature_value(int slot);
+    /// :SXX<n>,V<v>#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_aux_feature_value(int slot, long value);
+
     OnStepProtocolWrapper(const OnStepProtocolWrapper&) = delete;
     OnStepProtocolWrapper& operator=(const OnStepProtocolWrapper&) = delete;
 
@@ -759,10 +781,15 @@ enum class LinkLossHookPoint : std::uint8_t {
     AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
     DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
     BeforeExchange,         ///< send_command(): before this exchange takes the wire; only a caller's Sequence held
+    AfterConnectionCheck,   ///< a focuser, rotator or switch member passed its connection check; no lock held
 };
 /// Test hook: lets a test land a Disconnect, a reconnect or a sibling's exchange at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+/// Runs the hook at AfterConnectionCheck: the OnStep focuser, rotator and switch call it at the end of their
+/// connection check, so a test can land a Disconnect between that check and the member's read of the connect-time
+/// state. Does nothing (and takes no lock) while no hook is set.
+void run_connection_check_hook();
 /// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.
 std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info);
 }  // namespace detail

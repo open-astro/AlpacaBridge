@@ -105,7 +105,7 @@ const OFFERED = {
     observingconditions: ['weewx'],
     rotator: ['ifr', 'onstep', 'wandererastro', 'zwo'],
     safetymonitor: [],
-    switch: ['gemini', 'ioptron', 'playerone', 'touptek', 'wandererastro', 'zwo'],
+    switch: ['gemini', 'ioptron', 'onstep', 'playerone', 'touptek', 'wandererastro', 'zwo'],
     telescope: ['bisque', 'celestron', 'ioptron', 'onstep', 'skywatcher', 'synscan', 'zwo'],
 };
 

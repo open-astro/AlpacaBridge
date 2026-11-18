@@ -13,6 +13,7 @@ synscan	telescope	fake_mount_server.h	pending	6	-	needs a SynScan simulator: Fak
 onstep	telescope	fake_mount_server.h	pending	6	-	needs an OnStep simulator: the row serves FakeMountServer with an idle reply set (:GU# "nNp#"), so the mount never tracks, slews or parks
 onstep	focuser	fake_mount_server.h	run	3	AlpacaCore/conformu/OnStep/Fake/Fake-focuser-fake_mount_server-Linux-arm64.txt	-
 onstep	rotator	fake_mount_server.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
+onstep	switch	fake_mount_server.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 ioptron	telescope	fake_ioptron_mount.h	pending	6	-	needs an iOptron simulator: FakeIoptronMount is a scripted responder that lands each GOTO at its target and acks everything else, and :GLS never reports parked
 ioptron	focuser	fake_ioptron_ieaf.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ieaf-Linux-arm64.txt	-
 ifr	focuser	fake_ioptron_ifr.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ifr-Linux-arm64.txt	-

@@ -12,7 +12,7 @@
 
 #pragma once
 
-// OnStep telescope, focuser and rotator catalog field declarations, shared by onstep_schema.cpp
+// OnStep telescope, focuser, rotator and switch catalog field declarations, shared by onstep_schema.cpp
 // (no vendor header) and onstep_catalog.cpp (the factory, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -112,6 +112,10 @@ inline const std::vector<FieldRef>& onstep_rotator_fields() {
         kOnStepHost.ref(),           kOnStepTcpPort.ref(),    kOnStepResponseTimeoutMs.ref()};
     return fields;
 }
+
+// The switch joins the telescope's link (#2222): the same connection fields, nothing else (its switches are the
+// controller's auxiliary features, read at connect).
+inline const std::vector<FieldRef>& onstep_switch_fields() { return onstep_rotator_fields(); }
 
 }  // namespace alpacacore::catalog
 

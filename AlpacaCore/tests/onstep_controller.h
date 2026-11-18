@@ -12,12 +12,15 @@
 
 #pragma once
 
-// A scripted OnStepX controller (the telescope, its focusers and its rotator) on a loopback FakeMountServer, the
-// Network transport, for the focuser, rotator and shared-link cases (#2223, #2221): test_onstep_focuser.cpp,
-// test_onstep_rotator.cpp and the [stress] registrations in test_onstep_concurrency_stress.cpp. Replies follow OnStepX
-// Focuser.command.cpp and Rotator.command.cpp at af1d26bf.
+// A scripted OnStepX controller (the telescope, its focusers, its rotator and its auxiliary features) on a loopback
+// FakeMountServer, the Network transport, for the focuser, rotator, switch and shared-link cases (#2223, #2221,
+// #2222): test_onstep_focuser.cpp, test_onstep_rotator.cpp, test_onstep_switch.cpp and the [stress] registrations in
+// test_onstep_concurrency_stress.cpp. Replies follow OnStepX Focuser.command.cpp, Rotator.command.cpp and
+// Features.command.cpp at af1d26bf.
 
 #ifndef _WIN32
+
+#include <alpacacore/util/error_handling.h>
 
 #include "catch2_compat.h"
 #include "onstep_controller_model.h"
@@ -39,6 +42,7 @@ struct Controller {
     }
     std::unique_ptr<alpacacore::TelescopeDriver> telescope() { return onstep::create_onstep_telescope(0, info()); }
     std::unique_ptr<alpacacore::RotatorDriver> rotator() { return onstep::create_onstep_rotator(0, info()); }
+    std::unique_ptr<alpacacore::SwitchDriver> aux_switch() { return onstep::create_onstep_switch(0, info()); }
 };
 
 // Runs `action` `tries` times on this thread. Before each exchange it makes, the BeforeExchange hook lets another
@@ -90,6 +94,31 @@ std::vector<std::string> run_with_a_sibling_at_every_exchange(Controller& contro
     cv.notify_all();
     sibling.join();
     return controller.state->commands();
+}
+
+// Runs `member` on this thread with a Disconnect of `driver` landed right after the member's connection check passed
+// (the AfterConnectionCheck hook, once, on this thread only): the window a TSan storm found (#2222). Returns the
+// error code the member threw, or -1 when it returned.
+template <typename Member>
+int code_with_disconnect_after_check(alpacacore::AlpacaDriver& driver, Member&& member) {
+    const auto me = std::this_thread::get_id();
+    std::atomic<bool> fired{false};
+    onstep::detail::set_link_loss_hook([&](onstep::detail::LinkLossHookPoint point) {
+        if (point != onstep::detail::LinkLossHookPoint::AfterConnectionCheck || std::this_thread::get_id() != me ||
+            fired.exchange(true)) {
+            return;
+        }
+        driver.set_connected(false);
+    });
+    int code = -1;
+    try {
+        member();
+    } catch (const alpacacore::AlpacaException& e) {
+        code = e.error_code();
+    }
+    onstep::detail::set_link_loss_hook({});
+    CHECK(fired.load());
+    return code;
 }
 
 // Checks that every :GE# in `log` follows a command starting with `prefix`, and counts them.
