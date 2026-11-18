@@ -173,9 +173,9 @@ public:
 
     /// start() for a reserved start: consumes `reservation` once Exposing is published and releases it on any
     /// refusal or throw. A reservation a disconnect_and_join() dropped is refused with NotConnected, and the body
-    /// never runs. Returns true when an AbortExposure arrived while the start was reserved (record_abort()): the
-    /// driver then stops the exposure it just started, the same way its AbortExposure stops a running one. An abort
-    /// recorded for a start that is refused is cleared with the reservation.
+    /// never runs. Returns true when an AbortExposure arrived while the start was reserved (record_abort()): that
+    /// abort is applied at once, so the exposure ends Idle with no frame and the body never runs; the driver has no
+    /// SDK exposure to stop. An abort recorded for a start that is refused is cleared with the reservation.
     [[nodiscard]] bool start(CaptureReservation&& reservation, double duration_seconds, Body body,
                              std::optional<std::chrono::nanoseconds> watchdog_margin = std::nullopt) {
         CaptureReservation held = std::move(reservation);
@@ -266,6 +266,17 @@ private:
         if (reservation != 0) {
             reserved_ = 0;
             aborted = std::exchange(abort_pending_, false);
+        }
+        if (aborted) {
+            // Rule 9: the abort recorded during the reservation applies the moment Exposing would be published, so
+            // the exposure is published and aborted in one step and no body runs. Running the body and leaving the
+            // abort to the driver raced it: a body that reached its download first served the aborted frame (#2337).
+            state_ = State::Idle;
+            image_.reset();
+            failure_.reset();
+            owner_ = 0;
+            cv_.notify_all();
+            return true;
         }
         const Saved saved{state_, image_, failure_};
         const std::uint64_t token = ++last_token_;
