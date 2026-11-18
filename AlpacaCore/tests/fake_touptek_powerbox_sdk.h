@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted StellaVita power box: in-memory port values, no GPIO chip. Shared by the
@@ -65,7 +67,7 @@ public:
     bool fail_close{false};
 
     void open() override {
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         ++open_calls_;
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);

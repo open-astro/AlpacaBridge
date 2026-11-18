@@ -26,6 +26,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted ZWO EAF SDK: one focuser (id 3), shared by the focuser unit tests, the
@@ -336,7 +338,7 @@ private:
         InFlight(FakeZWOEAFSDK& fake, std::chrono::milliseconds delay, std::atomic<bool>& entered) : fake_(fake) {
             ++fake_.busy;
             entered = true;
-            if (delay.count() > 0) std::this_thread::sleep_for(delay);
+            alpacacore::test::connect_hold(delay);  // connect_hold_gate.h
         }
         ~InFlight() { --fake_.busy; }
         InFlight(const InFlight&) = delete;
