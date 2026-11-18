@@ -26,6 +26,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted ZWO EFW SDK: one wheel (id 5, 7 slots), shared by the filter wheel unit
@@ -212,7 +214,7 @@ private:
     // The library under the table: EFWOpen, EFWClose and the per-device calls on the raw units.
     void raw_open(int wheel_id) {
         ++open_entered;
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) throw AlpacaException("EFWOpen: EFW_ERROR_REMOVED", AlpacaError::NotConnected);
         if (no_wheels || (wheel_id != id && wheel_id != second_id)) {

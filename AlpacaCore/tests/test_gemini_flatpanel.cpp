@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
 #include "fake_task_clock.h"
@@ -879,14 +880,21 @@ TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without 
 TEST_CASE("Gemini Flat Panel Driver - a Disconnect during a connect returns at once (#1757)",
           "[gemini][flatpanel][unit][issue1757]") {
     alpacacore::test::FakeGeminiFlatPanel panel;
-    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));  // the handshake read timeout is 2 s
+    // The held handshake reply ends at gate.release(), not after a fixed time: a timed hold could end in a
+    // scheduler pause before disconnect() ran (connect_hold_gate.h). The handshake read timeout is 2 s.
+    alpacacore::test::ConnectHoldGate gate;
+    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path());
     driver->connect();
     REQUIRE(driver->get_connecting());
+    REQUIRE(gate.wait_entered(std::chrono::seconds(10)));  // inside the held handshake, past every cancel point
     const auto t0 = std::chrono::steady_clock::now();
     driver->disconnect();
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
-    CHECK(driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = driver->get_connecting();
+    gate.release();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
