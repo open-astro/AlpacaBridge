@@ -54,7 +54,8 @@ Config (`remotealpaca_fields.h`): `upstreamHost` (a name or an IP address, no sc
 - **Link (decision 0009).** A poll with no usable reply is one failed exchange; three in a row latch the fault
   (`util::PolledLinkHealth`: `Connected` stays true, the frame is refused with `DriverException`, the next good poll or
   `Refresh` clears it), and a fault standing past `max(util::kLinkStalenessBound, 3 x poll period)` is a lost link. A
-  refused connection, on the poll, a command or the Connect, is a lost link at once. Lost: `Connected` false, members
+  refused connection on the poll or a command is a lost link at once; on the Connect it fails the Connect, and the link
+  was never up. Lost: `Connected` false, members
   `NotConnected`, `DeviceState` empty, the poll ends, the frame is dropped; `get_link_fault()` keeps the reason until
   the next Connect or Disconnect; only the client's Connect relinks. No `LinkLostStamp` (no #521 consumer).
 - **Commands.** `Refresh` (forwarded, then a new frame measured) and an `AveragePeriod` write (forwarded, then written

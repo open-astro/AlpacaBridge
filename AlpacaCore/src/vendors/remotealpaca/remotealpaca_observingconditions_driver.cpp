@@ -141,7 +141,6 @@ struct Frame {
     Answer<double> average_period;
 };
 
-// A double in its shortest round-trip form, for a form body.
 // Decision 0024 rules 1 and 2: the brand, then the upstream's Name as the model, without its " (...)" qualifiers and
 // cut at its first comma, so no '(' or ',' reaches Name. An empty result keeps the default Name.
 constexpr const char* kBrand = "Remote Alpaca";
@@ -157,6 +156,7 @@ std::string name_from_upstream(const std::string& upstream_name) {
     return util::branded_name(kBrand, model);
 }
 
+// A double in its shortest round-trip form, for a form body.
 std::string number_text(double value) {
     std::array<char, 64> buffer{};
     const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
