@@ -972,6 +972,45 @@ TEST_CASE("SkyWatcher async - a slew operation that fails or is refused leaves P
     driver->set_connected(false);
 }
 
+// #2263: a one-axis stop-wait is not lost to a command on the other axis. Tracking=false waits for a ramping
+// RA axis with the locks released; a MoveAxis on Dec in that window used to bump the driver-wide counter and
+// the setter threw "Tracking change superseded by a concurrent motion command" with tracking still on.
+TEST_CASE("SkyWatcher async - a Dec MoveAxis during the Tracking=false RA stop-wait does not supersede it (#2263)",
+          "[skywatcher][async][motion-owner]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+    mount.set_stop_ramp_ms(800);
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread off([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    // The setter is parked in its RA stop-wait; Dec is idle, so the MoveAxis does not wait.
+    const bool parked = clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous);
+    driver->move_axis(1, 1.0);
+    const bool settled = run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(10000));
+    off.join();
+    REQUIRE(parked);
+    REQUIRE(settled);
+    CHECK_FALSE(threw.load());
+    CHECK_FALSE(driver->get_tracking());
+    CHECK(mount.axis_running(2));  // the Dec jog runs on
+    mount.set_stop_ramp_ms(0);
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
 // #1706: the pulse's dispatch stop-waits a ramping Dec axis with mutex_ released. An RA MoveAxis
 // landing in that window bumped the shared motion_generation_, so the pulse threw "Motion
 // superseded before dispatch" and never started: the correction was dropped.
