@@ -243,6 +243,35 @@ TEST_CASE("ZWO Mount Telescope Driver - Telescope Properties", "[zwo][telescope]
     require_alpaca_error([&]() { driver->set_slew_settle_time(1); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// #2258: with two bad arguments the command gate names the direction before the duration. Falsified by:
+// util::check_pulse_guide_arguments checking the duration first, or a ZWO pulse_direction/pulse_duration text change.
+TEST_CASE("ZWO Mount Telescope Driver - PulseGuide with a bad direction and duration names the direction",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->pulse_guide(5, -1); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("PulseGuide direction must be 0..3") != std::string::npos);
+    CHECK(text.find("duration") == std::string::npos);
+}
+
+// #2258: with a negative RA and a NaN Dec the gate checks RA in full first, so the answer is the range text.
+// Falsified by: set_guide_rate() checking Dec before RA, or checking both values for finiteness before either range.
+TEST_CASE("ZWO Mount Telescope Driver - GuideRate with a negative RA and a NaN Dec names the RA range",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->set_guide_rate({-1.0, nan}); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("GuideRate must not be negative") != std::string::npos);
+    CHECK(text.find("finite") == std::string::npos);
+}
+
 TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
