@@ -28,22 +28,39 @@ name: ConformU fake Sky-Watcher
 on:
   pull_request:
     paths:
-      # The Sky-Watcher driver, its wrapper and its catalog descriptor.
+      # The drivers of the run rows (the `runs` job picks the rows a PR's
+      # files reach), their wrappers and catalog descriptors.
       - "AlpacaCore/src/vendors/skywatcher/**"
       - "AlpacaCore/include/alpacacore/vendor/skywatcher/**"
-      # The fake mount, its serial board, clocks and the ConformU factory
-      # that fake_conformu_server includes.
+      - "AlpacaCore/src/vendors/zwo/**"
+      - "AlpacaCore/include/alpacacore/vendor/zwo/**"
+      - "AlpacaCore/src/vendors/onstep/**"
+      - "AlpacaCore/include/alpacacore/vendor/onstep/**"
+      - "AlpacaCore/src/vendors/ioptron/**"
+      - "AlpacaCore/include/alpacacore/vendor/ioptron/**"
+      - "AlpacaCore/src/vendors/qhy/**"
+      - "AlpacaCore/include/alpacacore/vendor/qhy/**"
+      # The fakes, clocks and ConformU factories that fake_conformu_server
+      # includes.
       - "AlpacaCore/tests/fake_skywatcher_*.h"
       - "AlpacaCore/tests/skywatcher_fake_clock.h"
       - "AlpacaCore/tests/conformu_skywatcher_factory.h"
+      - "AlpacaCore/tests/conformu_focuser_factories.h"
+      - "AlpacaCore/tests/fake_zwo_eaf_sdk.h"
+      - "AlpacaCore/tests/fake_mount_server.h"
+      - "AlpacaCore/tests/onstep_controller_model.h"
+      - "AlpacaCore/tests/fake_ioptron_ieaf.h"
+      - "AlpacaCore/tests/fake_ioptron_ifr.h"
+      - "AlpacaCore/tests/fake_qhy_qfocuser.h"
       - "AlpacaCore/tests/fake_pty_write.h"
       - "AlpacaCore/tests/fake_task_clock.h"
       # The test-only server target and the CMake that builds it.
       - "AlpacaHTTP/tests/fake_conformu_server.cpp"
       - "AlpacaHTTP/CMakeLists.txt"
       - "AlpacaCore/CMakeLists.txt"
-      # The telescope device interface and the core code behind it.
+      # The device interfaces of the run rows and the core code behind them.
       - "AlpacaCore/include/alpacacore/telescope_driver.h"
+      - "AlpacaCore/include/alpacacore/focuser_driver.h"
       - "AlpacaCore/include/alpacacore/alpaca_defs.h"
       - "AlpacaCore/include/alpacacore/alpaca_errors.h"
       - "AlpacaCore/include/alpacacore/alpacadriver.h"
@@ -72,7 +89,7 @@ on:
       - "scripts/conformu_fake_runs.tsv"
       - "AlpacaCore/tests/contract_sweep.h"
       - "scripts/check_conformu_reports.py"
-      - "AlpacaCore/conformu/Sky-Watcher/Fake/**"
+      - "AlpacaCore/conformu/*/Fake/**"
       - ".github/workflows/conformu-fake.yml"
   schedule:
     - cron: "47 4 * * *"   # after nightly-build.yml (03:17), before osv-scan.yml (05:23)
@@ -100,15 +117,59 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2  # the PR merge commit and its base parent, for the changed files
+
+      - name: Changed files (pull requests only)
+        # A pull_request run checks out the merge commit, whose first parent is the base.
+        if: github.event_name == 'pull_request'
+        run: git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
 
       - name: List the run rows
         id: list
-        # vendor/deviceType/fakeHeader keys the row for the run script; the CMake option builds its vendor; the slug
-        # names its artifact (the Sky-Watcher UDP row keeps conformu-fake-skywatcher).
+        # vendor/deviceType/fakeHeader keys the row for the run script; the CMake options build its vendor (a catalog
+        # vendor that another option builds, such as ifr under iOptron, is mapped); the slug names its artifact (the
+        # Sky-Watcher UDP row keeps conformu-fake-skywatcher). On a pull request a row runs when the PR changes a
+        # shared file (anything the paths filter lists that is not one vendor's: the core, the HTTP layer, the
+        # server, the run list, this workflow) or that row's own vendor sources, fake or reports; the nightly and
+        # dispatched runs run every row. Each telescope row is ~21 minutes, so a focuser-only PR does not pay for
+        # the mounts.
         run: |
           set -euo pipefail
           python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
           import json
+          import os
+          BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
+          SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
+          REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
+                         "ifr": "iOptron", "qhy": "QHY"}
+          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers.
+          VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
+                          "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
+                          "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher"}
+          changed_path = os.path.join(os.environ["RUNNER_TEMP"], "changed.txt")
+          changed = None
+          if os.path.exists(changed_path):
+              with open(changed_path, encoding="utf-8") as f:
+                  changed = [p.strip() for p in f if p.strip()]
+
+          def vendor_specific(path):
+              return (path in VENDOR_FILES
+                      or path.startswith(("AlpacaCore/src/vendors/", "AlpacaCore/include/alpacacore/vendor/",
+                                          "AlpacaCore/conformu/"))
+                      or (path.startswith("AlpacaCore/tests/fake_") and path != "AlpacaCore/tests/fake_pty_write.h"
+                          and path != "AlpacaCore/tests/fake_task_clock.h"))
+
+          shared_change = changed is None or any(not vendor_specific(p) for p in changed)
+
+          def reaches(vendor, fake):
+              dirs = SOURCE_DIRS.get(vendor, [vendor])
+              mine = ["AlpacaCore/src/vendors/%s/" % d for d in dirs]
+              mine += ["AlpacaCore/include/alpacacore/vendor/%s/" % d for d in dirs]
+              mine += ["AlpacaCore/conformu/%s/Fake/" % REPORT_DIRS.get(vendor, vendor)]
+              mine += ["AlpacaCore/tests/fake_%s_" % d for d in dirs]  # the vendor's other fakes (a shared board)
+              return any(p.startswith(tuple(mine)) or p == "AlpacaCore/tests/" + fake or VENDOR_FILES.get(p) in dirs
+                         for p in changed)
+
           rows = []
           with open("scripts/conformu_fake_runs.tsv", encoding="utf-8") as f:
               for line in f:
@@ -118,11 +179,14 @@ jobs:
                   if cells[0] == "vendor" or cells[3] != "run":
                       continue
                   vendor, dtype, fake = cells[0], cells[1], cells[2]
+                  if not shared_change and not reaches(vendor, fake):
+                      continue
                   stem = fake[:-2] if fake.endswith(".h") else fake
                   legacy = (vendor, dtype, fake) == ("skywatcher", "telescope", "fake_skywatcher_mount.h")
                   rows.append({
                       "key": "%s/%s/%s" % (vendor, dtype, fake),
-                      "option": "ALPACACORE_ENABLE_%s" % vendor.upper(),
+                      "options": " ".join("-DALPACACORE_ENABLE_%s=ON" % o
+                                          for o in BUILT_BY.get(vendor, [vendor.upper()])),
                       "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
                   })
           print("rows=" + json.dumps(rows))
@@ -138,6 +202,7 @@ jobs:
     # validation.
     name: ConformU against ${{ matrix.row.key }} (arm64)
     needs: runs
+    if: needs.runs.outputs.rows != '[]'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:
@@ -167,13 +232,14 @@ jobs:
 
       - name: Build the fake server (core + HTTP, the row's vendor only)
         env:
-          VENDOR_OPTION: ${{ matrix.row.option }}
+          VENDOR_OPTIONS: ${{ matrix.row.options }}
         run: |
           set -euo pipefail
+          read -r -a vendor_options <<< "$VENDOR_OPTIONS"
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DALPACAHTTP_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=OFF \
-            "-D${VENDOR_OPTION}=ON"
+            "${vendor_options[@]}"
           cmake --build AlpacaHTTP/build --target fake_conformu_server --parallel "$(nproc)"
 
       - name: Install ConformU 4.6.0-rc.1 (pinned release, sha256-checked)

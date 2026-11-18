@@ -396,12 +396,44 @@ if(ALPACAHTTP_BUILD_TESTS)
     # descriptor over the fake of one scripts/conformu_fake_runs.tsv row. Not
     # installed and not linked into alpacabridge or alpacahttp_server. The fake
     # headers live under AlpacaCore/tests, so that directory is on this target's
-    # include path only. The Sky-Watcher UDP mount is the only host today.
+    # include path only. Each vendor that is built adds its hosts: the server
+    # links it and gets FAKE_CONFORMU_<VENDOR>, which guards that vendor's
+    # factories (one vendor per CI matrix job, conformu-fake.yml).
+    add_executable(fake_conformu_server tests/fake_conformu_server.cpp)
+    target_link_libraries(fake_conformu_server alpacahttp)
+    target_include_directories(fake_conformu_server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
     if(TARGET alpacacore_skywatcher)
-        add_executable(fake_conformu_server tests/fake_conformu_server.cpp)
-        target_link_libraries(fake_conformu_server alpacahttp alpacacore_skywatcher)
-        target_include_directories(fake_conformu_server PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
+        target_link_libraries(fake_conformu_server alpacacore_skywatcher)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_SKYWATCHER)
+    endif()
+    if(TARGET alpacacore_zwo)
+        target_link_libraries(fake_conformu_server alpacacore_zwo)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ZWO)
+    endif()
+    if(TARGET alpacacore_celestron)
+        target_link_libraries(fake_conformu_server alpacacore_celestron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_CELESTRON)
+    endif()
+    if(TARGET alpacacore_onstep)
+        target_link_libraries(fake_conformu_server alpacacore_onstep)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ONSTEP)
+    endif()
+    if(TARGET alpacacore_ioptron)
+        target_link_libraries(fake_conformu_server alpacacore_ioptron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_IOPTRON)
+    endif()
+    if(TARGET alpacacore_astroasis)
+        target_link_libraries(fake_conformu_server alpacacore_astroasis)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ASTROASIS)
+    endif()
+    if(TARGET alpacacore_gemini)
+        target_link_libraries(fake_conformu_server alpacacore_gemini)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GEMINI)
+    endif()
+    if(TARGET alpacacore_qhy)
+        target_link_libraries(fake_conformu_server alpacacore_qhy)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_QHY)
     endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
