@@ -68,10 +68,15 @@ struct ConformuHost {
     std::function<std::unique_ptr<alpacacore::AlpacaDriver>(int device_number)> make;
 };
 
-// Static storage: the fake outlives every driver the factory builds.
+// Static storage: the fake outlives every driver the factory builds. Each fake is built only when its row is served.
 alpacacore::test::FakeSkyWatcherMount& skywatcher_mount() {
     static alpacacore::test::FakeSkyWatcherMount mount;
     return mount;
+}
+
+alpacacore::test::FakeSkyWatcherSerialBoard& skywatcher_serial_board() {
+    static alpacacore::test::FakeSkyWatcherSerialBoard board;
+    return board;
 }
 
 const ConformuHost kHosts[] = {
@@ -80,6 +85,13 @@ const ConformuHost kHosts[] = {
      "FakeSkyWatcherMount (simulated mount over loopback UDP)", [] { return skywatcher_mount().ok(); },
      [](int device_number) -> std::unique_ptr<alpacacore::AlpacaDriver> {
          return alpacacore::test::make_fake_skywatcher_telescope(device_number, skywatcher_mount());
+     }},
+    {"skywatcher", "telescope", "fake_skywatcher_serial_board.h", alpacacore::DeviceType::Telescope, "skywatcher-fake",
+     "Sky-Watcher (fake serial motor board, test only)", "ALPACACORE_ENABLE_SKYWATCHER",
+     "FakeSkyWatcherSerialBoard (simulated motor board over a pseudo-terminal)",
+     [] { return !skywatcher_serial_board().slave_path().empty(); },
+     [](int device_number) -> std::unique_ptr<alpacacore::AlpacaDriver> {
+         return alpacacore::test::make_fake_skywatcher_serial_telescope(device_number, skywatcher_serial_board());
      }},
 };
 

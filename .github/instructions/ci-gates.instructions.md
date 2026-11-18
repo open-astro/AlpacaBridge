@@ -125,11 +125,14 @@ author must do. Read the docstring before changing a gate.
   builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does before
   every merge, so a nightly `.deb` that fails the check is never published.
 - **ConformU against the fake Sky-Watcher mount** (`.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
-  test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for every `run`
-  row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount`). The run
-  list has one record per `kFakeConnectableRoster` row (`run`, or `pending` with the slice of #2078 that runs it)
-  and a `no-fake` record per driver with no fake; docs-drift check 30 holds it to the roster both ways, so a PR
-  that adds a roster row adds its record. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
+  test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
+  row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount` and its serial
+  motor board over `FakeSkyWatcherSerialBoard`), one matrix job per row (a `runs` job lists them; a telescope row
+  takes about 20 minutes on the arm64 runner). The run list has one record per `kFakeConnectableRoster` row (`run`,
+  or `pending` with a slice and the reason it does not run) and a `no-fake` record per driver with no fake;
+  docs-drift check 30 holds it to the roster both ways, so a PR that adds a roster row adds its record. A row runs
+  only when its fake can pass ConformU on merit: a fake that does not model the device (a mount that never moves
+  or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
   workflow's `paths:` list (the Sky-Watcher driver, the fake mount and server, the telescope interface, the HTTP
   layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
   whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the
