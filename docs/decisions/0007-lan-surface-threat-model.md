@@ -116,7 +116,7 @@ When a finding lands, set its row to `fixed` in the same change (rule 12).
 The reviewer check, for any new route or persisted config field. Each rule names where it applies and what checks it.
 
 1. A state change is never a GET. Scope: `AlpacaHTTP/src/**`. Checked by: review.
-2. The origin guard covers a route on the path that reaches the driver, not only on the wrong-verb path. Scope: `AlpacaHTTP/src/http/router.cpp`. Checked by: review.
+2. The origin guard covers a route on the path that reaches the driver, not only on the wrong-verb path. Scope: `AlpacaHTTP/src/http/router.cpp`, `AlpacaHTTP/src/http/routes/*.cpp`. Checked by: review.
 3. A change that answers a CORS preflight, adds an `Access-Control-*` header or handles OPTIONS passes every driver-reaching PUT through the origin guard in the same PR. Scope: `AlpacaHTTP/src/**`. Checked by: review.
 4. The body and every string field have a byte bound, and integers are range-checked before a narrowing cast, so nothing wraps. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/catalog/*.cpp`. Checked by: review.
 5. A URL field a client can set accepts only `http` and `https` and has a size cap; an operator-only URL (the update URLs below) meets the scheme part at fetch time. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
