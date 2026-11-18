@@ -492,12 +492,27 @@ h2 {
     margin-top: 14px;
 }
 
-/* Always-visible action bar below the tab content, on every tab. */
+/* Always-visible action bar below the tab content, on every tab. Side padding
+   matches the tab content, so its button never touches the screen edge (#1764). */
 .global-actions {
     margin-top: 18px;
-    padding-top: 14px;
+    padding: 14px 18px 0;
     border-top: 1px solid var(--line);
     flex-wrap: wrap;
+}
+
+/* The Server Actions card on Server Info (#1764 item 1). Shutdown gets its own
+   row below a rule, apart from Restart, so a gloved tap cannot reach it by a
+   near miss. */
+.server-actions-card {
+    margin-top: 0;
+    flex-wrap: wrap;
+}
+
+.server-actions-danger {
+    margin-top: 22px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--line);
 }
 
 /* ---- forms ---- */

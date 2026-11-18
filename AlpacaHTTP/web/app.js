@@ -2877,7 +2877,7 @@ function showServerClockError(event) {
     }
     event.preventDefault();
     noticeDialog('Server clock error',
-                 serverClockErrorText + '\n\nTo set it from this device, use Sync Time at the bottom of the page.');
+                 serverClockErrorText + '\n\nTo set it from this device, use Sync Time in the Server Actions card on the Server Info tab.');
 }
 
 // Shutdown server
