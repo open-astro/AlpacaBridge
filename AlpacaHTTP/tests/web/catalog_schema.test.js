@@ -101,7 +101,7 @@ const OFFERED = {
     covercalibrator: ['gemini', 'wandererastro'],
     dome: [],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'touptek', 'wandererastro', 'zwo'],
-    focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'qhy', 'touptek', 'zwo'],
+    focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'touptek', 'zwo'],
     observingconditions: ['weewx'],
     rotator: ['ifr', 'wandererastro', 'zwo'],
     safetymonitor: [],

@@ -385,10 +385,10 @@ struct Rig {
     FakeTaskClock clock;
     alpacacore::test::FakeMountServer server{[m = mount](const std::string& chunk) { return m->reply(chunk); }};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    onstep::ConnectionInfo info;
 
     // Without a site in the config the connect reads the mount's (:Gt#/:Gg#).
     explicit Rig(bool with_site = true, int response_timeout_ms = 300) {
-        onstep::ConnectionInfo info;
         info.type = onstep::ConnectionType::Network;
         info.host = "127.0.0.1";
         info.tcp_port = server.port();
@@ -1264,7 +1264,7 @@ TEST_CASE("OnStep snapshot - a connect whose status poll cannot start fails and 
     }
     CHECK(message.find("status poll did not start") != std::string::npos);
     CHECK_FALSE(rig.driver->get_connected());
-    CHECK_FALSE(onstep::OnStepProtocolWrapper::instance().is_connected());  // the port was closed
+    CHECK(onstep::detail::registered_link_for_testing(rig.info) == nullptr);  // the port was closed
     CHECK(error_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(rig.clock.waiter_count() == 0);
 

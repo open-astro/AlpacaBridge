@@ -72,6 +72,7 @@ Symbol: `AsyncOperation`
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
 | Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378, #1783 | MoveAxis re-send body; status poll slot (`status_poll_`); pulse-end slot (`pulse_measurement_`); Park/FindHome tail (`park_home_`) |
+| OnStep focuser | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | poll body; `Move` is one exchange answered at once, sent on the caller's thread |
 | iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
 | Player One camera | | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pulse-guide off-timer body; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
 | ToupTek camera | | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1418 | thermal poll and pulse-guide timer slots; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)); Altair rides this driver |

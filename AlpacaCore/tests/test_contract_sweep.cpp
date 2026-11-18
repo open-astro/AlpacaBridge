@@ -84,6 +84,7 @@
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
@@ -2041,6 +2042,91 @@ Tier2Host tier2_host_onstep_telescope() {
     h.at_park_unreachable = ":GU always answers 'nNp#' (not parked), so AtPark never reads true (idle_onstep above)";
     return h;
 }
+
+// An OnStepX with focuser 1 (OnStepX Focuser.command.cpp, af1d26bf; the controller of test_onstep_focuser.cpp, cut
+// down): 0..50000 steps from a minimum of 100, at rest at 1100. `moving` makes :F1T# report a move that never ends
+// once :F1s is accepted (tier 3). `silent` answers nothing (the tier-3 fault and the snapshot rig's held frame).
+struct OnStepFocuserFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> moving = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> endless = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_focuser_responder(const OnStepFocuserFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":F1T#") {
+            const bool now = moving->load();
+            if (!endless->load()) moving->store(false);  // a move ends at the next status read
+            return std::string(now ? "M3#" : "S3#");
+        }
+        if (c == ":F1g#") return std::string("1100#");
+        if (c == ":F1i#") return std::string("100#");
+        if (c == ":F1m#") return std::string("50100#");
+        if (c == ":F1u#") return std::string("0.50000#");
+        if (c == ":F1t#") return std::string("21.5#");
+        if (c == ":F1c#" || c == ":F1c0#" || c == ":F1c1#") return std::string(c == ":F1c1#" ? "1" : "0");
+        if (c.rfind(":F1s", 0) == 0) {
+            moving->store(true);
+            return std::string("1");
+        }
+        if (c == ":F1Q#") {
+            moving->store(false);
+            return std::string();
+        }
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_focuser_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_focuser(0, info, 1, clock);
+}
+
+Hosted onstep_focuser_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepFocuserFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_focuser_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_focuser_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX focuser over FakeMountServer (test_onstep_focuser.cpp): the first reply held for kHold in the hold
+// case, and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_focuser() {
+    Tier2Host h{"onstep_focuser",
+                "onstep",
+                "focuser",
+                "fake_mount_server.h",
+                DeviceType::Focuser,
+                "onstep_focuser",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_focuser_hosted(hold, alpacacore::util::default_task_clock(),
+                                     std::make_shared<OnStepFocuserFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_focuser_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -2848,7 +2934,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS2_ONSTEP(X) X(onstep_telescope, TEL)
+#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR)
 #else
 #define CS2_ONSTEP(X)
 #endif
@@ -3548,6 +3634,20 @@ Tier3Recipe tier3_recipe_onstep_telescope() {
     };
     return tier3_mount_server_recipe("onstep_telescope", "onstep", started, responder, onstep_telescope_over);
 }
+
+// A focuser move that never ends (:F1T# keeps answering 'M'), then the controller goes silent with the socket open.
+// Falsified by: onstep_focuser_driver.cpp get_is_moving() answering from the frame while the poll's fault is latched.
+Tier3Recipe tier3_recipe_onstep_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto fake = std::make_shared<OnStepFocuserFake>();
+    fake->endless->store(true);
+    return t3_on_clock({[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+                        [](Hosted& hosted) { t3_fake<OnStepFocuserFake>(hosted).silent->store(true); },
+                        [](Hosted& hosted) { t3_fake<OnStepFocuserFake>(hosted).silent->store(false); },
+                        "FakeMountServer responder silent mid-move",
+                        [clock, fake](bool hold) { return onstep_focuser_hosted(hold, *clock, fake); }},
+                       DeviceType::Focuser, clock);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
@@ -3948,7 +4048,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CT3_ONSTEP(X) X(onstep_telescope, OK)
+#define CT3_ONSTEP(X) X(onstep_telescope, OK) X(onstep_focuser, OK)
 #else
 #define CT3_ONSTEP(X)
 #endif
@@ -5018,6 +5118,21 @@ std::unique_ptr<SnapshotRig> snapshot_rig_onstep_telescope() {
     rig.tick = [driver] { ons::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
     return rig_owner;
 }
+
+// The OnStepX focuser over the tier-2 fake (test_onstep_focuser.cpp): a silent controller holds the frame, and the
+// poll on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepFocuserFake>();
+    Hosted hosted = onstep_focuser_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
+    return rig_owner;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -5255,7 +5370,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true))
+#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters())
 #else
 #define CS3_ONSTEP(X)
 #endif
