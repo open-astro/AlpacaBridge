@@ -38,11 +38,14 @@ struct Json {
     bool boolean = false;
     std::string text;  // a String's value, or a Number's literal
     std::vector<Json> items;
-    std::vector<std::pair<std::string, Json>> members;
+    // An Object's members as two parallel lists: std::vector allows an incomplete element type, but a
+    // std::pair<std::string, Json> inside Json does not (clang rejects it).
+    std::vector<std::string> member_names;
+    std::vector<Json> member_values;
 
     const Json* find(std::string_view key) const {
-        for (const auto& [name, value] : members) {
-            if (name == key) return &value;
+        for (std::size_t i = 0; i < member_names.size(); ++i) {
+            if (member_names[i] == key) return &member_values[i];
         }
         return nullptr;
     }
@@ -139,7 +142,8 @@ private:
             ++pos_;
             Json value;
             if (!value_into(value, depth + 1)) return false;
-            out.members.emplace_back(std::move(key), std::move(value));
+            out.member_names.push_back(std::move(key));
+            out.member_values.push_back(std::move(value));
             skip_space();
             if (pos_ >= text_.size()) return false;
             if (text_[pos_] == '}') {
