@@ -3829,4 +3829,165 @@ TEST_CASE(
     CHECK(driver->get_tracking());
     CHECK(driver->get_target_right_ascension() == ra_a);
 }
+
+namespace {
+
+// Starts the leg's motion command: a slew (0), Park (1) or FindHome (2).
+void start_leg(alpacacore::TelescopeDriver& driver, int leg) {
+    if (leg == 0) driver.slew_to_coordinates_async(std::fmod(driver.get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    if (leg == 1) driver.park();
+    if (leg == 2) driver.find_home();
+}
+
+// True when every request after the first `from` is an MC_AUX_GUIDE_ACTIVE read: nothing that moves the mount.
+bool only_guide_reads_since(const alpacacore::test::FakeCelestronCgxMount& mount, std::size_t from) {
+    const auto frames = mount.requests();
+    return std::all_of(frames.begin() + static_cast<std::ptrdiff_t>(std::min(from, frames.size())), frames.end(),
+                       [](const auto& frame) { return frame.command == 0x27; });
+}
+
+}  // namespace
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew, Park or FindHome supersedes a running pulse without a join and "
+    "waits for the mount to end its packet (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    // Before the driver: they outlive the pulse body blocked on the latch.
+    alpacacore::test::Latch latch;
+    std::atomic<bool> body_resumed{false};
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // A Dec pulse chain whose first packet the mount holds active; its body blocks at its first guide poll, so a
+    // join of it could not return.
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);
+    alpacacore::vendor::celestron::set_pulse_poll_hook_for_testing(*driver, [&] {
+        latch.block();
+        body_resumed.store(true);
+    });
+    driver->pulse_guide(0, 600000);
+    REQUIRE(latch.wait_entered());
+    alpacacore::vendor::celestron::set_pulse_poll_hook_for_testing(*driver, {});
+    const auto frames_before = mount.requests().size();
+    const int dec_packets = mount.count_command(0x11, 0x26);
+    const int position_reads = mount.count_command(0x10, 0x01) + mount.count_command(0x11, 0x01);
+
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    // The command reads the mount's guide report, which still says active, and sleeps on the clock between reads.
+    const bool waiting = clock.wait_for_waiters(1, 2s);
+    const auto returned_while_active = second.wait_for(0ms);
+    const bool nothing_moved_while_active = only_guide_reads_since(mount, frames_before);
+
+    // The mount ends the packet; the command sends its own commands at its next read.
+    mount.complete_axis_guide(0x11);
+    mount.set_auto_complete_motions(true);
+    const bool returned = wait_until([&] {
+        clock.advance(20ms);
+        return second.wait_for(0ms) == std::future_status::ready;
+    });
+    const bool body_still_held = !body_resumed.load();
+    latch.release();
+    const auto result = second.get();
+    // The superseded body resumes, finds itself superseded and ends without sending its axis anything.
+    const bool pulse_ended = wait_until([&] { return !driver->get_is_pulse_guiding(); });
+    const bool landed = wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    });
+
+    INFO("second command: " << result.text);
+    CHECK(result.text.empty());
+    CHECK(waiting);
+    CHECK((returned_while_active == std::future_status::timeout));
+    CHECK(nothing_moved_while_active);
+    CHECK(returned);
+    CHECK(body_still_held);
+    CHECK(pulse_ended);
+    CHECK(landed);
+    CHECK(mount.count_command(0x11, 0x26) == dec_packets);
+    CHECK(mount.count_command(0x10, 0x26) == 0);
+    if (leg == 0) {
+        CHECK(mount.count_command(0x10, 0x02) > 0);
+        CHECK(mount.count_command(0x11, 0x02) > 0);
+        CHECK(driver->get_tracking());
+    } else {
+        // Park and FindHome read no position, so every read is the pulse's end-of-pulse read: there is none.
+        CHECK(mount.count_command(0x10, 0x01) + mount.count_command(0x11, 0x01) == position_reads);
+        CHECK(driver->get_at_home());
+        CHECK(driver->get_at_park() == (leg == 1));
+    }
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew, Park or FindHome fails when the mount never ends the superseded "
+    "pulse's packet (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);  // the Dec packet stays active until the case ends it
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_wait_count(1, 2s));  // the pulse body, between its guide reads
+    const auto frames_before = mount.requests().size();
+    const auto started = clock.now();
+
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    REQUIRE(clock.wait_for_wait_count(2, 2s));  // the command, between its reads of the mount's guide report
+    bool guiding_while_waiting = true;
+    bool returned_early = false;
+    while (clock.now() - started < 3000ms) {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        guiding_while_waiting = guiding_while_waiting && driver->get_is_pulse_guiding();
+        returned_early = returned_early || second.wait_for(0ms) == std::future_status::ready;
+    }
+    const bool returned = wait_until([&] {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        return second.wait_for(0ms) == std::future_status::ready;
+    });
+    const auto waited = clock.now() - started;
+    const bool nothing_moved = only_guide_reads_since(mount, frames_before);
+    mount.complete_axis_guide(0x11);
+    const auto result = returned ? second.get() : CallResult{};
+    if (!returned) {
+        static_cast<void>(wait_until([&] {
+            clock.advance(20ms);
+            return second.wait_for(0ms) == std::future_status::ready;
+        }));
+    }
+
+    INFO("second command: " << result.text);
+    CHECK(guiding_while_waiting);
+    CHECK_FALSE(returned_early);
+    REQUIRE(returned);
+    CHECK(waited >= 3050ms);
+    CHECK(waited <= 3100ms);
+    CHECK(result.code == alpacacore::AlpacaError::DriverException);
+    CHECK(result.text == "Celestron CGX still reports a Dec guide packet active after 3050 ms; nothing was sent");
+    CHECK(nothing_moved);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking());
+}
 #endif

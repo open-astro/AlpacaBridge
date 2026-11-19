@@ -68,6 +68,11 @@ constexpr std::chrono::seconds kHostDisciplineResampleInterval{30};
 constexpr std::chrono::milliseconds kStatePollPeriod{250};
 constexpr int kStatePollFaultThreshold = 3;
 constexpr std::chrono::seconds kStatePollMaxAge{1};
+// The longest MC_AUX_GUIDE packet (255 centiseconds), and the margin a slew, Park or FindHome gives the mount past it
+// to report the packet a pulse it superseded left running inactive (#2263); the pulse body's own segment deadline
+// uses the same margin.
+constexpr std::chrono::milliseconds kGuidePacketMax{2550};
+constexpr std::chrono::milliseconds kGuideEndMargin{500};
 
 // The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
 // computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
@@ -342,6 +347,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         drain_hook_for_testing_ = std::move(hook);
     }
+    void set_pulse_poll_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_poll_hook_for_testing_ = std::move(hook);
+    }
 
 protected:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010 rule 5).
@@ -351,7 +360,10 @@ private:
     enum class PulseGuideStart : std::uint8_t { Acknowledged, Ambiguous };
 
     // `supersede_motion`: a slew, Park or FindHome, which supersedes a slew, Park or FindHome in flight through its
-    // own claim (#2263); every other initiator refuses while one runs. Both drain the guide packet (#1156).
+    // own claim (#2263), and supersedes a running pulse without a join (decision 0006 rule 3), then waits for the
+    // mount to report that pulse's guide packet inactive before it sends anything (wait_for_guide_end()). Every other
+    // initiator (Sync, Tracking, TrackingRate) refuses while a slew, Park or FindHome runs, and cancels and joins the
+    // pulse bodies, each waiting out its packet (#1156).
     class MotionTransition final {
     public:
         explicit MotionTransition(CelestronCgxTelescopeDriver& driver, bool supersede_motion = false);
@@ -361,7 +373,7 @@ private:
 
     private:
         CelestronCgxTelescopeDriver& driver_;
-        // Own the entire handoff, including the mutex-released task joins.
+        // Own the entire handoff, including the mutex-released task joins and the wait on the mount's guide report.
         // Otherwise disconnect can see an empty slot whose body another initiator is still joining.
         std::unique_lock<std::mutex> connection_lock_;
         std::unique_lock<std::mutex> lock_;
@@ -370,8 +382,8 @@ private:
     // Runs a body's wire stage under motion_start_mutex_, the lock every claim is made under, so a body that a newer
     // command superseded or a stop cancelled sends nothing once the stage starts (decision 0006 rule 6). An open
     // motion_transition_ does not stop it: a slew, Park or FindHome opens one while this body still owns the axes and
-    // releases the lock for the guide drain before its claim, and may then be refused without claiming (#2263). Every
-    // other transition refuses while a body runs, cancels it, or sets disconnecting_.
+    // releases the lock for its wait on the guide packet before its claim, and may then be refused without claiming
+    // (#2263). Every other transition refuses while a body runs, cancels it, or sets disconnecting_.
     template <typename Operation>
     bool run_motion_stage(util::OperationContext& context, const util::MotionClaim& claim, Operation&& operation) {
         std::lock_guard<std::mutex> lock(motion_start_mutex_);
@@ -507,7 +519,12 @@ private:
                             CgxPointingSide destination_side);
     void run_flip_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
                                  CgxPointingSide destination_side);
-    void publish_guide_end_frame();
+    void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
+    // A slew, Park or FindHome's wait for the guide packet of each pulse it superseded (`axes`, RA then Dec): reads
+    // the mount's MC_AUX_GUIDE_ACTIVE until it reports the packet inactive, never the pulse slot, bounded by
+    // kGuidePacketMax plus kGuideEndMargin on the task clock; an AbortSlew or Unpark accepted meanwhile ends it.
+    // Runs with no driver lock but transition_mutex_ held.
+    void wait_for_guide_end(const std::array<bool, 2>& axes);
     void run_pulse_guide(util::OperationContext& context, const util::MotionClaim& claim, CgxAxis axis,
                          int velocity_percent, int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
@@ -564,18 +581,24 @@ private:
     util::OperationGeneration stop_generation_;
     util::AsyncOperation stop_slot_;
     std::atomic<bool> stop_pending_{false};  // Slewing reads stop progress before it takes mutex_ (#1402).
+    // Set while a slew, Park or FindHome waits for the guide packet of a pulse it superseded (#2263): IsPulseGuiding
+    // stays true until the mount reports the packet inactive, as it does while a pulse body watches its own packet.
+    std::atomic<bool> guide_end_pending_{false};
     bool unpark_after_stop_ = false;
     // Test seam (set_stop_worker_hook_for_testing): runs at the top of stop_motion_worker_checked(), before it takes
     // motion_start_mutex_. Guarded by mutex_.
     std::function<void()> stop_worker_hook_for_testing_;
-    // Test seam (set_drain_hook_for_testing): runs in MotionTransition's guide drain, with motion_start_mutex_
-    // released. Guarded by mutex_.
+    // Test seam (set_drain_hook_for_testing): runs in MotionTransition's guide handoff (the join of the pulse
+    // bodies, or a slew, Park or FindHome's wait on the mount), with motion_start_mutex_ released. Guarded by mutex_.
     std::function<void()> drain_hook_for_testing_;
-    void run_drain_hook_for_testing() {
+    // Test seam (set_pulse_poll_hook_for_testing): runs on the pulse body's thread at the top of every guide poll,
+    // before it reads its stop reason, with no driver lock held. Guarded by mutex_.
+    std::function<void()> pulse_poll_hook_for_testing_;
+    void run_hook_for_testing(const std::function<void()>& seam) {
         std::function<void()> hook;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            hook = drain_hook_for_testing_;
+            hook = seam;
         }
         if (hook) hook();
     }
@@ -644,13 +667,33 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
         throw AlpacaException("Celestron CGX is already moving", AlpacaError::InvalidOperation);
     }
     driver_.motion_transition_ = true;
-    // The guide drain (#1156): an AUX guide packet cannot be interrupted, so the pulse bodies are cancelled and
-    // joined, each waiting out its active <=2.55 s packet, before the new command sends anything.
-    for (auto& slot : driver_.pulse_slots_) slot.cancel();
+    // An AUX guide packet cannot be interrupted, so the new command sends nothing while one runs (#1156).
+    std::array<bool, 2> superseded_pulses{};
+    if (supersede_motion) {
+        // A slew, Park or FindHome supersedes a running pulse without a join (decision 0006 rule 3, #2263): the bump
+        // under motion_start_mutex_ marks the body Superseded, so it sends its axis nothing more, the next chunk and
+        // the end-of-pulse read included, and the cancel only wakes it (Superseded wins). The packet it left on the
+        // mount is waited out below, on the mount's own report.
+        std::lock_guard<std::mutex> state_lock(driver_.mutex_);
+        for (std::size_t index = 0; index < 2; ++index) {
+            superseded_pulses[index] = driver_.pulse_slots_[index].running();
+            if (!superseded_pulses[index]) continue;
+            static_cast<void>(driver_.pulse_generations_[index].bump());
+            driver_.pulse_slots_[index].cancel();
+        }
+    } else {
+        // Sync, Tracking and TrackingRate are not motion commands: they cancel and join the pulse bodies, each
+        // waiting out its active <=2.55 s packet.
+        for (auto& slot : driver_.pulse_slots_) slot.cancel();
+    }
     lock_.unlock();
     try {
-        driver_.run_drain_hook_for_testing();
-        for (auto& slot : driver_.pulse_slots_) slot.cancel_all_and_join();
+        driver_.run_hook_for_testing(driver_.drain_hook_for_testing_);
+        if (supersede_motion) {
+            driver_.wait_for_guide_end(superseded_pulses);
+        } else {
+            for (auto& slot : driver_.pulse_slots_) slot.cancel_all_and_join();
+        }
     } catch (...) {
         lock_.lock();
         std::lock_guard<std::mutex> state_lock(driver_.mutex_);
@@ -684,6 +727,30 @@ void CelestronCgxTelescopeDriver::log_superseded_failure(const char* body, const
 }
 
 CelestronCgxTelescopeDriver::MotionTransition::~MotionTransition() { driver_.motion_transition_ = false; }
+
+void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& axes) {
+    if (!axes[0] && !axes[1]) return;
+    // IsPulseGuiding stays true until the mount reports the packet inactive (get_is_pulse_guiding()).
+    guide_end_pending_.store(true);
+    struct PendingEnd {
+        std::atomic<bool>& pending;
+        ~PendingEnd() { pending.store(false); }
+    } const pending_end{guide_end_pending_};
+    const auto bound = kGuidePacketMax + kGuideEndMargin;
+    const auto deadline = clock_.now() + bound;
+    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
+        if (!axes[pulse_index(axis)]) continue;
+        // A stop accepted meanwhile owns cleanup, and MotionTransition refuses the displaced command.
+        while (!stop_pending_.load() && protocol_.is_aux_guide_active(axis)) {
+            if (clock_.now() >= deadline)
+                throw AlpacaException(
+                    std::string("Celestron CGX still reports a ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
+                        " guide packet active after " + std::to_string(bound.count()) + " ms; nothing was sent",
+                    AlpacaError::DriverException);
+            clock_.sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+}
 
 [[noreturn]] void CelestronCgxTelescopeDriver::not_implemented(const char* member, bool property) {
     throw AlpacaException(std::string("Celestron CGX USB does not support ") + member,
@@ -1249,9 +1316,11 @@ bool CelestronCgxTelescopeDriver::get_is_pulse_guiding() const {
         throw AlpacaException("Celestron CGX pulse guide failed: " + *failure, AlpacaError::DriverException);
     }
     // Driver state, not the wire: the guide body runs until the mount reports the packet inactive (the firmware times
-    // it), and disconnect joins it, so a guide outlives the slot only when another AUX client started it, which this
-    // backend does not support (decision 0011 Consequences). Either axis's pulse counts.
-    return pulse_running();
+    // it), and disconnect joins it; a pulse a slew, Park or FindHome superseded ends its body at once, and that
+    // command's wait on the mount stands in for it (guide_end_pending_, #2263). A guide outlives both only when
+    // another AUX client started it, which this backend does not support (decision 0011 Consequences). Either axis's
+    // pulse counts.
+    return pulse_running() || guide_end_pending_.load();
 }
 double CelestronCgxTelescopeDriver::get_right_ascension() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -2488,8 +2557,13 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
 
 // The pulse moved an axis since the last frame. Publish the pair where it stopped before the slot ends, so the first
 // read after IsPulseGuiding goes false shows it without waiting for the next poll. One write per pulse is occasional
-// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link.
-void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
+// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link. Under
+// motion_start_mutex_, which every supersede of a pulse is made under: a pulse superseded after its last guide read
+// reads and writes nothing (decision 0006 rule 6). A cancelled pulse still publishes where it stopped.
+void CelestronCgxTelescopeDriver::publish_guide_end_frame(util::OperationContext& context,
+                                                          const util::MotionClaim& claim) {
+    const std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
+    if (superseded(context, claim)) return;
     try {
         const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
         const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
@@ -2515,11 +2589,12 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
         clock_.now() + std::chrono::milliseconds(
                            static_cast<std::int64_t>(first_chunk_centiseconds + remaining_centiseconds) * 10 + 5000);
     int current_chunk = first_chunk_centiseconds;
-    auto segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10 + 500);
+    auto segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10) + kGuideEndMargin;
     while (true) {
+        run_hook_for_testing(pulse_poll_hook_for_testing_);
         const auto reason = motion_stop_reason(context, claim);
-        // A newer pulse on this axis owns it now (decision 0006 rule 6): send it nothing more, the end-of-pulse read
-        // included.
+        // A newer pulse on this axis, or a slew, Park or FindHome, owns it now (decision 0006 rule 6): send it
+        // nothing more, the end-of-pulse read included.
         if (reason == util::StopReason::Superseded) return;
         cancelled = cancelled || reason != util::StopReason::None;
         const bool active = protocol_.is_aux_guide_active(axis);
@@ -2537,7 +2612,7 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
             continue;
         }
         if (cancelled || remaining_centiseconds == 0) {
-            publish_guide_end_frame();
+            publish_guide_end_frame(context, claim);
             return;
         }
         current_chunk = std::min(255, remaining_centiseconds);
@@ -2547,7 +2622,7 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
             return;
         }
         remaining_centiseconds -= current_chunk;
-        segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10 + 500);
+        segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10) + kGuideEndMargin;
     }
 }
 
@@ -2607,6 +2682,12 @@ void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<voi
 void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
         cgx->set_drain_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_pulse_poll_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_pulse_poll_hook_for_testing(std::move(hook));
     }
 }
 
