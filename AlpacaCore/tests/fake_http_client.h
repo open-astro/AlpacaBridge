@@ -64,8 +64,8 @@ public:
         return std::shared_ptr<util::HttpClient>(std::shared_ptr<void>{}, this);
     }
 
-    // The next `n` requests throw instead of answering, as a refused or timed-out request does: an
-    // AlpacaException(DriverException), the one exception the seam documents for a call with no response.
+    // The next `n` requests throw instead of answering, as a timed-out or dropped request does: an
+    // AlpacaException(DriverException). A refusal is refuse_next().
     void fail_next(int n) { failures_.store(n); }
 
     // The next `n` requests throw util::HttpConnectRefused, as a connect to a port nothing listens on does.
