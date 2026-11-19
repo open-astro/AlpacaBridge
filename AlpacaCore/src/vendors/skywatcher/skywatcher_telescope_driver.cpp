@@ -2361,6 +2361,7 @@ public:
                 verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, ctx, may_resend_locked);
             }
             if (stopped) {
+                detail::run_pulse_release_hook();
                 // open-astro#559: the property and the axis are released
                 // together, once the restore (and its verify) is done. If the
                 // ownership flag outlived IsPulseGuiding, a client that waited
@@ -7036,6 +7037,29 @@ void run_pulse_dispatch_failure_hook() {
     {
         std::lock_guard<std::mutex> lock(probe_mutex());
         hook = pulse_dispatch_failure_hook_slot();
+    }
+    if (hook) {
+        hook();
+    }
+}
+
+namespace {
+std::function<void()>& pulse_release_hook_slot() {
+    static std::function<void()> hook;
+    return hook;
+}
+}  // namespace
+
+void set_pulse_release_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    pulse_release_hook_slot() = std::move(hook);
+}
+
+void run_pulse_release_hook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex());
+        hook = pulse_release_hook_slot();
     }
     if (hook) {
         hook();
