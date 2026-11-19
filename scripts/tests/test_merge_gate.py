@@ -149,6 +149,18 @@ class MergeGateTest(unittest.TestCase):
         # The exemption is for the verdict only: a red check still fails.
         self.assertFails(self.gate([run("CI", "failure")], [], author="app/dependabot"), "CI: failure")
 
+    def test_a_head_with_check_runs_over_the_argument_cap(self):
+        # Linux caps one argument at 128 KiB; 37 real runs (about 3.6 KB each) were over it (#2436).
+        def big(name, conclusion="success", id_=1):
+            return dict(run(name, conclusion, id_=id_), output={"summary": "x" * 4000})
+
+        many = [big(f"job {i}", id_=i) for i in range(1, 65)]
+        self.assertGreater(len(json.dumps(many)), 200 * 1024)
+        self.assertPasses(self.gate([*many, big("review", id_=100)], [APPROVED]))
+        self.assertFails(self.gate([*many, big("job 65", "failure", id_=65), big("review", id_=100)], [APPROVED]),
+                         "job 65: failure")
+        self.assertFails(self.gate([*many, big("review", id_=100)], [ISSUES]), 'is not "✅ Approved"')
+
     def test_a_ref_without_a_pull_request_number_fails(self):
         self.assertFails(self.gate([review()], [APPROVED], ref="refs/heads/main"), "No pull request number")
 
