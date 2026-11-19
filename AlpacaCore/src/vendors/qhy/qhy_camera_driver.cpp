@@ -301,6 +301,13 @@ private:
                 const std::uint64_t token = session_.begin_stop();
                 if (token != 0) {
                     stop_token_ = token;
+                } else {
+                    // A StartExposure that holds its reservation and has not published Exposing (rule 9): end it
+                    // the way an AbortExposure does, so its start() runs no body. Its body would meet
+                    // disconnecting_ and return without an image, and with no stop marked against its token the
+                    // session kept "the exposure ended without an image" (DriverException from ImageReady and
+                    // ImageArray) until disconnect_and_join() below cleared it (#2431).
+                    static_cast<void>(session_.record_abort());
                 }
                 stop_exposure = token != 0 || session_.busy();
                 exposure_id = camera_id_.value_or("");
@@ -1375,7 +1382,12 @@ public:
                 std::move(reservation), exposure_s,
                 [this, request, clear_in_sdk](util::CaptureControl& c) { run_exposure(c, request, *clear_in_sdk); },
                 std::chrono::duration_cast<std::chrono::nanoseconds>(watchdog_margin_))) {
-            // An AbortExposure arrived while the start was reserved: no body ran, nothing was armed (rule 9).
+            // An AbortExposure, or a disconnect, arrived while the start was reserved: no body ran, nothing was
+            // armed (rule 9). The disconnect's is NotConnected, as when its join drops the reservation first.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (disconnecting_ || !connected_.load()) {
+                throw AlpacaException("Camera is disconnecting", AlpacaError::NotConnected);
+            }
             ALPACA_LOG_DEBUG("QHY", "StartExposure ended by an AbortExposure that arrived while it started");
         }
     }
