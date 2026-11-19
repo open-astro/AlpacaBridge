@@ -206,6 +206,40 @@ Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 
 If you set it, please post your reading (mount code from the connect log, dovetail side, latitude) on issue #579 so the board can join the measured table.
 
+### Capture a TRACE log for one session and put the level back
+
+**Why**: at `TRACE` the iOptron driver logs every serial command and reply, about 30 MiB an hour on an iOptron rig. That is the log to compare one night with another, but it is too much to leave on for days.
+
+**Turn it on**: open the **Logging** card on the **Server Info** tab and pick `TRACE`, or send the level as JSON (the endpoint takes a JSON body only):
+
+```sh
+curl -X PUT -H 'Content-Type: application/json' -d '{"level":"TRACE"}' http://<rig>:6800/management/v1/loglevel
+```
+
+**Put it back** the same way when the session is over, with `"INFO"` or `"WARNING"` (the shipped default). The level is global, not per driver, and it is saved in `/var/lib/alpacabridge/config/runtime_state.json`, so it survives a restart until you change it back. Deleting that file and restarting goes back to the level in the config file (or the default, `WARNING`).
+
+**How much is kept**: log files rotate at `logging.max_file_size_mb` (5 MiB) into `alpacabridge-YYYY-MM-DD.N.log` parts, and all log files together are capped by `logging.max_total_size_mb` (default 1024 MiB, about 34 h at TRACE). Over the cap the oldest files are deleted first, across days, so last night is still on disk the next afternoon, including the hours after midnight. Files older than `logging.retention_days` (90) are deleted whatever their size. With `logging.max_file_size_mb: 0` there is no rotation and the total cap is checked only at midnight and at start-up.
+
+**To keep more**: raise `max_total_size_mb` under `logging:` in the server config file. On a package install that file is `/var/lib/alpacabridge/config/default.yaml`; the package does not ship it, so create or edit it as the service user, as in [the motion watchdog section](#the-mount-stopped-by-itself-mid-slew-and-the-log-says-client-silence-motion-watchdog):
+
+```sh
+sudo -u alpacabridge nano /var/lib/alpacabridge/config/default.yaml
+```
+
+```yaml
+logging:
+  max_total_size_mb: 3072
+```
+
+Or set `ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB`, which overrides the file: `sudo systemctl edit alpacabridge`, add the lines below, save. Either way, apply it with `sudo systemctl restart alpacabridge`. Check the free space on the SD card first (`df -h /var/log`).
+
+```ini
+[Service]
+Environment=ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB=3072
+```
+
+**To get a whole night off the rig**: the **Download All Logs** archive on the Logging card stops at 32 MiB, about an hour of TRACE. Use the bug report from Ara, or copy the files directly: `scp '<user>@<rig>:/var/log/AlpacaBridge/alpacabridge-*.log' .`
+
 ## Clean build
 
 If all else fails, try a clean build:
