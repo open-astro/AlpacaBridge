@@ -15,6 +15,8 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
@@ -592,6 +594,14 @@ public:
     int utc_writes = 0;
     int utc_throw_code = 0;  // non-zero: set_utc_date throws AlpacaException with this code
     std::function<void()> on_utc_write;
+
+    // open-astro#2419: what Router::check_host_clock() handed this telescope.
+    void on_host_clock_changed(const alpacacore::util::HostClockEvent& event) noexcept override {
+        ++host_clock_events;
+        last_host_clock_event = event;
+    }
+    int host_clock_events = 0;
+    alpacacore::util::HostClockEvent last_host_clock_event{};
 
 private:
     double aperture_ = 0.0;
@@ -4000,6 +4010,27 @@ int main() {
         EXPECT(cfg.value("pollIntervalSeconds", -1) == 300);
         EXPECT(cfg.value("timeoutMs", -1) == 2500);
         remove_device(router, "weewx", "observingconditions", 9614);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: remotealpaca observingconditions config round-trips every field (#1753)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "observingconditions"},
+                                           {"deviceNumber", 9630},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32324},
+                                           {"upstreamDeviceNumber", 2},
+                                           {"pollPeriodSeconds", 7}},
+                                          "ObservingConditions", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32324);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 2);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 7);
+        remove_device(router, "remotealpaca", "observingconditions", 9630);
     }
 #endif
 
@@ -7671,6 +7702,117 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9801);
     }
 
+    // open-astro#2419: the server timer's host clock check. Both cases pin the
+    // kernel probe that HostClockTrust reads and clear its latch, and restore
+    // both on the way out.
+    struct HostClockTrustRestore {
+        explicit HostClockTrustRestore(bool synchronized) {
+            alpacacore::util::HostClockTrust::reset_for_testing();
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
+        }
+        ~HostClockTrustRestore() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+            alpacacore::util::HostClockTrust::reset_for_testing();
+        }
+    };
+    {
+        // case: the host clock check hands a realtime step to each telescope once and latches trust (#2419)
+        using alpacacore::util::HostClockEvent;
+        using alpacacore::util::HostClockTrust;
+        HostClockTrustRestore untrusted(false);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9811);
+        EXPECT(registry.register_device(scope));
+        alpacahttp::Router clock_router;
+        const auto sys0 = std::chrono::system_clock::time_point(std::chrono::seconds(1795079157));
+        const auto mono0 = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+        clock_router.check_host_clock(sys0, mono0);  // primes the detector
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(1), mono0 + std::chrono::seconds(1));
+        EXPECT(scope->host_clock_events == 0);
+        EXPECT(!HostClockTrust::trusted());
+        // RC51: the Pi clock jumped 6 h 48 min 27 s forward between two ticks.
+        const auto step = std::chrono::milliseconds(24507000);
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(2) + step, mono0 + std::chrono::seconds(2));
+        EXPECT(scope->host_clock_events == 1);
+        EXPECT(scope->last_host_clock_event.kind == HostClockEvent::Kind::Stepped);
+        EXPECT(scope->last_host_clock_event.step == step);
+        EXPECT(HostClockTrust::latched());
+        // The step latched trust in the same tick: no BecameTrusted after it, and nothing on a quiet tick.
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(3) + step, mono0 + std::chrono::seconds(3));
+        EXPECT(scope->host_clock_events == 1);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9811);
+    }
+    {
+        // case: the host clock check hands the untrusted-to-trusted edge to each telescope once (#2419)
+        using alpacacore::util::HostClockEvent;
+        HostClockTrustRestore untrusted(false);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9812);
+        EXPECT(registry.register_device(scope));
+        alpacahttp::Router clock_router;
+        const auto sys0 = std::chrono::system_clock::time_point(std::chrono::seconds(1795079157));
+        const auto mono0 = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+        clock_router.check_host_clock(sys0, mono0);
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(1), mono0 + std::chrono::seconds(1));
+        EXPECT(scope->host_clock_events == 0);
+        // NTP slewed the clock in: synchronised, with no step.
+        alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(2), mono0 + std::chrono::seconds(2));
+        EXPECT(scope->host_clock_events == 1);
+        EXPECT(scope->last_host_clock_event.kind == HostClockEvent::Kind::BecameTrusted);
+        clock_router.check_host_clock(sys0 + std::chrono::seconds(3), mono0 + std::chrono::seconds(3));
+        EXPECT(scope->host_clock_events == 1);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9812);
+    }
+    {
+        // case: a client UTCDate that steps or confirms the host clock trusts it for mount clocks (#2419)
+        using alpacacore::util::HostClockTrust;
+        HostClockTrustRestore untrusted(false);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9813);
+        EXPECT(registry.register_device(scope));
+        const std::string base = "/api/v1/telescope/9813";
+        auto write = [&](alpacahttp::Router& router_under_test, const std::string& body) {
+            const auto response = route_request(router_under_test, "PUT", base + "/utcdate", body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        };
+        // Out of range: the host clock is left as it is, and nothing says it is right.
+        {
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [](std::chrono::system_clock::time_point, std::string&) { return true; });
+            write(clock_router, R"({"UTCDate":"1999-01-01T00:00:00.000Z"})");
+            EXPECT(!HostClockTrust::latched());
+        }
+        // Stepped: the client set the host clock.
+        {
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [](std::chrono::system_clock::time_point, std::string&) { return true; });
+            write(clock_router, R"({"UTCDate":"2001-01-01T00:00:00.000Z"})");
+            EXPECT(HostClockTrust::latched());
+        }
+        HostClockTrust::reset_for_testing();
+        // SkippedSmall: the client's time agrees with the host's to within 1 s.
+        {
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks(
+                [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return false; });
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+            const auto now_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+            char stamp[32];
+            std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now_t));
+            char stamp_ms[8];
+            std::snprintf(stamp_ms, sizeof(stamp_ms), ".%03lldZ", static_cast<long long>(now_ms));
+            write(clock_router, std::string(R"({"UTCDate":")") + stamp + stamp_ms + R"("})");
+            EXPECT(HostClockTrust::latched());
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9813);
+    }
+
     // synctime management endpoint: GET reads the clock, POST validates the
     // epoch range before touching it. The actual clock_settime() succeeds only
     // with CAP_SYS_TIME, so the happy-path set is validated on hardware; here
@@ -9039,7 +9181,7 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Altair, Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek, WandererAstro, WeeWX and ZWO descriptors plus the "zzz" test descriptor, schema only, so
+    // ToupTek, WandererAstro, WeeWX, remotealpaca and ZWO descriptors plus the "zzz" test descriptor, schema only, so
     // its `available` is false.
     {
         alpacahttp::Router router;
@@ -9050,7 +9192,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 46);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 47);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -9198,6 +9340,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "weewx") {
 #ifdef ALPACACORE_ENABLE_WEEWX
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "remotealpaca") {
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -10919,6 +11068,30 @@ int main() {
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: configuredevice refuses a remotealpaca upstream that is this server (decision 0023 rule 4)
+        // The router knows the port the server listens on (here 6800) and that it binds every address, so a proxied
+        // device whose upstream is 127.0.0.1:6800 would call itself: refused when configured, and not registered.
+        // Another port of the same host is another server.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "observingconditions"},
+                                     {"deviceNumber", 9631},
+                                     {"upstreamHost", "127.0.0.1"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "ObservingConditions");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "ObservingConditions", 9631).is_null());
+
+        nlohmann::json other = loop;
+        other["upstreamPort"] = 6801;
+        EXPECT(api_attempt(router, other, "ObservingConditions").ok);
+        remove_device(router, "remotealpaca", "observingconditions", 9631);
     }
 #endif
 

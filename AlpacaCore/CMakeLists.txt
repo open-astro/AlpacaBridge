@@ -140,6 +140,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/astroasis/astroasis_schema.cpp
     src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
+    src/vendors/remotealpaca/remotealpaca_schema.cpp
     src/vendors/svbony/svbony_schema.cpp
     src/vendors/gphoto/gphoto_schema.cpp
     src/vendors/playerone/playerone_schema.cpp
@@ -231,11 +232,14 @@ if(ALPACACORE_ENABLE_WEEWX)
     endif()
 endif()
 
-# The upstream Alpaca client library (issue #1753 slice 2). No catalog
-# registration yet, so alpacacore_builtins does not link it; the proxied device
-# slices add that with their factories.
+# The remotealpaca proxied devices over the upstream Alpaca client (issue #1753).
 if(ALPACACORE_ENABLE_REMOTEALPACA)
     add_subdirectory(src/vendors/remotealpaca)
+    if(TARGET alpacacore_remotealpaca)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_remotealpaca)
+        # register_builtin_factories() guards its remotealpaca factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_REMOTEALPACA)
+    endif()
 endif()
 
 if(ALPACACORE_ENABLE_GEMINI)

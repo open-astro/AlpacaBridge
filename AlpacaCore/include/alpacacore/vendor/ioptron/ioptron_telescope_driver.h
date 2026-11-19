@@ -113,6 +113,11 @@ void start_clock_sync_for_testing(TelescopeDriver& driver);
 /// Test hook: called with false before each ":SUT" send attempt of the clock sync, true once its sends are done.
 void set_clock_sync_utc_hook_for_testing(TelescopeDriver& driver, std::function<void(bool)> hook);
 
+/// Test seam: the host UTC the clock sync writes with :SUT, and set_utc_date() compares a client's time to
+/// (issue #2419). Null restores system_clock. Set it before connecting. A driver not from the factories is ignored.
+void set_host_utc_source_for_testing(TelescopeDriver& driver,
+                                     std::function<std::chrono::system_clock::time_point()> source);
+
 /// Test seam: the kept failure of the clock-sync slot, until its next start.
 std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver);
 

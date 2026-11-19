@@ -207,6 +207,13 @@ struct PeerEntry {
     DeviceConfig config;
 };
 
+// One address the server listens on: the bound host ("0.0.0.0" or "::" for a
+// wildcard bind) and its TCP port.
+struct ListenAddress {
+    std::string host;
+    int port = 0;
+};
+
 // What bind() is told about the registration it is part of. `peers` is every
 // persisted entry with the same DeviceKey, the one being registered included
 // (its device_number is the bound one). Valid for the call only.
@@ -215,6 +222,10 @@ struct BindContext {
     std::span<const PeerEntry> peers;
     // Stores config keys learned later, at a connect (the ZWO camera's serial and model name, #2074). May be unset.
     std::function<void(const DeviceConfig&)> learned_at_connect = nullptr;
+    // The server's own listening addresses when called, empty while the port is not known yet (decision 0023 rule
+    // 4: a proxied device refuses an upstream that is this server, at configure and again at Connect, so a factory
+    // may keep it). AlpacaCore has no view of the server's bind; AlpacaHTTP fills it. May be unset.
+    std::function<std::vector<ListenAddress>()> listen_addresses = nullptr;
 };
 
 // The outcome of Factory::bind. A `rejection` means no device: the router

@@ -414,6 +414,8 @@ RemoteAlpacaClient::Reply RemoteAlpacaClient::call(Verb verb, std::string_view m
         try {
             response = verb == Verb::Get ? http_->get(member_url(member) + "?" + encoded, timeout_)
                                          : http_->put_form(member_url(member), encoded, timeout_);
+        } catch (const util::HttpConnectRefused& e) {
+            throw RemoteConnectRefused(prefix_ + "no reply to " + name + ": " + e.what());
         } catch (const std::exception& e) {
             throw RemoteTransportError(prefix_ + "no reply to " + name + ": " + e.what());
         }

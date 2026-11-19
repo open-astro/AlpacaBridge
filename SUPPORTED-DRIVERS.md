@@ -572,6 +572,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions device of another Alpaca server through this one. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
+
 ### WeeWX
 
 | Source | Connection | Linux<br>(arm64) | Status |

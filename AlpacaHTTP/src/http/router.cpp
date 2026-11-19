@@ -1192,7 +1192,11 @@ void set_bad_request_text(Response& response, const std::string& message);
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
+Router::Router(const CatalogExtension& extend_catalog) : Router(extend_catalog, 0) {}
+
+Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port)
+    : machine_hostname_(read_machine_hostname()) {
+    listen_port_->store(listen_port, std::memory_order_release);
     learned_sink_->router = this;
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
@@ -1262,6 +1266,47 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
             // real guard is the try/catch inside the function itself.
             util::log_error("Motion watchdog check failed for telescope #" +
                             std::to_string(telescope->get_device_number()) + ": " + log_what(ex));
+        }
+    }
+}
+
+void Router::check_host_clock(std::chrono::system_clock::time_point sys, std::chrono::steady_clock::time_point mono) {
+    using alpacacore::util::HostClockEvent;
+    using alpacacore::util::HostClockTrust;
+    std::optional<HostClockEvent> event;
+    if (const auto step = host_clock_step_detector_.observe(sys, mono)) {
+        const auto t = std::chrono::system_clock::to_time_t(sys);
+        std::tm tm{};
+        char text[32] = "unknown";
+        if (gmtime_r(&t, &tm) != nullptr) {
+            std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &tm);
+        }
+        util::log_info("Host clock stepped by " + std::to_string(step->count()) + " ms (now " + text + ")");
+        // Something set the clock (an outside clock_settime, NTP's first step).
+        // Never host_clock_.mark_stepped() here: that writes the hardware RTC
+        // with a time nothing has verified.
+        HostClockTrust::mark_set("host clock step");
+        event = HostClockEvent{HostClockEvent::Kind::Stepped, *step};
+    }
+    // Read after the latch above, so a step is one Stepped event and never
+    // also a BecameTrusted one. Starts false, so a host that is trusted at the
+    // first tick re-checks a mount that connected before it.
+    const bool trusted = HostClockTrust::trusted();
+    if (!event && trusted && !host_clock_was_trusted_) {
+        event = HostClockEvent{HostClockEvent::Kind::BecameTrusted, std::chrono::milliseconds(0)};
+    }
+    host_clock_was_trusted_ = trusted;
+    if (!event) {
+        return;
+    }
+    // Snapshot as shared_ptr copies, as run_motion_watchdogs() does: no
+    // registry lock is held while the drivers run.
+    auto devices =
+        alpacacore::management::DeviceRegistry::instance().get_devices_by_type(alpacacore::DeviceType::Telescope);
+    for (const auto& device : devices) {
+        if (auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get())) {
+            // noexcept: a driver must catch its own failures (TelescopeDriver's contract).
+            telescope->on_host_clock_changed(*event);
         }
     }
 }
@@ -4936,6 +4981,8 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // The clock is now client-set for the management readout and the
     // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
     host_clock_.mark_stepped();
+    // open-astro#2419: and trusted for a mount's own clock.
+    alpacacore::util::HostClockTrust::mark_set("Sync Time");
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;
@@ -5423,6 +5470,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                      if (sink->router != nullptr) {
                          sink->router->store_learned_config(entry, catalog_json::json_from_config(learned), unique_id);
                      }
+                 },
+                 // Decision 0023 rule 4: the listener binds the wildcard of both families, so every local and
+                 // loopback address on this port is this server.
+                 [port = listen_port_]() -> std::vector<alpacacore::catalog::ListenAddress> {
+                     const int listening = port->load(std::memory_order_acquire);
+                     if (listening == 0) return {};
+                     return {{"0.0.0.0", listening}, {"::", listening}};
                  }});
             if (bound.rejection) {
                 error_message = *bound.rejection;

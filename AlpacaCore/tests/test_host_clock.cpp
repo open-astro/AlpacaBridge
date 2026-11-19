@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
 #include <unistd.h>
 
@@ -683,4 +684,56 @@ TEST_CASE("HostClock - a successful RTC write invalidates the settled probe (#29
     HostClock::set_sysfs_root_for_test("");
     HostClock::invalidate_rtc_probe();
     fs::remove_all(root);
+}
+
+// open-astro#2419: the realtime-vs-monotonic step detector the server's timer runs, and the trust latch the
+// mounts with their own clock gate their connect-time clock write on.
+TEST_CASE("HostClockStepDetector - primes on the first sample and reports only a step past 1 s",
+          "[util][hostclock][unit]") {
+    alpacacore::util::HostClockStepDetector detector;
+    const auto sys0 = system_clock::time_point(seconds(1700000000));
+    const auto mono0 = steady_clock::time_point(seconds(1000));
+    CHECK_FALSE(detector.observe(sys0, mono0).has_value());  // primes, even far from anything
+    // Both clocks moved alike: no step.
+    CHECK_FALSE(detector.observe(sys0 + seconds(1), mono0 + seconds(1)).has_value());
+    // 500 ms of drift between two samples: inside the 1 s tolerance.
+    CHECK_FALSE(detector.observe(sys0 + milliseconds(2500), mono0 + seconds(2)).has_value());
+    // RC51: the Pi clock jumped 6 h 48 min forward between two 1 s ticks.
+    const auto forward =
+        detector.observe(sys0 + milliseconds(2500) + seconds(1) + milliseconds(24480000), mono0 + seconds(3));
+    REQUIRE(forward.has_value());
+    CHECK(forward->count() == 24480000);
+    // Each sample re-primes: the next ordinary tick is quiet again.
+    CHECK_FALSE(detector.observe(sys0 + milliseconds(2500) + seconds(2) + milliseconds(24480000), mono0 + seconds(4))
+                    .has_value());
+    // A step backwards is negative.
+    const auto back = detector.observe(sys0 + milliseconds(2500) + seconds(3), mono0 + seconds(5));
+    REQUIRE(back.has_value());
+    CHECK(back->count() == -24480000);
+}
+
+TEST_CASE("HostClockTrust - the kernel probe or the latch trusts the host clock, and the latch stays set",
+          "[util][hostclock][unit]") {
+    using alpacacore::util::HostClockTrust;
+    HostClockTrust::reset_for_testing();
+    {
+        ProbeGuard probe(false);
+        CHECK_FALSE(HostClockTrust::trusted());
+        CHECK_FALSE(HostClockTrust::latched());
+    }
+    {
+        ProbeGuard probe(true);
+        CHECK(HostClockTrust::trusted());  // NTP-synchronised
+        CHECK_FALSE(HostClockTrust::latched());
+    }
+    {
+        ProbeGuard probe(false);
+        HostClockTrust::mark_set("test");
+        CHECK(HostClockTrust::trusted());  // set by something, kernel still says unsynchronised
+        CHECK(HostClockTrust::latched());
+        HostClockTrust::mark_set("test again");  // idempotent
+        CHECK(HostClockTrust::trusted());
+        HostClockTrust::reset_for_testing();
+        CHECK_FALSE(HostClockTrust::trusted());
+    }
 }

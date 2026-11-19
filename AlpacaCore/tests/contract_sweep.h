@@ -89,6 +89,9 @@
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
@@ -667,6 +670,21 @@ inline ContractEntry contract_entry_weewx_observingconditions() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+// A proxied device (decision 0023): no tier-1 probe reaches the upstream, so the placeholder upstream is never called.
+inline ContractEntry contract_entry_remotealpaca_observingconditions() {
+    return make_entry(
+        "remotealpaca_observingconditions", "remotealpaca", "observingconditions", DeviceType::ObservingConditions,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteObservingConditionsConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_observingconditions(n, config);
+        },
+        kSrcAgents);
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GEMINI
 inline ContractEntry contract_entry_gemini_covercalibrator() {
     return make_entry(
@@ -927,6 +945,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #else
 #define CS_WEEWX(X)
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions)
+#else
+#define CS_REMOTEALPACA(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 // The formatter does not reach a fixed point on this continuation list.
 // clang-format off
@@ -991,6 +1014,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_CELESTRON(X) \
     CS_BISQUE(X) \
     CS_WEEWX(X) \
+    CS_REMOTEALPACA(X) \
     CS_GEMINI(X) \
     CS_SVBONY(X) \
     CS_GPHOTO(X) \
@@ -1059,6 +1083,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"ioptron", "switch", "fake_ioptron_gpio.h"},
     {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
+    {"remotealpaca", "observingconditions", "fake_http_client.h"},  // a scripted upstream (alpaca_upstream_script.h)
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1108,6 +1133,8 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
     {"celestron_focuser", "celestron", "AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp"},
     {"celestron_cgx_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp"},
+    {"remotealpaca_observingconditions", "remotealpaca",
+     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

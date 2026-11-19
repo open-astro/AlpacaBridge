@@ -102,7 +102,7 @@ const OFFERED = {
     dome: [],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'touptek', 'wandererastro', 'zwo'],
     focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'touptek', 'zwo'],
-    observingconditions: ['weewx'],
+    observingconditions: ['remotealpaca', 'weewx'],
     rotator: ['ifr', 'onstep', 'wandererastro', 'zwo'],
     safetymonitor: [],
     switch: ['gemini', 'ioptron', 'onstep', 'playerone', 'touptek', 'wandererastro', 'zwo'],

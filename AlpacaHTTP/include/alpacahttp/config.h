@@ -105,6 +105,9 @@ public:
     int log_retention_days() const { return log_retention_days_; }
     // logging.max_file_size_mb: per-file log cap in MiB (the file rotates at it); 0 = no cap.
     int log_max_file_size_mb() const { return log_max_file_size_mb_; }
+    // logging.max_total_size_mb: cap in MiB on all log files together, across days; the
+    // oldest files are deleted first (#2422). 0 = no total cap.
+    int log_max_total_size_mb() const { return log_max_total_size_mb_; }
     const std::string& config_path() const { return config_path_; }
 
     // Device enable/disable
@@ -161,6 +164,7 @@ public:
     void set_update_packages_url(const std::string& url) { update_packages_url_ = url; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
+    void set_log_max_total_size_mb(int mb) { log_max_total_size_mb_ = mb < 0 ? 0 : mb; }
 
 private:
     std::uint16_t http_port_ = 6800;
@@ -210,6 +214,7 @@ private:
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
     int log_max_file_size_mb_ = 5;  // 0 = no cap
+    int log_max_total_size_mb_ = 1024;  // 0 = no total cap; about 34 h of TRACE on an iOptron rig
     std::string config_path_;
 
     // Device enable/disable map: "devicetype:number" -> enabled

@@ -28,6 +28,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/software_update.h>
@@ -87,6 +88,10 @@ public:
     // built-in registration functions don't provide, use it.
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
     explicit Router(const CatalogExtension& extend_catalog);
+    // As above, knowing the HTTP port the server listens on before the saved
+    // devices load, so a proxied device configured on this server is refused
+    // there too (decision 0023 rule 4). The Server passes its configured port.
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port);
 
     // The catalog register_device_from_config() and sanitize_device_config()
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
@@ -212,6 +217,13 @@ public:
     // value a PUT saved. The description reports it and the web UI edits it;
     // the responder binds the saved port only at the next restart.
     void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
+    // Decision 0023 rule 4: the HTTP port this server listens on, on every
+    // address (the listener binds the wildcard). A proxied device's factory and
+    // its Connect read it through BindContext::listen_addresses to refuse an
+    // upstream that is this server. 0 means not known yet (no check). The
+    // Server sets the port it bound, which differs from the configured one when
+    // that was 0.
+    void set_listen_port(std::uint16_t port) { listen_port_->store(port, std::memory_order_release); }
 
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
@@ -223,6 +235,17 @@ public:
     // mutex_, so calling it under a router lock would be a new, undocumented
     // lock-order edge).
     void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
+
+    // open-astro#2419: watch the host realtime clock for a step against the
+    // monotonic clock, and util::HostClockTrust::trusted() for its false ->
+    // true edge, and hand either to every registered telescope's
+    // on_host_clock_changed(), so a mount that keeps its own clock re-syncs
+    // it. A step also latches HostClockTrust (something set the clock). Called
+    // on every tick of the same timer thread as run_motion_watchdogs(),
+    // before it and whatever the watchdog interval is; `sys` and `mono` are
+    // that tick's two clock readings, so a test feeds synthetic pairs. Only
+    // that thread touches the detector state.
+    void check_host_clock(std::chrono::system_clock::time_point sys, std::chrono::steady_clock::time_point mono);
 
     // Software update (docs/software-update.md): the manager behind
     // /management/v1/update/*. Server installs one over the production
@@ -295,6 +318,9 @@ private:
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
     std::atomic<std::uint16_t> discovery_port_{Config::kDefaultDiscoveryPort};
+    // Shared with the listen_addresses source a proxied device keeps, so the
+    // driver never reads a destroyed Router.
+    std::shared_ptr<std::atomic<std::uint16_t>> listen_port_ = std::make_shared<std::atomic<std::uint16_t>>(0);
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.
@@ -560,6 +586,10 @@ private:
     // const-propagation, which a unique_ptr silently drops: a const Router
     // method could reach a non-const HostClock through the pointer.
     alpacacore::util::HostClock host_clock_;
+    // open-astro#2419: check_host_clock()'s state, touched only by the
+    // server's timer thread (or a test standing in for it).
+    alpacacore::util::HostClockStepDetector host_clock_step_detector_;
+    bool host_clock_was_trusted_ = false;
     // open-astro#675: replaced wholesale by set_now_fn(), never mutated; see
     // current_now_fn().
     std::shared_ptr<const NowFn> now_fn_ =

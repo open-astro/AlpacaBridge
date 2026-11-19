@@ -174,6 +174,33 @@ TEST_CASE("Remote Alpaca client - no usable reply is a transport failure", "[rem
     CHECK(thrown_by([&] { nowhere.get_double("temperature"); }).first);
 }
 
+TEST_CASE("Remote Alpaca client - a refused connection is RemoteConnectRefused, other failures are not",
+          "[remotealpaca][client]") {
+    alpacacore::test::FakeHttpClient http(
+        [] { return std::string(R"({"Value":1.0,"ClientTransactionID":0,"ErrorNumber":0,"ErrorMessage":""})"); });
+    RemoteAlpacaClient client(http.client(), upstream_at(11111), 9);
+    const auto refused_by = [&client](auto&& call) {
+        try {
+            call();
+        } catch (const alpacacore::vendor::remotealpaca::RemoteConnectRefused& e) {
+            CHECK(e.error_code() == AlpacaError::DriverException);
+            CHECK(std::string(e.what()).rfind("127.0.0.1:11111: ", 0) == 0);
+            return true;
+        } catch (const RemoteTransportError&) {
+            return false;
+        }
+        FAIL("the call did not throw");
+        return false;
+    };
+
+    http.refuse_next(2);
+    CHECK(refused_by([&] { client.get_double("temperature"); }));
+    CHECK(refused_by([&] { client.put("refresh"); }));
+    http.fail_next(1);  // a timeout or a dropped connection
+    CHECK_FALSE(refused_by([&] { client.get_double("temperature"); }));
+    CHECK(client.get_double("temperature") == 1.0);
+}
+
 TEST_CASE("Remote Alpaca client - calls on one client never overlap", "[remotealpaca][client]") {
     alpacacore::test::FakeHttpClient http(
         [] { return std::string(R"({"Value":1.0,"ClientTransactionID":0,"ErrorNumber":0,"ErrorMessage":""})"); });
