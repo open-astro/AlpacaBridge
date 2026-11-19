@@ -44,8 +44,10 @@
 //   void check_tracking();           // InvalidOperation (equatorial slews only)
 //
 // The gate itself does no I/O, takes no lock and keeps no state (decision 0016 rules 1 and 2): a driver calls it
-// under its own state lock, as it ran its checks before. Only the parked-against-fault order and the protocol limits
-// differ per driver; both are data in TelescopeCommandLimits, never a vendor name in here.
+// where it ran its checks before, holding the lock its check callbacks expect. That is its state lock when the
+// callbacks read state under a lock the caller holds, and no lock when each callback takes the state lock itself.
+// Only the parked-against-fault order and the protocol limits differ per driver; both are data in
+// TelescopeCommandLimits, never a vendor name in here.
 
 namespace alpacacore::util {
 
