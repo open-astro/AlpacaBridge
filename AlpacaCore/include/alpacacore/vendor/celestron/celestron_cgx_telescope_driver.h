@@ -49,5 +49,9 @@ void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 void poll_state_now_for_testing(TelescopeDriver& driver);
 /// Reads and clears the link-loss stamp (decision 0009 point 3); nullopt when none is held.
 std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver);
+/// Runs `hook` on the body's thread at the top of every motion body's checked stop, before that stop takes the
+/// motion-start lock; a case blocks there to land a newer command between a body's two supersede checks. Pass an
+/// empty function to clear it.
+void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::celestron

@@ -334,6 +334,10 @@ public:
     std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing() {
         return link_lost_at_.consume();
     }
+    void set_stop_worker_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_worker_hook_for_testing_ = std::move(hook);
+    }
 
 protected:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010 rule 5).
@@ -555,6 +559,9 @@ private:
     util::AsyncOperation stop_slot_;
     std::atomic<bool> stop_pending_{false};  // Slewing reads stop progress before it takes mutex_ (#1402).
     bool unpark_after_stop_ = false;
+    // Test seam (set_stop_worker_hook_for_testing): runs at the top of stop_motion_worker_checked(), before it takes
+    // motion_start_mutex_. Guarded by mutex_.
+    std::function<void()> stop_worker_hook_for_testing_;
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> disconnected_checkpoint_;
@@ -1956,6 +1963,12 @@ void CelestronCgxTelescopeDriver::sync_to_alt_az(double, double) {
 }
 
 void CelestronCgxTelescopeDriver::stop_motion_worker_checked(const util::MotionClaim& claim) {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hook = stop_worker_hook_for_testing_;
+    }
+    if (hook) hook();
     // Serialize check + dispatch with the explicit-stop ownership publication.
     // Never take transition_mutex_: the reaper holds it while joining us.
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
@@ -2169,12 +2182,24 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
             return;
         }
         stop_motion_worker_checked(claim);
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_ = false;
-        at_home_ = false;
-        calibrated_ = false;
-        needs_sync_ = false;
-        sync_correction_active_ = false;
+        bool superseded_during_stop;
+        {
+            // Checked again under mutex_, which every claim takes: a newer command can claim the axes while the stop
+            // waits for motion_start_mutex_, and its state is then not this body's to write (decision 0006 rule 6).
+            std::lock_guard<std::mutex> lock(mutex_);
+            superseded_during_stop = superseded(context, claim);
+            if (!superseded_during_stop) {
+                parked_ = false;
+                at_home_ = false;
+                calibrated_ = false;
+                needs_sync_ = false;
+                sync_correction_active_ = false;
+            }
+        }
+        if (superseded_during_stop) {
+            log_superseded_failure("FindHome or Park", std::current_exception());
+            return;
+        }
         throw;
     }
 }
@@ -2319,6 +2344,11 @@ void CelestronCgxTelescopeDriver::run_slew_operation(util::OperationContext& con
             return;
         }
         stop_motion_worker_checked(claim);
+        // A newer command can claim the axes while the stop waits for motion_start_mutex_ (decision 0006 rule 6).
+        if (superseded(context, claim)) {
+            log_superseded_failure("Slew", std::current_exception());
+            return;
+        }
         throw;
     }
 }
@@ -2413,13 +2443,24 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
             return;
         }
         stop_motion_worker_checked(claim);
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_ = false;
-        at_home_ = false;
-        if (!reference_established) {
-            calibrated_ = !rebase_started;
-            needs_sync_ = false;
-            sync_correction_active_ = false;
+        bool superseded_during_stop;
+        {
+            // Checked again under mutex_, as in the home catch (decision 0006 rule 6).
+            std::lock_guard<std::mutex> lock(mutex_);
+            superseded_during_stop = superseded(context, claim);
+            if (!superseded_during_stop) {
+                parked_ = false;
+                at_home_ = false;
+                if (!reference_established) {
+                    calibrated_ = !rebase_started;
+                    needs_sync_ = false;
+                    sync_correction_active_ = false;
+                }
+            }
+        }
+        if (superseded_during_stop) {
+            log_superseded_failure("Meridian slew", std::current_exception());
+            return;
         }
         throw;
     }
@@ -2535,6 +2576,12 @@ std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testi
         return cgx->consume_link_lost_at_for_testing();
     }
     return std::nullopt;
+}
+
+void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_stop_worker_hook_for_testing(std::move(hook));
+    }
 }
 
 }  // namespace alpacacore::vendor::celestron

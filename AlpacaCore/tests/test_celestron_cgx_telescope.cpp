@@ -3346,7 +3346,8 @@ void connect_home_and_track(alpacacore::test::FakeCelestronCgxMount& mount, alpa
 TEST_CASE("Celestron CGX USB Telescope Driver - a slew, Park or FindHome supersedes a slew in flight (#2263)",
           "[celestron][cgx][telescope][motion-owner]") {
     using namespace std::chrono_literals;
-    const int leg = GENERATE(0, 1, 2);  // a second slew, Park, FindHome
+    // A second slew, Park or FindHome during a slew; then a Park during a FindHome, and a FindHome during a Park.
+    const int leg = GENERATE(0, 1, 2, 3, 4);
     INFO("leg=" << leg);
     alpacacore::test::FakeCelestronCgxMount mount;
     REQUIRE(mount.ok());
@@ -3357,9 +3358,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a slew, Park or FindHome superse
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     connect_home_and_track(mount, *driver);
 
-    // The first slew's GOTO stays in flight: its body waits on the clock for the mount to report it done.
+    // The first command's GOTO or home stays in flight: its body waits on the clock for the mount to report it done.
     mount.set_auto_complete_motions(false);
-    driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    if (leg <= 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    if (leg == 3) driver->find_home();
+    if (leg == 4) driver->park();
     REQUIRE(clock.wait_for_waiters(1, 2s));
     const int ra_stops = mount.count_command(0x10, 0x24);
     const int dec_stops = mount.count_command(0x11, 0x24);
@@ -3370,8 +3373,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a slew, Park or FindHome superse
     const double second_ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
     const auto second = call_result([&] {
         if (leg == 0) driver->slew_to_coordinates_async(second_ra, 30.0);
-        if (leg == 1) driver->park();
-        if (leg == 2) driver->find_home();
+        if (leg == 1 || leg == 3) driver->park();
+        if (leg == 2 || leg == 4) driver->find_home();
     });
     const bool landed = wait_until([&] {
         clock.advance(20ms);
@@ -3391,8 +3394,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a slew, Park or FindHome superse
         CHECK(driver->get_target_right_ascension() == second_ra);
         CHECK(driver->get_target_declination() == 30.0);
     }
-    if (leg == 1) CHECK(driver->get_at_park());
-    if (leg == 2) CHECK(driver->get_at_home());
+    if (leg == 1 || leg == 3) CHECK(driver->get_at_park());
+    if (leg == 2 || leg == 4) CHECK(driver->get_at_home());
 }
 
 TEST_CASE(
@@ -3678,5 +3681,84 @@ TEST_CASE(
     }
     if (leg == 1) CHECK(driver->get_at_home());
     if (leg == 2) CHECK(driver->get_at_park());
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a body whose stop finds it superseded writes no state (#2263)",
+          "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a flip slew superseded by FindHome, FindHome by Park, a slew by FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    // Declared before the driver, so they outlive its threads: the body's INFO for a throw after it was superseded,
+    // the slot's WARN for a body that rethrew instead, and the latch the body's stop blocks on.
+    std::atomic<int> superseded_infos{0};
+    std::atomic<int> stale_warns{0};
+    struct SinkRestore {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkRestore() { alpacacore::logging::set_log_sink(previous); }
+    } restore;
+    alpacacore::test::Latch latch;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (message.find("ended after a newer command took its axes") != std::string_view::npos)
+                superseded_infos.fetch_add(1);
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("stale operation failed") != std::string_view::npos)
+                stale_warns.fetch_add(1);
+        });
+
+    // The first command's home or GOTO stays in flight; its body waits on the clock between completion reads.
+    mount.set_auto_complete_motions(false);
+    if (leg == 0) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 1.0, 24.0), 25.0);
+    if (leg == 1) driver->find_home();
+    if (leg == 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+
+    // Its next RA completion read gets a malformed status and throws. The body checks it is not superseded, then
+    // its stop blocks here, before it takes the lock every claim is made under; the second command claims meanwhile.
+    alpacacore::vendor::celestron::set_stop_worker_hook_for_testing(*driver, [&] { latch.block(); });
+    mount.ack_next_with_payload(0x10, leg == 2 ? 0x13 : 0x12, {0x01});
+    clock.advance(200ms);
+    REQUIRE(latch.wait_entered());
+    const int ra_stops = mount.count_command(0x10, 0x24);
+    if (leg == 1) {
+        driver->park();
+    } else {
+        driver->find_home();
+    }
+    latch.release();
+    const bool body_ended = wait_until([&] { return superseded_infos.load() + stale_warns.load() > 0; });
+    alpacacore::vendor::celestron::set_stop_worker_hook_for_testing(*driver, {});
+
+    CHECK(body_ended);
+    CHECK(superseded_infos.load() == 1);
+    CHECK(stale_warns.load() == 0);
+    CHECK(mount.count_command(0x10, 0x24) == ra_stops);
+    // The FindHome or Park in flight dropped the reference; the superseded body did not restore it.
+    const auto slew = call_result(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    INFO("slew: " << slew.text);
+    CHECK(slew.text == "Run FindHome before slewing the Celestron CGX");
+
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_home(0x10);
+    mount.complete_axis_home(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    if (leg == 1) {
+        CHECK(driver->get_at_park());
+    } else {
+        CHECK(driver->get_at_home());
+    }
 }
 #endif
