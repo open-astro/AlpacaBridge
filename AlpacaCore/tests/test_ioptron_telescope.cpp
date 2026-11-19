@@ -1469,6 +1469,7 @@ TEST_CASE("iOptron Telescope Driver - connect time sample does not block UTC get
 TEST_CASE("iOptron Telescope Driver - configured UTC sync publishes only a successful time write",
           "[ioptron][telescope][unit][utcdate]") {
     const bool fail_write = GENERATE(false, true);
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the mount clock (#2419)
     alpacacore::test::FakeIoptronMount mount("0025", 0.0);
     mount.set_utc_reply("bad#");
     REQUIRE(mount.ok());
