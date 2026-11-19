@@ -1560,7 +1560,7 @@ public:
         const int first_chunk_cs = std::min(total_cs, 255);
 
         std::chrono::milliseconds pulse_length{duration};
-        const auto axis_index = static_cast<std::size_t>(axis);
+        const std::size_t axis_index = axis == 1 ? 1 : 0;  // axis is 0 or 1; spelled out for cppcheck
         const std::size_t other_index = 1 - axis_index;
         // This axis's position hold, armed by a pulse on the other axis that may still be running: the arm below
         // clears it, and a guide write that fails puts it back (that pulse still owns it).
