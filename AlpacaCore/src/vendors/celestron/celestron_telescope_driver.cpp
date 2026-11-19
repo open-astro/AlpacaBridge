@@ -1739,6 +1739,26 @@ public:
         claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
         const util::MotionClaim mine = slew_claim_;
         const auto still_mine = [this, mine] { return !lost_locked(mine); };
+        // #2263: the call owns the mount until it returns. Slewing reads false once the slew lands, but the motion
+        // owner hears finished() only here, on every exit, so a PulseGuide during the landing read, the settle and
+        // the tracking restore is refused instead of superseding the slew (set_slewing_flag_locked()).
+        blocking_slew_ = mine;
+        struct EndBlockingSlew {
+            CelestronTelescopeDriver& driver;
+            std::unique_lock<std::mutex>& lock;
+            const util::MotionClaim& mine;
+            ~EndBlockingSlew() {
+                if (!lock.owns_lock()) {
+                    lock.lock();
+                }
+                if (driver.blocking_slew_ && same_claim(*driver.blocking_slew_, mine)) {
+                    driver.blocking_slew_.reset();
+                }
+                if (!driver.slewing_cached_) {
+                    driver.motion_owner_.finished(mine);  // a timed-out slew still slewing keeps refusing, as before
+                }
+            }
+        } end_blocking_slew{*this, lock, mine};
         // The initiator lock stays held through the dispatch, so no other initiator runs while mutex_ is free.
         if (!do_slew_to_coordinates(lock, ra, dec, nullptr, still_mine)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
@@ -2970,12 +2990,12 @@ private:
     }
 
     // The control path's Slewing flag. Once it reads false the newest slew, Park or FindHome is over for the motion
-    // owner, and a PulseGuide is accepted again (#2263). Only the command that owns the mount writes it (decision
-    // 0006 rule 6), so the claim it ends is that command's. A failed or deferred stop keeps the flag true, and with
-    // it the refusal: the mount may still be moving.
+    // owner, and a PulseGuide is accepted again (#2263); a blocking SlewToCoordinates is over only when it returns.
+    // Only the command that owns the mount writes it (decision 0006 rule 6), so the claim it ends is that command's. A
+    // failed or deferred stop keeps the flag true, and with it the refusal: the mount may still be moving.
     void set_slewing_flag_locked(bool slewing) const {
         slewing_cached_ = slewing;
-        if (!slewing) {
+        if (!slewing && !(blocking_slew_ && same_claim(*blocking_slew_, slew_claim_))) {
             motion_owner_.finished(slew_claim_);
         }
     }
@@ -3458,7 +3478,10 @@ private:
         bool hardware_slewing = false;
         // The read runs with mutex_ free: a newer motion command (AbortSlew, MoveAxis, Park, a new slew) may take the
         // mount meanwhile, and its state is then not this read's to change.
-        const util::MotionClaim generation = slew_claim_;  // the slew or Park this read serves
+        // The slew or Park this read serves. Compared with the stored slew_claim_, which stays lost for good after any
+        // later claim or cancel: call only right after a fresh claim_slew_locked() (the blocking slew's wait, the Park
+        // hook), never from the status poll, or slewing_cached_ freezes.
+        const util::MotionClaim generation = slew_claim_;
         try {
             const SamplePlan landed_plan = sample_plan_locked(true);
             std::tie(hardware_slewing, landed) = without_lock(lock, [&] {
@@ -4196,6 +4219,9 @@ private:
     // The newest slew, Park or FindHome claim; mutex_. The poll's home check, poll_hardware_slewing() and fail_home()
     // read it as the claim of the operation they serve.
     util::MotionClaim slew_claim_;
+    // The claim of a blocking SlewToCoordinates from its claim until it returns; mutex_. While it is the newest slew
+    // claim, a published Slewing false does not end it for the owner (set_slewing_flag_locked()).
+    std::optional<util::MotionClaim> blocking_slew_;
     // The send gate (send_motion_locked()): how many motion command groups are on the wire, and the wait for one to
     // end. Both guarded by mutex_.
     mutable unsigned motion_sends_in_flight_ = 0;

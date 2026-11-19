@@ -1463,4 +1463,71 @@ TEST_CASE("Celestron motion owner - a refused Park or async slew leaves a runnin
     rig.driver->abort_slew();
 }
 
+// A blocking SlewToCoordinates owns the mount until it returns, its settle and tracking restore included: Slewing reads
+// false once it lands, but a PulseGuide in the settle is refused and does not supersede the slew (#2263), so the call
+// returns success and restores tracking, as it did before the motion owner. A PulseGuide after the call returns is
+// accepted.
+TEST_CASE(
+    "Celestron motion owner - a PulseGuide during a blocking slew's settle is refused and the slew completes (#2263)",
+    "[celestron][telescope][pulseguide][motion-owner]") {
+    const int leg = GENERATE(0, 1);  // 0: PulseGuide during the settle; 1: right after the call returns
+    CAPTURE(leg);
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    st->tracking_on.store(true);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_slew_settle_time(2);
+    REQUIRE(driver->get_can_pulse_guide());
+    const int t_before = st->t_count.load();
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(5.0, 20.0);
+        } catch (const std::exception&) {
+            threw.store(true);
+        }
+        done.store(true);
+    });
+    const auto finish = [&] {
+        const bool finished = advance_until(clock, [&] { return done.load(); }, 2);
+        if (!finished &&
+            !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+            std::terminate();  // the slewer is stuck off the clock: joining it would hang
+        }
+        slewer.join();
+        return finished;
+    };
+    if (leg == 0) {
+        // The GOTO is on the wire and reported moving; then it lands: Slewing reads false while the call is still in
+        // its landing read or its settle.
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+        REQUIRE(advance_until(clock, [&] { return done.load() || driver->get_slewing(); }, 2));
+        REQUIRE(advance_until(clock, [&] { return done.load() || !driver->get_slewing(); }, 2));
+        REQUIRE_FALSE(done.load());
+        bool refused = false;
+        try {
+            driver->pulse_guide(0, 500);
+        } catch (const alpacacore::AlpacaException& ex) {
+            refused = ex.error_code() == alpacacore::AlpacaError::InvalidOperation;
+        }
+        CHECK(refused);
+        REQUIRE(finish());
+        CHECK_FALSE(threw.load());
+        CHECK(st->t_count.load() > t_before);  // the completion tail restored tracking
+        CHECK(st->guide_command_count(1) == 0);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    } else {
+        REQUIRE(finish());
+        CHECK_FALSE(threw.load());
+        CHECK(st->t_count.load() > t_before);
+        CHECK_NOTHROW(driver->pulse_guide(0, 500));
+        CHECK(driver->get_is_pulse_guiding());
+    }
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
