@@ -94,12 +94,11 @@ constexpr double kLandingFarMissArcsec = 600.0;
 // open-astro#2405: the sync bound. A sync re-defines where the mount points, so a sync far from where the mount
 // believes it is (a wrong target, a client that synced to the wrong object, a plate solve of the wrong field) would
 // throw every later GOTO off by that much, with no motion to notice. 5 deg covers any real polar alignment or cone
-// error; the operator may set 1 to 30 deg per device. Independently a sync may change RA by at most 20 minutes of
-// time: the RA rule is one constant here and one function in util/motion_guards.h (sync_ra_change_exceeds_bound), so
-// a rule that scales with cos(Dec) near the pole would be a change in one place.
+// error; the operator may set 1 to 30 deg per device. The bound is the angle on the sky between the two positions,
+// never minutes of RA, so it means the same at every declination, the pole and the CGX home at Dec +90 included
+// (maintainer decision on #2405). 5 deg is the #2396 value; no rig data yet argues for another.
 constexpr double kMaxSyncOffsetDegrees = 5.0;
 constexpr double kSyncOffsetMinDegrees = 1.0;
 constexpr double kSyncOffsetMaxDegrees = 30.0;
-constexpr double kMaxSyncRaChangeMinutes = 20.0;
 
 }  // namespace alpacacore::util

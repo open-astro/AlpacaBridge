@@ -555,7 +555,7 @@ TEST_CASE("check_sync_bound - accepts a sync exactly at each limit", "[motion-gu
     // 5 deg in Dec.
     CHECK_NOTHROW(
         check_sync_bound("SyncToCoordinates", MountPosition{0.0, 0.0}, MountPosition{0.0, 5.0}, kMaxSyncOffsetDegrees));
-    // 20 min of RA at Dec 60 (about 2.5 deg on the sky).
+    // 20 min of RA at Dec 60 is about 2.5 deg on the sky.
     CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, 60.0}, MountPosition{20.0 / 60.0, 60.0},
                                    kMaxSyncOffsetDegrees));
     // 12 min the short way round 0 h.
@@ -579,13 +579,6 @@ TEST_CASE("check_sync_bound - refuses a sync past any limit with InvalidValue", 
     CHECK(separation ==
           "SyncToCoordinates: the sync would move the pointing by 5.01 degrees, more than the 5.00 "
           "degree limit");
-    const auto ra = alpaca_error_message(
-        [] {
-            check_sync_bound("SyncToTarget", MountPosition{0.0, 60.0}, MountPosition{20.1 / 60.0, 60.0},
-                             kMaxSyncOffsetDegrees);
-        },
-        AlpacaError::InvalidValue);
-    CHECK(ra == "SyncToTarget: the sync would change RightAscension by 20.10 minutes, more than 20 minutes");
     const auto dec = alpaca_error_message(
         [] {
             check_sync_bound("SyncToCoordinates", MountPosition{0.0, 87.0}, MountPosition{0.0, 89.0},
@@ -599,6 +592,29 @@ TEST_CASE("check_sync_bound - refuses a sync past any limit with InvalidValue", 
                              kMaxSyncOffsetDegrees, 90.01);
         },
         AlpacaError::InvalidValue);
+}
+
+TEST_CASE("check_sync_bound - only the angle on the sky counts, at every declination", "[motion-guards]") {
+    // 1 h of RA at Dec 89 is about 15 arcmin on the sky: a small sync near the pole is accepted.
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, 89.0}, MountPosition{1.0, 89.0},
+                                   kMaxSyncOffsetDegrees));
+    // At the pole RA is undefined (the CGX home at Dec +90): a target 3 deg away is accepted at any RA.
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, 90.0}, MountPosition{6.0, 87.0},
+                                   kMaxSyncOffsetDegrees));
+    alpacacore::test::require_alpaca_error(
+        [] {
+            check_sync_bound("SyncToCoordinates", MountPosition{0.0, 90.0}, MountPosition{12.0, 84.9},
+                             kMaxSyncOffsetDegrees);
+        },
+        AlpacaError::InvalidValue);
+    // 21 min of RA on the equator is 5.25 deg on the sky: refused by the same angle.
+    const auto equator = alpacacore::test::alpaca_error_message(
+        [] {
+            check_sync_bound("SyncToTarget", MountPosition{0.0, 0.0}, MountPosition{21.0 / 60.0, 0.0},
+                             kMaxSyncOffsetDegrees);
+        },
+        AlpacaError::InvalidValue);
+    CHECK(equator == "SyncToTarget: the sync would move the pointing by 5.25 degrees, more than the 5.00 degree limit");
 }
 
 TEST_CASE("check_sync_bound - the offset limit is the caller's configured value", "[motion-guards]") {

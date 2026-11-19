@@ -314,12 +314,6 @@ inline double validate_max_sync_offset_degrees(double degrees) {
     return degrees;
 }
 
-/// The sync RA rule (#2405): the short-way RA change in minutes of time, true when it is above
-/// kMaxSyncRaChangeMinutes.
-inline bool sync_ra_change_exceeds_bound(double target_ra_hours, double current_ra_hours) {
-    return !(std::abs(shortest_ra_delta_hours(target_ra_hours, current_ra_hours)) * 60.0 <= kMaxSyncRaChangeMinutes);
-}
-
 namespace detail {
 inline std::string two_decimals(double value) {
     std::array<char, 32> text{};
@@ -330,8 +324,9 @@ inline std::string two_decimals(double value) {
 
 /**
  * Refuses a sync with InvalidValue when it would move the pointing from `current` to `target` by more than
- * `max_offset_degrees` on the sky, change RA by more than kMaxSyncRaChangeMinutes (sync_ra_change_exceeds_bound),
- * or, for a driver that keeps the sync as an offset, leave `resulting_dec_degrees` beyond +/-90. Each limit itself is
+ * `max_offset_degrees` as an angle on the sky (so a small sync near the pole, or from the CGX home at Dec +90 where RA
+ * is undefined, is judged by how far the pointing really moves, never by minutes of RA), or, for a driver that keeps
+ * the sync as an offset, leave `resulting_dec_degrees` beyond +/-90. Each limit itself is
  * accepted; a value that is not a number is refused. `label` names the member ("SyncToCoordinates"). Reads nothing; the
  * driver passes the position it holds.
  */
@@ -346,13 +341,6 @@ inline void check_sync_bound(std::string_view label, const MountPosition& curren
                                   detail::two_decimals(separation_degrees) + " degrees, more than the " +
                                   detail::two_decimals(max_offset_degrees) + " degree limit",
                               AlpacaError::InvalidValue);
-    }
-    if (sync_ra_change_exceeds_bound(target.ra_hours, current.ra_hours)) {
-        throw AlpacaException(
-            std::string(label) + ": the sync would change RightAscension by " +
-                detail::two_decimals(std::abs(shortest_ra_delta_hours(target.ra_hours, current.ra_hours)) * 60.0) +
-                " minutes, more than " + std::to_string(static_cast<int>(kMaxSyncRaChangeMinutes)) + " minutes",
-            AlpacaError::InvalidValue);
     }
     if (resulting_dec_degrees && !(std::abs(*resulting_dec_degrees) <= 90.0)) {
         throw AlpacaException(std::string(label) + ": the sync would put Declination at " +
