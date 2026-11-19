@@ -173,9 +173,6 @@ struct FocuserStatus {
     int goto_rate = 0;
 };
 
-/// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
-/// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
-/// written only while the rotator is stopped.
 /// One OnStepX auxiliary feature slot from :GXY<n># (OnStepX Features.command.cpp, af1d26bf): its name (at most 10
 /// characters) and its purpose code (Constants.h: 1 switch, 2 analog output, 3 dew heater, 4 intervalometer, 6 hidden
 /// switch; :GXY reports a momentary switch, 5, and a cover switch, 7, as 1).
@@ -184,6 +181,9 @@ struct AuxFeature {
     int purpose = 0;
 };
 
+/// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
+/// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
+/// written only while the rotator is stopped.
 struct RotatorStatus {
     bool moving = false;
     bool derotating = false;
@@ -195,7 +195,7 @@ struct RotatorStatus {
  * @brief One link to one OnStep controller: the LX200-derived command set over
  *        its serial port or its TCP command channel.
  *
- * Every OnStep device on a controller (the telescope, a focuser, the rotator) shares one
+ * Every OnStep device on a controller (the telescope, a focuser, the rotator, the switch) shares one
  * link, which acquire() hands out (#2223, the iOptron iFR precedent of decision
  * 0017): the first device to connect opens it, later devices join it, and it
  * closes when the last holder lets go. Every exchange holds the link's own lock

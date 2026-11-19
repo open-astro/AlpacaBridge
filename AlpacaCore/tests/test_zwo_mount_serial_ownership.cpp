@@ -20,7 +20,6 @@
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <fcntl.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <memory>
@@ -45,20 +44,6 @@ ConnectionInfo serial_info(const std::string& path) {
     info.port_path = path;
     info.baud_rate = 9600;
     return info;
-}
-
-// Puts a second fd on the tty at @p path, opened with @p flags, in @p fd's place: the shape of
-// alpacacore::test::make_fd_unwritable(), whose read-only /dev/null this wrapper never writes to, because every
-// command first flushes the tty's input and tcflush() on /dev/null fails with ENOTTY before the write. A stand-in on
-// the same tty keeps the flush working, so O_RDONLY makes the command's write meet EBADF and O_WRONLY its reply read.
-// TIOCEXCL is released first, so the stand-in can open; the wrapper's close() later closes the stand-in.
-bool replace_fd_on_tty(int fd, const std::string& path, int flags) {
-    (void)::ioctl(fd, TIOCNXCL);
-    const int stand_in = ::open(path.c_str(), flags | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
-    if (stand_in < 0) return false;
-    const bool ok = ::dup2(stand_in, fd) == fd;
-    ::close(stand_in);
-    return ok;
 }
 
 }  // namespace
@@ -128,7 +113,7 @@ TEST_CASE("ZWO mount serial - EBADF on the mount's fd is a lost link until the n
     // On the command's write the call reports its own failed send, as for EIO; on its reply read, the lost transport.
     const bool on_write = GENERATE(true, false);
     INFO((on_write ? "EBADF on the command's write" : "EBADF on the reply read"));
-    REQUIRE(replace_fd_on_tty(fd, device.slave_path(), on_write ? O_RDONLY : O_WRONLY));
+    REQUIRE(alpacacore::test::replace_fd_on_tty(fd, device.slave_path(), on_write ? O_RDONLY : O_WRONLY));
     alpacacore::test::require_alpaca_error(
         [&] { (void)wrapper.send_command(":GVP"); },
         on_write ? alpacacore::AlpacaError::DriverException : alpacacore::AlpacaError::NotConnected);

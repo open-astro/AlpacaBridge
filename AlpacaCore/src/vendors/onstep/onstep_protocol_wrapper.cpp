@@ -300,9 +300,10 @@ void configure_onstep_line(struct termios& tty, speed_t speed) {
 
 // Send one '#'-terminated query on an open probe link and collect the reply
 // (without the '#') for at most @p budget_ms. Empty on a write failure,
-// silence or a read error.
-std::string probe_query(int fd, const char* cmd, int budget_ms) {
-    if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) {
+// silence or a read error. The writes and reads go through the link
+// (util::SerialLink, #2262); a probe judges only the bytes it got.
+std::string probe_query(util::SerialLink& link, const char* cmd, int budget_ms) {
+    if (!link.write_all(cmd, std::char_traits<char>::length(cmd))) {
         return "";
     }
     // Up to 31 bytes before the '#', CR/LF included; a timeout or a hangup
@@ -310,7 +311,8 @@ std::string probe_query(int fd, const char* cmd, int budget_ms) {
     util::ReadSpec spec;
     spec.skip.clear();
     spec.max_len = kProbeReplyMax;
-    const auto r = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms));
+    const auto r =
+        util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms));
     std::string resp = r.bytes;
     if (r.outcome == util::ReadOutcome::Terminator) {
         resp.pop_back();
@@ -345,10 +347,10 @@ std::string probe_onstep_port(const std::string& port_path, std::string& version
         std::this_thread::sleep_for(std::chrono::seconds(attempt == 0 ? 2 : 1));
         tcflush(fd, TCIOFLUSH);
 
-        const std::string response = probe_query(fd, ":GVP#", 3000);
+        const std::string response = probe_query(link, ":GVP#", 3000);
         if (response.find("OnStep") != std::string::npos || response.find("On-Step") != std::string::npos) {
             tcflush(fd, TCIOFLUSH);
-            version = probe_query(fd, ":GVN#", 2000);
+            version = probe_query(link, ":GVN#", 2000);
             return response;
         }
 
@@ -1713,7 +1715,7 @@ private:
 
     bool write_data(const std::string& data) {
         if (connection_type_ == ConnectionType::Serial) {
-            return util::tty_write_all(serial_fd_, data.c_str(), data.length());
+            return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
         }
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
@@ -1735,7 +1737,8 @@ private:
     // (decision 0009 rule 2a, #2220).
     util::ReadResult checked_read(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
         if (connection_type_ == ConnectionType::Serial) {
-            const auto r = util::read_until(serial_fd_, spec, deadline);
+            // The link judges a LinkDead read (util::SerialLink, #2262): a hangup errno on its fd is a loss.
+            const auto r = util::read_until(link_, spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) {
                 lose_link_locked("read failed: " + util::errno_string(r.err));
             }
@@ -1807,8 +1810,6 @@ private:
     }
 
     // ── Link-loss helpers (decision 0009, #1241) ──
-
-    static bool is_loss_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV || err == EBADF; }
 
     // Caller holds mutex_. True when the open fd's node is gone.
     bool node_removed_locked() const {
@@ -1895,7 +1896,10 @@ private:
         (void)link_lost_at_.consume();  // its own mutex, after loss_mutex_ as in record_loss()
     }
 
+    // A successful connect and an explicit Disconnect (decision 0009 rule 5): the wrapper's latch and the serial
+    // link's verdict both start clear. The port release after a loss (disconnect_locked()) keeps both.
     void clear_loss() {
+        link_.clear_loss();
         std::lock_guard<std::mutex> lock(loss_mutex_);
         link_lost_ = false;
         lost_reason_.clear();
@@ -1934,11 +1938,14 @@ private:
 
     // Caller holds mutex_; errno is from the failed write. A write that failed
     // because the link is gone loses it (decision 0009 rule 2a); one that timed
-    // out on a link still there stays a DriverException.
+    // out on a link still there stays a DriverException. Over serial the
+    // verdict is the link's (util::SerialLink, #2262: EIO, ENXIO, ENODEV and
+    // EBADF on its fd, judged by link_.write_all()); this wrapper keeps no
+    // serial errno list.
     [[noreturn]] void fail_write_locked() {
         const int err = errno;
         if (connection_type_ == ConnectionType::Serial) {
-            if (is_loss_errno(err)) {
+            if (link_.lost()) {
                 lose_link_locked("write failed: " + util::errno_string(err));
             }
             if (node_removed_locked()) {
