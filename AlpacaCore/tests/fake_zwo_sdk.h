@@ -75,6 +75,9 @@ public:
     bool stop_releases_download{true};
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
+    // The Exposure control's minimum in microseconds (get_control_caps); a camera whose shortest exposure is longer
+    // than the SDK's 1 us default.
+    long exposure_min_us{1};
     bool fail_exposure_start{false};
     // Every exposure start reports Failed until cleared: a driver retry meets the fault again (sweep tier 3).
     std::atomic<bool> fail_every_exposure{false};
@@ -141,6 +144,14 @@ public:
     std::vector<long> exposure_at_bandwidth_writes() const {
         std::lock_guard lock(mutex_);
         return exposure_at_bandwidth_writes_;
+    }
+
+    // The last value written to a control (the exposure register in microseconds, for one); 0 when none was.
+    // A lookup, not operator[], so reading a control never adds an entry to the fake.
+    long control_value(ControlType type) {
+        std::lock_guard lock(mutex_);
+        const auto it = controls_.find(type);
+        return it == controls_.end() ? 0 : it->second;
     }
 
     int call_count(const std::string& name) const {
@@ -275,7 +286,7 @@ public:
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         std::vector<ControlCaps> caps = {
-            {ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
+            {ControlType::Exposure, "Exposure", "Exposure time", exposure_min_us, 3'600'000'000L, 100'000, false, true},
             {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
             {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
             {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
@@ -687,6 +698,8 @@ public:
     // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
     std::map<int, bool> heater_by_id;
     std::map<int, std::string> serial_by_id;
+    // What get_camera_info_by_id() names an id-bound camera; empty = the info read fails.
+    std::string info_name;
 
     /// Every camera id any per-camera call (info, open, init, close, caps,
     /// value read, serial) was made with.
@@ -699,9 +712,12 @@ public:
         ++enumerations;
         return cameras;
     }
-    bool get_camera_info_by_id(int id, vendor::zwo::ZWOCameraInfo&) override {
+    bool get_camera_info_by_id(int id, vendor::zwo::ZWOCameraInfo& info) override {
         touch(id);
-        return false;
+        if (info_name.empty()) return false;
+        info.camera_id = id;
+        info.name = info_name;
+        return true;
     }
     vendor::zwo::SharedOpenTable::Opened open_camera_link(int id) override {
         const InFlight in_flight(*this, open_delay_ms, open_entered);

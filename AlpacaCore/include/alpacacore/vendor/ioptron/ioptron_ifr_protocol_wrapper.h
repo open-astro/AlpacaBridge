@@ -90,6 +90,11 @@ struct IfrPortInfo {
 /// so the focuser and the rotator of one unit land on the same port.
 std::vector<IfrPortInfo> enumerate_ifr_ports();
 
+/// The USB descriptor tokens of a iFR focuser-rotator adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ifr_usb_tokens();
+
 /// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, unless ifr_refuses_model() refuses
 /// the code.
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);
@@ -102,7 +107,7 @@ bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);
  * its pointer, so the focuser and the rotator connect and disconnect independently while sharing one fd.
  *
  * Every exchange runs under the session's I/O lock, the per-link lock of decision 0016; nothing else is held
- * across the wire. A hangup, or EIO/ENXIO/ENODEV on a write, loses the link at once for both devices
+ * across the wire. A hangup, or EIO/ENXIO/ENODEV/EBADF on a write, loses the link at once for both devices
  * (decision 0009 rule 2): the port is released, link_alive() turns false and the reason is kept for
  * link_fault(). The next acquire() then opens a fresh session.
  */

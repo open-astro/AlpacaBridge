@@ -34,6 +34,11 @@ struct iOptronNetworkHostInfo {
 
 std::vector<iOptronPortInfo> enumerate_ioptron_ports();
 
+/// The USB descriptor tokens of a iOptron mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ioptron_mount_usb_tokens();
+
 /// The auto-detect probe of one serial port: :MountInfo# under a serial-port
 /// probe claim (waits out another scan's probe of the same port). Returns the
 /// 4-digit model code, or empty when no mount answers.
@@ -188,7 +193,7 @@ public:
 
     /**
      * @brief False once an exchange over serial has seen the port gone (a hangup on a read, a blind command's ack
-     *        drain included, or EIO/ENXIO/ENODEV on a write), or lose_link() was called; the port is then already
+     *        drain included, or EIO/ENXIO/ENODEV/EBADF on a write), or lose_link() was called; the port is then already
      *        released and the exchange threw NotConnected (decision 0009 rule 2). Over TCP a hangup stays a
      *        DriverException. Cleared by the next successful connect(). Lock-free.
      */
@@ -244,6 +249,14 @@ public:
      * Sends :GLS# and :GUT# commands.
      */
     SiteInfo get_site_info();
+
+    /**
+     * @brief The site information with the timezone and DST taken from a :GUT# reply already read.
+     *
+     * Sends :GLS# only. @p gut_reply is a read_utc_reply() result; its timezone/DST fields need the first
+     * 17 characters only, so a reply whose UTC field is unusable still gives them (issue #1784).
+     */
+    SiteInfo get_site_info(const std::string& gut_reply);
 
     /**
      * @brief Get the :GLS# part of the site information (longitude, latitude, GPS digit, hemisphere).
@@ -364,12 +377,14 @@ public:
      * Sends :MH# command.
      */
     void go_to_home();
-    
+
     /**
      * @brief Auto-search zero (home) position.
      *
-     * Sends :MSH# command. Uses homing sensors.
-     * Available on CEM120, CEM70, GEM45, CEM40 series.
+     * Sends :MSH# command blind. Uses homing sensors.
+     * Available on CEM120, CEM70, GEM45, CEM40 series per the v3.10 spec; hardware-verified on the HAE29C EQ
+     * (0036, issue #2420). The ack is a bare '1' with no '#', possibly sent only when the search ends, so the
+     * command is not read back: completion is seen by polling :GLS# for system status 7.
      */
     void find_home();
     
@@ -429,7 +444,20 @@ public:
      * Sends :GUT# command.
      */
     std::chrono::system_clock::time_point get_utc_time();
-    
+
+    /**
+     * @brief One :GUT# exchange, the reply without its status prefix and terminator, unparsed.
+     *
+     * The connect reads it once for both the UTC sample (parse_utc_time()) and the site's timezone and DST
+     * (get_site_info(const std::string&)), issue #1784.
+     */
+    std::string read_utc_reply();
+
+    /**
+     * @brief The UTC time in a read_utc_reply() result; throws when the reply is not a valid v3.10 time.
+     */
+    static std::chrono::system_clock::time_point parse_utc_time(const std::string& gut_reply);
+
     /**
      * @brief Set timezone offset.
      *
@@ -529,7 +557,9 @@ private:
     ~iOptronProtocolWrapper();
     iOptronProtocolWrapper(const iOptronProtocolWrapper&) = delete;
     iOptronProtocolWrapper& operator=(const iOptronProtocolWrapper&) = delete;
-    
+
+    void apply_gut_site_fields(SiteInfo& site, const std::string& gut_response);
+
     // PIMPL pattern - hides platform-specific implementation
     class Impl;
     std::unique_ptr<Impl> pimpl_;

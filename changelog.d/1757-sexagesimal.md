@@ -1,0 +1,3 @@
+### Changed
+
+- **The OnStep and ZWO AM sexagesimal wire text lives once**, `util/sexagesimal.h`, issue #1757. The RA, Dec and site formatting (`format_hms`, `format_dms`, `format_dm`) and the reply parsers (the lenient LX200 `parse_sexagesimal` OnStep uses, the strict `parse_hms` and `parse_angle_triplet` ZWO uses) move out of both protocol wrappers, with their first table tests. Every value rounds once, to the whole second or minute, so a fix to the rounding or the sign reaches both mounts. The OnStep RA text could read `24:00:00` for an hour value that wraps to exactly 24 h (a tiny negative); it now reads `00:00:00`, as ZWO's did. A non-finite value formats as zero on both mounts instead of being undefined on OnStep. Every reply the mounts send is parsed as before.

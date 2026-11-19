@@ -17,9 +17,11 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/poll_settle.h>
 #include <alpacacore/util/polled_state.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
@@ -42,7 +44,18 @@ namespace alpacacore::vendor::celestron {
 namespace {
 
 constexpr double kSiderealDegreesPerSecond = 15.0411 / 3600.0;
-constexpr int kMaxPulseGuideDurationMs = 600000;
+// The CGX's argument limits for the command gate (#2258). The state checks (interleaved with site, motor-model and
+// motion checks) and MoveAxis (rate ignored, not implemented) stay the driver's own.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 600000;
+    limits.texts.pulse_direction = limits.texts.pulse_duration = "PulseGuide direction or duration is out of range";
+    limits.guide_rate_ra_min = limits.guide_rate_dec_min = kSiderealDegreesPerSecond * 0.1;
+    limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegreesPerSecond;
+    limits.texts.guide_rate_not_finite = limits.texts.guide_rate_range =
+        "Guide rates must be between 10% and 100% of sidereal";
+    return limits;
+}();
 constexpr std::uint32_t kRaHomeEncoder = kCgxEncoderStepsPerRevolution / 4;
 constexpr std::uint32_t kDecHomeEncoder = kCgxEncoderStepsPerRevolution / 2;
 constexpr double kSlewArrivalToleranceDegrees = 3.0 / 3600.0;
@@ -55,6 +68,11 @@ constexpr std::chrono::seconds kHostDisciplineResampleInterval{30};
 constexpr std::chrono::milliseconds kStatePollPeriod{250};
 constexpr int kStatePollFaultThreshold = 3;
 constexpr std::chrono::seconds kStatePollMaxAge{1};
+// The longest MC_AUX_GUIDE packet (255 centiseconds), and the margin a slew, Park or FindHome gives the mount past it
+// to report the packet a pulse it superseded left running inactive (#2263); the pulse body's own segment deadline
+// uses the same margin.
+constexpr std::chrono::milliseconds kGuidePacketMax{2550};
+constexpr std::chrono::milliseconds kGuideEndMargin{500};
 
 // The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
 // computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
@@ -109,8 +127,9 @@ public:
           info_(std::move(info)),
           clock_(clock),
           system_now_(std::move(system_now)),
-          motion_slot_("Celestron CGX motion", motion_generation_, clock),
-          pulse_slot_("Celestron CGX pulse guide", pulse_generation_, clock),
+          motion_slot_("Celestron CGX motion", motion_slot_generation_, clock),
+          pulse_slots_{{"Celestron CGX pulse guide (RA)", pulse_generations_[0], clock},
+                       {"Celestron CGX pulse guide (Dec)", pulse_generations_[1], clock}},
           stop_slot_("Celestron CGX stop", stop_generation_, clock),
           mechanical_hemisphere_(info_.site_latitude_degrees.value_or(0.0) < 0.0 ? CgxHemisphere::South
                                                                                  : CgxHemisphere::North),
@@ -129,7 +148,7 @@ public:
         polled_.stop_and_join();
         stop_slot_.cancel_all_and_join();
         motion_slot_.cancel_all_and_join();
-        pulse_slot_.cancel_all_and_join();
+        for (auto& slot : pulse_slots_) slot.cancel_all_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -147,7 +166,7 @@ public:
 
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override {
-        return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L USB Telescope";
+        return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L";
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
@@ -171,12 +190,9 @@ public:
         return polled_.link_lost() ? "no answer to the state poll" : std::string();
     }
     void set_connected(bool connected) override;
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
+
     std::string action(std::string_view, std::string_view) override;
-    bool can_action(std::string_view) const override { return false; }
     std::string command_blind(std::string_view, bool) override;
     bool command_bool(std::string_view, bool) override;
     std::string command_string(std::string_view, bool) override;
@@ -230,6 +246,8 @@ public:
     void set_focal_length(double meters) override;
     GuideRate get_guide_rate() const override;
     void set_guide_rate(const GuideRate&) override;
+    void set_guide_rate_right_ascension(double value) override;
+    void set_guide_rate_declination(double value) override;
     double get_right_ascension() const override;
     double get_right_ascension_rate() const override {
         require_connected();
@@ -321,6 +339,18 @@ public:
     std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing() {
         return link_lost_at_.consume();
     }
+    void set_stop_worker_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_worker_hook_for_testing_ = std::move(hook);
+    }
+    void set_drain_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        drain_hook_for_testing_ = std::move(hook);
+    }
+    void set_pulse_poll_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_poll_hook_for_testing_ = std::move(hook);
+    }
 
 protected:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010 rule 5).
@@ -329,30 +359,85 @@ protected:
 private:
     enum class PulseGuideStart : std::uint8_t { Acknowledged, Ambiguous };
 
+    // `supersede_motion`: a slew, Park or FindHome, which supersedes a slew, Park or FindHome in flight through its
+    // own claim (#2263), and supersedes a running pulse without a join (decision 0006 rule 3), then waits for the
+    // mount to report that pulse's guide packet inactive before it sends anything (wait_for_guide_end()). Every other
+    // initiator (Sync, Tracking, TrackingRate) refuses while a slew, Park or FindHome runs, and cancels and joins the
+    // pulse bodies, each waiting out its packet (#1156).
     class MotionTransition final {
     public:
-        explicit MotionTransition(CelestronCgxTelescopeDriver& driver, bool cancel_motion = false);
+        explicit MotionTransition(CelestronCgxTelescopeDriver& driver, bool supersede_motion = false);
         ~MotionTransition();
         MotionTransition(const MotionTransition&) = delete;
         MotionTransition& operator=(const MotionTransition&) = delete;
 
     private:
         CelestronCgxTelescopeDriver& driver_;
-        // Own the entire handoff, including the mutex-released task joins.
+        // Own the entire handoff, including the mutex-released task joins and the wait on the mount's guide report.
         // Otherwise disconnect can see an empty slot whose body another initiator is still joining.
         std::unique_lock<std::mutex> connection_lock_;
         std::unique_lock<std::mutex> lock_;
     };
 
+    // Runs a body's wire stage under motion_start_mutex_, the lock every claim is made under, so a body that a newer
+    // command superseded or a stop cancelled sends nothing once the stage starts (decision 0006 rule 6). An open
+    // motion_transition_ does not stop it: a slew, Park or FindHome opens one while this body still owns the axes and
+    // releases the lock for its wait on the guide packet before its claim, and may then be refused without claiming
+    // (#2263). Every other transition refuses while a body runs, cancels it, or sets disconnecting_.
     template <typename Operation>
-    bool run_motion_stage(util::OperationContext& context, Operation&& operation) {
+    bool run_motion_stage(util::OperationContext& context, const util::MotionClaim& claim, Operation&& operation) {
         std::lock_guard<std::mutex> lock(motion_start_mutex_);
-        if (context.stop_reason() != util::StopReason::None || motion_transition_ || disconnecting_ ||
-            !connected_.load()) {
+        if (motion_stop_reason(context, claim) != util::StopReason::None || disconnecting_ || !connected_.load()) {
             return false;
         }
         std::forward<Operation>(operation)();
         return true;
+    }
+
+    // Why a body should stop (#2263): Superseded when a newer claim took one of its axes or a newer start replaced it
+    // on its slot, otherwise the slot's or the owner's Cancelled, otherwise None. Superseded wins (decision 0006
+    // rule 6). Reads atomics and the slot mutex only, so a body asks with or without mutex_.
+    util::StopReason motion_stop_reason(const util::OperationContext& context, const util::MotionClaim& claim) const {
+        const auto slot = context.stop_reason();
+        const auto owner = motion_owner_.stop_reason(claim);
+        if (slot == util::StopReason::Superseded || owner == util::StopReason::Superseded)
+            return util::StopReason::Superseded;
+        return slot != util::StopReason::None ? slot : owner;
+    }
+    bool superseded(const util::OperationContext& context, const util::MotionClaim& claim) const {
+        return motion_stop_reason(context, claim) == util::StopReason::Superseded;
+    }
+    // A superseded body touches neither the axes nor the driver state: a throw it meets after a newer command took its
+    // axes is logged at INFO and dropped, never kept as a failure of the command that owns them now.
+    static void log_superseded_failure(const char* body, const std::exception_ptr& failure);
+    // Ends a slew, Park or FindHome claim, so a PulseGuide is accepted again. Takes mutex_.
+    void finish_slew_claim(const util::MotionClaim& claim) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motion_owner_.finished(claim);
+    }
+    // Ends a slew, Park or FindHome claim when its body returns or throws.
+    class SlewClaimEnd final {
+    public:
+        SlewClaimEnd(CelestronCgxTelescopeDriver& driver, const util::MotionClaim& claim)
+            : driver_(driver), claim_(claim) {}
+        ~SlewClaimEnd() { driver_.finish_slew_claim(claim_); }
+        SlewClaimEnd(const SlewClaimEnd&) = delete;
+        SlewClaimEnd& operator=(const SlewClaimEnd&) = delete;
+
+    private:
+        CelestronCgxTelescopeDriver& driver_;
+        const util::MotionClaim claim_;
+    };
+    static std::size_t pulse_index(CgxAxis axis) { return axis == CgxAxis::RightAscension ? 0 : 1; }
+    // The pulse whose first packet's ACK was lost has watched that packet end: its axis takes a new pulse again.
+    void end_ambiguous_pulse_start(std::size_t index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_start_ambiguous_[index] = false;
+    }
+    bool pulse_running() const { return pulse_slots_[0].running() || pulse_slots_[1].running(); }
+    std::optional<std::string> pulse_failure() const {
+        if (auto failure = pulse_slots_[0].last_failure()) return failure;
+        return pulse_slots_[1].last_failure();
     }
 
     [[noreturn]] static void not_implemented(const char* member, bool property = false);
@@ -376,6 +461,7 @@ private:
     // Each write drops the poll in flight and keeps measured_at, so the frame still ages by the poll alone. A control
     // loop that called this every few milliseconds would starve the poll and, after util::kLinkStalenessBound, read
     // as a lost link mid-motion: keep the callers occasional (arrival, Sync, PulseGuide polarity, slew planning).
+    // scripts/check_docs_drift.py check 26 pins these callers and read_sky_position()'s (#2035).
     void write_frame(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const {
         polled_.write([ra_encoder, dec_encoder, read_at = system_now_()](CgxFrame& frame) {
             frame.ra_encoder = ra_encoder;
@@ -426,31 +512,38 @@ private:
     std::chrono::system_clock::time_point utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
     void require_site_locked() const;
-    void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
-    void run_home_operation(util::OperationContext& context, bool park_after);
+    void run_home_operation(util::OperationContext& context, const util::MotionClaim& claim, bool park_after);
     std::string home_axes_status();
     void log_home_wait(std::chrono::steady_clock::time_point& next_log);
     void start_slew_operation(double ra, double dec);
-    void run_slew_operation(util::OperationContext& context, double ra, double dec, CgxPointingSide destination_side);
-    void run_flip_slew_operation(util::OperationContext& context, double ra, double dec,
+    void run_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
+                            CgxPointingSide destination_side);
+    void run_flip_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
                                  CgxPointingSide destination_side);
-    void publish_guide_end_frame();
-    void run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
-                         int first_chunk_centiseconds, int remaining_centiseconds,
+    void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
+    // A slew, Park or FindHome's wait for the guide packet of each pulse it superseded (`axes`, RA then Dec): reads
+    // the mount's MC_AUX_GUIDE_ACTIVE until it reports the packet inactive, never the pulse slot, bounded by
+    // kGuidePacketMax plus kGuideEndMargin on the task clock; an AbortSlew or Unpark accepted meanwhile ends it.
+    // Runs with no driver lock but transition_mutex_ held.
+    void wait_for_guide_end(const std::array<bool, 2>& axes);
+    void run_pulse_guide(util::OperationContext& context, const util::MotionClaim& claim, CgxAxis axis,
+                         int velocity_percent, int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
     void stop_axes_checked(std::chrono::milliseconds verification_budget = std::chrono::milliseconds(500));
-    void stop_motion_worker_checked();
+    // A cancelled or failed body's stop: skipped while an explicit stop owns cleanup, and once a newer command
+    // superseded `claim` and owns the axes.
+    void stop_motion_worker_checked(const util::MotionClaim& claim);
     void start_stop_operation(bool unpark);
     void run_stop_operation(util::OperationContext& context);
     // `lock` is the caller's held mutex_ lock: the tracking exchanges run with it dropped.
     void set_tracking_locked(bool tracking, std::unique_lock<std::mutex>& lock);
     void write_tracking_state_locked(bool tracking, int rate, std::unique_lock<std::mutex>& lock);
-    bool finish_slew_operation(util::OperationContext& context, util::TaskClock::clock::time_point deadline,
-                               double right_ascension_hours, double declination_degrees, CgxPointingSide pointing_side,
-                               const char* timeout_message);
-    bool wait_for_slew_completion(util::OperationContext& context, util::TaskClock::clock::time_point deadline,
-                                  const char* timeout_message,
+    bool finish_slew_operation(util::OperationContext& context, const util::MotionClaim& claim,
+                               util::TaskClock::clock::time_point deadline, double right_ascension_hours,
+                               double declination_degrees, CgxPointingSide pointing_side, const char* timeout_message);
+    bool wait_for_slew_completion(util::OperationContext& context, const util::MotionClaim& claim,
+                                  util::TaskClock::clock::time_point deadline, const char* timeout_message,
                                   std::chrono::milliseconds poll_interval = std::chrono::milliseconds(200));
     bool wait_for_slew_settle(util::OperationContext& context) const;
     void require_site_change_allowed_locked() const;
@@ -474,14 +567,43 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> unknown_motor_model_{false};
     mutable CelestronCgxProtocol protocol_;
-    util::OperationGeneration motion_generation_;
+    // Who owns the axes (#2263; CONTEXT.md, "Cancelled vs superseded"): a slew, Park or FindHome claims both, a
+    // PulseGuide its own, under motion_start_mutex_ and mutex_, and a stop cancels both. Each body asks it why to stop.
+    util::MotionOwner motion_owner_;
+    // The motion slot's own generation, which util::AsyncOperation needs; ownership is the owner's.
+    util::OperationGeneration motion_slot_generation_;
     util::AsyncOperation motion_slot_;
-    util::OperationGeneration pulse_generation_;
-    util::AsyncOperation pulse_slot_;
+    // One pulse slot per axis (RA, Dec), each with a generation of its own: a pulse supersedes the older pulse on its
+    // axis and leaves the other axis's alone.
+    std::array<util::OperationGeneration, 2> pulse_generations_;
+    util::AsyncOperation pulse_slots_[2];
+    // Per axis (RA, Dec): set while the pulse whose first packet's ACK was lost still watches that packet. A new pulse
+    // on that axis is refused meanwhile: AUX has no transaction id, so the axis is not reused. Guarded by mutex_.
+    std::array<bool, 2> pulse_start_ambiguous_{};
     util::OperationGeneration stop_generation_;
     util::AsyncOperation stop_slot_;
     std::atomic<bool> stop_pending_{false};  // Slewing reads stop progress before it takes mutex_ (#1402).
+    // Set while a slew, Park or FindHome waits for the guide packet of a pulse it superseded (#2263): IsPulseGuiding
+    // stays true until the mount reports the packet inactive, as it does while a pulse body watches its own packet.
+    std::atomic<bool> guide_end_pending_{false};
     bool unpark_after_stop_ = false;
+    // Test seam (set_stop_worker_hook_for_testing): runs at the top of stop_motion_worker_checked(), before it takes
+    // motion_start_mutex_. Guarded by mutex_.
+    std::function<void()> stop_worker_hook_for_testing_;
+    // Test seam (set_drain_hook_for_testing): runs in MotionTransition's guide handoff (the join of the pulse
+    // bodies, or a slew, Park or FindHome's wait on the mount), with motion_start_mutex_ released. Guarded by mutex_.
+    std::function<void()> drain_hook_for_testing_;
+    // Test seam (set_pulse_poll_hook_for_testing): runs on the pulse body's thread at the top of every guide poll,
+    // before it reads its stop reason, with no driver lock held. Guarded by mutex_.
+    std::function<void()> pulse_poll_hook_for_testing_;
+    void run_hook_for_testing(const std::function<void()>& seam) {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hook = seam;
+        }
+        if (hook) hook();
+    }
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> disconnected_checkpoint_;
@@ -533,7 +655,8 @@ private:
     mutable util::PolledState<CgxFrame> polled_;
 };
 
-CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTelescopeDriver& driver, bool cancel_motion)
+CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTelescopeDriver& driver,
+                                                                bool supersede_motion)
     : driver_(driver), connection_lock_(driver.transition_mutex_), lock_(driver.motion_start_mutex_) {
     driver_.require_connected();
     if (driver_.motion_transition_ || driver_.disconnecting_) {
@@ -542,16 +665,50 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
     if (driver_.stop_slot_.running()) {
         throw AlpacaException("Celestron CGX stop is still finishing", AlpacaError::InvalidOperation);
     }
-    if (!cancel_motion && driver_.motion_slot_.running()) {
+    if (!supersede_motion && driver_.motion_slot_.running()) {
         throw AlpacaException("Celestron CGX is already moving", AlpacaError::InvalidOperation);
     }
     driver_.motion_transition_ = true;
-    driver_.pulse_slot_.cancel();
-    if (cancel_motion) driver_.motion_slot_.cancel();
+    // An AUX guide packet cannot be interrupted, so the new command sends nothing while one runs (#1156).
+    std::array<bool, 2> superseded_pulses{};
+    // IsPulseGuiding stays true from the supersede until the wait below ends, on every exit: the woken body can end
+    // its slot before this initiator reaches the wait (get_is_pulse_guiding()).
+    struct GuideEndPending {
+        std::atomic<bool>* pending = nullptr;
+        ~GuideEndPending() {
+            if (pending) pending->store(false);
+        }
+    } guide_end_pending;
+    if (supersede_motion) {
+        // A slew, Park or FindHome supersedes a running pulse without a join (decision 0006 rule 3, #2263): the bump
+        // under motion_start_mutex_ marks the body Superseded, so it sends its axis nothing more, the next chunk and
+        // the end-of-pulse read included, and the cancel only wakes it (Superseded wins). The packet it left on the
+        // mount is waited out below, on the mount's own report.
+        std::lock_guard<std::mutex> state_lock(driver_.mutex_);
+        for (std::size_t index = 0; index < 2; ++index)
+            superseded_pulses[index] = driver_.pulse_slots_[index].running();
+        if (superseded_pulses[0] || superseded_pulses[1]) {
+            driver_.guide_end_pending_.store(true);  // before the bump, so no reader sees neither
+            guide_end_pending.pending = &driver_.guide_end_pending_;
+        }
+        for (std::size_t index = 0; index < 2; ++index) {
+            if (!superseded_pulses[index]) continue;
+            static_cast<void>(driver_.pulse_generations_[index].bump());
+            driver_.pulse_slots_[index].cancel();
+        }
+    } else {
+        // Sync, Tracking and TrackingRate are not motion commands: they cancel and join the pulse bodies, each
+        // waiting out its active <=2.55 s packet.
+        for (auto& slot : driver_.pulse_slots_) slot.cancel();
+    }
     lock_.unlock();
     try {
-        driver_.pulse_slot_.cancel_all_and_join();
-        if (cancel_motion) driver_.motion_slot_.cancel_all_and_join();
+        driver_.run_hook_for_testing(driver_.drain_hook_for_testing_);
+        if (supersede_motion) {
+            driver_.wait_for_guide_end(superseded_pulses);
+        } else {
+            for (auto& slot : driver_.pulse_slots_) slot.cancel_all_and_join();
+        }
     } catch (...) {
         lock_.lock();
         std::lock_guard<std::mutex> state_lock(driver_.mutex_);
@@ -566,16 +723,48 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
             throw AlpacaException("Celestron CGX motion request interrupted by AbortSlew or Unpark",
                                   AlpacaError::InvalidOperation);
     }
-    if (!cancel_motion) {
-        if (const auto failure = driver_.pulse_slot_.last_failure()) {
-            driver_.motion_transition_ = false;
-            throw AlpacaException("Celestron CGX pulse guide did not finish cleanly: " + *failure,
-                                  AlpacaError::DriverException);
-        }
+    if (const auto failure = driver_.pulse_failure()) {
+        driver_.motion_transition_ = false;
+        throw AlpacaException("Celestron CGX pulse guide did not finish cleanly: " + *failure,
+                              AlpacaError::DriverException);
     }
 }
 
+void CelestronCgxTelescopeDriver::log_superseded_failure(const char* body, const std::exception_ptr& failure) {
+    std::string reason;
+    try {
+        std::rethrow_exception(failure);
+    } catch (const std::exception& error) {
+        reason = error.what();
+    } catch (...) {
+        reason = "unknown exception";
+    }
+    ALPACA_LOG_INFO("Celestron CGX", std::string(body) + " ended after a newer command took its axes: " + reason);
+}
+
 CelestronCgxTelescopeDriver::MotionTransition::~MotionTransition() { driver_.motion_transition_ = false; }
+
+void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& axes) {
+    if (!axes[0] && !axes[1]) return;
+    // MotionTransition holds guide_end_pending_ true across this wait, so IsPulseGuiding stays true until the mount
+    // reports the packet inactive (get_is_pulse_guiding()).
+    const auto bound = kGuidePacketMax + kGuideEndMargin;
+    // One deadline for both axes, on purpose: both packets started before the supersede, so neither outlives the
+    // longest packet plus the margin from now; a per-axis deadline would let two packets wait twice as long.
+    const auto deadline = clock_.now() + bound;
+    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
+        if (!axes[pulse_index(axis)]) continue;
+        // A stop accepted meanwhile owns cleanup, and MotionTransition refuses the displaced command.
+        while (!stop_pending_.load() && protocol_.is_aux_guide_active(axis)) {
+            if (clock_.now() >= deadline)
+                throw AlpacaException(
+                    std::string("Celestron CGX still reports a ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
+                        " guide packet active after " + std::to_string(bound.count()) + " ms; nothing was sent",
+                    AlpacaError::DriverException);
+            clock_.sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+}
 
 [[noreturn]] void CelestronCgxTelescopeDriver::not_implemented(const char* member, bool property) {
     throw AlpacaException(std::string("Celestron CGX USB does not support ") + member,
@@ -649,10 +838,6 @@ void CelestronCgxTelescopeDriver::require_site_locked() const {
 }
 
 CgxHemisphere CelestronCgxTelescopeDriver::hemisphere_locked() const { return mechanical_hemisphere_; }
-
-void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec, const char* operation) const {
-    util::validate_ra_dec(ra, dec, operation);
-}
 
 void CelestronCgxTelescopeDriver::require_readable_locked() const {
     require_connected();
@@ -834,6 +1019,8 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             disconnecting_ = false;
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        // Disconnect joined every pulse body, so no packet is still unresolved on either axis.
+        pulse_start_ambiguous_ = {};
         bool retained = reference_valid_locked() && disconnected_checkpoint_ && reference_firmware_ == firmware;
         if (retained) {
             const auto saved_checkpoint = *disconnected_checkpoint_;
@@ -868,7 +1055,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         target_ra_set_ = false;
         target_dec_set_ = false;
         motion_slot_.clear_failure();
-        pulse_slot_.clear_failure();
+        for (auto& slot : pulse_slots_) slot.clear_failure();
         stop_slot_.clear_failure();
         lock.unlock();
         // The first frame before Connected reads true, so a getter has an answer when Connect returns; the poll
@@ -915,12 +1102,16 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
     std::unique_lock<std::mutex> motion_start_lock(motion_start_mutex_);
     disconnecting_ = true;
     motion_transition_ = true;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
+    }
     motion_slot_.cancel();
-    pulse_slot_.cancel();
+    for (auto& slot : pulse_slots_) slot.cancel();
     motion_start_lock.unlock();
     stop_slot_.cancel_all_and_join();
     motion_slot_.cancel_all_and_join();
-    pulse_slot_.cancel_all_and_join();
+    for (auto& slot : pulse_slots_) slot.cancel_all_and_join();
     motion_start_lock.lock();
     std::exception_ptr stop_failure;
     if (protocol_.is_connected()) {
@@ -977,7 +1168,7 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
     // poll's on_lost, decision 0009) and destruction release ownership.
     if (stop_failure) protocol_.disconnect();
     motion_slot_.clear_failure();
-    pulse_slot_.clear_failure();
+    for (auto& slot : pulse_slots_) slot.clear_failure();
     stop_slot_.clear_failure();
     motion_transition_ = false;
     disconnecting_ = false;
@@ -1109,27 +1300,41 @@ GuideRate CelestronCgxTelescopeDriver::get_guide_rate() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return guide_rate_;
 }
+// Each axis is checked before the connection, so a bad value is InvalidValue even while disconnected
+// (open-astro#1786).
 void CelestronCgxTelescopeDriver::set_guide_rate(const GuideRate& rate) {
-    const auto valid = [](double value) {
-        return std::isfinite(value) && value >= kSiderealDegreesPerSecond * 0.1 && value <= kSiderealDegreesPerSecond;
-    };
-    if (!valid(rate.ra) || !valid(rate.dec)) {
-        throw AlpacaException("Guide rates must be between 10% and 100% of sidereal", AlpacaError::InvalidValue);
-    }
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     guide_rate_ = rate;
 }
+// One axis under one lock: the base default reads the pair through the connection-checking getter first, so an
+// out-of-range write on a disconnected mount answered NotConnected (open-astro#1786).
+void CelestronCgxTelescopeDriver::set_guide_rate_right_ascension(double value) {
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
+    require_connected();
+    std::lock_guard<std::mutex> lock(mutex_);
+    guide_rate_.ra = value;
+}
+void CelestronCgxTelescopeDriver::set_guide_rate_declination(double value) {
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
+    require_connected();
+    std::lock_guard<std::mutex> lock(mutex_);
+    guide_rate_.dec = value;
+}
 bool CelestronCgxTelescopeDriver::get_is_pulse_guiding() const {
     require_connected();
     require_healthy_transport();
-    if (const auto failure = pulse_slot_.last_failure()) {
+    if (const auto failure = pulse_failure()) {
         throw AlpacaException("Celestron CGX pulse guide failed: " + *failure, AlpacaError::DriverException);
     }
     // Driver state, not the wire: the guide body runs until the mount reports the packet inactive (the firmware times
-    // it), and disconnect joins it, so a guide outlives the slot only when another AUX client started it, which this
-    // backend does not support (decision 0011 Consequences).
-    return pulse_slot_.running();
+    // it), and disconnect joins it; a pulse a slew, Park or FindHome superseded ends its body at once, and that
+    // command's wait on the mount stands in for it (guide_end_pending_, #2263). A guide outlives both only when
+    // another AUX client started it, which this backend does not support (decision 0011 Consequences). Either axis's
+    // pulse counts.
+    return pulse_running() || guide_end_pending_.load();
 }
 double CelestronCgxTelescopeDriver::get_right_ascension() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1153,7 +1358,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    validate_site_and_coordinates(ra, dec, "DestinationSideOfPier");
+    util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     require_site_locked();
@@ -1190,13 +1395,14 @@ bool CelestronCgxTelescopeDriver::wait_for_slew_settle(util::OperationContext& c
 }
 
 bool CelestronCgxTelescopeDriver::wait_for_slew_completion(util::OperationContext& context,
+                                                           const util::MotionClaim& claim,
                                                            util::TaskClock::clock::time_point deadline,
                                                            const char* timeout_message,
                                                            std::chrono::milliseconds poll_interval) {
     while (true) {
-        const auto reason = context.stop_reason();
+        const auto reason = motion_stop_reason(context, claim);
         if (reason != util::StopReason::None) {
-            if (reason == util::StopReason::Cancelled) stop_motion_worker_checked();
+            if (reason == util::StopReason::Cancelled) stop_motion_worker_checked(claim);
             return false;
         }
         if (protocol_.is_axis_slew_done(CgxAxis::RightAscension) && protocol_.is_axis_slew_done(CgxAxis::Declination)) {
@@ -1207,17 +1413,17 @@ bool CelestronCgxTelescopeDriver::wait_for_slew_completion(util::OperationContex
     }
 }
 
-bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& context,
+bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& context, const util::MotionClaim& claim,
                                                         util::TaskClock::clock::time_point deadline,
                                                         double right_ascension_hours, double declination_degrees,
                                                         CgxPointingSide pointing_side, const char* timeout_message) {
     int corrections = 0;
     while (true) {
-        if (!wait_for_slew_completion(context, deadline, timeout_message,
+        if (!wait_for_slew_completion(context, claim, deadline, timeout_message,
                                       std::chrono::milliseconds(corrections == 0 ? 200 : 20)))
             return false;
         bool arrived = false;
-        if (!run_motion_stage(context, [&] {
+        if (!run_motion_stage(context, claim, [&] {
                 std::unique_lock<std::mutex> lock(mutex_);
                 const CgxSkyPosition actual = read_sky_position(lock);
                 const double ra_error_degrees =
@@ -1269,10 +1475,10 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
         }
         if (!arrived) continue;
         if (!wait_for_slew_settle(context)) {
-            if (context.stop_reason() == util::StopReason::Cancelled) stop_motion_worker_checked();
+            if (motion_stop_reason(context, claim) == util::StopReason::Cancelled) stop_motion_worker_checked(claim);
             return false;
         }
-        return run_motion_stage(context, [this] {
+        return run_motion_stage(context, claim, [this] {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
             restore_tracking_after_slew_ = false;
@@ -1382,7 +1588,7 @@ void CelestronCgxTelescopeDriver::require_site_change_allowed_locked() const {
     // Caller holds motion_start_mutex_ and mutex_. Refuse rather than cancelling
     // a guide or changing the coordinate frame underneath an active operation.
     if (motion_transition_ || disconnecting_ || slew_in_progress_ || stop_pending_ || motion_slot_.running() ||
-        pulse_slot_.running() || stop_slot_.running())
+        pulse_running() || stop_slot_.running())
         throw AlpacaException("Cannot change Celestron CGX site coordinates while motion is in progress",
                               AlpacaError::InvalidOperation);
 }
@@ -1509,26 +1715,32 @@ int CelestronCgxTelescopeDriver::get_tracking_rate() const {
 void CelestronCgxTelescopeDriver::find_home() { start_home_operation(false); }
 void CelestronCgxTelescopeDriver::park() { start_home_operation(true); }
 void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
-    if (direction < 0 || direction > 3 || duration_ms < 0 || duration_ms > kMaxPulseGuideDurationMs) {
-        throw AlpacaException("PulseGuide direction or duration is out of range", AlpacaError::InvalidValue);
-    }
+    util::check_pulse_guide_arguments(kCommandLimits, direction, duration_ms);
     require_connected();
     require_known_motor_model();
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     require_connected();
     if (motion_transition_ || disconnecting_)
         throw AlpacaException("Celestron CGX is changing motion ownership", AlpacaError::InvalidOperation);
-    if (motion_slot_.running() || pulse_slot_.running()) {
-        throw AlpacaException("PulseGuide cannot overlap telescope motion or another guide pulse",
-                              AlpacaError::InvalidOperation);
+    const bool dec_axis = direction == 0 || direction == 1;
+    const CgxAxis axis = dec_axis ? CgxAxis::Declination : CgxAxis::RightAscension;
+    const std::size_t index = pulse_index(axis);
+    constexpr const char* kOverlapRefusal = "PulseGuide cannot overlap telescope motion or another guide pulse";
+    {
+        // A slew, Park or FindHome owns both axes, so the pulse is refused (#2263). A pulse on this axis whose first
+        // packet's ACK was lost keeps it; any other pulse on this axis is superseded below, one on the other axis
+        // keeps running.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (motion_owner_.slew_running() || pulse_start_ambiguous_[index])
+            throw AlpacaException(kOverlapRefusal, AlpacaError::InvalidOperation);
     }
-    if (const auto failure = pulse_slot_.last_failure()) {
+    if (const auto failure = pulse_failure()) {
         throw AlpacaException("Celestron CGX pulse guide remains unresolved: " + *failure,
                               AlpacaError::DriverException);
     }
 
-    CgxAxis axis;
     int velocity;
+    util::MotionClaim claim;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         require_site_locked();
@@ -1540,10 +1752,8 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
             throw AlpacaException("PulseGuide requires tracking to be enabled", AlpacaError::InvalidOperation);
         if (!reference_valid_locked())
             throw AlpacaException("Run FindHome before PulseGuide", AlpacaError::InvalidOperation);
-        if (duration_ms == 0) return;
+        if (duration_ms == 0) return;  // claims nothing: a pulse running on this axis keeps it
         const auto sky = read_sky_position(lock);
-        const bool dec_axis = direction == 0 || direction == 1;
-        axis = dec_axis ? CgxAxis::Declination : CgxAxis::RightAscension;
         const double guide_rate = dec_axis ? guide_rate_.dec : guide_rate_.ra;
         velocity = static_cast<int>(std::lround(guide_rate / kSiderealDegreesPerSecond * 100.0));
         // Normal northern CGX: positive Dec encoder motion lowers declination.
@@ -1555,15 +1765,36 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
             velocity = -velocity;
         }
         if (dec_axis && sky.pointing_side == CgxPointingSide::BeyondPole) velocity = -velocity;
+        // Claims this axis (decision 0006 rule 3): the older pulse on it is superseded, not joined, and sends this
+        // axis nothing more; this pulse's first packet replaces its packet on the wire.
+        // TODO: confirm on hardware that an MC_AUX_GUIDE sent while the axis's previous packet is active replaces it.
+        claim = motion_owner_.claim(util::MotionCommand::PulseGuide, static_cast<int>(index), kOverlapRefusal);
     }
 
     const int total_centiseconds = std::max(1, static_cast<int>(std::lround(duration_ms / 10.0)));
     const int first_chunk = std::min(255, total_centiseconds);
     auto start_promise = std::make_shared<std::promise<PulseGuideStart>>();
     const auto start_result = start_promise->get_future().share();
-    pulse_slot_.start([this, axis, velocity, first_chunk, remaining = total_centiseconds - first_chunk,
-                       start_result](util::OperationContext& context) {
-        run_pulse_guide(context, axis, velocity, first_chunk, remaining, start_result);
+    pulse_slots_[index].start([this, claim, axis, index, velocity, first_chunk,
+                               remaining = total_centiseconds - first_chunk,
+                               start_result](util::OperationContext& context) {
+        // Only the body whose own first packet went unacknowledged hands the axis back. A newer pulse on its axis never
+        // supersedes it (pulse_start_ambiguous_ refuses one); a slew, Park or FindHome can, and it then returns at once
+        // and clears the flag while that command owns the axis (#2263).
+        const auto end_ambiguity = [&] {
+            if (start_result.get() == PulseGuideStart::Ambiguous) end_ambiguous_pulse_start(index);
+        };
+        try {
+            run_pulse_guide(context, claim, axis, velocity, first_chunk, remaining, start_result);
+        } catch (...) {
+            end_ambiguity();
+            if (superseded(context, claim)) {
+                log_superseded_failure("PulseGuide", std::current_exception());
+                return;
+            }
+            throw;
+        }
+        end_ambiguity();
     });
     try {
         protocol_.pulse_guide_axis(axis, velocity, first_chunk);
@@ -1572,6 +1803,10 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
         // The command may have applied even though its acknowledgement did not.
         // Keep the worker in charge of this <=2.55 s packet; never chain the
         // remaining request or let another motion reuse the axis meanwhile.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_start_ambiguous_[index] = true;
+        }
         start_promise->set_value(PulseGuideStart::Ambiguous);
         throw;
     }
@@ -1604,7 +1839,7 @@ void CelestronCgxTelescopeDriver::slew_to_target_async() {
     start_slew_operation(ra, dec);
 }
 void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec, "SyncToCoordinates");
+    util::validate_ra_dec(ra, dec, "SyncToCoordinates");
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1775,8 +2010,12 @@ void CelestronCgxTelescopeDriver::start_stop_operation(bool unpark) {
         stop_pending_ = false;
         throw;
     }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
+    }
     motion_slot_.cancel();
-    pulse_slot_.cancel();
+    for (auto& slot : pulse_slots_) slot.cancel();
 }
 
 void CelestronCgxTelescopeDriver::run_stop_operation(util::OperationContext& context) {
@@ -1793,11 +2032,11 @@ void CelestronCgxTelescopeDriver::run_stop_operation(util::OperationContext& con
             std::lock_guard<std::mutex> lock(mutex_);
             restore_tracking_requested = tracking_ || restore_tracking_after_slew_;
         }
-        pulse_slot_.cancel_all_and_join();
+        for (auto& slot : pulse_slots_) slot.cancel_all_and_join();
         motion_slot_.cancel_all_and_join();
         stop_axes_checked(std::chrono::seconds(3));
         motion_slot_.clear_failure();
-        pulse_slot_.clear_failure();
+        for (auto& slot : pulse_slots_) slot.clear_failure();
         std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         const bool restore_tracking = restore_tracking_requested && reference_valid_locked() && !parked_;
@@ -1828,13 +2067,21 @@ void CelestronCgxTelescopeDriver::sync_to_alt_az(double, double) {
     not_implemented("SyncToAltAz");
 }
 
-void CelestronCgxTelescopeDriver::stop_motion_worker_checked() {
+void CelestronCgxTelescopeDriver::stop_motion_worker_checked(const util::MotionClaim& claim) {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hook = stop_worker_hook_for_testing_;
+    }
+    if (hook) hook();
     // Serialize check + dispatch with the explicit-stop ownership publication.
     // Never take transition_mutex_: the reaper holds it while joining us.
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stop_pending_) return;
+        // A newer command owns the axes (decision 0006 rule 6): a stop now would end its motion.
+        if (motion_owner_.stop_reason(claim) == util::StopReason::Superseded) return;
     }
     stop_axes_checked();
 }
@@ -1929,7 +2176,7 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
         require_site_locked();  // FindHome fixes the mechanical hemisphere from the latitude.
     }
     if (park_after && get_at_park()) return;
-    MotionTransition transition(*this);
+    MotionTransition transition(*this, true);
     if (park_after && get_at_park()) return;
     if (!park_after && get_at_park())
         throw AlpacaException("Cannot FindHome while parked; Unpark first", AlpacaError::InvalidWhileParked);
@@ -1937,8 +2184,11 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
         std::unique_lock<std::mutex> lock(mutex_);
         if (tracking_) set_tracking_locked(false, lock);
     }
+    util::MotionClaim claim;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Both axes (#2263): a slew, Park or FindHome in flight is superseded; its body sends nothing more.
+        claim = motion_owner_.claim(util::MotionCommand::Slew);
         calibrated_ = false;
         needs_sync_ = false;
         sync_correction_active_ = false;
@@ -1950,10 +2200,13 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     try {
         protocol_.start_axis_home(CgxAxis::RightAscension);
         protocol_.start_axis_home(CgxAxis::Declination);
-        motion_slot_.start(
-            [this, park_after](util::OperationContext& context) { run_home_operation(context, park_after); });
+        motion_slot_.start([this, claim, park_after](util::OperationContext& context) {
+            const SlewClaimEnd end(*this, claim);
+            run_home_operation(context, claim, park_after);
+        });
         stop_slot_.clear_failure();
     } catch (...) {
+        finish_slew_claim(claim);
         try {
             stop_axes_checked();
         } catch (const std::exception& error) {
@@ -1993,14 +2246,17 @@ void CelestronCgxTelescopeDriver::log_home_wait(std::chrono::steady_clock::time_
     ALPACA_LOG_DEBUG("Celestron CGX", "Home wait: " + home_axes_status());
 }
 
-void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& context, bool park_after) {
+void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& context, const util::MotionClaim& claim,
+                                                     bool park_after) {
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     auto next_log = clock_.now() + std::chrono::seconds(10);
     try {
         while (true) {
-            const auto reason = context.stop_reason();
-            if (reason != util::StopReason::None) {
-                if (reason == util::StopReason::Cancelled) stop_motion_worker_checked();
+            const auto reason = motion_stop_reason(context, claim);
+            // A newer command owns the axes and the state it set (decision 0006 rule 6).
+            if (reason == util::StopReason::Superseded) return;
+            if (reason == util::StopReason::Cancelled) {
+                stop_motion_worker_checked(claim);
                 std::lock_guard<std::mutex> lock(mutex_);
                 parked_ = false;
                 at_home_ = false;
@@ -2012,10 +2268,11 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
             if (protocol_.is_axis_home_done(CgxAxis::RightAscension) &&
                 protocol_.is_axis_home_done(CgxAxis::Declination)) {
                 if (!wait_for_slew_settle(context)) {
-                    if (context.stop_reason() == util::StopReason::Cancelled) stop_motion_worker_checked();
+                    if (motion_stop_reason(context, claim) == util::StopReason::Cancelled)
+                        stop_motion_worker_checked(claim);
                     return;
                 }
-                if (!run_motion_stage(context, [this, park_after] {
+                if (!run_motion_stage(context, claim, [this, park_after] {
                         const auto reference_generation = protocol_.session_generation();
                         protocol_.set_axis_position(CgxAxis::RightAscension, kRaHomeEncoder);
                         protocol_.set_axis_position(CgxAxis::Declination, kDecHomeEncoder);
@@ -2051,26 +2308,42 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
     } catch (...) {
-        stop_motion_worker_checked();
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_ = false;
-        at_home_ = false;
-        calibrated_ = false;
-        needs_sync_ = false;
-        sync_correction_active_ = false;
+        if (superseded(context, claim)) {
+            log_superseded_failure("FindHome or Park", std::current_exception());
+            return;
+        }
+        stop_motion_worker_checked(claim);
+        bool superseded_during_stop;
+        {
+            // Checked again under mutex_, which every claim takes: a newer command can claim the axes while the stop
+            // waits for motion_start_mutex_, and its state is then not this body's to write (decision 0006 rule 6).
+            std::lock_guard<std::mutex> lock(mutex_);
+            superseded_during_stop = superseded(context, claim);
+            if (!superseded_during_stop) {
+                parked_ = false;
+                at_home_ = false;
+                calibrated_ = false;
+                needs_sync_ = false;
+                sync_correction_active_ = false;
+            }
+        }
+        if (superseded_during_stop) {
+            log_superseded_failure("FindHome or Park", std::current_exception());
+            return;
+        }
         throw;
     }
 }
 
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
+    util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
     require_connected();
     require_known_motor_model();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         require_site_locked();
     }
-    MotionTransition transition(*this);
+    MotionTransition transition(*this, true);
     bool sync_correction_active;
     CgxPointingSide side;
     double lst;
@@ -2079,9 +2352,17 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (parked_) throw AlpacaException("Cannot slew while parked", AlpacaError::InvalidWhileParked);
+        // A retarget of this driver's own slew still in flight is not Tracking off (ascom-contract, "Equatorial slews
+        // require Tracking"): that slew turned Tracking off for its GOTO and owes the restore this one takes over.
+        const bool retarget = motion_owner_.slew_running() && restore_tracking_after_slew_;
+        // A flip slew homing to its rebase has no reference yet; FindHome and Park owe no restore, so they keep the
+        // FindHome advice.
+        if (!reference_valid_locked() && retarget)
+            throw AlpacaException("Celestron CGX is homing for a meridian flip; wait for it or AbortSlew first",
+                                  AlpacaError::InvalidOperation);
         if (!reference_valid_locked())
             throw AlpacaException("Run FindHome before slewing the Celestron CGX", AlpacaError::InvalidOperation);
-        if (!tracking_)
+        if (!tracking_ && !retarget)
             throw AlpacaException("Enable tracking before starting an equatorial slew", AlpacaError::InvalidOperation);
         if (!tracking_state_valid_)
             throw AlpacaException("Celestron CGX tracking state is unknown after a partial controller update",
@@ -2099,11 +2380,16 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
         hemisphere = hemisphere_locked();
     }
     const auto positions = cgx_sky_position_to_encoders(ra, dec, lst, hemisphere, side);
+    util::MotionClaim claim;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         // Disable tracking before publishing the slew transition. If the
-        // controller update fails, the prior calibrated/idle state remains.
-        set_tracking_locked(false, lock);
+        // controller update fails, the prior calibrated/idle state remains,
+        // and so does the owner of a slew in flight: the claim comes after it.
+        // A retarget finds Tracking already off and sends nothing here.
+        if (tracking_) set_tracking_locked(false, lock);
+        // Both axes (#2263): a slew in flight is superseded; its body sends nothing more.
+        claim = motion_owner_.claim(util::MotionCommand::Slew);
         at_home_ = false;
         parked_ = false;
         slew_in_progress_ = true;
@@ -2125,15 +2411,17 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
             target_dec_degrees_ = dec;
             target_ra_set_ = target_dec_set_ = true;
         }
-        motion_slot_.start([this, ra, dec, side, needs_home_route](util::OperationContext& context) {
+        motion_slot_.start([this, claim, ra, dec, side, needs_home_route](util::OperationContext& context) {
+            const SlewClaimEnd end(*this, claim);
             if (needs_home_route) {
-                run_flip_slew_operation(context, ra, dec, side);
+                run_flip_slew_operation(context, claim, ra, dec, side);
             } else {
-                run_slew_operation(context, ra, dec, side);
+                run_slew_operation(context, claim, ra, dec, side);
             }
         });
         stop_slot_.clear_failure();
     } catch (...) {
+        finish_slew_claim(claim);
         try {
             stop_axes_checked();
         } catch (const std::exception& error) {
@@ -2175,19 +2463,29 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     }
 }
 
-void CelestronCgxTelescopeDriver::run_slew_operation(util::OperationContext& context, double ra, double dec,
-                                                     CgxPointingSide destination_side) {
+void CelestronCgxTelescopeDriver::run_slew_operation(util::OperationContext& context, const util::MotionClaim& claim,
+                                                     double ra, double dec, CgxPointingSide destination_side) {
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     try {
         static_cast<void>(
-            finish_slew_operation(context, deadline, ra, dec, destination_side, "Celestron CGX slew timed out"));
+            finish_slew_operation(context, claim, deadline, ra, dec, destination_side, "Celestron CGX slew timed out"));
     } catch (...) {
-        stop_motion_worker_checked();
+        if (superseded(context, claim)) {
+            log_superseded_failure("Slew", std::current_exception());
+            return;
+        }
+        stop_motion_worker_checked(claim);
+        // A newer command can claim the axes while the stop waits for motion_start_mutex_ (decision 0006 rule 6).
+        if (superseded(context, claim)) {
+            log_superseded_failure("Slew", std::current_exception());
+            return;
+        }
         throw;
     }
 }
 
-void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext& context, double ra, double dec,
+void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext& context,
+                                                          const util::MotionClaim& claim, double ra, double dec,
                                                           CgxPointingSide destination_side) {
     bool rebase_started = false;
     bool reference_established = false;
@@ -2208,10 +2506,10 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
     auto next_log = clock_.now() + std::chrono::seconds(10);
     try {
         while (true) {
-            const auto reason = context.stop_reason();
+            const auto reason = motion_stop_reason(context, claim);
             if (reason != util::StopReason::None) {
                 if (reason == util::StopReason::Cancelled) {
-                    stop_motion_worker_checked();
+                    stop_motion_worker_checked(claim);
                     clear_cancelled_state();
                 }
                 return;
@@ -2227,8 +2525,8 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                     ra_rehome_label = ra_rehome_label_;
                     dec_rehome_label = dec_rehome_label_;
                 }
-                if (!run_motion_stage(context, [this, &lst, &hemisphere, &rebase_started, &reference_established,
-                                                ra_rehome_label, dec_rehome_label, ra, dec, destination_side] {
+                // The labels by value; the outputs (lst, hemisphere, the flags) and the arguments by reference.
+                if (!run_motion_stage(context, claim, [&, ra_rehome_label, dec_rehome_label] {
                         const auto reference_generation = protocol_.session_generation();
                         rebase_started = true;
                         protocol_.set_axis_position(CgxAxis::RightAscension, ra_rehome_label);
@@ -2257,12 +2555,12 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                         std::lock_guard<std::mutex> lock(mutex_);
                         at_home_ = false;
                     })) {
-                    clear_cancelled_state();
+                    if (!superseded(context, claim)) clear_cancelled_state();
                     return;
                 }
-                if (!finish_slew_operation(context, deadline, ra, dec, destination_side,
+                if (!finish_slew_operation(context, claim, deadline, ra, dec, destination_side,
                                            "Celestron CGX flip slew timed out")) {
-                    if (context.stop_reason() == util::StopReason::Cancelled) clear_cancelled_state();
+                    if (motion_stop_reason(context, claim) == util::StopReason::Cancelled) clear_cancelled_state();
                     return;
                 }
                 return;
@@ -2274,14 +2572,29 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
     } catch (...) {
-        stop_motion_worker_checked();
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_ = false;
-        at_home_ = false;
-        if (!reference_established) {
-            calibrated_ = !rebase_started;
-            needs_sync_ = false;
-            sync_correction_active_ = false;
+        if (superseded(context, claim)) {
+            log_superseded_failure("Meridian slew", std::current_exception());
+            return;
+        }
+        stop_motion_worker_checked(claim);
+        bool superseded_during_stop;
+        {
+            // Checked again under mutex_, as in the home catch (decision 0006 rule 6).
+            std::lock_guard<std::mutex> lock(mutex_);
+            superseded_during_stop = superseded(context, claim);
+            if (!superseded_during_stop) {
+                parked_ = false;
+                at_home_ = false;
+                if (!reference_established) {
+                    calibrated_ = !rebase_started;
+                    needs_sync_ = false;
+                    sync_correction_active_ = false;
+                }
+            }
+        }
+        if (superseded_during_stop) {
+            log_superseded_failure("Meridian slew", std::current_exception());
+            return;
         }
         throw;
     }
@@ -2289,8 +2602,13 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
 
 // The pulse moved an axis since the last frame. Publish the pair where it stopped before the slot ends, so the first
 // read after IsPulseGuiding goes false shows it without waiting for the next poll. One write per pulse is occasional
-// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link.
-void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
+// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link. Under
+// motion_start_mutex_, which every supersede of a pulse is made under: a pulse superseded after its last guide read
+// reads and writes nothing (decision 0006 rule 6). A cancelled pulse still publishes where it stopped.
+void CelestronCgxTelescopeDriver::publish_guide_end_frame(util::OperationContext& context,
+                                                          const util::MotionClaim& claim) {
+    const std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
+    if (superseded(context, claim)) return;
     try {
         const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
         const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
@@ -2300,8 +2618,9 @@ void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
     }
 }
 
-void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
-                                                  int first_chunk_centiseconds, int remaining_centiseconds,
+void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& context, const util::MotionClaim& claim,
+                                                  CgxAxis axis, int velocity_percent, int first_chunk_centiseconds,
+                                                  int remaining_centiseconds,
                                                   const std::shared_future<PulseGuideStart>& start_result) {
     const PulseGuideStart start = start_result.get();
     bool cancelled = start == PulseGuideStart::Ambiguous;
@@ -2315,9 +2634,13 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
         clock_.now() + std::chrono::milliseconds(
                            static_cast<std::int64_t>(first_chunk_centiseconds + remaining_centiseconds) * 10 + 5000);
     int current_chunk = first_chunk_centiseconds;
-    auto segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10 + 500);
+    auto segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10) + kGuideEndMargin;
     while (true) {
-        const auto reason = context.stop_reason();
+        run_hook_for_testing(pulse_poll_hook_for_testing_);
+        const auto reason = motion_stop_reason(context, claim);
+        // A newer pulse on this axis, or a slew, Park or FindHome, owns it now (decision 0006 rule 6): send it
+        // nothing more, the end-of-pulse read included.
+        if (reason == util::StopReason::Superseded) return;
         cancelled = cancelled || reason != util::StopReason::None;
         const bool active = protocol_.is_aux_guide_active(axis);
         if (active) {
@@ -2334,17 +2657,17 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
             continue;
         }
         if (cancelled || remaining_centiseconds == 0) {
-            publish_guide_end_frame();
+            publish_guide_end_frame(context, claim);
             return;
         }
         current_chunk = std::min(255, remaining_centiseconds);
-        if (!run_motion_stage(context, [this, axis, velocity_percent, current_chunk] {
+        if (!run_motion_stage(context, claim, [this, axis, velocity_percent, current_chunk] {
                 protocol_.pulse_guide_axis(axis, velocity_percent, current_chunk);
             })) {
             return;
         }
         remaining_centiseconds -= current_chunk;
-        segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10 + 500);
+        segment_deadline = clock_.now() + std::chrono::milliseconds(current_chunk * 10) + kGuideEndMargin;
     }
 }
 
@@ -2393,6 +2716,24 @@ std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testi
         return cgx->consume_link_lost_at_for_testing();
     }
     return std::nullopt;
+}
+
+void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_stop_worker_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_drain_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_pulse_poll_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_pulse_poll_hook_for_testing(std::move(hook));
+    }
 }
 
 }  // namespace alpacacore::vendor::celestron

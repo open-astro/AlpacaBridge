@@ -101,6 +101,15 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                 messages.push_back(std::move(message));
                 out.erase(f.key);  // Persisted: dropped to unset
             }
+        } else if (f.kind == FieldRef::Kind::String && (f.role == Role::Host || f.role == Role::PortPath)) {
+            // open-astro#2292 (ADR 0007 rule 4): a host name or device path has a byte bound.
+            const std::size_t limit = f.role == Role::Host ? kMaxHostBytes : kMaxPortPathBytes;
+            const std::size_t size = std::get<std::string>(*v).size();
+            if (size > limit) {
+                messages.push_back(name + " is " + std::to_string(size) + " bytes; the limit is " +
+                                   std::to_string(limit));
+                // Persisted: kept, so the connect refuses it instead of an empty path auto-detecting.
+            }
         } else if (f.kind == FieldRef::Kind::RecordList) {
             std::vector<DeviceConfig> records = std::get<std::vector<DeviceConfig>>(*v);
             for (std::size_t i = 0; i < records.size(); ++i) {
@@ -154,6 +163,18 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
                          s.vendor_label, s.forget_dropped_selectors});
     }
     return views;
+}
+
+std::optional<DescriptorView> DeviceCatalog::describe(const DeviceKey& key) const {
+    const Schema* s = find_schema(key);
+    if (s == nullptr) return std::nullopt;
+    return DescriptorView{s->key,
+                          s->display_name,
+                          s->build_option,
+                          find_factory(s->key) != nullptr,
+                          s->fields,
+                          s->vendor_label,
+                          s->forget_dropped_selectors};
 }
 
 std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
@@ -306,6 +327,28 @@ std::optional<std::vector<AttachedCamera>> DeviceCatalog::list_cameras(std::stri
         if (entry.first == vendor && entry.second) return entry.second();
     }
     return std::nullopt;
+}
+
+std::vector<std::string> DeviceCatalog::camera_lister_vendors() const {
+    std::vector<std::string> vendors;
+    for (const auto& entry : camera_listers_) {
+        if (entry.second) vendors.push_back(entry.first);
+    }
+    return vendors;
+}
+
+void DeviceCatalog::add_usb_serial_identity(UsbSerialIdentity identity) {
+    usb_serial_identities_.push_back(std::move(identity));
+}
+
+void DeviceCatalog::add_hid_lister(DeviceKey key, HidLister lister) {
+    for (auto& entry : hid_listers_) {
+        if (entry.first == key) {
+            entry.second = std::move(lister);
+            return;
+        }
+    }
+    hid_listers_.emplace_back(std::move(key), std::move(lister));
 }
 
 const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {

@@ -143,7 +143,7 @@ sudo hwclock -w                          # persist the correct time to the RTC
 timedatectl status                       # expect: System clock synchronized: yes
 ```
 
-**If the SBC has no internet at all**: connecting a telescope from a client that sends `UTCDate` (NINA, SkySafari and PHD2 all do on connect) sets the SBC's clock by itself, as long as `sync_system_clock_from_clients` is left on; the Server Info panel's Clock row shows which source the clock currently has. To set it by hand instead, use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → the action bar at the bottom of the page) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from a clone of this repository on an internet-connected workstation (e.g. your laptop; the package does not install it) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
+**If the SBC has no internet at all**: connecting a telescope from a client that sends `UTCDate` (NINA, SkySafari and PHD2 all do on connect) sets the SBC's clock by itself, as long as `sync_system_clock_from_clients` is left on; the Server Info panel's Clock row shows which source the clock currently has. To set it by hand instead, use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → Server Info → Server Actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from a clone of this repository on an internet-connected workstation (e.g. your laptop; the package does not install it) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
 
 ```sh
 scripts/sync-clock.sh astro@192.168.168.1 --rtc
@@ -202,7 +202,7 @@ Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 | West | Southern hemisphere | `reversed` |
 | East | Southern hemisphere | `normal` |
 
-`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device name in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
+`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device Description in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
 
 If you set it, please post your reading (mount code from the connect log, dovetail side, latitude) on issue #579 so the board can join the measured table.
 

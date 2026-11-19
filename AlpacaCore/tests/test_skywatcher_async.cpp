@@ -34,8 +34,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -807,6 +809,208 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) leaves a running Dec pulse to e
     driver->set_connected(false);
 }
 
+// #2263, decision 0006 rule 3: a MoveAxis supersedes the pulse on its own axis and never joins its body. The
+// Dec pulse is parked in its dispatch stop-wait (a ramping Dec jog) on the clock. A MoveAxis(Dec) that joined
+// the pulse body would wait there for the clock; one that supersedes it parks in its own Dec stop-wait beside
+// it, and the pulse body then leaves Dec alone: it never starts its guide motion.
+TEST_CASE("SkyWatcher async - MoveAxis(Dec) supersedes a Dec pulse in its dispatch stop-wait without a join (#2263)",
+          "[skywatcher][async][pulseguide][motion-owner]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(1, 1.0);  // Dec jog: the pulse's dispatch must stop it first
+    REQUIRE(mount.axis_running(2));
+    const uint32_t period_at_1x = mount.step_period(2);
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the pulse dispatch, in the Dec stop-wait
+    const int dec_starts = mount.start_count(2);
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread mover([&] {
+        try {
+            driver->move_axis(1, 2.0);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    // No join: the MoveAxis reaches its own stop-wait while the pulse body still sleeps in its own.
+    const bool beside_pulse = clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous);
+    CHECK(beside_pulse);
+    const bool guiding_after_claim = driver->get_is_pulse_guiding();
+    const bool settled = run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(10000));
+    mover.join();
+    REQUIRE(settled);
+    CHECK_FALSE(guiding_after_claim);  // the pulse ended when the MoveAxis took Dec
+    CHECK_FALSE(threw.load());
+    // Past the pulse's own end: the superseded body sent Dec nothing, the MoveAxis's start is the only one.
+    elapse(clock, std::chrono::milliseconds(2500));
+    CHECK(mount.start_count(2) == dec_starts + 1);
+    CHECK(mount.axis_running(2));
+    CHECK(mount.step_period(2) != period_at_1x);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+// #2263: the same rule on the RA in-place pulse. Its end-of-pulse restore is parked between its ':I' and its
+// ':J', outside the locks. A MoveAxis(RA) returns without waiting for it, and the superseded body sends RA
+// nothing more: no ':J' re-latch, no ':I' and no stop over the MoveAxis's motion.
+TEST_CASE(
+    "SkyWatcher async - MoveAxis(RA) supersedes an RA pulse in its restore and the pulse sends RA nothing (#2263)",
+    "[skywatcher][async][pulseguide][motion-owner]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    ParkedPulseRestoreHook hook;
+    driver->pulse_guide(2, 300);  // East: an in-place rate change on the tracking RA axis
+    REQUIRE(hook.wait_parked(std::chrono::seconds(5)));
+    const uint32_t restored_period = mount.step_period(1);
+
+    auto mover = std::async(std::launch::async, [&] { driver->move_axis(0, 1.0); });
+    const bool returned = mover.wait_for(kRendezvous) == std::future_status::ready;
+    CHECK(returned);
+    const bool guiding_after_claim = driver->get_is_pulse_guiding();
+    const int starts = mount.start_count(1);
+    const int stops = mount.stop_count(1);
+    const int rate_writes = mount.frames_seen('I');
+    hook.release();
+    mover.get();
+    CHECK_FALSE(guiding_after_claim);
+    // The disconnect joins the pulse body and sends only ':K'.
+    driver->set_connected(false);
+    if (returned) {
+        CHECK(mount.start_count(1) == starts);
+        CHECK(mount.frames_seen('I') == rate_writes);
+        CHECK(mount.stop_count(1) == stops + 1);         // the disconnect's own stop
+        CHECK(mount.step_period(1) != restored_period);  // the MoveAxis rate, not the tracking restore
+    }
+}
+
+// #2263 (decision, 2026-11-16): one rule on every mount. A PulseGuide while a slew, Park or FindHome runs is
+// refused and changes nothing: no pulse starts and the operation keeps running. InvalidOperation for the slew
+// and FindHome; a Park keeps its older InvalidWhileParked refusal ("not allowed while parking").
+TEST_CASE("SkyWatcher async - PulseGuide during a slew, Park or FindHome is refused and changes nothing (#2263)",
+          "[skywatcher][async][pulseguide][motion-owner]") {
+    const int operation = GENERATE(0, 1, 2);
+    CAPTURE(operation);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    if (operation == 0) {
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0), 40.0);
+    } else if (operation == 1) {
+        driver->park();
+    } else {
+        driver->find_home();
+    }
+    REQUIRE(driver->get_slewing());
+    const auto refusal =
+        operation == 1 ? alpacacore::AlpacaError::InvalidWhileParked : alpacacore::AlpacaError::InvalidOperation;
+    for (const int direction : {0, 2}) {  // a Dec pulse and an RA pulse
+        require_alpaca_error([&] { driver->pulse_guide(direction, 500); }, refusal);
+    }
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(sw::pulse_hold_active_for_testing(*driver, 1));
+    CHECK_FALSE(sw::pulse_hold_active_for_testing(*driver, 2));
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+// #2263, PR #2361 review: a slew operation that ends by a throw still lets PulseGuide in again, and so does a
+// slew start the slot refuses after its claim. Leg 0 fails the goto body, leg 1 the Park body (both through a
+// rejected ':J'), leg 2 refuses the slew body's thread.
+TEST_CASE("SkyWatcher async - a slew operation that fails or is refused leaves PulseGuide accepted (#2263)",
+          "[skywatcher][async][pulseguide][motion-owner]") {
+    const int leg = GENERATE(0, 1, 2);
+    CAPTURE(leg);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 20.0);
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
+    if (leg == 2) {
+        sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        require_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, 40.0); },
+                             alpacacore::AlpacaError::DriverException);
+    } else {
+        mount.reject_start_motion(leg == 0 ? 1 : 2, 1);
+        if (leg == 0) {
+            driver->slew_to_coordinates_async(target_ra, 40.0);
+        } else {
+            driver->park();
+        }
+        const auto failed = [&] {
+            try {
+                return !driver->get_slewing();
+            } catch (const alpacacore::AlpacaException&) {
+                return true;  // the stored failure (#575)
+            }
+        };
+        REQUIRE(run_clock_until(clock, failed, std::chrono::milliseconds(10000)));
+        REQUIRE_FALSE(driver->get_at_park());
+    }
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
+    CHECK(driver->get_is_pulse_guiding());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
+    driver->set_connected(false);
+}
+
+// #2263: a one-axis stop-wait is not lost to a command on the other axis. Tracking=false waits for a ramping
+// RA axis with the locks released; a MoveAxis on Dec in that window used to bump the driver-wide counter and
+// the setter threw "Tracking change superseded by a concurrent motion command" with tracking still on.
+TEST_CASE("SkyWatcher async - a Dec MoveAxis during the Tracking=false RA stop-wait does not supersede it (#2263)",
+          "[skywatcher][async][motion-owner]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+    mount.set_stop_ramp_ms(800);
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread off([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    // The setter is parked in its RA stop-wait; Dec is idle, so the MoveAxis does not wait.
+    const bool parked = clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous);
+    driver->move_axis(1, 1.0);
+    const bool settled = run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(10000));
+    off.join();
+    REQUIRE(parked);
+    REQUIRE(settled);
+    CHECK_FALSE(threw.load());
+    CHECK_FALSE(driver->get_tracking());
+    CHECK(mount.axis_running(2));  // the Dec jog runs on
+    mount.set_stop_ramp_ms(0);
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
 // #1706: the pulse's dispatch stop-waits a ramping Dec axis with mutex_ released. An RA MoveAxis
 // landing in that window bumped the shared motion_generation_, so the pulse threw "Motion
 // superseded before dispatch" and never started: the correction was dropped.
@@ -1193,16 +1397,15 @@ TEST_CASE("SkyWatcher async - an RA duty stop during a Dec pulse's dispatch stop
     driver->set_connected(false);
 }
 
-// #1706 review: the post-slew rate check's recovery stops and restarts RA only. An async slew's
-// landing hold does not end on a bump, so a Dec pulse sent into the hold dispatches before the
-// restore and, while Dec reports running (hold_running), is still in its stop-wait when the check
-// stops RA. A 1 deg slew lands with no refining goto, so the hold follows the landing waits.
-// Falsified by: skywatcher_telescope_driver.cpp:5415 a bare ++motion_generation_ in place of
-// bump_motion_generation_locked(kAxisRa).
+// #1706 review, then #2263: a Dec pulse sent into an async slew's landing hold used to dispatch
+// before the restore and sit in its stop-wait while the post-slew rate check stopped and restarted
+// RA. Since #2263 the slew owns both axes until it ends, so that pulse is refused with
+// InvalidOperation and the check still restarts RA. A 1 deg slew lands with no refining goto, so
+// the hold follows the landing waits.
 TEST_CASE(
-    "SkyWatcher async - the post-slew rate check's RA restart during a Dec pulse's dispatch stop-wait does not drop "
-    "the pulse (#1706)",
-    "[skywatcher][async][pulseguide]") {
+    "SkyWatcher async - a Dec pulse sent into the post-slew landing hold is refused and the rate check runs "
+    "(#1706, #2263)",
+    "[skywatcher][async][pulseguide][motion-owner]") {
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
@@ -1215,12 +1418,10 @@ TEST_CASE(
         ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
     } sink_guard;
     std::atomic<bool> condemned{false};
-    std::atomic<int> dec_starts_at_warn{-1};
     alpacacore::logging::set_log_sink(
         [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
             if (level == alpacacore::logging::LogLevel::Warn &&
-                message.find("Post-slew tracking restart") != std::string_view::npos && !condemned.load()) {
-                dec_starts_at_warn.store(mount.start_count(2));  // the fake's own mutex, not the driver's
+                message.find("Post-slew tracking restart") != std::string_view::npos) {
                 condemned.store(true);
             }
         });
@@ -1236,18 +1437,14 @@ TEST_CASE(
     REQUIRE_FALSE(mount.axis_running(1));
     const int dec_starts = mount.start_count(2);
 
-    mount.hold_running(2, true);
-    driver->pulse_guide(0, 500);
-    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the hold and the Dec stop-wait
+    REQUIRE(driver->get_slewing());
+    require_alpaca_error([&] { driver->pulse_guide(0, 500); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     REQUIRE(run_clock_until(clock, [&] { return condemned.load(); }, std::chrono::milliseconds(10000)));
-    CHECK(dec_starts_at_warn.load() == dec_starts);  // still waiting when the check stopped RA
-    mount.hold_running(2, false);
-    CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
-    REQUIRE(run_clock_until(
-        clock, [&] { return !driver->get_is_pulse_guiding() && !driver->get_slewing(); },
-        std::chrono::milliseconds(10000)));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(10000)));
     clock.advance(std::chrono::milliseconds(2000));
     clock.wait_for_woken_settled(kRendezvous);
+    CHECK(mount.start_count(2) == dec_starts);  // no pulse ever started Dec
     CHECK_FALSE(mount.axis_running(2));
     CHECK(mount.axis_running(1));  // the check restarted tracking
     driver->set_tracking(false);
@@ -1396,12 +1593,12 @@ TEST_CASE("SkyWatcher async - a refused MoveAxis(Dec) during a Dec pulse leaves 
 // 500 ms, pinning real axis-on time to a ~40 ms window and turning ordinary
 // scheduling jitter into a flaky failure -- the first fix for that (a flat
 // +-1 count) was itself still spent entirely on overshoot, since undershoot
-// is structurally impossible here: task_wait_for(remaining) never returns
+// is structurally impossible here: the slot wait ctx.wait_for(remaining) never returns
 // early and the fake starts integrating at ":J", before the driver's own
 // dispatch cost is paid, so delivered counts can only be AT LEAST
 // trunc(rate x duration) (Axis::advance()'s remainder carry keeps that
 // floor under one count at any duration) and can exceed it by however long
-// task_wait_for's wakeup, the ":K" round trip and stop_axis()'s mutex
+// the slot wait's (ctx.wait_for) wakeup, the ":K" round trip and stop_axis()'s mutex
 // acquisition take. A flat +-1 band therefore left ~70-90 ms of real budget
 // entirely on the overshoot side while still failing on a few ms of it --
 // four review rounds on open-astro#603 measured the same ~80 ms figure
@@ -1441,7 +1638,7 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a b
             // the header comment), so the lower bound stays at the fake's own
             // quantisation floor -- tight enough to catch the ~21% shortfall
             // this branch fixes -- while the upper bound absorbs the real
-            // overshoot budget (task_wait_for wakeup + the ":K" round trip +
+            // overshoot budget (ctx.wait_for wakeup + the ":K" round trip +
             // stop_axis()'s mutex) instead of spending a flat +-1 band
             // entirely on one side of a symmetric check.
             CHECK(moved_counts >= expected_counts - 1.0);
@@ -1635,7 +1832,7 @@ struct WatchdogLogGuard {
 }  // namespace
 
 // open-astro#743 rules 2 and 3: the MoveAxis(axis, 0) stop task polls the
-// board's braking ramp through task_wait_for and gives up at kAxisStopTimeout
+// board's braking ramp through the slot wait (ctx.wait_for) and gives up at kAxisStopTimeout
 // (5 s), both on the injected clock. The fake's ramp is on the same clock, so
 // the poll sees the axis stop exactly when virtual time reaches the ramp's
 // end, and the timeout fires at 5 s of virtual time while the board still
@@ -2026,6 +2223,10 @@ struct SlotGate {
     std::condition_variable cv;
     bool open = true;
 
+    // A REQUIRE that throws before release() would leave the driver's join waiting
+    // on a gated thread forever.
+    ~SlotGate() { release(); }
+
     std::function<std::thread(std::function<void()>)> spawn() {
         return [this](std::function<void()> f) {
             return std::thread([this, f = std::move(f)]() mutable {
@@ -2408,8 +2609,8 @@ TEST_CASE("SkyWatcher async - rate offsets require Sidereal and zero on drive-ra
     driver->set_tracking(true);
 
     driver->set_tracking_rate(1);  // Lunar
-    REQUIRE_THROWS_AS(driver->set_declination_rate(1.0), alpacacore::AlpacaException);
-    REQUIRE_THROWS_AS(driver->set_right_ascension_rate(1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::InvalidOperation);
 
     driver->set_tracking_rate(0);  // Sidereal
     driver->set_declination_rate(5.0);
@@ -2738,7 +2939,8 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
     // identity, NOT a patch level, so the version must read "3.39" and never
     // "3.39.50".
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: measured");
     auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
@@ -2748,10 +2950,25 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // rig showed the direct connection reverting to a generic name after
     // every disconnect while the synscan driver kept its model (2026-09-10).
     driver->set_connected(false);
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: measured");
     firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
+}
+
+// Decision 0024: a board mount_code_to_name() does not know has no model to name. Falsified by:
+// skywatcher_telescope_driver.cpp get_name() returning "Sky-Watcher " + model_cache_ for an unknown board.
+TEST_CASE("SkyWatcher - an unknown board is Sky-Watcher Telescope with its code in the Description",
+          "[skywatcher][telescope][eqm35]") {
+    auto profile = alpacacore::test::FakeMountProfile::eqm35_pro();
+    profile.version_reply = "03277E";  // fw 3.39, mount code 0x7E: in no row of mount_code_to_name()
+    FakeSkyWatcherSerialBoard mount(profile);
+    auto driver = connected_driver(mount);
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
+    CHECK(driver->get_description() ==
+          "Sky-Watcher EQMOD direct mount, unknown board code 0x7E, eps: unmeasured default");
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher EQM-35 - the connect log names the mount code in hex (#458)", "[skywatcher][telescope][eqm35]") {
@@ -2814,7 +3031,8 @@ TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher]
     mount.set_home_index_degrees(2, 2.0);
     auto driver = connected_driver(mount);
 
-    CHECK(driver->get_name() == "Sky-Watcher Wave 100i (EQMOD, eps: unmeasured default)");
+    CHECK(driver->get_name() == "Sky-Watcher Wave 100i");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: unmeasured default");
     CHECK(driver->get_can_find_home() == true);
 
     driver->find_home();
@@ -3173,7 +3391,8 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     // PR #221 continuity: a deferred RightAscensionRate write pre-arms the RA
     // duty rate with no hardware touch while a pulse owns the RA axis; the
     // duty body idles on the axis-ownership recheck at burst start, and takes
-    // over once the pulse releases the axis.
+    // over once the pulse releases the axis. The pulse's restore stops RA
+    // for it (open-astro#1720), rather than writing the clamped floor rate.
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
@@ -3186,10 +3405,23 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     REQUIRE(driver->get_is_pulse_guiding());
     driver->set_right_ascension_rate(0.995);  // deferred; ~0.075 arcsec/s, below the EQM-35 floor
     REQUIRE(driver->get_right_ascension_rate() == 0.995);
+    mount.clear_motion_log();  // the deferred write sent nothing; what follows is the pulse end
 
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
-    // The pulse's restore stops the RA axis for the duty regime; the worker
-    // then bursts it on its own period.
+    // open-astro#1720: the pulse's restore goes through the RA drive applier, so the first RA command after the
+    // pulse is the stop that hands the axis to the duty worker (whose bursts then start with a stop of their own).
+    // Writing the sub-floor rate with ":I" clamped it at the floor (":I1FFFFFF") and left RA tracking at the floor
+    // rate until the first burst.
+    std::string first_ra_frame;
+    for (const auto& frame : mount.motion_log()) {
+        if (frame.size() > 2 && frame[2] == '1') {
+            first_ra_frame = frame;
+            break;
+        }
+    }
+    INFO("first RA motion frame after the pulse: " << first_ra_frame);
+    CHECK((first_ra_frame.rfind(":K1", 0) == 0 || first_ra_frame.rfind(":L1", 0) == 0));
+    // The worker then bursts it on its own period.
     const int starts = mount.start_count(1);
     REQUIRE(
         run_clock_until(clock, [&] { return mount.start_count(1) >= starts + 2; }, std::chrono::milliseconds(9000)));
@@ -4696,7 +4928,7 @@ TEST_CASE("SkyWatcher async - a slew refused at dispatch still publishes the tar
     auto driver = connected_driver(mount);
     driver->set_tracking(true);       // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);  // kAxisRa; the goto starts RA first, so that throw is the dispatch failure
-    CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->slew_to_coordinates(5.5, -25.0); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_slewing());
     CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
     CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
@@ -4715,7 +4947,7 @@ TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
     mount.reject_start_motion(1, 1);
-    CHECK_THROWS_AS(driver->sync_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->sync_to_coordinates(5.5, -25.0); }, alpacacore::AlpacaError::DriverException);
     CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
     CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
     driver->set_connected(false);
@@ -4776,8 +5008,8 @@ TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#30
 
     // Nothing is set on a fresh connect: reset_runtime_state_locked() clears
     // both, which is what makes ConformU's read-before-write check pass.
-    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Sync rather than slew: it sets the same pair through the same locked
     // path and returns without leaving a task running.
@@ -4793,8 +5025,8 @@ TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#30
     CHECK_FALSE(driver->get_connected());
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
     driver->set_connected(false);
 }
 
@@ -5734,7 +5966,10 @@ TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late da
     // exchange_timed_out_ outcome: no datagram at all, three exchanges latch.
     mount.set_silent(true);
     const int served = mount.transactions_served();
-    for (int i = 0; i < 3; ++i) CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    for (int i = 0; i < 3; ++i) {
+        require_alpaca_error([&] { (void)proto.inquire_position(sw::kAxisRa); },
+                             alpacacore::AlpacaError::DriverException);
+    }
     CHECK(proto.link_faulted());
     CHECK(mount.transactions_served() > served);
 
@@ -5752,12 +5987,16 @@ TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late da
     // settle), so the exchange gives up before the datagram is sent.
     const int served_before_hold = mount.transactions_served();
     mount.hold_next_reply(std::chrono::milliseconds(4000));
-    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);            // timed out: 1
+    require_alpaca_error([&] { (void)proto.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);                               // timed out: 1
     REQUIRE(wait_until([&] { return mount.transactions_served() > served_before_hold; }, 8000));  // late reply sent
     mount.set_silent(true);
-    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // sees stale frame: reset
-    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // 1
-    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // 2
+    require_alpaca_error([&] { (void)proto.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);  // sees stale frame: reset
+    require_alpaca_error([&] { (void)proto.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);  // 1
+    require_alpaca_error([&] { (void)proto.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);  // 2
     CHECK_FALSE(proto.link_faulted());
     proto.disconnect();
 }
@@ -5782,7 +6021,7 @@ void refused_slot_start_stops_axes(const std::function<void(alpacacore::Telescop
     sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK_THROWS_AS(second(*driver), alpacacore::AlpacaException);
+    require_alpaca_error([&] { second(*driver); }, alpacacore::AlpacaError::DriverException);
 
     // Let the superseded body unwind on the virtual clock.
     for (int i = 0; i < 20; ++i) {
@@ -5831,8 +6070,9 @@ TEST_CASE("SkyWatcher slot - a refused goto start on an idle tracking mount keep
     sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK_THROWS_AS(driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 35.0),
-                    alpacacore::AlpacaException);
+    require_alpaca_error(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 35.0); },
+        alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_tracking());
     CHECK(mount.axis_running(1));
     driver->set_connected(false);
@@ -5858,7 +6098,7 @@ TEST_CASE(
     sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
     gate.release();
 
     const int starts_before = mount.start_count(1);
@@ -6086,6 +6326,49 @@ TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I restore
     driver->set_connected(false);
 }
 
+// open-astro#1720, the dispatch-failure sibling of the pulse-end restore: a sub-floor RightAscensionRate written
+// between the failed dispatch and the drive-rate recovery is applied by stopping RA for the duty worker, not by a
+// floor-clamped ":I".
+TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I hands a sub-floor RA rate to the duty worker",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    std::atomic<bool> fired{false};
+    std::size_t log_at_recovery = 0;
+    alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook([&] {
+        if (!fired.exchange(true)) {
+            // Between the failed dispatch ":J" and the drive-rate recovery: deferred (the pulse owns RA), so the
+            // setter only pre-arms the duty rate and starts the worker, which waits for the pulse to release RA.
+            driver->set_right_ascension_rate(0.995);  // ~0.075 arcsec/s, below the slow-mode floor
+            log_at_recovery = mount.motion_log().size();
+        }
+    });
+    struct HookReset {
+        ~HookReset() { alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook(nullptr); }
+    } hook_reset;
+    mount.reject_start_motion(1, 1);  // the dispatch ":J" after the live ":I"
+    driver->pulse_guide(2, 800);
+    REQUIRE(wait_until([&] { return fired.load(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_right_ascension_rate() == 0.995);
+
+    // The recovery's first RA command stops the axis; the old path wrote the clamped floor period with ":I".
+    const auto log = mount.motion_log();
+    std::string first_ra_frame;
+    for (std::size_t i = log_at_recovery; i < log.size() && first_ra_frame.empty(); ++i) {
+        if (log[i].size() > 2 && log[i][2] == '1') first_ra_frame = log[i];
+    }
+    INFO("first RA motion frame of the recovery: " << first_ra_frame);
+    CHECK((first_ra_frame.rfind(":K1", 0) == 0 || first_ra_frame.rfind(":L1", 0) == 0));
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - Tracking reads false once a Tracking=false stop-wait that threw sees RA stopped",
           "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
@@ -6145,5 +6428,77 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA) during the pulse rate check is not ov
     CHECK(mount.axis_running(1));
     driver->move_axis(0, 0.0);
     driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// Decision 0022 rule 2: the ownership window ends with the operation that armed
+// it. pulse_hold_ is read only behind pulse_axis_active_, so the seam reads the
+// window itself.
+TEST_CASE("SkyWatcher async - a pulse whose dispatch fails leaves no armed hold window (#2066)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    alpacacore::vendor::skywatcher::set_pulse_spawn_for_testing(*driver, 2, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    REQUIRE_THROWS(driver->pulse_guide(0, 1500));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AbortSlew during a pulse leaves no armed hold window (#2066)", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    driver->pulse_guide(0, 8000);
+    REQUIRE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->set_connected(false);
+}
+
+// Decision 0006 rule 3: a synchronous goto supersedes the slew body in flight,
+// it does not join it. The body's thread is held back, so a join would stall
+// the goto until the release.
+TEST_CASE("SkyWatcher async - a synchronous goto supersedes a running slew body without joining it (#2066)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> finished;
+    alpacacore::vendor::skywatcher::set_slew_spawn_for_testing(
+        *driver, [released, &finished](std::function<void()> body) {
+            return std::thread([released, &finished, body = std::move(body)] {
+                released.wait();
+                body();
+                finished.set_value();
+            });
+        });
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);  // body held back
+
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(std::fmod(lst - 1.0 + 24.0, 24.0), 30.0);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch) cancelled by the abort below
+        }
+    });
+    // The goto dispatched while the first body is still parked.
+    const bool dispatched = wait_until([&] { return mount.axis_running(2); }, 5000);
+    const bool joined = finished.get_future().wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    release.set_value();
+    CHECK(dispatched);
+    CHECK_FALSE(joined);
+    driver->abort_slew();
+    slewer.join();
+    alpacacore::vendor::skywatcher::set_slew_spawn_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }

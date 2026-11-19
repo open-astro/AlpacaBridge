@@ -47,6 +47,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -124,6 +125,9 @@ public:
     /// frame at once ("Px#"), as a wedged firmware does, without the serial
     /// timeout a silent fake costs.
     void set_garbage_state_replies(bool on) { garbage_state_.store(on); }
+    /// Persistent: Position, IsMoving and temperature requests get no reply at all (the handshake and firmware
+    /// query still answer), unlike the one-shot hold_reply_to().
+    void set_silent_state_replies(bool on) { silent_state_.store(on); }
     /// ":06#" answers garbage while the other state queries stay good (a
     /// focuser without a temperature probe).
     void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
@@ -132,6 +136,10 @@ public:
     void set_moving(bool moving) { moving_.store(moving); }
     void set_temperature(double celsius) { temperature_.store(celsius); }
     void set_position(int position) { position_.store(position); }
+    /// What ":08#" reports from now on, as a focuser reconfigured behind the driver's back would.
+    void set_max_position(int max_position) { max_position_.store(max_position); }
+    /// ":08#" answers a frame the max position parser rejects ("Mx#"), the other queries stay good.
+    void set_garbage_max_position(bool on) { garbage_max_position_.store(on); }
 
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
@@ -209,9 +217,11 @@ private:
         if (cmd == ":03#") {
             const auto delay = handshake_delay_ms_.load();
             if (delay > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                alpacacore::test::connect_hold(std::chrono::milliseconds(delay));  // connect_hold_gate.h
             }
             reply = "F" + std::to_string(kFirmware) + "#";
+        } else if (silent_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
+            return;
         } else if (garbage_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
             reply = "Px#";
         } else if (garbage_temperature_.load() && cmd == ":06#") {
@@ -225,7 +235,8 @@ private:
             std::snprintf(buf, sizeof(buf), "Z%.1f#", temperature_.load());
             reply = buf;
         } else if (cmd == ":08#") {
-            reply = "M" + std::to_string(max_position_.load()) + "#";
+            reply =
+                garbage_max_position_.load() ? std::string("Mx#") : "M" + std::to_string(max_position_.load()) + "#";
         } else if (cmd == ":11#") {
             reply = "O1#";
         } else if (cmd == ":13#") {
@@ -291,9 +302,11 @@ private:
     std::string hold_cmd_;  // hold_reply_to(), guarded by mutex_
     int hold_cmd_ms_ = 0;
 
+    std::atomic<bool> silent_state_{false};
     std::atomic<bool> garbage_state_{false};
     std::atomic<bool> garbage_temperature_{false};
     std::atomic<bool> garbage_temp_comp_{false};
+    std::atomic<bool> garbage_max_position_{false};
     std::atomic<bool> moving_{false};
     std::atomic<double> temperature_{12.5};
     std::atomic<int> position_{1000};

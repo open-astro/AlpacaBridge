@@ -331,6 +331,35 @@ TEST_CASE("TaskClock fake - sleep_for and the waiter rendezvous", "[util][taskcl
     }
 }
 
+TEST_CASE("FakeTaskClock - wait_for_waiter_thread waits for the named thread and not any waiter",
+          "[util][taskclock][unit]") {
+    FakeTaskClock fake;
+    TaskClock& clock = fake;
+    Sleeper parked(clock, 1h, &fake);  // another thread, already parked (a driver's status poll)
+    REQUIRE(fake.wait_for_waiters(1, kBound));
+
+    std::promise<void> release;
+    auto released = release.get_future();
+    std::atomic<bool> done{false};
+    std::thread late([&clock, &released, &done] {
+        released.wait();
+        clock.sleep_for(1s);
+        done = true;
+    });
+    // The parked sleeper is a waiter, but not the named thread.
+    CHECK_FALSE(fake.wait_for_waiter_thread(late.get_id(), 50ms));
+    release.set_value();
+    CHECK(fake.wait_for_waiter_thread(late.get_id(), kBound));
+    // Release it however the checks went, bounded in real time, so the case still tears down. The 1 ms sleep yields
+    // to the released thread, a real-time wait.
+    const auto give_up = std::chrono::steady_clock::now() + kBound;
+    while (!done && std::chrono::steady_clock::now() < give_up) {
+        fake.advance(1s);
+        std::this_thread::sleep_for(1ms);
+    }
+    late.join();
+}
+
 TEST_CASE("TaskClock fake - wait_count grows per registration and advance reports the waiters it woke",
           "[util][taskclock][unit]") {
     // open-astro#743: wait_count() is the cumulative registration count;

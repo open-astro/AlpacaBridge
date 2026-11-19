@@ -16,14 +16,17 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/gps_status.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -98,6 +101,21 @@ constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr int kMaxPulseGuideMs = 25500;
+// NexStar's limits for the telescope command gate (#2258); the motion commands run no latched-fault check.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = kMaxPulseGuideMs;
+    limits.pulse_guide_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.move_axis_stop_epsilon = 1e-6;
+    limits.move_axis_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.slew_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.texts.pulse_direction = "PulseGuide direction must be 0-3 and duration 0-25500 ms";
+    limits.texts.pulse_duration = limits.texts.pulse_direction;
+    limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
+    return limits;
+}();
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -224,7 +242,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);  // the connect publishes the model name under it, at its end
         if (!mount_model_name_.empty()) {
-            return "Celestron " + mount_model_name_;
+            return util::branded_name("Celestron", mount_model_name_);
         }
         return "Celestron NexStar Telescope";
     }
@@ -273,15 +291,7 @@ public:
         return link_fault_text_;
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake runs under it and the
@@ -422,7 +432,12 @@ public:
         return served_altaz_locked().second;
     }
 
+    // The optics and SlewSettleTime are the client's values, not the mount's: lock-free, no fault refusal, but
+    // NotConnected while disconnected or lost like every other member (ASCOM contract precedence). The optics setters
+    // are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with them, connected
+    // or not.
     double get_aperture_diameter() const override {
+        check_connected();
         return aperture_diameter_m_;
     }
 
@@ -434,6 +449,7 @@ public:
     }
 
     double get_aperture_area() const override {
+        check_connected();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -483,14 +499,7 @@ public:
         check_connected();
         throw_if_link_faulted();
         const auto now = clock_.now();
-        bool active = false;
-        for (std::size_t axis = 0; axis < pulse_guide_active_.size(); ++axis) {
-            if (pulse_guide_active_[axis] && now >= pulse_guide_end_time_[axis]) {
-                pulse_guide_active_[axis] = false;
-            }
-            active = active || pulse_guide_active_[axis];
-        }
-        return active;
+        return pulse_hold_[0].active(now) || pulse_hold_[1].active(now);
     }
 
     bool get_can_set_declination_rate() const override {
@@ -554,14 +563,14 @@ public:
         }
         const auto now = clock_.now();
         double dec_value;
-        if (!position_link_health_.faulted() && pg_hold_dec_valid_ && now < pg_hold_dec_until_) {
+        if (!position_link_health_.faulted() && pg_hold_[1].active(now)) {
             dec_value = pg_hold_dec_degrees_;
         } else {
             dec_value = served_equatorial_locked().second;
         }
-        if (!position_link_health_.faulted() && pg_dec_correction_valid_ && now < pg_dec_correction_until_) {
+        if (!position_link_health_.faulted() && pg_correction_[1].active(now)) {
             dec_value = pg_dec_baseline_degrees_ + pg_dec_expected_delta_degrees_;
-            pg_dec_correction_valid_ = false;
+            pg_correction_[1].clear();
         }
         return std::clamp(dec_value, -90.0, 90.0);
     }
@@ -620,6 +629,7 @@ public:
     }
 
     double get_focal_length() const override {
+        check_connected();
         return focal_length_m_;
     }
 
@@ -641,13 +651,16 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         std::lock_guard<std::mutex> transition(transition_mutex_);
         check_connected();
         if (!has_autoguider_port_) {
             throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
+        }
+        // #2257: a negative rate is refused, not sent. Disconnected or with no port, the answer stays as above.
+        if (rate.ra < 0.0 || rate.dec < 0.0) {
+            throw AlpacaException("GuideRate must not be negative", AlpacaError::InvalidValue);
         }
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
@@ -656,6 +669,15 @@ public:
         protocol.set_autoguide_rate(1, dec_percent);
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
+    }
+    // #2379: the base setters read GuideRate first, which answers NotConnected before the finite check.
+    void set_guide_rate_right_ascension(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
+        TelescopeDriver::set_guide_rate_right_ascension(value);
+    }
+    void set_guide_rate_declination(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
+        TelescopeDriver::set_guide_rate_declination(value);
     }
 
     double get_right_ascension() const override {
@@ -667,15 +689,15 @@ public:
         }
         const auto now = clock_.now();
         double ra_value;
-        if (!position_link_health_.faulted() && pg_hold_ra_valid_ && now < pg_hold_ra_until_) {
+        if (!position_link_health_.faulted() && pg_hold_[0].active(now)) {
             ra_value = pg_hold_ra_hours_;
         } else {
             ra_value = served_equatorial_locked().first;
         }
-        if (!position_link_health_.faulted() && pg_ra_correction_valid_ && now < pg_ra_correction_until_) {
+        if (!position_link_health_.faulted() && pg_correction_[0].active(now)) {
             ra_value = std::fmod(pg_ra_baseline_hours_ + pg_ra_expected_delta_hours_, 24.0);
             if (ra_value < 0.0) ra_value += 24.0;
-            pg_ra_correction_valid_ = false;
+            pg_correction_[0].clear();
         }
         return ra_value;
     }
@@ -742,6 +764,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected();
         return slew_settle_time_seconds_;
     }
 
@@ -749,6 +772,7 @@ public:
         if (seconds < 0) {
             throw AlpacaException("Slew settle time must be >= 0 seconds", AlpacaError::InvalidValue);
         }
+        check_connected();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
 
@@ -1038,6 +1062,10 @@ public:
         homing_ = true;
         at_home_ = false;
         set_slewing_locked(true);
+        // homing_ reports Slewing from here on, so the hold of a GOTO this call took over ends here: a home that lands
+        // inside that hold reads false at once (decision 0022 rule 2). Not at the claim: the hold keeps Slewing true
+        // for the GOTO while MC_LEVEL_START is on the wire with mutex_ free and homing_ not yet set.
+        slew_hold_.clear();
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls FindHome after a failed GOTO must not be told the OLD
         // goto failed while it's homing.
@@ -1112,7 +1140,7 @@ public:
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
             set_slewing_locked(true);
-            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
             position_override_until_ = util::TaskClock::clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -1179,7 +1207,7 @@ public:
                     }
                     publish_measurement_locked(landed);
                     set_slewing_locked(false);
-                    slew_force_until_ = util::TaskClock::clock::time_point::min();
+                    slew_hold_.clear();
                     flip_in_progress_ = false;
                     parked_ = true;
                     parking_ = false;
@@ -1195,7 +1223,7 @@ public:
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
-                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                slew_hold_.clear();
                 keep_pending_stop_locked(superseded);  // the park goto never went out
             });
     }
@@ -1358,7 +1386,7 @@ public:
             ALPACA_LOG_ERROR("Celestron",
                              "stop after park failure failed: " + stop_error + "; the mount may still be moving");
         }
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         ALPACA_LOG_WARN("Celestron", message);
@@ -1383,7 +1411,43 @@ public:
             ALPACA_LOG_ERROR("Celestron",
                              "stop after slew failure failed: " + stop_error + "; the mount may still be moving");
         }
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        drop_poll_in_flight_locked();
+        flip_in_progress_ = false;
+        ALPACA_LOG_WARN("Celestron", message);
+    }
+
+    // The blocking SlewToCoordinates' GOTO send threw: an HC R/r, or either MC_GOTO_FAST of a pass-through pair (the
+    // first answered or not). The command may have reached the mount with its reply lost, so the mount is stopped as
+    // fail_slew() stops it for the async body, with mutex_ free for the stops, before the error goes to the client.
+    // An answered stop ends Slewing and the hold (decision 0022 rule 2), and with them the MoveAxis or FindHome this
+    // slew took over: the blocking slew clears manual_axis_slewing_ and homing_ only once its GOTO is out, so they
+    // are cleared here as AbortSlew clears them after its answered stops. A stop that fails keeps Slewing true and
+    // stores the failure, because the mount may still be moving. A newer owner (or a disconnect) keeps the state.
+    void stop_after_failed_goto_locked(std::unique_lock<std::mutex>& lock, const std::function<bool()>& still_mine,
+                                       const std::string& message) {
+        const auto owns = [this, &still_mine] { return connected_ && still_mine(); };
+        if (!owns()) {
+            return;
+        }
+        const std::string stop_error = stop_park_slew(lock, owns);
+        if (!owns()) {
+            return;
+        }
+        if (stop_error.empty()) {
+            homing_ = false;
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            set_slewing_locked(false);
+        } else {
+            last_home_error_.clear();
+            last_slew_error_ =
+                message + "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after GOTO failure failed: " + stop_error + "; the mount may still be moving");
+        }
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         drop_poll_in_flight_locked();
         flip_in_progress_ = false;
@@ -1407,15 +1471,17 @@ public:
             ALPACA_LOG_ERROR("Celestron", "stop after Slewing poll failure failed: " + stop_error +
                                               "; the mount may still be moving");
         }
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         drop_poll_in_flight_locked();
         flip_in_progress_ = false;
         ALPACA_LOG_WARN("Celestron", message);
     }
 
+    // The FindHome dispatch failure: the hold of a GOTO that FindHome took over ends with it (decision 0022 rule 2).
     void fail_home(std::unique_lock<std::mutex>& lock, const std::string& message) const {
         const std::uint64_t generation = motion_generation_;
+        slew_hold_.clear();
         begin_home_failure_locked(message);
         finish_home_failure_locked(
             generation, message, stop_park_slew(lock, [this, generation] { return motion_generation_ == generation; }));
@@ -1454,10 +1520,7 @@ public:
 
     void pulse_guide(int direction, int duration) override {
         // The MC_AUX_GUIDE duration byte counts 10 ms steps, 255 per command, chained up to 25.5 s.
-        if (direction < 0 || direction > 3 || duration < 0 || duration > kMaxPulseGuideMs) {
-            throw AlpacaException("PulseGuide direction must be 0-3 and duration 0-25500 ms",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         auto& protocol = CelestronProtocolWrapper::instance();
 
@@ -1467,36 +1530,16 @@ public:
         // Validation only. The pier read, the join and the start below run with mutex_ free (decision 0006).
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            if (!has_autoguider_port_) {
-                throw AlpacaException("PulseGuide not supported — no autoguider port detected",
-                                      AlpacaError::MethodNotImplemented);
-            }
-            check_not_parked_locked("PulseGuide");
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", nullptr, true});
 
-            switch (direction) {
-                case 0:  // North → DEC axis, positive velocity
-                    axis = 1;
-                    velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 1:  // South → DEC axis, negative velocity
-                    axis = 1;
-                    velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 2:  // East → RA axis, negative velocity (slow tracking = RA increases on sky)
-                    axis = 0;
-                    velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 3:  // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
-                    axis = 0;
-                    velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                    break;
-                default:
-                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-            }
-
+            // 0 North and 1 South move Dec (axis 1), 2 East and 3 West move RA (axis 0). North and West are positive
+            // (East slows tracking, so RA increases on the sky); a rate that rounds to 0 still moves one step.
+            axis = direction <= 1 ? 1 : 0;
+            const int sign = (direction == 0 || direction == 3) ? 1 : -1;
+            const double rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
+            velocity = sign * static_cast<int>(std::round((rate / kSiderealDegPerSec) * 100.0));
             if (velocity == 0) {
-                velocity = (direction == 1 || direction == 2) ? -1 : 1;
+                velocity = sign;
             }
 
             read_pier = axis == 1 && hc_available_;
@@ -1519,59 +1562,79 @@ public:
         pulse_ops_[axis].cancel_all_and_join();
 
         std::chrono::milliseconds pulse_length{duration};
-        util::TaskClock::clock::time_point pulse_start;
+        const auto axis_index = static_cast<std::size_t>(axis);
+        const std::size_t other_index = 1 - axis_index;
+        // This axis's position hold, armed by a pulse on the other axis that may still be running: the arm below
+        // clears it, and a guide write that fails puts it back (that pulse still owns it).
+        util::HoldWindow prev_axis_position_hold;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("PulseGuide");
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
+            prev_axis_position_hold = pg_hold_[axis_index];
 
             // Taken after the join: it can last a full transaction timeout, which would leave these stale.
             const bool is_dec_axis = (direction == 0 || direction == 1);
             const double duration_sec = duration / 1000.0;
             const auto now = clock_.now();
-            const auto hold_end =
-                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
-            const auto correction_end =
-                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+            const auto hold = pulse_length + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
+            const auto correction = pulse_length + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
 
             const auto [served_ra, served_dec] = served_equatorial_locked();
 
             if (is_dec_axis) {
                 pg_hold_ra_hours_ = served_ra;
-                pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
-                pg_hold_ra_until_ = hold_end;
-                pg_hold_dec_valid_ = false;
+                // A pulse still running on the other axis moves it: no hold for that axis then.
+                if (pulse_hold_[0].active(now)) {
+                    pg_hold_[0].clear();
+                } else {
+                    pg_hold_[0].arm(now, hold);
+                }
+                pg_hold_[1].clear();
 
                 double expected_delta = guide_rate_.dec * duration_sec;
                 if (direction == 1) expected_delta = -expected_delta;
                 pg_dec_baseline_degrees_ = served_dec;
                 pg_dec_expected_delta_degrees_ = expected_delta;
-                pg_dec_correction_valid_ = true;
-                pg_dec_correction_until_ = correction_end;
+                pg_correction_[1].arm(now, correction);
             } else {
                 pg_hold_dec_degrees_ = served_dec;
-                pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
-                pg_hold_dec_until_ = hold_end;
-                pg_hold_ra_valid_ = false;
+                if (pulse_hold_[1].active(now)) {
+                    pg_hold_[1].clear();
+                } else {
+                    pg_hold_[1].arm(now, hold);
+                }
+                pg_hold_[0].clear();
 
                 double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
                 if (direction == 3) expected_delta = -expected_delta;
                 pg_ra_baseline_hours_ = served_ra;
                 pg_ra_expected_delta_hours_ = expected_delta;
-                pg_ra_correction_valid_ = true;
-                pg_ra_correction_until_ = correction_end;
+                pg_correction_[0].arm(now, correction);
             }
 
-            pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
-            pulse_start = now;
+            // Armed before the guide write goes out (decision 0022 rule 2), so IsPulseGuiding reads true from the
+            // moment the command can reach the mount. The cross-axis holds above read the other axis's window only.
+            pulse_hold_[axis_index].arm(now, pulse_length + kPulseGuideCompletionDelay);
         }
         // The guide write goes out with mutex_ free; the initiator lock keeps any other motion out meanwhile.
-        protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
+        try {
+            protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
+        } catch (...) {
+            // The pulse never started as far as the driver knows: every window it armed closes before the error
+            // reaches the client (decision 0022 rule 2), so the next pulse on the other axis takes its cross-axis
+            // hold as before, and RA and Dec serve neither a correction nor a hold for a pulse that never ran. The
+            // hold on this axis goes back to the other axis's pulse that armed it, unless a disconnect cleared it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_hold_[axis_index].clear();
+            pg_correction_[axis_index].clear();
+            pg_hold_[other_index].clear();
+            if (connected_) {
+                pg_hold_[axis_index] = prev_axis_position_hold;
+            }
+            throw;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guide_active_[static_cast<std::size_t>(axis)] = true;
-            pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
-                pulse_start + pulse_length + kPulseGuideCompletionDelay;
             drop_poll_in_flight_locked();
         }
 
@@ -1610,12 +1673,13 @@ public:
             } catch (...) {
                 // No chain will end the pulse the first chunk started on this axis, and the mount keeps
                 // guiding for the first chunk only: stop the axis as AbortSlew does and drop the pulse state
-                // before the refusal reaches the client.
+                // before the refusal reaches the client. The correction predicted the whole pulse and the
+                // cross-axis hold was for its length, so both close too (decision 0022 rule 2).
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    const auto axis_index = static_cast<std::size_t>(axis);
-                    pulse_guide_active_[axis_index] = false;
-                    pulse_guide_end_time_[axis_index] = util::TaskClock::clock::time_point::min();
+                    pulse_hold_[axis_index].clear();
+                    pg_correction_[axis_index].clear();
+                    pg_hold_[other_index].clear();
                 }
                 if (connected_) {
                     try {
@@ -1638,12 +1702,12 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");  // #2257: the argument check runs first
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinates");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinates");
             check_slew_safety(lock, "SlewToCoordinates");
             check_tracking_for_slew(lock, "SlewToCoordinates");
         }
@@ -1670,15 +1734,13 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");  // #2257: arguments first
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE claiming: claiming the slew slot would end a park in
             // flight (clearing parking_) and let this slew clobber it.
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("SlewToCoordinatesAsync");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-            check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -1700,7 +1762,6 @@ public:
             check_connected();
             clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_slew_safety(lock, "SlewToCoordinatesAsync");
 
             use_passthrough = !hc_available_;
@@ -1741,7 +1802,7 @@ public:
             // that retries a rejected goto must not be told the OLD goto
             // failed.
             clear_motion_errors_locked();
-            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
             position_override_until_ = util::TaskClock::clock::time_point::min();
             flip_in_progress_ = do_flip;
             target_ra_hours_ = ra;
@@ -1913,7 +1974,7 @@ public:
                     // Slewing, the flags and the position the mount stopped at flip in one locked step.
                     publish_measurement_locked(landed);
                     set_slewing_locked(false);
-                    slew_force_until_ = util::TaskClock::clock::time_point::min();
+                    slew_hold_.clear();
                     flip_in_progress_ = false;
                 } catch (const std::exception& ex) {
                     std::unique_lock<std::mutex> lock(mutex_);
@@ -1934,7 +1995,7 @@ public:
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
-                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                slew_hold_.clear();
                 flip_in_progress_ = false;
                 keep_pending_stop_locked(superseded);  // the goto never went out
             });
@@ -1974,13 +2035,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         // An initiator like the motion commands: its write and its publish stay one step to them (the sync used
         // to hold mutex_ across the write, which kept them out).
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {
@@ -2057,7 +2118,7 @@ public:
                 if (stop_error.empty()) {
                     set_slewing_locked(false);
                 }
-                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                slew_hold_.clear();
                 position_override_until_ = util::TaskClock::clock::time_point::min();
                 flip_in_progress_ = false;
             }
@@ -2083,38 +2144,32 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-        }
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
+        const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("MoveAxis");
+            util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         }
         pulse_ops_[axis].cancel_all_and_join();
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("MoveAxis");
+        util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
         const std::uint64_t mine = motion_generation_;
 
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = std::abs(rate) > kStopEpsilon;
         set_slewing_locked(false);
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         manual_axis_slewing_[axis] = moving;
-        pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
-        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = util::TaskClock::clock::time_point::min();
+        // MoveAxis ends a pulse on this axis (its chain was joined above): the pulse's window, its correction and
+        // its hold on the other axis close (decision 0022 rule 2). A moving axis also ends the hold a pulse on the
+        // other axis put on it, which no longer describes where it points.
+        pulse_hold_[static_cast<std::size_t>(axis)].clear();
+        pg_correction_[static_cast<std::size_t>(axis)].clear();
+        pg_hold_[static_cast<std::size_t>(1 - axis)].clear();
         if (moving) {
+            pg_hold_[static_cast<std::size_t>(axis)].clear();
             parked_ = false;
             at_home_ = false;
         }
@@ -2177,13 +2232,12 @@ public:
         // AbortSlew clears a stored motion error only after all stop
         // commands are acknowledged.
         clear_motion_errors_locked();
-        pulse_guide_active_.fill(false);
-        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+        clear_pulse_guiding_locked();
         homing_ = false;
         set_slewing_locked(false);
         slew_aborted_ = true;
         flip_in_progress_ = false;
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -2242,10 +2296,9 @@ private:
         parking_ = false;
         at_home_ = false;
         homing_ = false;
-        pulse_guide_active_.fill(false);
-        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+        clear_pulse_guiding_locked();
         set_slewing_locked(false);
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -2296,11 +2349,10 @@ private:
             parking_ = false;
             at_home_ = false;
             homing_ = false;
-            pulse_guide_active_.fill(false);
-            pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+            clear_pulse_guiding_locked();
             snapshot_.reset();
             set_slewing_locked(false);
-            slew_force_until_ = util::TaskClock::clock::time_point::min();
+            slew_hold_.clear();
             position_override_until_ = util::TaskClock::clock::time_point::min();
             utc_offset_.clear();
             mount_clock_unreadable_ = false;
@@ -2581,7 +2633,7 @@ private:
         slew_aborted_ = true;
         ++motion_generation_;
         flip_in_progress_ = false;
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -2598,9 +2650,18 @@ public:
     }
 
 private:
+    // Ends every pulse's state: the IsPulseGuiding windows and the position holds and corrections they armed
+    // (decision 0022 rule 2). AbortSlew, the slews, Park, FindHome, connect and disconnect call it.
     void clear_pulse_guiding_locked() {
-        pulse_guide_active_.fill(false);
-        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+        for (auto& window : pulse_hold_) {
+            window.clear();
+        }
+        for (auto& window : pg_hold_) {
+            window.clear();
+        }
+        for (auto& window : pg_correction_) {
+            window.clear();
+        }
     }
 
     // A park in flight (parking_) gates the same members as a completed park:
@@ -2686,6 +2747,9 @@ private:
                 }
             }
             if (slow_ok) {
+                // Not counted toward link health: it runs only after the alt-az read (and
+                // the pier read) above answered on this tick, so a dead link has already
+                // failed one of those. Count it if the slow fields are reordered so it runs first.
                 try {
                     sample.tracking_mode = protocol.get_tracking_mode();
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
@@ -3017,14 +3081,15 @@ private:
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
             // The control path owns the Slewing value while it moves the mount itself.
             plan.read_slewing = !(parking_ || slew_.running() || homing_ || manual_axis_slewing_[0] ||
-                                  manual_axis_slewing_[1] || clock_.now() < slew_force_until_);
+                                  manual_axis_slewing_[1] || slew_hold_.active(clock_.now()));
             read_site = !site_info_valid_ && plan.full && site_read_due_locked();
         }
+        run_status_poll_after_plan_hook();  // test seam: the tick has its plan, mutex_ is free
         if (read_site) {
             std::optional<LocationInfo> site;
             try {
                 site = CelestronProtocolWrapper::instance().get_location();
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSitePollRetryDelay
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost() || stopped()) {
@@ -3126,6 +3191,17 @@ private:
         }
     }
 
+    void run_status_poll_after_plan_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_after_plan_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poller(util::OperationContext& ctx) {
         for (int tick = 0;; ++tick) {
             const auto started = clock_.now();
@@ -3189,6 +3265,11 @@ public:
         status_poll_after_sample_hook_ = std::move(hook);
     }
 
+    void set_status_poll_after_plan_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_after_plan_hook_ = std::move(hook);
+    }
+
 private:
     void note_position_reply_locked() const {
         if (position_link_health_.on_reply()) {
@@ -3244,7 +3325,7 @@ private:
         if (slew_.running()) {
             return slewing_cached_;
         }
-        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || clock_.now() < slew_force_until_ || homing_) {
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || slew_hold_.active(clock_.now()) || homing_) {
             return true;  // homing: the status poll checks for completion
         }
         return std::nullopt;
@@ -3276,7 +3357,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (clock_.now() < slew_force_until_) {
+        if (slew_hold_.active(clock_.now())) {
             return true;
         }
         if (homing_) {
@@ -3402,6 +3483,25 @@ private:
         return "FindHome completion polling failed after " + std::to_string(failures) +
                " consecutive failures: " + *probe.error;
     }
+
+    // The gate's state checks in NexStar's words (#2258). `guide_port`: PulseGuide's port check after the connection.
+    struct GateChecks {
+        const CelestronTelescopeDriver& driver;
+        const char* who = nullptr;
+        std::unique_lock<std::mutex>* lock = nullptr;
+        bool guide_port = false;
+
+        void check_connected() const {
+            driver.check_connected();
+            if (guide_port && !driver.has_autoguider_port_) {
+                throw AlpacaException("PulseGuide not supported — no autoguider port detected",
+                                      AlpacaError::MethodNotImplemented);
+            }
+        }
+        void check_not_parked(bool /*stop*/) const { driver.check_not_parked_locked(who); }
+        void check_no_fault() const { driver.throw_if_link_faulted(); }
+        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
     // (open-astro#1274). Read as the Tracking getter reads it, except that the control path asks the mount once
@@ -3697,7 +3797,7 @@ private:
     // `still_mine` is tested under mutex_ in code order: after the J read, after the pier read, at the gate, and after
     // the goto. Returns false, writing nothing further, when it was false: the slew was taken over. The publish
     // block sits between the two reads, so the first test is what keeps a claim that landed during the J read from
-    // having its Slewing and its stored error overwritten.
+    // having its Slewing overwritten; a pier read that throws puts the stored errors back.
     bool do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec,
                                 const util::OperationContext* body_ctx, const std::function<bool()>& still_mine) {
         util::validate_ra_dec(ra, dec, "SlewToCoordinates");
@@ -3728,37 +3828,87 @@ private:
             ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
 
+        // The flip decision's pier read runs before any GOTO byte can go out: when it throws, what the publish below
+        // overwrote goes back (decision 0022 rule 2). Slewing reads what the client was served before the call (the
+        // snapshot's frame, which a poll may have set from the mount, not slewing_cached_), and the hold of an earlier
+        // GOTO this call superseded keeps its own end instead of a fresh 8 s. The stored motion errors come back too: a
+        // read that throws sends nothing, so a stored failure (a failed AbortSlew stop) stays what Slewing raises. The
+        // poll failure counters stay reset, as they are at every claim. A GOTO send that throws is handled at the send
+        // below. The Park body's failure path (fail_park) then ends its own state as before.
+        const auto prev_frame = snapshot_.read();
+        const bool prev_slewing_cached = slewing_cached_;
+        const util::HoldWindow prev_hold = slew_hold_;
+        const auto prev_override = position_override_until_;
+        const std::string prev_slew_error = last_slew_error_;
+        const std::string prev_home_error = last_home_error_;
+        const auto roll_back_locked = [&] {
+            if (!connected_ || !still_mine()) {
+                return;  // a newer owner (or the disconnect) has the state
+            }
+            slewing_cached_ = prev_slewing_cached;
+            if (prev_frame) {
+                snapshot_.write([&prev_frame](PolledFrame& frame) {
+                    frame.slewing = prev_frame->value.slewing;
+                    frame.slewing_known = prev_frame->value.slewing_known;
+                });
+            }
+            slew_hold_ = prev_hold;
+            position_override_until_ = prev_override;
+            last_slew_error_ = prev_slew_error;
+            last_home_error_ = prev_home_error;
+        };
+
         drop_poll_in_flight_locked();
         set_slewing_locked(true);
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that retries a rejected goto (even via the blocking SlewToCoordinates)
-        // must not be told the OLD goto failed.
+        // must not be told the OLD goto failed. A pier read that throws below puts
+        // the stored errors back (roll_back_locked).
         clear_motion_errors_locked();
-        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
         position_override_until_ = util::TaskClock::clock::time_point::min();
 
         uint32_t flip_ra = 0, flip_dec = 0;
-        bool flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+        bool flip = false;
+        try {
+            flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+        } catch (...) {
+            roll_back_locked();
+            throw;
+        }
         if (!still_mine()) {
             return false;
         }
-
         flip_in_progress_ = flip;
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         run_slew_dispatch_hook(lock);  // test seam: an initiator lands between the flip decision and the GOTO
-        const bool sent = send_motion_locked(lock, still_mine, [&] {
-            auto& protocol = CelestronProtocolWrapper::instance();
-            if (flip) {
-                protocol.mc_goto_fast(0, flip_ra);
-                protocol.mc_goto_fast(1, flip_dec);
-            } else if (hc) {
-                protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, precise);
-            } else {
-                protocol.mc_goto_fast(0, ra_raw_target);
-                protocol.mc_goto_fast(1, dec_raw_target);
+        bool sent = false;
+        try {
+            sent = send_motion_locked(lock, still_mine, [&] {
+                auto& protocol = CelestronProtocolWrapper::instance();
+                if (flip) {
+                    protocol.mc_goto_fast(0, flip_ra);
+                    protocol.mc_goto_fast(1, flip_dec);
+                } else if (hc) {
+                    protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, precise);
+                } else {
+                    protocol.mc_goto_fast(0, ra_raw_target);
+                    protocol.mc_goto_fast(1, dec_raw_target);
+                }
+            });
+        } catch (const std::exception& ex) {
+            if (body_ctx == nullptr) {  // the Park body's fail_park stops the mount itself
+                stop_after_failed_goto_locked(lock, still_mine,
+                                              std::string("SlewToCoordinates GOTO failed: ") + ex.what());
             }
-        });
+            throw;
+        } catch (...) {
+            if (body_ctx == nullptr) {
+                stop_after_failed_goto_locked(lock, still_mine, "SlewToCoordinates GOTO failed: unknown exception");
+            }
+            throw;
+        }
         if (!sent) {
             return false;
         }
@@ -3830,7 +3980,7 @@ private:
         }
         publish_measurement_locked(landed);
         set_slewing_locked(false);
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -3893,7 +4043,7 @@ private:
     mutable std::string last_home_error_;  // FindHome's completion error, not every motion error.
     mutable int slew_status_poll_failures_ = 0;
     mutable int home_status_poll_failures_ = 0;
-    mutable util::TaskClock::clock::time_point slew_force_until_;
+    mutable util::HoldWindow slew_hold_;  // under mutex_; Slewing's 8 s hold from a GOTO's start (decision 0022)
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     std::string mount_firmware_version_;
@@ -3913,9 +4063,8 @@ private:
     bool sync_time_on_connect_;
     const CelestronAlignmentSetting alignment_setting_;  // fork geometry from the device config (#860)
     GuideRate guide_rate_{};
-    mutable std::array<bool, 2> pulse_guide_active_{false, false};
-    mutable std::array<util::TaskClock::clock::time_point, 2> pulse_guide_end_time_{
-        util::TaskClock::clock::time_point::min(), util::TaskClock::clock::time_point::min()};
+    // IsPulseGuiding per axis (0 RA, 1 Dec): the pulse plus the completion delay (decision 0022).
+    std::array<util::HoldWindow, 2> pulse_hold_{};
     // open-astro#326: atomic, not a plain bool. set_connected() writes this
     // during the AUX-bus probe while get_can_pulse_guide(),
     // get_can_set_guide_rates(), get_guide_rate()/set_guide_rate() and
@@ -3931,21 +4080,17 @@ private:
     // for get_connected()).
     std::atomic<bool> has_autoguider_port_{false};
 
+    // A pulse holds the other axis's position at its pre-pulse value (pg_hold_, indexed by axis) and serves the
+    // pulsed axis's expected position once (pg_correction_), each until its window ends.
+    std::array<util::HoldWindow, 2> pg_hold_{};
+    mutable std::array<util::HoldWindow, 2> pg_correction_{};
     mutable double pg_hold_ra_hours_ = 0.0;
-    mutable bool pg_hold_ra_valid_ = false;
-    mutable util::TaskClock::clock::time_point pg_hold_ra_until_;
     mutable double pg_hold_dec_degrees_ = 0.0;
-    mutable bool pg_hold_dec_valid_ = false;
-    mutable util::TaskClock::clock::time_point pg_hold_dec_until_;
 
     mutable double pg_ra_baseline_hours_ = 0.0;
     mutable double pg_ra_expected_delta_hours_ = 0.0;
-    mutable bool pg_ra_correction_valid_ = false;
-    mutable util::TaskClock::clock::time_point pg_ra_correction_until_;
     mutable double pg_dec_baseline_degrees_ = 0.0;
     mutable double pg_dec_expected_delta_degrees_ = 0.0;
-    mutable bool pg_dec_correction_valid_ = false;
-    mutable util::TaskClock::clock::time_point pg_dec_correction_until_;
     mutable bool sync_completed_this_session_ = false;
     bool has_ra_switch_ = false;
     bool has_dec_switch_ = false;
@@ -4002,6 +4147,7 @@ private:
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> status_poll_after_plan_hook_;  // guarded by status_poll_hook_mutex_
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
@@ -4053,6 +4199,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_after_plan_hook_for_testing(std::move(hook));
     }
 }
 

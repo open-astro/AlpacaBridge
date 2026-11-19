@@ -36,6 +36,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 
@@ -77,6 +78,15 @@ public:
     /// in place of 1 for the whole of the pulse. The fake has no pulse timer, so the status stays 3 until a test sets
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
     void set_pulse_reports_guiding(bool on) { pulse_reports_guiding_.store(on); }
+
+    /// Issue #2421: false answers a ":Z" pulse-guide command with nothing, as the HAE29C firmware (and the v3 spec)
+    /// does. On by default: a pulse is acked with "1", which also tells a TCP test the command was recorded and its
+    /// :ZQ/:ZS trim applied before the driver call returned.
+    void set_pulse_acks(bool on) { pulse_acks_.store(on); }
+
+    /// Tracking-rate digit of the ":GLS" reply (0 sidereal, 1 lunar, 2 solar, 3 King, 4 custom), as the firmware
+    /// reports the rate the mount tracks at. A ":RTn#" command sets it to n, as the firmware does. Default 0.
+    void set_tracking_rate_digit(int rate) { tracking_rate_digit_.store(rate); }
 
     /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
     void set_position(double ra_hours, double dec_degrees) {
@@ -163,7 +173,7 @@ private:
     std::string respond(const std::string& chunk) {
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
             holding_.store(true);
-            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
         }
         std::string out;
         std::string cmd;
@@ -199,7 +209,7 @@ private:
             std::snprintf(site, sizeof(site), "%c%08lld%08lld", lon < 0 ? '-' : '+', lon < 0 ? -lon : lon,
                           latitude_field_.load());
             return std::string(site) + std::to_string(gps_status_.load()) + std::to_string(system_status_.load()) +
-                   "0001#";
+                   std::to_string(tracking_rate_digit_.load()) + "001#";
         }
         if (cmd == ":GUT#") {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -258,19 +268,25 @@ private:
         if (pulse_reports_guiding_.load() && cmd.rfind(":Z", 0) == 0) {
             system_status_.store(3);  // auto-guiding, for the whole of the pulse (issue #2186)
         }
+        if (cmd.size() == 5 && cmd.rfind(":RT", 0) == 0 && cmd[3] >= '0' && cmd[3] <= '4') {
+            tracking_rate_digit_.store(cmd[3] - '0');
+            return "1";
+        }
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
             // A pulse-guide trim closes the residual exactly.
             ra_units_.store(pending_ra_);
-            return "1";
         }
-        if (cmd.rfind(":Z", 0) == 0 || cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 ||
-            cmd.rfind(":Q", 0) == 0) {
+        if (cmd.rfind(":Z", 0) == 0) {
+            return pulse_acks_.load() ? "1" : "";
+        }
+        if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 || cmd.rfind(":Q", 0) == 0) {
             return "1";  // set / motion / rate acks
         }
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
     }
 
     std::atomic<int> system_status_{1};
+    std::atomic<int> tracking_rate_digit_{0};
     std::atomic<int> gps_status_{0};
     std::atomic<long long> longitude_units_{0};
     std::atomic<long long> latitude_field_{0};
@@ -293,6 +309,7 @@ private:
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
     std::atomic<bool> pulse_reports_guiding_{false};
+    std::atomic<bool> pulse_acks_{true};
     FakeMountServer server_;
 };
 

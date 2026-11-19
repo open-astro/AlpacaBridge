@@ -61,6 +61,8 @@ public:
     virtual int get_position(int focuser_id) = 0;
     virtual void move(int focuser_id, int position) = 0;
     virtual void stop(int focuser_id) = 0;
+    /// Makes @p position the unit's current position without moving it (EAFResetPostion, sic).
+    virtual void reset_position(int focuser_id, int position) = 0;
 
     virtual int get_max_step(int focuser_id) = 0;
     /// Writes the focuser's stored max step (EAFSetMaxStep); the unit clamps moves at it.
@@ -70,6 +72,8 @@ public:
     virtual double get_temperature(int focuser_id) = 0;
     virtual std::string get_serial_number(int focuser_id) = 0;
     virtual std::string get_firmware_version(int focuser_id) = 0;
+    /// The unit's model (EAFGetType): "EAFN" on an EAFN, whose EAF_INFO name still reads "EAF" (rig, SDK 1.8.1).
+    virtual std::string get_type(int focuser_id) = 0;
     virtual std::string get_sdk_version() = 0;
 
 protected:

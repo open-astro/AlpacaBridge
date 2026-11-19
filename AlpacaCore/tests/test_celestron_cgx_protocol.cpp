@@ -43,6 +43,7 @@
 
 namespace {
 
+using alpacacore::test::require_alpaca_error;
 using alpacacore::vendor::celestron::AuxFrame;
 using alpacacore::vendor::celestron::decode_aux_frame;
 using alpacacore::vendor::celestron::encode_aux_frame;
@@ -103,9 +104,12 @@ TEST_CASE("Celestron CGX AUX link - resync clears a timeout but never reopens a 
     link.connect_serial(fake.slave_path());
 
     fake.set_muted(true);
-    CHECK_THROWS_AS(
-        link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-        alpacacore::AlpacaException);
+    require_alpaca_error(
+        [&] {
+            (void)link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension,
+                                         std::chrono::milliseconds(50));
+        },
+        alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(link.is_healthy());
     fake.set_muted(false);
     link.resync();
@@ -140,14 +144,14 @@ TEST_CASE("Celestron CGX AUX link - recovering a timed-out stream keeps the faul
     REQUIRE(link.is_healthy());
 
     fake.set_muted(true);
-    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-                    alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)); },
+                         alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(link.is_healthy());
     link.connect_serial(fake.slave_path(), alpacacore::vendor::celestron::AuxLinkSpeed::Baud115200,
                         std::chrono::milliseconds(0));
     CHECK_FALSE(link.is_healthy());
-    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-                    alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)); },
+                         alpacacore::AlpacaError::DriverException);
     link.resync();
     CHECK_FALSE(link.is_healthy());
 
@@ -283,7 +287,8 @@ TEST_CASE("Celestron CGX AUX link - desync advances generation and recovers on t
         }
         mount.set_motor_identity(0x10, {7, 19}, {0x17, 0x88});
         const int sent = mount.count_command(0x10, 0xfe);
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(100)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(100)); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK(protocol.session_generation() == desynchronized);
         CHECK(mount.count_command(0x10, 0xfe) == sent);
         int exclusive = 0;
@@ -551,7 +556,7 @@ TEST_CASE("Fake Celestron CGX mount - sever cancels a held reply", "[celestron][
     mount.sever_link();
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
     REQUIRE(held);
-    CHECK_THROWS_AS(exchange.get(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)exchange.get(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(protocol.is_connected());
 }
 
@@ -821,7 +826,8 @@ TEST_CASE("Celestron CGX AUX link - requires reconnect after a timed-out reply",
     CHECK(protocol.is_connected());
 
     mount.set_muted(false);
-    CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(100)), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(100)); },
+                         alpacacore::AlpacaError::DriverException);
     protocol.disconnect();
     protocol.connect_serial(mount.slave_path());
     CHECK(protocol.exchange(request, std::chrono::milliseconds(100)).payload == std::vector<std::uint8_t>{7, 18});
@@ -881,10 +887,12 @@ TEST_CASE("Celestron CGX AUX link - logs the original transaction failure once w
         const double elapsed_ms = std::stod(messages[0].substr(elapsed_at + 12));
         CHECK((elapsed_ms >= (checksum_failure ? 0.0 : 50.0)));
         CHECK_FALSE(protocol.is_healthy());
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(50)); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK((messages.size() == 1));
         protocol.disconnect();
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(50)); },
+                             alpacacore::AlpacaError::NotConnected);
         CHECK((messages.size() == 1));
     }
 }

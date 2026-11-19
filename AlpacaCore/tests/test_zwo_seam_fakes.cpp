@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
@@ -44,6 +45,7 @@ using alpacacore::test::FakeZWOEFWSDK;
 using alpacacore::test::LockedZWOCAASDK;
 using alpacacore::test::LockedZWOEAFSDK;
 using alpacacore::test::LockedZWOEFWSDK;
+using alpacacore::test::require_alpaca_error;
 
 int error_code(const std::function<void()>& fn) {
     try {
@@ -690,7 +692,7 @@ TEST_CASE("ZWO EFW seam - get_names does not wait behind a slow Position refill"
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(driver->get_names().size() == 7);
-    CHECK(driver->get_name() == "EFW");
+    CHECK(driver->get_name() == "ZWO EFW");
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(150));
     refill.get();
     driver->set_connected(false);
@@ -710,7 +712,7 @@ TEST_CASE("ZWO EFW seam - a failed set_position invalidates the cached Position"
     REQUIRE(sdk.position_calls == 1);
 
     sdk.fail_set_position = true;
-    CHECK_THROWS_AS(driver->set_position(4), AlpacaException);
+    require_alpaca_error([&] { driver->set_position(4); }, alpacacore::AlpacaError::DriverException);
     sdk.fail_set_position = false;
     sdk.position = 2;
     CHECK(driver->get_position() == 2);
@@ -744,13 +746,15 @@ TEST_CASE("ZWO EFW seam - get_names does not wait behind a held connect",
 // Decision 0016 rule 3: identity and limits publish at the end of connect, so a connect that throws after the
 // enumeration leaves the pre-connect values.
 // Falsified by: zwo_filterwheel_driver.cpp resolve_wheel_id() storing wheel_info_/wheel_info_valid_ again after the
-// enumeration (get_name() reports the enumerated "EFW" and set_names() with 3 names is rejected for the 7-slot count).
+// enumeration (get_name() reports the enumerated "ZWO EFW 7x36 II" and set_names() with 3 names is rejected for the
+// 7-slot count).
 TEST_CASE("ZWO EFW seam - a failed connect leaves the pre-connect name and slot limits",
           "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
     FakeZWOEFWSDK sdk;
+    sdk.name = "EFW 7x36 II";  // apart from the "ZWO EFW" fallback, so a kept enumeration shows
     sdk.fail_open = true;
     auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
-    REQUIRE_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_name() == "ZWO EFW");
     CHECK_NOTHROW(driver->set_names({"A", "B", "C"}));

@@ -81,6 +81,34 @@ function serverClockError(result) {
     return message || 'Server clock error ' + result.ErrorNumber;
 }
 
+// What the live server clock knows after one GET /management/v1/synctime.
+// `state` is the previous { offsetMs, errorText }; `result` is the parsed
+// reply, or null when the fetch failed (server unreachable, or a body that is
+// not JSON); `midpointMs` is the browser time halfway through the round trip,
+// when the server is assumed to have read its clock (Value is whole seconds).
+//
+// A reply sets errorText from serverClockError() and, when it carries a usable
+// time, the offset. The validity check is not paranoia about our own server
+// (open-astro#389): a non-numeric Value would make the offset NaN, an Invalid
+// Date that throws on every one-second tick; isValidClockSeconds() also rejects
+// a finite but out-of-range Value (#511). Any other bad reply keeps the old
+// offset.
+//
+// A failed fetch keeps the offset, so the clock keeps ticking locally rather
+// than blanking to --:--:--, and clears errorText (issue #2087): an earlier
+// refusal says nothing about the clock now, and its advice to use Sync Time
+// cannot work while the server is unreachable.
+function serverClockAfterRefresh(state, result, midpointMs) {
+    if (result === null) {
+        return { offsetMs: state.offsetMs, errorText: '' };
+    }
+    let offsetMs = state.offsetMs;
+    if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
+        offsetMs = (result.Value * 1000) - midpointMs;
+    }
+    return { offsetMs: offsetMs, errorText: serverClockError(result) };
+}
+
 function formatServerClock(date, timeZone) {
     if (Number.isNaN(date.getTime())) {
         // No time to show; the UTC arm below would throw on toISOString().
@@ -427,6 +455,13 @@ function renderReleaseNotes(markdown) {
 const HOST_CHECK_ALWAYS_ALLOWED =
     "IP addresses, localhost and *.localhost, this machine's hostname, *.local, *.home.arpa and *.internal";
 
+// Issue #1764: the check applies to every request's Host (reject_disallowed_host
+// in router.cpp), not only to the browser that turns it on, so the toggle row
+// warns before another client is locked out.
+const HOST_CHECK_LOCKOUT_NOTE =
+    'Other clients (NINA, a phone, a second browser) that reach this server by a name that is not ' +
+    'allowed will be refused, so add every name they use first.';
+
 // What the two Host check rows render from the description Value. null when
 // the server does not report the setting (an older build), so no row shows a
 // toggle that reads as "off". Both rows are always editable (open-astro#787).
@@ -476,6 +511,31 @@ function wifiSsidLabel(item, displayCount) {
     return displayCount > 1 && hex ? `${label} (${hex})` : label;
 }
 
+// Issue #856: the Client adapter choices from GET wifi/status. The first is
+// Automatic (no preference, value ""); then each adapter by interface and
+// permanent MAC, its value the MAC. One that reports no MAC (a virtual
+// interface) or is the hotspot's own interface is listed but cannot be chosen;
+// its value is never a MAC, so a second interface sharing the radio's MAC
+// keeps the selection. `selected` is the stored preference when an option can
+// carry it, else "".
+function wifiAdapterOptions(status) {
+    const adapters = status && Array.isArray(status.Adapters) ? status.Adapters : [];
+    const device = String((status && status.Device) || '');
+    const options = [{ value: '', label: 'Automatic', disabled: false }];
+    for (const adapter of adapters) {
+        const iface = String((adapter && adapter.Interface) || '?');
+        const mac = String((adapter && adapter.Mac) || '');
+        const isAp = !!(adapter && adapter.IsAp);
+        let label = iface + (mac ? ' (' + mac + ')' : ' (no MAC)');
+        if (isAp) label += ', hotspot';
+        else if (iface === device) label += ', in use';
+        options.push({ value: isAp || !mac ? 'none:' + iface : mac, label, disabled: isAp || !mac });
+    }
+    const preferred = String((status && status.PreferredMac) || '');
+    const selected = preferred && options.some((o) => o.value === preferred) ? preferred : '';
+    return { options, selected };
+}
+
 // The server accepts each ASIAIR GPIO line on at most one port (router.cpp).
 // Returns a message naming the first repeated line, or null. `gpios` holds one
 // number per port row in order; NaN (a blank row) is skipped.
@@ -499,13 +559,21 @@ function normalizeAlignmentMode(value) {
     return value === 'altaz' || value === 'equatorial' ? value : 'auto';
 }
 
-// Status dot for a configureddevices row: green = driver loaded and a client
-// Connected, yellow = loaded and idle (no client connected; the hardware is not
-// probed until a connect), red = LoadError, LastConnectError, a LinkFault
-// (connected or not), or Connected missing/non-boolean (unavailable).
+// Status dot for a configureddevices row: green = driver loaded, a client
+// Connected and a client request in the last 60 s, yellow "quiet" = Connected
+// but no client request for longer than that (issue #1764), yellow "idle" =
+// loaded and no client connected (the hardware is not probed until a connect),
+// red = LoadError, LastConnectError, a LinkFault (connected or not), or
+// Connected missing/non-boolean (unavailable).
 // Green means a client is connected AND the device still replies, so any latched
 // LinkFault turns the device red. Each red reason carries its own label, and the
-// red text joins every reason.
+// red text joins every reason. The activity fields come from the router's
+// per-client registry (ActiveClients, LastClientRequestAgeMs, absent when no
+// client request is inside the 10 minute window); a row without ActiveClients
+// (an older server) keeps the plain Connected reading. A client that polls
+// slower than 60 s shows yellow, by design.
+const CLIENT_REQUEST_FRESH_MS = 60000;
+
 function deviceStatus(device) {
     const d = device || {};
     const reasons = [];
@@ -513,9 +581,43 @@ function deviceStatus(device) {
     if (d.LastConnectError) reasons.push('Last connect failed: ' + String(d.LastConnectError));
     if (d.LinkFault) reasons.push('Device not responding: ' + String(d.LinkFault));
     if (reasons.length > 0) return { state: 'error', text: reasons.join('; ') };
+    if (d.Connected === true && typeof d.ActiveClients === 'number') {
+        const age = d.LastClientRequestAgeMs;
+        if (typeof age === 'number' && Number.isFinite(age) && age >= 0) {
+            if (age <= CLIENT_REQUEST_FRESH_MS) return { state: 'connected', text: 'Client connected' };
+            return { state: 'quiet', text: 'Connected, no client request for ' + Math.floor(age / 1000) + ' s' };
+        }
+        return { state: 'quiet', text: 'Connected, no client request in the last 10 min' };
+    }
     if (d.Connected === true) return { state: 'connected', text: 'Client connected' };
     if (d.Connected === false) return { state: 'idle', text: 'Idle, no client connected' };
     return { state: 'error', text: 'Status unavailable' };
+}
+
+// The stale-data banner (issue #1764 item 5). `failures` is the count of
+// consecutive failed device status polls (refused, timed out, non-OK, not JSON
+// or a non-zero ErrorNumber), `lastGoodAt` the browser time (ms) of the last
+// good poll or null, `now` the browser time. The banner and the rows' stale
+// marker show from the first failure and clear on the next good poll. The age
+// is whole seconds on the browser's own clock, never the server's. The delay
+// before the next poll backs off 5, 5, 10, then 15 s (the cap) after 1, 2, 3
+// and 4 or more failures; a good poll resets it to 5 s. With the 4 s request
+// timeout a stopped server shows the banner within 10 s: a refused poll fails
+// at most 5 s after the stop, a hung one at most 9 s.
+const STATUS_POLL_MS = 5000;
+const STATUS_POLL_TIMEOUT_MS = 4000;
+const STATUS_POLL_BACKOFF_MS = [5000, 5000, 10000, 15000];
+
+function linkStatus(failures, lastGoodAt, now) {
+    if (!(failures > 0)) return { banner: false, stale: false, text: '', nextDelayMs: STATUS_POLL_MS };
+    const step = Math.min(failures, STATUS_POLL_BACKOFF_MS.length) - 1;
+    let text = 'Connection to the bridge lost, retrying. ';
+    if (typeof lastGoodAt === 'number' && Number.isFinite(lastGoodAt)) {
+        text += 'Last update ' + Math.max(0, Math.floor((now - lastGoodAt) / 1000)) + ' s ago.';
+    } else {
+        text += 'No device data received yet.';
+    }
+    return { banner: true, stale: true, text, nextDelayMs: STATUS_POLL_BACKOFF_MS[step] };
 }
 
 // Site coordinates in the Configured Settings list: finite numbers print at a
@@ -872,6 +974,31 @@ function calibrationActionBody(actionName, clientTransactionId) {
     }).toString();
 }
 
+// Issue #1764: the header the web UI puts on its own device API requests, so
+// the router does not count them as client activity (kWebUiClientHeader in
+// router.cpp; tests/web/field_use.test.js keeps the two in step).
+const WEB_UI_CLIENT_HEADER = { name: 'X-AlpacaBridge-Client', value: 'web-ui' };
+
+// Issue #1764: on a narrow screen (480 px and below) the header clock drops its
+// seconds, so it stays on the title row. `text` is formatServerClock() output;
+// any other text (the '--:--:--' placeholder, 'clock error') is returned as is.
+function headerClockText(text, narrow) {
+    if (!narrow || typeof text !== 'string') return text;
+    return text.replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2}(?= )/, '$1');
+}
+
+// Issue #1764: the tab a key moves to in the role="tablist" bar (the WAI-ARIA
+// tabs pattern): ArrowLeft/ArrowRight wrap, Home and End go to the ends.
+// Returns null for any other key, so the caller leaves the event alone.
+function nextTabIndex(current, key, count) {
+    if (!Number.isInteger(count) || count <= 0) return null;
+    if (key === 'ArrowRight') return (current + 1) % count;
+    if (key === 'ArrowLeft') return (current - 1 + count) % count;
+    if (key === 'Home') return 0;
+    if (key === 'End') return count - 1;
+    return null;
+}
+
 function zwoUsbBandwidth(value) {
     if (value === null || value === undefined || String(value).trim() === '') return undefined;
     const bandwidth = Number(value);
@@ -881,20 +1008,37 @@ function zwoUsbBandwidth(value) {
     return bandwidth;
 }
 
+// The ASIAIR port (0-based) whose GPIO line repeats an earlier port's, the
+// second port asiairDuplicateGpioError names, or -1 when no line repeats. The
+// form shows the duplicate error under that port's field (issue #1764).
+function asiairRepeatedGpioPort(gpios) {
+    const seen = new Set();
+    for (let i = 0; i < gpios.length; i += 1) {
+        const gpio = gpios[i];
+        if (Number.isNaN(gpio)) continue;
+        if (seen.has(gpio)) return i;
+        seen.add(gpio);
+    }
+    return -1;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
+    module.exports = { isValidClockSeconds, serverClockError, serverClockAfterRefresh, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
-                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
-                        normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
+                        wifiSsidKey, wifiSsidLabel, wifiAdapterOptions, asiairDuplicateGpioError, asiairRepeatedGpioPort,
+                        normalizeAlignmentMode, deviceStatus, linkStatus, STATUS_POLL_MS, STATUS_POLL_TIMEOUT_MS,
+                        formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
                         zwoCameraOptions, zwoCameraSelection, zwoCameraHint, configureWarning,
                         deviceSettingShown,
                        showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
                        mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,
                        mayStartCalibration, calibrationStatusText, calibrationHint,
-                        calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth };
+                        calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth,
+                        HOST_CHECK_LOCKOUT_NOTE, CLIENT_REQUEST_FRESH_MS, WEB_UI_CLIENT_HEADER, headerClockText,
+                        nextTabIndex };
 }

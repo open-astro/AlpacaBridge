@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/thermal_camera_choice.h>
@@ -99,7 +100,13 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ToupTek Thermal Switch"; }
+    // Camera model + function (decision 0024), so two cameras' switches are told apart; "ToupTek Thermal Switch"
+    // until a connect names the camera.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_name_ == "ToupTek Camera") return "ToupTek Thermal Switch";
+        return util::branded_name("ToupTek", camera_name_) + " Thermal Switch";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -121,9 +128,7 @@ public:
 
     bool get_connected() const override { return connected_.load(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
@@ -206,26 +211,6 @@ public:
             handle_ = nullptr;
             sdk.close_camera(handle);
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("CommandBlind not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("CommandBool not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
     int get_max_switch() const override {
@@ -555,7 +540,7 @@ private:
             e.min_value = 0;
             e.max_value = 1;
             elements.push_back(std::move(e));
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): no tail light, skipped
             // Camera doesn't support the tail-light option; skip it.
         }
         if (elements.empty()) {

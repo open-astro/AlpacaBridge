@@ -156,8 +156,7 @@ namespace {
 bool raw_port_looks_like_iefw_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor,
-                                                        {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, iefw_usb_tokens());
 }
 }  // namespace
 #endif
@@ -458,8 +457,8 @@ private:
         }
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once and fails with NotConnected.
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd: the util::SerialLink verdict, #2262):
+    // decision 0009 rule 2 loses the link at once and fails with NotConnected.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
         lose_link_locked(reason);
         throw AlpacaException(reason, AlpacaError::NotConnected);
@@ -475,9 +474,9 @@ private:
 
     void write_data(const std::string& data) {
 #ifndef _WIN32
-        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
+        if (!link_.write_all(data)) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV) {
+            if (link_.lost()) {
                 fail_link_locked("iEFW serial link lost (errno " + std::to_string(err) + ")");
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
@@ -493,8 +492,7 @@ private:
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
         const auto r = util::read_until(
-            link_.fd(), spec,
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
         switch (r.outcome) {
             case util::ReadOutcome::Terminator:
                 response = r.bytes;
@@ -538,7 +536,7 @@ private:
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
         const auto r = util::read_until(
-            link_.fd(), spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
         if (r.outcome == util::ReadOutcome::Length) {
             if (r.bytes != "1") {
                 ALPACA_LOG_WARN("iOptron", std::string("iEFW unexpected ack byte: ") + r.bytes);
@@ -594,6 +592,11 @@ std::int32_t IefwProtocolWrapper::get_stored_offset(std::int32_t slot) { return 
 
 void IefwProtocolWrapper::set_stored_offset(std::int32_t slot, std::int32_t offset) {
     impl_->set_stored_offset(slot, offset);
+}
+
+const std::vector<std::string>& iefw_usb_tokens() {
+    static const std::vector<std::string> tokens{"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::ioptron

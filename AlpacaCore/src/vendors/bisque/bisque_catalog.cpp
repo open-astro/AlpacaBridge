@@ -29,7 +29,7 @@ void register_bisque_factory(DeviceCatalog& catalog) {
     factory.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
         vendor::bisque::ConnectionInfo info;
         info.host = config.get(kBisqueHost);
-        info.tcp_port = static_cast<int>(config.get(kBisqueTcpPort));
+        info.tcp_port = network_port_or_zero(config.get(kBisqueTcpPort));
         info.response_timeout_ms = static_cast<int>(config.get(kBisqueResponseTimeoutMs));
 
         // find(), not get(): the 0.0 default is not a site.

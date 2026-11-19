@@ -157,16 +157,9 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
     alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
 
-    // TODO: Register devices with AlpacaCore DeviceRegistry
-    // Example:
-    // auto& registry = alpacacore::management::DeviceRegistry::instance();
-    // auto camera = std::make_shared<YourCameraDriver>(...);
-    // registry.register_device(camera);
-    
-    // TODO: Create and set ManagementDriver
-    // Example:
-    // auto mgmt_driver = std::make_shared<YourManagementDriver>(config);
-    // server.set_management_driver(mgmt_driver);
+    // Nothing is registered here: the server's Router restores the saved devices from
+    // config/registered_devices.json when it is built, and answers the management
+    // description itself, so no ManagementDriver is set.
 
     // Start discovery service
     std::unique_ptr<alpacahttp::Discovery> discovery;
@@ -215,15 +208,16 @@ int main(int argc, char* argv[]) {
     }
 
     // A loop that ended with g_running still true was ended by the server
-    // itself (a restart whose listener could not re-bind, a failed start).
+    // itself (a first bind that failed, a restart whose listener could not
+    // re-bind, a failed start).
     // Nobody asked for this, so exit 1: systemd's Restart=on-failure respawns
     // the service, where a 0 would have left it down for good (#713).
     const bool stop_requested = !g_running;
     int exit_status = 0;
     if (!stop_requested) {
         alpacahttp::util::log_error(
-            "HTTP server stopped without a shutdown request (restart could not re-bind the listener, or the "
-            "listener failed); exiting with status 1 so systemd restarts the service");
+            "HTTP server stopped without a shutdown request (the first bind failed, a restart could not re-bind "
+            "the listener, or the listener failed); exiting with status 1 so systemd restarts the service");
         exit_status = 1;
     }
 

@@ -26,6 +26,7 @@
 
 namespace {
 
+using alpacacore::test::alpaca_error_message;
 using alpacacore::test::require_alpaca_error;
 
 }  // namespace
@@ -90,6 +91,21 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Not connected throws", "[ioptr
     require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Falsified by: ioptron_switch_driver.cpp imate_profile() editing not_connected_message or a port's range_error.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - error texts", "[ioptron][switch][unit]") {
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[2].pwm_enabled = true;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(alpaca_error_message([&]() { driver->get_switch(1); }, alpacacore::AlpacaError::NotConnected) ==
+          "iMate PowerBox not connected");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(1, 2.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,1]");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(2, 101.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,100]");
+}
+
 // 4. Unsupported actions
 TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported actions", "[ioptron][switch][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
@@ -98,10 +114,12 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported actions", "[ioptro
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 // 5. Device-specific behavior — per-port metadata and the always-on pass-through.
