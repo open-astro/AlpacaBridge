@@ -137,6 +137,12 @@ public:
         return download_cv_.wait_for(lock, timeout, [this] { return download_entered_; });
     }
 
+    // The Exposure register at each USB Limit write, in order (the SDK paces USB from the clock it sets).
+    std::vector<long> exposure_at_bandwidth_writes() const {
+        std::lock_guard lock(mutex_);
+        return exposure_at_bandwidth_writes_;
+    }
+
     int call_count(const std::string& name) const {
         std::lock_guard lock(mutex_);
         const auto it = calls_.find(name);
@@ -327,6 +333,8 @@ public:
             }
             ++calls_["set_bandwidth"];
             bandwidth_auto_ = is_auto;
+            const auto exposure = controls_.find(ControlType::Exposure);
+            exposure_at_bandwidth_writes_.push_back(exposure == controls_.end() ? 0 : exposure->second);
         }
         controls_[type] = value;
     }
@@ -614,6 +622,7 @@ private:
     // Non-zero so a default connect+read takes the plain path; 0 is the #722 placeholder.
     std::map<ControlType, long> controls_{{ControlType::Temperature, 150}};
     bool bandwidth_auto_{false};
+    std::vector<long> exposure_at_bandwidth_writes_;
     ROIDescription roi_{};
     StartPosition start_pos_{};
     ExposureStatus status_{ExposureStatus::Idle};
