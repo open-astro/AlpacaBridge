@@ -78,6 +78,11 @@ public:
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
     void set_pulse_reports_guiding(bool on) { pulse_reports_guiding_.store(on); }
 
+    /// Issue #2421: false answers a ":Z" pulse-guide command with nothing, as the HAE29C firmware (and the v3 spec)
+    /// does. On by default: a pulse is acked with "1", which also tells a TCP test the command was recorded and its
+    /// :ZQ/:ZS trim applied before the driver call returned.
+    void set_pulse_acks(bool on) { pulse_acks_.store(on); }
+
     /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
@@ -261,10 +266,11 @@ private:
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
             // A pulse-guide trim closes the residual exactly.
             ra_units_.store(pending_ra_);
-            return "1";
         }
-        if (cmd.rfind(":Z", 0) == 0 || cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 ||
-            cmd.rfind(":Q", 0) == 0) {
+        if (cmd.rfind(":Z", 0) == 0) {
+            return pulse_acks_.load() ? "1" : "";
+        }
+        if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 || cmd.rfind(":Q", 0) == 0) {
             return "1";  // set / motion / rate acks
         }
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
@@ -293,6 +299,7 @@ private:
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
     std::atomic<bool> pulse_reports_guiding_{false};
+    std::atomic<bool> pulse_acks_{true};
     FakeMountServer server_;
 };
 
