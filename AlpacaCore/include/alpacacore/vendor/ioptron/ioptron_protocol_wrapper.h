@@ -377,7 +377,7 @@ public:
      * Sends :MH# command.
      */
     void go_to_home();
-    
+
     /**
      * @brief Auto-search zero (home) position.
      *
