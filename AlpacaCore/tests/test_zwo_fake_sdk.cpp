@@ -490,37 +490,17 @@ struct TimedExposureRig {
     }
 };
 
-// Steps the clock by `step` (the 50 ms status poll by default) each time the exposure body waits on it, and reads
-// ImageReady after every step. Returns the clock time at which ImageReady first read true, or nothing when the
-// exposure ended without a frame (a kept failure) or did not end within 20 s of real time.
+// Steps the clock by `step` (the 50 ms status poll by default) each time the exposure body waits on it. Returns the
+// clock time at which ImageReady first read true, or nothing when the exposure ended without a frame (a kept failure)
+// or did not end within 20 s of real time.
 std::optional<alpacacore::util::TaskClock::clock::time_point> step_until_image_ready(
     TimedExposureRig& rig, std::chrono::milliseconds step = std::chrono::milliseconds(50)) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    while (std::chrono::steady_clock::now() < deadline) {
-        try {
-            if (rig.camera->get_image_ready()) return rig.clock.now();
-        } catch (const alpacacore::AlpacaException&) {
-            return std::nullopt;
-        }
-        if (alpacacore::test::zwo_exposure_ended(*rig.camera)) {
-            try {
-                if (rig.camera->get_image_ready()) return rig.clock.now();
-            } catch (const alpacacore::AlpacaException&) {
-            }
-            return std::nullopt;
-        }
-        if (!rig.clock.wait_for_woken_settled(std::chrono::milliseconds(100))) {
-            // A thread the last step woke has not reached its next clock wait or exited. Its old wait still counts
-            // in waiter_count(), so a step now would move the clock while it is between two waits (open-astro#743).
-            continue;
-        }
-        if (rig.clock.waiter_count() > 0) {
-            rig.clock.advance(step);
-        } else {
-            // The body is between clock waits, in an SDK call or the frame download, which run in real time. Wait
-            // for it to park on the clock again, for 1 ms at most so the checks above run again.
-            static_cast<void>(rig.clock.wait_for_waiters(1, std::chrono::milliseconds(1)));
-        }
+    const auto ended_at =
+        alpacacore::test::step_until_exposure_end(*rig.camera, rig.clock, step, std::chrono::seconds(20));
+    if (!ended_at.has_value()) return std::nullopt;
+    try {
+        if (rig.camera->get_image_ready()) return ended_at;
+    } catch (const alpacacore::AlpacaException&) {
     }
     return std::nullopt;
 }

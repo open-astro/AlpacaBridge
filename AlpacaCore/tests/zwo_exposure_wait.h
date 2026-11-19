@@ -21,6 +21,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <optional>
 #include <thread>
 
 #include "fake_task_clock.h"
@@ -53,14 +54,16 @@ inline bool wait_exposure_end(const CameraDriver& camera, std::chrono::milliseco
     return zwo_eventually([&] { return zwo_exposure_ended(camera); }, bound);
 }
 
-/// As above on a FakeTaskClock: each time a thread waits on the clock (the status poll, the retry pacing, the USB 2.0
-/// settle) and every thread the last step woke has settled, advances it by `step`.
-inline bool wait_exposure_end(const CameraDriver& camera, FakeTaskClock& clock,
-                              std::chrono::nanoseconds step = std::chrono::milliseconds(50),
-                              std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+/// Waits for the exposure body to end on a FakeTaskClock: each time a thread waits on the clock (the status poll, the
+/// retry pacing, the USB 2.0 settle) and every thread the last step woke has settled, advances it by `step`. Returns
+/// the clock time at which the end was first seen, or nothing when it did not come within `bound` of real time. Only
+/// these steps move the clock, so it is still that time when the case reads ImageReady.
+inline std::optional<util::TaskClock::clock::time_point> step_until_exposure_end(
+    const CameraDriver& camera, FakeTaskClock& clock, std::chrono::nanoseconds step = std::chrono::milliseconds(50),
+    std::chrono::milliseconds bound = std::chrono::seconds(5)) {
     const auto deadline = std::chrono::steady_clock::now() + bound;
     while (!zwo_exposure_ended(camera)) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (std::chrono::steady_clock::now() >= deadline) return std::nullopt;
         if (!clock.wait_for_woken_settled(std::chrono::milliseconds(100))) {
             // A thread the last step woke has not reached its next clock wait or exited. Its old wait still counts
             // in waiter_count(), so a step now would move the clock while it is between two waits (open-astro#743).
@@ -74,7 +77,14 @@ inline bool wait_exposure_end(const CameraDriver& camera, FakeTaskClock& clock,
             static_cast<void>(clock.wait_for_waiters(1, std::chrono::milliseconds(1)));
         }
     }
-    return true;
+    return clock.now();
+}
+
+/// As above on a FakeTaskClock (step_until_exposure_end()): true when the exposure ended within `bound`.
+inline bool wait_exposure_end(const CameraDriver& camera, FakeTaskClock& clock,
+                              std::chrono::nanoseconds step = std::chrono::milliseconds(50),
+                              std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    return step_until_exposure_end(camera, clock, step, bound).has_value();
 }
 
 /// Runs `fn` on a helper thread and waits up to 2 s of real time for it with the clock held. If it has not returned,
