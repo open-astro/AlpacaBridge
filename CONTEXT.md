@@ -41,7 +41,6 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   `util::MotionOwner` tells the two apart per axis; Sky-Watcher and Celestron CGX
   use it. Celestron NexStar and SynScan still keep a driver-wide motion generation
   counter by hand until they adopt it (#2263).
-  until they adopt it (#2263).
 - Avoid: "aborted" or "stopped" for both. Treating a superseded body as cancelled
   would send a stop to axes the newer operation owns.
 
