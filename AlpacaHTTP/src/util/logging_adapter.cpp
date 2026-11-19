@@ -274,20 +274,24 @@ namespace {
     // Delete the oldest log files until all of them together fit
     // g_log_max_total_bytes (#2422). Oldest first: the oldest date first and,
     // within a date, its highest part first and its current file (part 0) last,
-    // the reverse of list_log_files(). Retention by total size rather than per
+    // the reverse of list_log_files() while the day being written is the newest
+    // date (see below). Retention by total size rather than per
     // day keeps a night that crosses midnight whole: the evening's parts are
     // only deleted once everything older is gone. The open file is counted
     // through g_log_file_bytes and never deleted, even when it alone is over
     // the cap. Returns the number of files removed; no-op when the cap is 0.
     //
-    // Ordering is by the date in the name, as for retention: a rig that boots
-    // with a stale clock (no RTC, before NTP or a client's synctime) names its
-    // files with an older date than the ones on disk, and its rotated parts are
-    // then the first to go until the clock is right. mtime would come from the
-    // same wrong clock, so it would not help.
+    // Ordering is by the date in the name, as for retention, except that the
+    // day being written (g_log_file_date) always goes last: whatever dates the
+    // other files carry, the lines being written now are the newest. A file
+    // dated after today (the clock jumped ahead once, then came back) or a boot
+    // with a clock behind the files on disk would otherwise make every rotation
+    // delete the session's own part .1 while the other-dated files stayed for
+    // good. mtime would come from the same wrong clock, so it would not help.
     //
     // Caller holds g_file_mutex; nothing here logs (the deadlock note in
-    // configure_log_directory), and only error_code overloads are used.
+    // configure_log_directory), and only error_code overloads are used: this
+    // runs inside the log sink, where an exception would reach every caller.
     std::size_t prune_to_total_size_locked() {
         if (g_log_directory.empty() || g_log_max_total_bytes == 0) {
             return 0;
@@ -301,8 +305,8 @@ namespace {
         std::vector<Candidate> files;
         std::uintmax_t total = g_log_file_name.empty() ? 0 : g_log_file_bytes;
         std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator(g_log_directory, ec)) {
-            if (ec) break;
+        for (std::filesystem::directory_iterator it(g_log_directory, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto& entry = *it;
             std::error_code type_ec;
             if (!entry.is_regular_file(type_ec)) continue;
             const std::string name = entry.path().filename().string();
@@ -317,7 +321,11 @@ namespace {
         if (total <= g_log_max_total_bytes) {
             return 0;
         }
-        std::sort(files.begin(), files.end(), [](const Candidate& a, const Candidate& b) {
+        const std::string& writing = g_log_file_date;  // empty when no file is open
+        std::sort(files.begin(), files.end(), [&writing](const Candidate& a, const Candidate& b) {
+            const bool a_writing = a.date == writing;
+            const bool b_writing = b.date == writing;
+            if (a_writing != b_writing) return b_writing;
             return a.date != b.date ? a.date < b.date : a.part > b.part;
         });
         std::size_t removed = 0;
@@ -534,7 +542,7 @@ std::vector<LogFileInfo> list_log_files() {
 
     // Newest first: by date, then the day's current file before its parts .1, .2, ...
     // in number order (a plain name sort would put .9 before .1 and .10 before .2).
-    // prune_to_total_size_locked() deletes in exactly the reverse order.
+    // prune_to_total_size_locked() deletes in the reverse order (the day being written always last).
     std::sort(result.begin(), result.end(), [](const LogFileInfo& a, const LogFileInfo& b) {
         const auto a_date = log_file_date(a.name);
         const auto b_date = log_file_date(b.name);
