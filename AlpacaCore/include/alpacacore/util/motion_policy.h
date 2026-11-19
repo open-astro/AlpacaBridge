@@ -88,7 +88,7 @@ constexpr auto kMoveAxisDurationMax = std::chrono::seconds(300);
 // open-astro#2405: the landing gate's far miss. A mount that has come to rest more than 600 arcsec (10 arcmin) from
 // its target on either axis did not land: the GOTO was refused, stopped at a limit or never ran. Smaller residuals
 // are pointing error a re-GOTO or a sync corrects, not a failure. The Celestron Park arrival check and the SynScan
-// landing refine limit use the same value.
+// landing refine limit keep their own 600 arcsec copies until those drivers adopt the guards (#2409, #2412).
 constexpr double kLandingFarMissArcsec = 600.0;
 
 // open-astro#2405: the sync bound. A sync re-defines where the mount points, so a sync far from where the mount

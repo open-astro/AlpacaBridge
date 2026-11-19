@@ -21,7 +21,6 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
-#include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/polled_state.h>
@@ -131,8 +130,8 @@ constexpr double kLandingToleranceArcsec = 3.0;
 // A readback this far from the target is not a landing error a fine re-GOTO corrects. The handset sometimes ends a
 // GOTO ~49' east of the aim (EQM-35 Pro, HC 06.03.00, open-astro#1105) and a repeat GOTO to the same target lands, so
 // the GOTO is repeated once unchanged; a second miss this large (a refused or limit-stopped GOTO, a mount that never
-// moved) fails the slew. The shared landing far miss (util/motion_policy.h).
-constexpr double kLandingRefineLimitArcsec = util::kLandingFarMissArcsec;
+// moved) fails the slew.
+constexpr double kLandingRefineLimitArcsec = 600.0;
 // How long a refinement GOTO forces Slewing true while the handset starts moving (the first GOTO uses 8 s).
 constexpr auto kRefineStartForce = std::chrono::seconds(2);
 // open-astro#1030: the handset computes RA from a local sidereal time it advances once a second, so after a GOTO

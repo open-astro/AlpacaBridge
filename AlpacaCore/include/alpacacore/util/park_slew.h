@@ -62,10 +62,9 @@ struct ParkSlewHooks {
     /// owns the park. If cancelled or superseded, the newer operation owns state.
     std::function<void(const std::string&)> fail;
     /// Optional; empty means no check. Reads where the mount landed and returns an empty string when it is within
-    /// tolerance of the park target (util::kLandingFarMissArcsec, util/motion_policy.h), else the failure message. Run
-    /// after the tracking stop on every completion, because a mount that acked the GOTO and never moved ends the poll
-    /// like one that arrived. Like the other hooks it may throw; it checks `superseded` itself when it releases the
-    /// mutex.
+    /// tolerance of the park target, else the failure message. Run after the tracking stop on every completion,
+    /// because a mount that acked the GOTO and never moved ends the poll like one that arrived. Like the other hooks
+    /// it may throw; it checks `superseded` itself when it releases the mutex.
     std::function<std::string()> verify_at_target;
     /// When set, a miss reported by `verify_at_target` repeats the whole flow once (dispatch to verify) before it
     /// fails: a handset that ends a GOTO far off its aim lands on it when the GOTO is sent again (#1105).
