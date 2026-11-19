@@ -2259,6 +2259,74 @@ TEST_CASE("iOptron Telescope Driver - IsPulseGuiding falls 500 ms after the puls
     driver->set_connected(false);
 }
 
+// ── Issue #2421: the :Z pulse commands never ack, so PulseGuide waits only a short ack drain ─────────────────
+namespace {
+
+// The fastest of three West pulses, in real time: wire time is not on the task clock. Three calls keep one
+// scheduler pause on a loaded runner from failing the bound; every pulse through the 300 ms blind drain is slow.
+std::chrono::microseconds fastest_pulse(alpacacore::TelescopeDriver& driver) {
+    auto fastest = std::chrono::microseconds::max();
+    for (int i = 0; i < 3; ++i) {
+        fastest = std::min(fastest, alpacacore::test::timed([&] { driver.pulse_guide(3, 56); }));
+    }
+    return fastest;
+}
+
+}  // namespace
+
+// Falsified by: pulse_guide() in ioptron_protocol_wrapper.cpp sending through the public send_command_blind(), whose
+// serial ack drain waits 300 ms on a silent line (the HAE29C's :Z), so each pulse takes about 300 ms.
+TEST_CASE("iOptron Telescope Driver - PulseGuide returns within 50 ms on a serial mount that sends no ack",
+          "[ioptron][telescope][unit][fake][pulseguide][issue2421]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    mount.model().set_pulse_acks(false);
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(fastest_pulse(*driver) < std::chrono::milliseconds(50));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(wait_until([&] { return mount.model().count(":ZQ00056#") == 3; }));
+    driver->set_connected(false);
+}
+
+// Falsified by: pulse_guide() sending through the public send_command_blind(), whose network ack drain waits 50 ms
+// on a silent socket.
+TEST_CASE("iOptron Telescope Driver - PulseGuide returns within 50 ms on a TCP mount that sends no ack",
+          "[ioptron][telescope][unit][fake][pulseguide][issue2421]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_pulse_acks(false);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    CHECK(fastest_pulse(*driver) < std::chrono::milliseconds(50));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(wait_until([&] { return mount.count(":ZQ00056#") == 3; }));
+    driver->set_connected(false);
+}
+
+// Firmware that does ack a pulse: the short drain still reads the '1', so it does not prefix the next reply (TCP has
+// no flush before a write). The raw CommandString reply is compared, because the position getters strip a leading
+// '1' (strip_status_prefix) and would hide it. A North pulse moves nothing in the fake.
+// Falsified by: pulse_guide() skipping the ack drain (a zero wait), which leaves the '1' in front of the :GEP# reply.
+TEST_CASE("iOptron Telescope Driver - a pulse ack from firmware that sends one does not shift the next reply",
+          "[ioptron][telescope][unit][fake][pulseguide][issue2421]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    const std::string before = driver->command_string(":GEP#", true);
+    REQUIRE(before.rfind("+", 0) == 0);
+
+    driver->pulse_guide(0, 100);
+    REQUIRE(wait_until([&] { return mount.count(":Z") == 1; }));  // the fake sent its ack (:ZE or :ZC by pier side)
+    CHECK(driver->command_string(":GEP#", true) == before);
+    driver->set_connected(false);
+}
+
 // Each pulse holds the axis it does not move and ends the hold a pulse on the other axis set; a zero-length pulse
 // ends both holds and IsPulseGuiding.
 TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the earlier hold",
