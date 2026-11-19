@@ -1,6 +1,6 @@
 ### Breaking changes
 
-- **ZWO AM mounts: a PulseGuide during a GOTO or FindHome is refused** (AlpacaCore, issue #2263): it answers `InvalidOperation` ("PulseGuide is not allowed while a slew, park or home is running") and changes nothing, where it used to be accepted and its `:Mg` went out while the mount slewed. A PulseGuide during a Park was already refused (the Tracking check, since Park turns tracking off) and still is. The refusal ends with the motion: once the GOTO lands, fails or is stopped, the FindHome lands, or a MoveAxis takes an axis, a PulseGuide is accepted again. **After upgrading:** a client waits for Slewing to read false before it pulse-guides, as ConformU and the guiding programs already do.
+- **ZWO AM mounts: a PulseGuide during a GOTO or FindHome is refused** (AlpacaCore, issue #2263): it answers `InvalidOperation` ("PulseGuide is not allowed while a slew, park or home is running") and changes nothing, where it used to be accepted and its `:Mg` went out while the mount slewed. A PulseGuide during a Park was already refused (the Tracking check, since Park turns tracking off) and still is, now also while the Park call is still reading the mount's mode and turning tracking off. The refusal ends with the motion: once the GOTO lands, fails or is stopped, the FindHome lands, or a MoveAxis takes an axis, a PulseGuide is accepted again. **After upgrading:** a client waits for Slewing to read false before it pulse-guides, as ConformU and the guiding programs already do.
 
 ### Changed
 

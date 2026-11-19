@@ -1615,7 +1615,8 @@ public:
         // claim between the fence and ":hC" (initiator_mutex_, held to the end).
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
-        claim_slew(/*home=*/true);
+        PendingSlewCommand pending(*this);
+        claim_slew(pending, /*home=*/true);
         if (initiator_hook_) initiator_hook_("FindHome");
         bump_motion_epoch();  // open-astro#1925: before ":hC"
         // decision 0022 rule 2: Slewing is true before ":hC" goes out; a failed send gives the window back.
@@ -1654,7 +1655,8 @@ public:
         // lock anyway).
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
-        claim_slew();
+        PendingSlewCommand pending(*this);
+        claim_slew(pending);
         if (initiator_hook_) initiator_hook_("Park");
         if (get_at_park()) {
             return;
@@ -1938,6 +1940,7 @@ public:
         // leave poll_pause_ stuck true.
         double target_ra = 0.0;
         double target_dec = 0.0;
+        PendingSlewCommand pending(*this);  // until this call returns: past the initiator_mutex_ wait and the arm
         try {
             ensure_not_parked("SlewToTargetAsync");
             {
@@ -1954,7 +1957,8 @@ public:
             // checked before claim_slew() cancels a pulse in
             // flight, so a refused slew leaves that motion alone.
             require_tracking_for_slew("SlewToTargetAsync");
-            claim_slew();
+            claim_slew(pending);
+            if (initiator_hook_) initiator_hook_("SlewToTargetAsync");
         } catch (...) {
             poll_pause_.store(false);
             throw;
@@ -2561,10 +2565,33 @@ private:
     // #2263, util::MotionOwner: a command owns only the axes it moves. A slew, park or home claims both axes; a moving
     // MoveAxis claims its own; a stop cancels its axes. Each ends the queued and running guide pulses on those axes
     // (end_pulses()) and returns slew_error_epoch_ as read in that section (sync_to_pair(), #2093).
-    uint64_t claim_slew(bool home = false) {
+    //
+    // A slew, park or home counts as running from its claim (`pending`, in the claim's section) until its call ends,
+    // on the throw path too: between the claim and its own state (goto_active_, park_command_active_, the slew window)
+    // it does wire I/O or waits for initiator_mutex_, and a PulseGuide there must be refused (#2263).
+    class PendingSlewCommand {
+    public:
+        explicit PendingSlewCommand(ZWOTelescopeDriver& driver) : driver_(driver) {}
+        PendingSlewCommand(const PendingSlewCommand&) = delete;
+        PendingSlewCommand& operator=(const PendingSlewCommand&) = delete;
+        ~PendingSlewCommand() {
+            if (!counted_) return;
+            std::lock_guard<std::mutex> lock(driver_.mutex_);
+            --driver_.slew_commands_pending_;
+        }
+
+    private:
+        friend class ZWOTelescopeDriver;
+        ZWOTelescopeDriver& driver_;
+        bool counted_ = false;
+    };
+
+    uint64_t claim_slew(PendingSlewCommand& pending, bool home = false) {
         return end_pulses(util::MotionOwner::kBothAxes, [&] {
             slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
             home_claimed_ = home;
+            ++slew_commands_pending_;
+            pending.counted_ = true;
         });
     }
 
@@ -2626,6 +2653,7 @@ private:
     // failed, fenced), no Park pending, the slew window closed and, after a FindHome, the mount not moving. Under
     // mutex_.
     bool slew_motion_running_locked(util::HoldWindow::mono now) const {
+        if (slew_commands_pending_ != 0) return true;  // a call between its claim and its own state
         if (own_goto_in_flight_locked() || park_command_active_ || slew_hold_.active(now)) return true;
         if (!home_claimed_) return false;
         const auto reading = snapshot_.read();
@@ -3519,9 +3547,12 @@ private:
     std::array<PulseAxis, 2> pulse_;  // #2263: per axis; see PulseAxis for which lock guards which field
     // #2263: the per-axis motion owner, under mutex_ (its stop_reason() reads atomics). slew_claim_ is the newest
     // slew, park or home claim, home_claimed_ whether it was FindHome's (slew_motion_running_locked()).
+    // slew_commands_pending_ counts the slew, park and home calls between their claim and their return
+    // (PendingSlewCommand).
     util::MotionOwner motion_owner_;
     util::MotionClaim slew_claim_;
     bool home_claimed_ = false;
+    int slew_commands_pending_ = 0;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) and
     // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'
     // start/reap and their stop flags can never interleave between two

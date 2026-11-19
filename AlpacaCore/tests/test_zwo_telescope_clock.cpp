@@ -28,6 +28,7 @@
 #include <future>
 #include <list>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -346,6 +347,68 @@ TEST_CASE("ZWO motion owner - PulseGuide during a slew, park or home is refused 
         INFO("after the refusal: " << sent[i]);
         CHECK(sent[i].rfind(":Q", 0) != 0);
     }
+}
+
+namespace {
+
+// The slew, park or home commands by their initiator seam name, for the claim-gap cases (#2263).
+void start_slew_command(TelescopeDriver& driver, const std::string& name) {
+    if (name == "SlewToTargetAsync") driver.slew_to_coordinates_async(6.0, 30.0);
+    if (name == "FindHome") driver.find_home();
+    if (name == "Park") driver.park();
+}
+
+}  // namespace
+
+// #2263: a slew, park or home counts as running from its claim, not only once it has set its own state (goto_active_,
+// park_command_active_, the slew window). The initiator seam runs a PulseGuide in that gap, right after the claim:
+// before Park's ":GU" and ":Td", before FindHome arms its window, and where a SlewAsync waits for initiator_mutex_. It
+// is refused and no ":Mg" goes out.
+// Falsified by: zwo_telescope_driver.cpp claim_slew() not counting the pending command, so
+// slew_motion_running_locked() reads "not running" and finished() ends the claim.
+TEST_CASE("ZWO motion owner - PulseGuide between a slew's claim and its own state is refused (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const std::string slew = GENERATE(as<std::string>{}, "SlewToTargetAsync", "FindHome", "Park");
+    CAPTURE(slew);
+    Rig rig("AM5");
+    bool ran = false;  // the hook runs on the initiator's own thread
+    int code = 0;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name != slew || ran) return;
+        ran = true;
+        try {
+            rig.driver->pulse_guide(0, 1000);
+        } catch (const AlpacaException& ex) {
+            code = ex.error_code();
+        }
+    });
+    rig.connect();
+    rig.mount.set_slew_duration(30s);
+    start_slew_command(*rig.driver, slew);
+    CHECK(ran);
+    CHECK(code == AlpacaError::InvalidOperation);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    for (int i = 0; i < 8; ++i) rig.advance(250ms);
+    CHECK(rig.mount.count(":Mg") == 0);
+}
+
+// #2263: a slew, park or home whose call throws between its claim and its own state gives the claim up, so the next
+// PulseGuide is accepted.
+// Falsified by: zwo_telescope_driver.cpp PendingSlewCommand ending only when its call returns (not on a throw), so
+// every later PulseGuide is refused.
+TEST_CASE("ZWO motion owner - a slew that throws after its claim leaves PulseGuide accepted (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const std::string slew = GENERATE(as<std::string>{}, "SlewToTargetAsync", "FindHome", "Park");
+    CAPTURE(slew);
+    Rig rig("AM5");
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == slew) throw std::runtime_error("seam");
+    });
+    rig.connect();
+    CHECK_THROWS_AS(start_slew_command(*rig.driver, slew), std::runtime_error);
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 1000));
+    CHECK(rig.mount.wait_for_count(":Mgn", 1, kReal));
+    CHECK(rig.driver->get_is_pulse_guiding());
 }
 
 // #2263: the slew, park or home claim ends with the motion on every exit path, so a PulseGuide is accepted again: a
