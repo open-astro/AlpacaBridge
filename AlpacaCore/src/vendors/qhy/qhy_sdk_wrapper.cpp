@@ -108,13 +108,13 @@ public:
     std::unordered_map<std::string, SharedHandle> handles;
     // Deliberately a SEPARATE map from `handles` above, not a field on
     // SharedHandle: close_camera() erases the handles entry once the last
-    // owner releases it, but that's exactly the moment a still-running
-    // exposure worker's liveness needs to keep being visible to the NEXT
-    // open_camera() call (review finding on PR #201 -- a detached zombie
-    // worker can outlive the handle-map entry, and either the camera driver
-    // OR the paired CFW driver reconnecting afterward would otherwise open
-    // a second, independent physical handle while the zombie's is still
-    // potentially in flight on the first one). Entries are never erased --
+    // owner releases it, but that's exactly the moment an exposure still in
+    // flight needs to keep being visible to the NEXT open_camera() call
+    // (review finding on PR #201 -- an exposure call outliving the handle-map
+    // entry would let the camera driver OR the paired CFW driver reconnecting
+    // afterward open a second, independent physical handle while the old one
+    // is still potentially in flight; since #1736 the camera driver joins its
+    // exposure body before it closes, so this is a backstop). Entries are never erased --
     // there are only ever one or two camera_ids per process, so this isn't
     // a real growth concern, and erasing on a clean return would just
     // reintroduce a window to get it wrong.
@@ -293,12 +293,11 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
     }
 
     // No live handle to reuse -- about to OpenQHYCCD() a fresh one. Refuse
-    // if a prior exposure worker for this id might still be alive: if
-    // join_exposure_thread() hit its 2s timeout and detached rather than
-    // joined, that worker can still be blocked inside GetQHYCCDSingleFrame
-    // on the OLD handle even though close_camera() already erased the entry
-    // above. Opening a second, independent handle to the same physical USB
-    // device while the zombie's is still potentially in flight is undefined
+    // if a prior exposure for this id might still be inside the SDK (its
+    // registered flag is still true): it could be blocked inside
+    // GetQHYCCDSingleFrame on the OLD handle even though close_camera()
+    // already erased the entry above. Opening a second, independent handle to
+    // the same physical USB device while that call is in flight is undefined
     // territory for the vendor SDK -- and reachable through EITHER the
     // camera driver reconnecting OR the paired CFW driver reconnecting
     // independently, since both call this same function for the same id

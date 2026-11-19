@@ -18,9 +18,10 @@
 // an unplug removes. The network cases at the end (#2220) run it over the TCP
 // command channel against a loopback FakeMountServer, where a hangup is the
 // loss (decision 0009 rule 2a).
-// The write-side loss mapping (fail_write_locked) has no case of its own: on
-// a severed pty the removed-node check before every write fires first, so a
-// pty cannot make the write itself return EIO with the node still present.
+// The write-side loss mapping (fail_write_locked) is pinned by the EBADF case
+// (#2262): on a severed pty the removed-node check before every write fires
+// first, so a pty cannot make the write itself return EIO with the node still
+// present, but a read-only stand-in on the same tty makes it return EBADF.
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
@@ -383,6 +384,61 @@ TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected b
     CHECK(protocol.link_lost_reason().find("read failed") != std::string::npos);
     CHECK_FALSE(protocol.link_alive());
     CHECK(protocol.consume_link_lost_at().has_value());
+}
+
+// Issue #2262: over serial the verdict is the shared util::SerialLink one. A hangup mid-reply is a lost link (the
+// read's own errno text), and only the next connect on the same wrapper clears the loss and its reason, here to a
+// replugged adapter behind the same path.
+TEST_CASE("OnStep link loss - a hangup mid-reply is a lost link until the next connect",
+          "[onstep][serial][connected][link-lost][issue2262]") {
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
+    const auto info = serial_info(link);
+    REQUIRE(protocol.connect(info));
+    mount.sever_on(":GRa#");
+    require_alpaca_error([&] { (void)protocol.send_command(":GRa#"); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().find("read failed") != std::string::npos);
+    require_alpaca_error([&] { (void)protocol.send_command(":GU#"); }, alpacacore::AlpacaError::NotConnected);
+
+    FakeOnStepSerialMount replugged;
+    link.repoint(replugged.slave_path());
+    REQUIRE(protocol.connect(info));
+    CHECK(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().empty());
+    CHECK_FALSE(protocol.send_command(":GRa#").empty());
+    protocol.disconnect();
+}
+
+// Issue #2262: EBADF on the controller's own fd is a lost link, on the command's write and on its reply read alike
+// (the util::SerialLink verdict; the wrapper's own errno list is gone), with the node still present, and a
+// Disconnect then a Connect clears it.
+TEST_CASE("OnStep link loss - EBADF on the controller's fd is a lost link until the next connect",
+          "[onstep][serial][connected][link-lost][issue2262]") {
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    OnStepProtocolWrapper protocol;
+    const auto info = serial_info(link);
+    const auto before = alpacacore::test::fds_open_on(mount.slave_path());
+    REQUIRE(protocol.connect(info));
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(mount.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE_FALSE(protocol.send_command(":GRa#").empty());
+
+    const bool on_write = GENERATE(true, false);
+    INFO((on_write ? "EBADF on the command's write" : "EBADF on the reply read"));
+    REQUIRE(alpacacore::test::replace_fd_on_tty(fd, mount.slave_path(), on_write ? O_RDONLY : O_WRONLY));
+    require_alpaca_error([&] { (void)protocol.send_command(":GRa#"); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().find(on_write ? "write failed" : "read failed") != std::string::npos);
+
+    protocol.disconnect();
+    CHECK(protocol.link_lost_reason().empty());
+    REQUIRE(protocol.connect(info));
+    CHECK(protocol.link_alive());
+    CHECK_FALSE(protocol.send_command(":GRa#").empty());
+    protocol.disconnect();
 }
 
 // #1430: FindHome reads :GE# right after :hC#. A link lost in between must
