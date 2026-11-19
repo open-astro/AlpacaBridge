@@ -307,19 +307,21 @@ namespace {
 // The slew, park and home commands the PulseGuide refusal covers (#2263).
 void start_slew(TelescopeDriver& driver, const std::string& name) {
     if (name == "GOTO") driver.slew_to_coordinates_async(6.0, 30.0);
-    if (name == "FindHome") driver.find_home();
+    if (name == "FindHome" || name == "FindHome, window closed") driver.find_home();
     if (name == "Park") driver.park();
 }
 
 }  // namespace
 
 // #2263, ITelescopeV4: a PulseGuide while a slew, park or home runs is refused with InvalidOperation and changes
-// nothing: no ":Mg", IsPulseGuiding false, the motion still runs and nothing stops it.
+// nothing: no ":Mg", IsPulseGuiding false, the motion still runs and nothing stops it. A FindHome still counts once its
+// 5 s slew window has closed, while the mount reports it moving.
 // Falsified by: zwo_telescope_driver.cpp pulse_guide(): never taking the slew_running() refusal branch (GOTO and
-// FindHome; a Park is already refused by the Tracking check, since Park sends ":Td").
+// FindHome; a Park is already refused by the Tracking check, since Park sends ":Td"); for the closed-window leg,
+// find_home() claiming without its home flag.
 TEST_CASE("ZWO motion owner - PulseGuide during a slew, park or home is refused and changes nothing (#2263)",
           "[zwo][telescope][unit][clock][motion-owner]") {
-    const std::string slew = GENERATE(as<std::string>{}, "GOTO", "FindHome", "Park");
+    const std::string slew = GENERATE(as<std::string>{}, "GOTO", "FindHome", "FindHome, window closed", "Park");
     CAPTURE(slew);
     Rig rig("AM5");
     rig.connect();
@@ -328,6 +330,9 @@ TEST_CASE("ZWO motion owner - PulseGuide during a slew, park or home is refused 
     if (slew == "GOTO") {
         REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
         rig.await_poll_resumed();
+    }
+    if (slew == "FindHome, window closed") {
+        for (int i = 0; i < 24; ++i) rig.advance(250ms);  // 6 s: the window closed, the mount still homes
     }
     REQUIRE(rig.driver->get_slewing());
     const auto before = rig.mount.commands().size();
