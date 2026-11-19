@@ -101,6 +101,11 @@ public:
     // a frame the camera began itself. USB 3.0 cameras, short exposures, and any fake without a clock
     // keep the plain behaviour.
     const util::TaskClock* usb2_settle_clock{nullptr};
+    // Issue #2414: the clock an auto-completed exposure is timed on. Set, a start reports Working until the exposure
+    // register's length has passed on it since the start, as a camera does, then Success. Unset, a start reports
+    // Success at once, which the driver refuses as a frame that began before the start (and restarts) for an exposure
+    // longer than its early-frame tolerance (20 ms plus 0.1 %).
+    const util::TaskClock* exposure_clock{nullptr};
     static constexpr std::chrono::milliseconds kUsb2FailWindow{500};
     static constexpr long kUsb2FailMinExposureUs{3'000'000};
 
@@ -175,6 +180,14 @@ public:
     void set_exposure_status(ExposureStatus status) {
         std::lock_guard lock(mutex_);
         status_ = status;
+    }
+
+    /// Issue #2414 (needs exposure_clock): the next starts' frames are ready this long after their start, in start
+    /// order, instead of after the exposure: a camera that delivers a frame it began itself before the start (the
+    /// ASI120MM Mini started inside ~0.3 s of the previous download).
+    void script_frame_ready_after(std::vector<std::chrono::nanoseconds> delays) {
+        std::lock_guard lock(mutex_);
+        ready_after_script_.assign(delays.begin(), delays.end());
     }
 
     /// Clock time of every start_exposure call, in call order (empty without usb2_settle_clock).
@@ -374,6 +387,18 @@ public:
             throw AlpacaException("scripted exposure-trigger failure", AlpacaError::DriverException);
         }
         status_ = auto_complete_exposure ? ExposureStatus::Success : ExposureStatus::Working;
+        ready_at_.reset();
+        if (auto_complete_exposure && exposure_clock != nullptr) {
+            const auto exposure = controls_.find(ControlType::Exposure);
+            std::chrono::nanoseconds ready_after =
+                std::chrono::microseconds(exposure == controls_.end() ? 0 : exposure->second);
+            if (!ready_after_script_.empty()) {
+                ready_after = ready_after_script_.front();
+                ready_after_script_.pop_front();
+            }
+            status_ = ExposureStatus::Working;
+            ready_at_ = exposure_clock->now() + ready_after;
+        }
         if (fail_every_exposure) status_ = ExposureStatus::Failed;
         if (usb2_settle_clock != nullptr) {
             const auto now = usb2_settle_clock->now();
@@ -392,6 +417,7 @@ public:
             std::lock_guard lock(mutex_);
             require_open_locked(camera_id);
             status_ = ExposureStatus::Idle;
+            ready_at_.reset();
         }
         if (stop_releases_download) release_download();
     }
@@ -411,6 +437,10 @@ public:
             const auto status = status_script_.front();
             status_script_.pop_front();
             return status;
+        }
+        if (status_ == ExposureStatus::Working && ready_at_.has_value() && exposure_clock->now() >= *ready_at_) {
+            status_ = ExposureStatus::Success;
+            ready_at_.reset();
         }
         return status_;
     }
@@ -629,6 +659,9 @@ private:
     StartPosition start_pos_{};
     ExposureStatus status_{ExposureStatus::Idle};
     std::deque<ExposureStatus> status_script_;
+    std::deque<std::chrono::nanoseconds> ready_after_script_;
+    // When the exposure an auto-completing start began on exposure_clock turns Success.
+    std::optional<util::TaskClock::clock::time_point> ready_at_;
     std::string exposure_status_error_;
     std::vector<util::TaskClock::clock::time_point> start_times_;
     std::optional<util::TaskClock::clock::time_point> last_download_time_;
