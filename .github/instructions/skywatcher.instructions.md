@@ -882,6 +882,14 @@ No hemisphere is involved in either:
   autoguiding is the way in. Only the continuous branch was affected: a sub-floor rate
   recovers on its own through the duty worker's start gate.
 
+A deferral is only safe while the owner's restore is still to run. A pulse runs its restore,
+drops the lock and then releases its axis, so a write in that gap was stranded too (#2431):
+`release_pulse_locked()` now compares the stored `RightAscensionRate` and `DeclinationRate`
+with what its restore applied and applies a difference under the lock that releases the axis.
+A new owner with a restore must do the same at its release. Tests: `test_skywatcher_async.cpp`,
+"a DeclinationRate write between a Dec pulse's restore and its release is applied (#2431)" and
+its RightAscensionRate twin.
+
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
 the ones asking "is the mount doing anything at all", such as the duty worker's
