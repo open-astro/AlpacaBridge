@@ -1398,7 +1398,7 @@ TEST_CASE("ZWO async - a SlewAsync during Unpark's fence-to-command gap is refus
 // must not start a drain over a newer one. A reset (AbortSlew) and a second PulseGuide (B, 6000 ms) land in that gap:
 // B's drain sends its first step, and A's late start would supersede it, so B's second step would never be sent.
 // Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse_start_mutex_ lock held across the drain
-// decision and pulse_slot_.start() (B's second step is lost); or reset_position_offsets(): removing its
+// decision and pulse_slot_[axis].start() (B's second step is lost); or end_pulses(): removing its
 // pulse_start_mutex_ lock (the reset returns while A is held).
 TEST_CASE("ZWO async - a stale pulse drain start never cuts a newer accepted pulse (#2096)",
           "[zwo][telescope][async][operation-slot]") {
@@ -1527,7 +1527,7 @@ TEST_CASE("ZWO async - a redundant connect before a new drain runs keeps no stal
 // for the step already past its check, so the initiator's command follows that ":Mg" and stops or supersedes it. The
 // seam holds the step between its check and its send; a command that reaches the mount within 200 ms real time
 // meanwhile overtook it (a bounded negative check, as sent_while_held above).
-// Falsified by: zwo_telescope_driver.cpp reset_position_offsets(): removing the wait for pulse_sends_in_flight_ == 0,
+// Falsified by: zwo_telescope_driver.cpp end_pulses(): removing the wait for sends_in_flight == 0,
 // so the initiator's command goes out while the counted ":Mg" is still unsent.
 TEST_CASE("ZWO async - AbortSlew, Park or FindHome during a guide pulse send waits for its :Mg (#2072)",
           "[zwo][telescope][async][operation-slot]") {
@@ -1782,9 +1782,10 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
     driver->set_connected(false);
 }
 
-// The destructor with live bodies: a GOTO held on its time write (":SMTI"), a pulse drain waiting for the same link
-// and the poll. The destructor disconnects (cancelling the held read), fences and reaps the GOTO, then reaps the
-// teardown, the pulse drain and the poll, without waiting out the link timeout. Under ThreadSanitizer ([stress-guard])
+// The destructor with live bodies: a GOTO held on its time write (":SMTI") and the poll. The destructor disconnects
+// (cancelling the held read), fences and reaps the GOTO, then reaps the teardown, the pulse drains and the poll,
+// without waiting out the link timeout. A PulseGuide meanwhile is refused at once (#2263: no pulse during a slew), and
+// never waits for the held GOTO. Under ThreadSanitizer ([stress-guard])
 // it also checks that no body outlives the members it touches.
 // #2256: the hold is on ":SMTI", not ":Sr". The GOTO body holds target_write_mutex_ from ":Sr" through ":MS", and
 // PulseGuide queues under it (open-astro#2093), so a hold on ":Sr" blocked the pulse until ":Sr", ":Sd" and ":MS" had
@@ -1792,7 +1793,7 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
 // over, and ":Sd"/":MS" reached the count only when the fake read them after release().
 // Falsified by: zwo_telescope_driver.cpp set_connected(): Connected=false without protocol_.cancel_pending_io(), so
 // the fence waits for the held ":SMTI" until the 5 s link timeout.
-TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and the poll live",
+TEST_CASE("ZWO async - the destructor reaps a held GOTO and the poll, and a PulseGuide meanwhile is refused at once",
           "[zwo][telescope][async][operation-slot][stress-guard]") {
     Rig rig(5000);
     auto& mount = rig.mount;
@@ -1801,9 +1802,12 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     mount.hold_reply(":SMTI");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
-    // The pulse must queue at once and leave its drain waiting for the link; a pulse that waits for the GOTO to
-    // finish runs the destructor after the GOTO is over, and the test checks nothing (#2256).
-    const auto pulse_took = timed([&] { REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 3000)); });
+    // The pulse must be refused at once; a pulse that waits for the GOTO to finish runs the destructor after the GOTO
+    // is over, and the test checks nothing (#2256).
+    const auto pulse_took = timed([&] {
+        alpacacore::test::require_alpaca_error([&] { rig.driver->pulse_guide(0, 3000); },
+                                               alpacacore::AlpacaError::InvalidOperation);
+    });
     CHECK(pulse_took < kInitiatorBudget);
     auto destroy = std::async(std::launch::async, [&] { rig.driver.reset(); });
     const bool destroyed = destroy.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
