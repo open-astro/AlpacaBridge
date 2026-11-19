@@ -2138,11 +2138,8 @@ TEST_CASE("Bisque motion owner - PulseGuide during a slew, a Park or a FindHome 
     require_alpaca_error([&] { rig.driver->pulse_guide(2, 100); },
                          leg == 2 ? AlpacaError::InvalidWhileParked : AlpacaError::InvalidOperation);
     if (leg != 2) {
-        try {
-            rig.driver->pulse_guide(0, 100);
-        } catch (const alpacacore::AlpacaException& e) {
-            CHECK(std::string(e.what()) == "PulseGuide is not allowed while a slew, park or home is running");
-        }
+        CHECK_THROWS_WITH(rig.driver->pulse_guide(0, 100),
+                          "PulseGuide is not allowed while a slew, park or home is running");
     }
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     if (leg == 3) {
@@ -2186,13 +2183,13 @@ TEST_CASE("Bisque motion owner - a refused slew, a landing or a failed FindHome 
     CHECK(rig.mount.guide_commands.load() == 1);
 }
 
-// A MoveAxis or a Park claims an axis FindHome owns, and an AbortSlew cancels it, while TheSkyX still runs the home
-// loop. Both wait on the socket behind it; once FindHome's reply comes, the home is no longer this call's to report,
-// so AtHome stays false, as a Park retired the same way never sets AtPark (#2062).
+// A MoveAxis or a Park claims an axis FindHome owns, and an AbortSlew or a MoveAxis stop cancels it, while TheSkyX
+// still runs the home loop. Both wait on the socket behind it; once FindHome's reply comes, the home is no longer this
+// call's to report, so AtHome stays false, as a Park retired the same way never sets AtPark (#2062).
 TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindHome leaves AtHome false (#2263)",
           "[bisque][telescope][motion-owner]") {
     ClockedBisque rig;
-    const int leg = GENERATE(0, 1, 2);  // MoveAxis, Park, AbortSlew
+    const int leg = GENERATE(0, 1, 2, 3);  // MoveAxis, Park, AbortSlew, MoveAxis stop
     CAPTURE(leg);
     // The second command must reach its claim inside this real-time window; it takes no wire turn before it.
     rig.mount.find_home_ms = 1500;
@@ -2203,8 +2200,10 @@ TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindH
             rig.driver->move_axis(0, 0.5);
         } else if (leg == 1) {
             rig.driver->park();
-        } else {
+        } else if (leg == 2) {
             rig.driver->abort_slew();
+        } else {
+            rig.driver->move_axis(0, 0.0);
         }
     });
     REQUIRE(homed.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
@@ -2224,8 +2223,8 @@ TEST_CASE("Bisque motion owner - a MoveAxis on either axis lets a pulse on eithe
     const int direction = GENERATE(0, 2);  // North (Dec), East (RA)
     const int axis = GENERATE(0, 1);
     CAPTURE(direction, axis);
-    rig.mount.guide_ms = 800;
-    REQUIRE_NOTHROW(rig.driver->pulse_guide(direction, 1000));
+    rig.mount.guide_ms = 2000;  // margin over the 150 ms real-time sleep below on a loaded runner
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(direction, 2500));
     REQUIRE(wait_real([&] { return rig.mount.guide_commands.load() == 1; }));
     auto moved = std::async(std::launch::async, [&] { rig.driver->move_axis(axis, 0.5); });
     // Real time: the MoveAxis passes its gate and waits on the wrapper's lock behind the DirectGuide reply, and
