@@ -1992,4 +1992,55 @@ TEST_CASE("SynScan PulseGuide - a replacement takes over from an older pulse who
     driver->set_connected(false);
 }
 
+// The older pulse fails all its stop attempts and sits in the wait after the last one. A replacement arms its window
+// and releases mutex_ for its rate command; the old wait runs out right then (the handset steps the clock when the
+// rate arrives). The old body's failure tail must wait for the turn and find itself superseded: run under mutex_
+// alone it cleared the replacement's window (IsPulseGuiding false while the axis moves, decision 0022 rule 2) and
+// marked the axis as a runaway (Slewing true after the replacement's clean end). RA, because only its stop (the
+// tracking `T`) can fail on the fake: a Dec stop is blind.
+TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the replacement's window alone (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    auto answer = st->responder();
+    auto wake_on_rate = std::make_shared<std::atomic<bool>>(false);
+    auto rate = std::make_shared<alpacacore::test::Latch>();
+    alpacacore::test::FakeTaskClock* const virtual_clock = &clock;
+    alpacacore::test::FakeMountServer server([answer, wake_on_rate, rate, virtual_clock](const std::string& chunk) {
+        if (is_variable_rate_command(chunk, 16) && !is_zero_rate_command(chunk) && wake_on_rate->exchange(false)) {
+            virtual_clock->advance(std::chrono::milliseconds(100));  // the old body's last retry wait runs out
+            rate->block();
+        }
+        return answer(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_tracking_driver(clock, server.port(), 300);
+
+    const ParkedPulse first = start_pulse_parked(clock, *driver, 3, 200);  // West: RA
+    st->reject_tracking.store(true);                                       // every stop attempt's `T` times out
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const int before = st->command_count('T');
+        clock.advance(std::chrono::milliseconds(attempt == 0 ? 250 : 100));
+        REQUIRE(wait_until([&] { return st->command_count('T') > before; }, 5000));
+        REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));
+    }
+    st->reject_tracking.store(false);
+
+    wake_on_rate->store(true);
+    auto second = std::async(std::launch::async, [&] { driver->pulse_guide(3, 3000); });
+    REQUIRE(rate->wait_entered());
+    REQUIRE(returned(first));
+    rate->release();
+    second.get();
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+
+    const int tracking_writes = st->command_count('T');
+    // The replacement's end restores tracking (its `T`), whatever the old body did to the window.
+    REQUIRE(advance_until_pulse_ended(clock, *driver, [&] { return st->command_count('T') > tracking_writes; }));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

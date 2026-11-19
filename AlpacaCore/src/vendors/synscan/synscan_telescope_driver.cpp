@@ -1519,16 +1519,20 @@ public:
                     break;
                 }
             }
-            // A newer command took the axis during the retry wait: its rate replaced this one, so neither the window
-            // nor the axis is this body's any more (#2263).
-            if (!stopped && ctx.stop_reason() == util::StopReason::Superseded) {
-                return;
-            }
             if (!stopped) {
+                // In a wire turn, with the Superseded check made at the turn as each attempt makes it: a replacement
+                // pulse or a moving MoveAxis arms its window and releases mutex_ for its rate command, and supersedes
+                // this body only once that rate has landed. Under mutex_ alone this tail could run in that gap and
+                // clear the newer window or flag the newer motion as a runaway (decision 0022 rule 2, #2263). A newer
+                // command that took the axis owns the window and the axis, so the body touches neither.
+                std::unique_lock<std::mutex> lock(mutex_);
+                const WireTurn turn(*this, lock);
+                if (ctx.stop_reason() == util::StopReason::Superseded) {
+                    return;
+                }
                 ALPACA_LOG_ERROR("SynScan", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
                                                 " attempts on axis " + std::to_string(axis) +
                                                 " — axis may still be moving (mount runaway risk): " + last_error);
-                std::lock_guard<std::mutex> lock(mutex_);
                 pulse_hold_[axis_index].clear();
                 // Surface the error state: report the axis as slewing until an
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
@@ -2437,6 +2441,8 @@ private:
     // nothing and touches no state (run_pulse_stop_body()). Called under mutex_ once the newer command's rate has
     // landed, before anything lets the old body run again, so a failed command leaves the old pulse to end itself.
     void supersede_pulse_locked(int axis) {
+        // The bump comes before the cancel: a body that the cancel wakes must already read Superseded. Read as
+        // Cancelled, it would send its blind stop with no turn, which only a canceller that joins it may allow.
         pulse_generation_[axis].bump();
         pulse_ops_[axis].cancel();
     }
