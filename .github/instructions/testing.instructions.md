@@ -114,24 +114,13 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   `libusb_hotplug_register_callback` on any host without a working USB stack,
   so the real singleton cannot be touched on a test runner. Two extra rules
   apply there. **(a) No QHY fake method may block** — the camera driver's
-  exposure worker joins with a bounded timeout and *detaches* on expiry, so a
-  blocking fake leaves a detached thread calling into it after the test ends,
-  and its slot bodies (temperature, telemetry, cooler-off, pulse guide; #1736)
-  make the driver's destructor wait for a blocked call.
-  **(b) The detachable exposure worker must reach the seam through a captured
-  `QHYSDK*`, never through `this->sdk_`** — the worker still captures `this`
-  for everything else they touch; only the SDK call is required to go through
-  the raw pointer. **This narrows the use-after-free window; it does not close
-  it.** A detached worker that outlives the driver still dereferences `this`
-  afterwards (`connected_`, `mutex_`, the `exposure_superseded` re-check), and
-  that is UB whichever form the SDK call takes. What the raw pointer buys is
-  the *long* part of the window: the seam object is guaranteed to outlive
-  every driver built on it (rule 2 in `fake_qhy_sdk.h`), so a worker parked
-  inside a blocking SDK call — where it spends essentially all its time — is
-  not holding a reference into the driver for that whole duration. Reaching
-  the SDK via `sdk_` would instead touch the driver at the moment each call
-  returns, on top of the post-call touches. Treat detached workers as unsafe
-  and bound their lifetime; do not read this rule as making them safe.
+  exposure body (its `util::CaptureSession`) and its slot bodies (temperature,
+  telemetry, cooler-off, pulse guide) are joined with no time bound (#1736), so
+  a blocking fake makes the driver's disconnect or destructor wait for it.
+  **(b) Every body reaches the seam through `sdk_`**: none is detached since
+  #1736, so none outlives the driver, and the seam object outlives every driver
+  built on it (rule 2 in `fake_qhy_sdk.h`). The captured `QHYSDK*` that a
+  detachable worker once needed went with the last detach.
   Rule (a) has one sanctioned escape hatch: `FakeQHYSDK::before_call`, a hook that
   is null in every ordinary test and that a case sets deliberately to make one
   named fake method block (the three #339 cases use it to prove the

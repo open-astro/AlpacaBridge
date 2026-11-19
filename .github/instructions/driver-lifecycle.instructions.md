@@ -70,14 +70,14 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO and SVBONY are; decision 0020)
-  and the GPIO soft-PWM workers; the list is a sample, not a roster.
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO, SVBONY, ToupTek and QHY are;
+  decision 0020) and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
     freed memory (UB). Make it a joinable member thread with a cancel flag +
-    `std::condition_variable`, and cancel + join it in the destructor. The QHY camera's
-    exposure worker is the last bounded detach-on-timeout thread (its CaptureSession slice
-    of #1736 removes it); add no new one. The 2026-07
+    `std::condition_variable`, and cancel + join it in the destructor. No driver detaches a
+    thread any more (the QHY camera's exposure worker was the last, removed by #1736); add
+    no new one. The 2026-07
     full-codebase audit found this rule held on every connect/disconnect *lifecycle*
     path but violated on a dozen *operational* paths; apply it to every thread a driver
     spawns, not just the connection machinery.
@@ -197,7 +197,11 @@ vendor-agnostic; do them in the driver from the start.
   `CloseQHYCCD`-on-last-reference deleter in the wrapper) so the disconnect's
   `close_camera()` defers the physical close until every in-flight call
   finishes. Same shape applies to any vendor SDK with a long, uncancellable,
-  no-timeout call.
+  no-timeout call. The QHY exposure body is the exception (#1736): it runs in a
+  `util::CaptureSession`, and a disconnect calls `cancel_exposure()` first, then
+  `disconnect_and_join()`, which joins with no bound. When the cancel does not
+  interrupt `GetQHYCCDSingleFrame`, the disconnect waits for that one call, as
+  ZWO's waits for `ASIGetDataAfterExp` (decision 0020, the QHY row).
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
