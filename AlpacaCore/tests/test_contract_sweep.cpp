@@ -2555,8 +2555,8 @@ struct RemoteUpstreamFake {
 };
 
 // The proxied ObservingConditions over the scripted upstream. The hold is FakeHttpClient's per-call delay, a
-// connect_hold() site: while a ConnectHoldGate is alive the first call waits for its release (connect_hold_gate.h). The failing leg is an upstream
-// that refuses every connection, as a stopped server does.
+// connect_hold() site: while a ConnectHoldGate is alive the first call waits for its release (connect_hold_gate.h). The
+// failing leg is an upstream that refuses every connection, as a stopped server does.
 Tier2Host tier2_host_remotealpaca_observingconditions() {
     Tier2Host h{"remotealpaca_observingconditions",
                 "remotealpaca",
