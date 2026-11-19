@@ -1380,14 +1380,40 @@ TEST_CASE("SkyWatcher async - an RA duty stop during a Dec pulse's dispatch stop
     }
     const int dec_starts = mount.start_count(2);
 
+    // Names the duty worker's thread when it stops (the write below joins it). Shared state: the worker started
+    // after the write runs this hook at the disconnect too.
+    auto exit_thread = std::make_shared<std::promise<std::thread::id>>();
+    auto named = std::make_shared<std::atomic<bool>>(false);
+    sw::set_duty_before_exit_stop_hook_for_testing(*driver, [exit_thread, named] {
+        if (!named->exchange(true)) {
+            exit_thread->set_value(std::this_thread::get_id());
+        }
+    });
     driver->pulse_guide(0, 500);
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the duty tick and the Dec stop-wait
     std::thread write;
+    std::atomic<bool> wrote{false};
     if (!burst_end) {
         const int stops = mount.frames_seen('K');
-        write = std::thread([&] { driver->set_declination_rate(10.0); });  // Dec busy: stored for the pulse end
-        REQUIRE(mount.wait_for_frames('K', stops + 1, kRendezvous));       // the old worker's exit stop
-        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));
+        write = std::thread([&] {
+            driver->set_declination_rate(10.0);  // Dec busy: stored for the pulse end
+            wrote = true;
+        });
+        REQUIRE(mount.wait_for_frames('K', stops + 1, kRendezvous));  // the old worker's exit stop
+        auto exit_future = exit_thread->get_future();
+        REQUIRE(exit_future.wait_for(kRendezvous) == std::future_status::ready);
+        const std::thread::id duty = exit_future.get();
+        REQUIRE(clock.wait_for_waiter_thread(duty, kRendezvous));  // parked in its exit stop-wait
+        // The write stores its rate only once its stop_duty_worker() has joined the worker, after that stop lands
+        // on the clock. Step until the worker is gone, then wait for the write in real time, while the pulse still
+        // owns Dec. run_clock_until() steps whenever the pulse's own wait is parked, so on a loaded runner the pulse
+        // could end first; the write then found Dec busy with the jog and was kept for its MoveAxis(Dec, 0) (#2431).
+        int steps = 0;
+        do {
+            REQUIRE(step_clock(clock, kClockStep));
+        } while (clock.wait_for_waiter_thread(duty, std::chrono::milliseconds(0)) && ++steps < 40);
+        REQUIRE(wait_until([&] { return wrote.load(); }, 2000));
+        REQUIRE(driver->get_is_pulse_guiding());
     }
     CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
     mount.set_stop_ramp_ms(0);  // stops land at once from here: a ramping duty stop-wait would block the disconnect

@@ -1894,27 +1894,74 @@ public:
                     pulse_hold_[ai].clear();  // decision 0022: the window ends with its operation
                 }
             };
-            // The pulse owns RA until it lets go here, and set_site_latitude()
-            // skips a busy RA axis, so a crossing after the restore's last
-            // direction decision (inside the post-stop rate check, or between
-            // a dispatch-failure recovery and this release) was never
-            // applied. Decide again under the lock that hands the axis back.
-            // Not for a cancelled pulse (its reaper owns the axes) or a failed
-            // stop (nothing was restored).
-            auto release_pulse_locked = [this, axis, ai, my_seq, &stopped_by_other,
-                                         &end_pulse_locked](StateLock& lock) {
-                if (axis == kAxisRa && pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other() &&
-                    tracking_effectively_on_locked() && ra_duty_rate_deg_s_ == 0.0 && cmd_axis_rate_deg_s_[0] != 0.0 &&
-                    (effective_ra_rate_locked() > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
+            // What the Dec stop in stop_axis() below left: the DeclinationRate it read and whether the offset
+            // then ran. Set only once that stop has run (#2431).
+            struct DecRestore {
+                double rate = 0.0;
+                bool running = false;
+            };
+            std::optional<DecRestore> dec_restore;
+            // The pulse owns its axis until it lets go here, and the setters
+            // skip a busy axis: set_site_latitude() and set_right_ascension_rate()
+            // a busy RA axis, set_declination_rate() a busy Dec axis. They
+            // store the value for the pulse's restore. A write after the
+            // restore's last decision (inside the post-stop rate check, after
+            // stop_axis() dropped the lock, or between a dispatch-failure
+            // recovery and this release) was never applied (#2431). Decide
+            // again under the lock that hands the axis back. The appliers can
+            // drop the lock (a stop-wait, the rate check's start), and a write
+            // then is deferred again, so each side decides again after its
+            // applier, a bounded number of passes. Not for a cancelled pulse
+            // (its reaper owns the axes) or a failed stop (nothing was
+            // restored).
+            auto release_pulse_locked = [this, axis, ai, my_seq, &stopped_by_other, &end_pulse_locked,
+                                         &dec_restore](StateLock& lock) {
+                constexpr int kMaxPasses = 4;
+                const auto owns = [&] { return pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other(); };
+                for (int pass = 0; axis == kAxisRa && pass < kMaxPasses; ++pass) {
+                    const double running = cmd_axis_rate_deg_s_[0];
+                    if (!owns() || !tracking_effectively_on_locked() || ra_duty_rate_deg_s_ != 0.0 || running == 0.0 ||
+                        effective_ra_rate_locked() == running) {
+                        break;
+                    }
                     try {
-                        restart_ra_in_current_direction_locked(lock);
+                        if ((effective_ra_rate_locked() > 0.0) != (running > 0.0)) {
+                            restart_ra_in_current_direction_locked(lock);
+                        } else {
+                            // A RightAscensionRate write: the same applier as the setter's not-busy branch.
+                            apply_ra_tracking_rate_locked(lock, running);
+                        }
                     } catch (const std::exception& e) {
                         if (!lock.owns_lock()) {
                             lock.lock();
                         }
-                        ALPACA_LOG_WARN(
-                            "SkyWatcher",
-                            std::string("Pulse end: failed to turn RA round after a hemisphere change: ") + e.what());
+                        ALPACA_LOG_WARN("SkyWatcher",
+                                        std::string("Pulse end: failed to re-apply the RA drive rate: ") + e.what());
+                        break;
+                    }
+                }
+                if (axis == kAxisDec && dec_restore) {
+                    double applied = dec_restore->rate;
+                    bool running = dec_restore->running;
+                    for (int pass = 0; pass < kMaxPasses; ++pass) {
+                        if (!owns() || !tracking_effectively_on_locked() || dec_rate_arcsec_per_sec_ == applied) {
+                            break;
+                        }
+                        applied = dec_rate_arcsec_per_sec_;
+                        // The deferred write cleared dec_offset_running_ without touching the axis, which still
+                        // does what the last applier left: the applier must stop a running offset first.
+                        dec_offset_running_ = running;
+                        try {
+                            apply_dec_rate_offset_locked(lock);
+                        } catch (const std::exception& e) {
+                            if (!lock.owns_lock()) {
+                                lock.lock();
+                            }
+                            ALPACA_LOG_WARN("SkyWatcher",
+                                            std::string("Pulse end: failed to apply the Dec rate offset: ") + e.what());
+                            break;
+                        }
+                        running = dec_offset_running_;
                     }
                 }
                 end_pulse_locked();
@@ -2125,7 +2172,7 @@ public:
             bool lost_axis = false;
             auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
                               &restore_still_wanted, &restored_by_drive_applier, &stop_ra_if_tracking_off_locked,
-                              &superseded_locked, &lost_axis]() {
+                              &superseded_locked, &lost_axis, &dec_restore]() {
                 restored_by_drive_applier = false;  // a retried stop decides afresh
                 // Every exchange below runs under a lock that first checks the pulse still owns its axis.
                 const auto lost_locked = [&] { return lost_axis = superseded_locked(); };
@@ -2288,6 +2335,7 @@ public:
                     // A Dec pulse pre-empted any DeclinationRate offset
                     // motion: re-apply it so guiding corrections don't
                     // silently cancel comet/satellite tracking.
+                    const double restore_rate = dec_rate_arcsec_per_sec_;  // read before the applier can drop the lock
                     if (axis == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0) {
                         try {
                             apply_dec_rate_offset_locked(lock);
@@ -2295,6 +2343,12 @@ public:
                             ALPACA_LOG_WARN("SkyWatcher",
                                             std::string("Pulse end: failed to restore Dec rate offset: ") + e.what());
                         }
+                    }
+                    if (axis == kAxisDec) {
+                        // The rate this restore read (and applied, with tracking on), and whether the offset runs
+                        // now. A write while the applier's stop-wait had the lock released leaves the stored rate
+                        // unequal to it, and the release applies it.
+                        dec_restore = DecRestore{restore_rate, dec_offset_running_};
                     }
                 }
             };
