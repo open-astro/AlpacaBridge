@@ -477,8 +477,9 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a reconnect rebuilds the D
     Rig rig;
     rig.upstream.set("description", "\"\"");  // the upstream has no Description: the default stays
     rig.upstream.set("name", "\"Simulator (ObservingConditions, port 2)\"");
-    const std::string expected = "ObservingConditions of the upstream Alpaca server 127.0.0.1:11111 device 0 "
-                                 "(upstream Name: Simulator (ObservingConditions, port 2))";
+    const std::string expected =
+        "ObservingConditions of the upstream Alpaca server 127.0.0.1:11111 device 0 "
+        "(upstream Name: Simulator (ObservingConditions, port 2))";
     rig.connect();
     CHECK(rig.driver->get_description() == expected);
     rig.driver->set_connected(false);
