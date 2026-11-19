@@ -509,9 +509,13 @@ std::optional<alpacacore::util::TaskClock::clock::time_point> step_until_image_r
             }
             return std::nullopt;
         }
+        if (!rig.clock.wait_for_woken_settled(std::chrono::milliseconds(100))) {
+            // A thread the last step woke has not reached its next clock wait or exited. Its old wait still counts
+            // in waiter_count(), so a step now would move the clock while it is between two waits (open-astro#743).
+            continue;
+        }
         if (rig.clock.waiter_count() > 0) {
             rig.clock.advance(step);
-            static_cast<void>(rig.clock.wait_for_woken_settled(std::chrono::milliseconds(100)));
         } else {
             // The body is between clock waits, in an SDK call or the frame download, which run in real time. Wait
             // for it to park on the clock again, for 1 ms at most so the checks above run again.

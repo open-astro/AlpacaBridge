@@ -54,16 +54,20 @@ inline bool wait_exposure_end(const CameraDriver& camera, std::chrono::milliseco
 }
 
 /// As above on a FakeTaskClock: each time a thread waits on the clock (the status poll, the retry pacing, the USB 2.0
-/// settle), advances it by `step` and lets the woken threads settle.
+/// settle) and every thread the last step woke has settled, advances it by `step`.
 inline bool wait_exposure_end(const CameraDriver& camera, FakeTaskClock& clock,
                               std::chrono::nanoseconds step = std::chrono::milliseconds(50),
                               std::chrono::milliseconds bound = std::chrono::seconds(5)) {
     const auto deadline = std::chrono::steady_clock::now() + bound;
     while (!zwo_exposure_ended(camera)) {
         if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (!clock.wait_for_woken_settled(std::chrono::milliseconds(100))) {
+            // A thread the last step woke has not reached its next clock wait or exited. Its old wait still counts
+            // in waiter_count(), so a step now would move the clock while it is between two waits (open-astro#743).
+            continue;
+        }
         if (clock.waiter_count() > 0) {
             clock.advance(step);
-            static_cast<void>(clock.wait_for_woken_settled(std::chrono::milliseconds(100)));
         } else {
             // The body is between clock waits, in an SDK call or the frame download, which run in real time. Wait
             // for it to park on the clock again, for 1 ms at most so the end check above runs again.
