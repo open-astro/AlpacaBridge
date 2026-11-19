@@ -131,7 +131,8 @@ public:
         if (still && status_stopped) {
             return StopStep::Verified;
         }
-        if (now - round_started_ < kStopVerifyBudget / kStopResendRounds) {
+        // In milliseconds: seconds divided by a round count would truncate (4 s / 3 is 1 s in whole seconds).
+        if (now - round_started_ < std::chrono::milliseconds(kStopVerifyBudget) / kStopResendRounds) {
             return StopStep::Wait;
         }
         return stops_sent_ >= kStopResendRounds ? StopStep::Failed : StopStep::Resend;

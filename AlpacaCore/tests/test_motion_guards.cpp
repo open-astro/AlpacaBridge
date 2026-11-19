@@ -166,6 +166,23 @@ TEST_CASE("StopVerifier - within 30 arcsec is still, beyond it is motion, on eit
     }
 }
 
+TEST_CASE("StopVerifier - exactly 30 arcsec apart is still", "[motion-guards]") {
+    StopVerifier verifier(at(0ms));
+    CHECK(verifier.feed(at(100ms), status_at(100ms, false), read_at(100ms, 1.0, 0.0)) == StopStep::Wait);
+    CHECK(verifier.feed(at(600ms), status_at(600ms, false), read_at(600ms, 1.0, 30 * kArcsecToDegrees)) ==
+          StopStep::Verified);
+}
+
+TEST_CASE("StopVerifier - a read before a resend does not pair with one after it", "[motion-guards]") {
+    StopVerifier verifier(at(0ms));
+    CHECK(verifier.feed(at(750ms), status_at(750ms, true), read_at(750ms, 1.0, 10.0)) == StopStep::Wait);
+    CHECK(verifier.feed(at(1000ms), status_at(1000ms, true), read_at(1000ms, 1.0, 10.0)) == StopStep::Resend);
+    verifier.stop_resent(at(1000ms));
+    // 500 ms after the 750 ms read, but only 250 ms after the first read that follows the resend.
+    CHECK(verifier.feed(at(1250ms), status_at(1250ms, false), read_at(1250ms, 1.0, 10.0)) == StopStep::Wait);
+    CHECK(verifier.feed(at(1750ms), status_at(1750ms, false), read_at(1750ms, 1.0, 10.0)) == StopStep::Verified);
+}
+
 TEST_CASE("StopVerifier - failed, unknown and stale reads never verify", "[motion-guards]") {
     SECTION("a failed position read") {
         StopVerifier verifier(at(0ms));
@@ -595,6 +612,9 @@ TEST_CASE("check_sync_bound - a position that is not a number is refused", "[mot
     const double nan = std::nan("");
     alpacacore::test::require_alpaca_error(
         [nan] { check_sync_bound("SyncToCoordinates", MountPosition{nan, 10.0}, MountPosition{1.0, 10.0}, 5.0); },
+        AlpacaError::InvalidValue);
+    alpacacore::test::require_alpaca_error(
+        [nan] { check_sync_bound("SyncToCoordinates", MountPosition{1.0, nan}, MountPosition{1.0, 10.0}, 5.0); },
         AlpacaError::InvalidValue);
     alpacacore::test::require_alpaca_error(
         [nan] { check_sync_bound("SyncToCoordinates", MountPosition{1.0, 10.0}, MountPosition{1.0, 10.0}, 5.0, nan); },
