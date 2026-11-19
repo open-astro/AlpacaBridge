@@ -774,6 +774,11 @@ Sets RA tracking rate:
 - `:ms#` – Dec+  
 - `:mw#` – RA+  
 
+Despite the letters, "RA+" raises the RightAscension reading, as `:ZS` (RA+) does
+(AlpacaBridge issue #2424; INDI found the same on a CEM120). The driver treats "Dec+"
+as a mechanical sense that flips with pier side, as the Dec guide pulses do; no rig has
+confirmed that for `:mn#`/`:ms#` yet.
+
 **Response:**  
 None  
 
