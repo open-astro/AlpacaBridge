@@ -80,13 +80,15 @@ NormalizeResult normalize_telescope(const DeviceConfig& in, Source source) {
         result.config.set(kZwoConnectionType.key, type);
     }
 
-    const char* endpoint_missing = nullptr;
+    std::string endpoint_missing;
     if (type == "serial" && in.get(kZwoPortPath).empty()) {
         endpoint_missing = "Serial port path is required";
     } else if (type == "network" && in.get(kZwoHost).empty()) {
         endpoint_missing = "Host IP address is required";
+    } else if (type == "network") {
+        endpoint_missing = network_port_fault(kZwoTcpPort.key, result.config.get(kZwoTcpPort));
     }
-    if (endpoint_missing) {
+    if (!endpoint_missing.empty()) {
         if (from_api) {
             result.rejection = endpoint_missing;
             return result;

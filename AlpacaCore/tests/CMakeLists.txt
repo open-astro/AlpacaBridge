@@ -56,8 +56,11 @@ set(TEST_SOURCES
     test_hold_window.cpp
     test_pointing_math.cpp
     test_telescope_command_gate.cpp
+    test_camera_frame_request.cpp
+    test_sexagesimal.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
+    test_motion_owner.cpp
     test_lock_gate.cpp
     test_capture_session.cpp
     test_connection_resolver.cpp
@@ -223,11 +226,21 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_getter_locks.cpp)
     # Getters and DeviceState served from the polled snapshot (issue #1783).
     list(APPEND TEST_SOURCES test_onstep_telescope_snapshot.cpp)
+    # The OnStepX focuser and the controller's shared link, with its [stress] case (issue #2223).
+    list(APPEND TEST_SOURCES test_onstep_focuser.cpp)
+    # The OnStepX rotator on the same shared link, with its [stress] cases (issue #2221).
+    list(APPEND TEST_SOURCES test_onstep_rotator.cpp)
+    # The OnStepX auxiliary features as a Switch on the same link, with its [stress] cases (issue #2222).
+    list(APPEND TEST_SOURCES test_onstep_switch.cpp)
 endif()
 if(TARGET alpacacore_http_client)
     # The util::HttpClient libcurl implementation against a loopback server, and its
     # test-only locked decorator (decision 0023, issue #1753).
     list(APPEND TEST_SOURCES test_http_client.cpp)
+endif()
+if(TARGET alpacacore_remotealpaca)
+    # The upstream Alpaca client against the loopback fake Alpaca server (issue #1753).
+    list(APPEND TEST_SOURCES test_remotealpaca_client.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.
@@ -374,6 +387,9 @@ if(TARGET alpacacore_onstep)
 endif()
 if(TARGET alpacacore_http_client)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_http_client)
+endif()
+if(TARGET alpacacore_remotealpaca)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_remotealpaca)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)

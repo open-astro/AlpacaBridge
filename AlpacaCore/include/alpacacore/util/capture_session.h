@@ -92,6 +92,10 @@ public:
     std::uint64_t token() const { return token_; }
     /// The SDK exposure has begun: stamps LastExposureStartTime and the PercentCompleted base.
     inline void exposure_started();
+    /// Moves the watchdog deadline to at least `from_now` after the task clock's now, for a download whose length
+    /// the body learns only once the exposure has run (QHY's slow readout modes, #1736). It never shortens the
+    /// deadline. False, and nothing changed, when this body no longer owns the session.
+    inline bool extend_deadline(std::chrono::nanoseconds from_now);
     /// The frame is being downloaded: CameraState Download.
     inline void reading_out();
     /// Publishes the frame. False, and the frame dropped, when this body no
@@ -173,9 +177,9 @@ public:
 
     /// start() for a reserved start: consumes `reservation` once Exposing is published and releases it on any
     /// refusal or throw. A reservation a disconnect_and_join() dropped is refused with NotConnected, and the body
-    /// never runs. Returns true when an AbortExposure arrived while the start was reserved (record_abort()): the
-    /// driver then stops the exposure it just started, the same way its AbortExposure stops a running one. An abort
-    /// recorded for a start that is refused is cleared with the reservation.
+    /// never runs. Returns true when an AbortExposure arrived while the start was reserved (record_abort()): that
+    /// abort is applied at once, so the exposure ends Idle with no frame and the body never runs; the driver has no
+    /// SDK exposure to stop. An abort recorded for a start that is refused is cleared with the reservation.
     [[nodiscard]] bool start(CaptureReservation&& reservation, double duration_seconds, Body body,
                              std::optional<std::chrono::nanoseconds> watchdog_margin = std::nullopt) {
         CaptureReservation held = std::move(reservation);
@@ -266,6 +270,17 @@ private:
         if (reservation != 0) {
             reserved_ = 0;
             aborted = std::exchange(abort_pending_, false);
+        }
+        if (aborted) {
+            // Rule 9: the abort recorded during the reservation applies the moment Exposing would be published, so
+            // the exposure is published and aborted in one step and no body runs. Running the body and leaving the
+            // abort to the driver raced it: a body that reached its download first served the aborted frame (#2337).
+            state_ = State::Idle;
+            image_.reset();
+            failure_.reset();
+            owner_ = 0;
+            cv_.notify_all();
+            return true;
         }
         const Saved saved{state_, image_, failure_};
         const std::uint64_t token = ++last_token_;
@@ -684,6 +699,19 @@ inline void CaptureControl::exposure_started() {
         session_.start_time_ = std::chrono::system_clock::now();
         session_.base_ = session_.clock_.now();
     }
+}
+
+inline bool CaptureControl::extend_deadline(std::chrono::nanoseconds from_now) {
+    std::unique_lock<std::mutex> lock(session_.mutex_);
+    session_.apply_watchdog(lock);
+    if (!session_.owns_locked(token_)) {
+        return false;
+    }
+    const auto at_least = session_.clock_.now() + std::chrono::duration_cast<TaskClock::clock::duration>(from_now);
+    if (at_least > session_.deadline_) {
+        session_.deadline_ = at_least;
+    }
+    return true;
 }
 
 inline void CaptureControl::reading_out() {

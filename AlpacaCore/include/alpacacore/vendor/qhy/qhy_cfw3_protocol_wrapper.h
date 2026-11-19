@@ -135,7 +135,8 @@ public:
 
     /**
      * @brief False once a transaction has seen the port die since the last
-     * connect(): POLLHUP, EOF, or EIO/ENXIO/ENODEV/EBADF (the #445 shape).
+     * connect(): POLLHUP, EOF, or EIO/ENXIO/ENODEV/EBADF (the #445 shape; the
+     * util::SerialLink verdict since #2262).
      * The fd is released at that moment and every later command throws
      * NotConnected until a new connect(). Lock-free.
      */

@@ -230,10 +230,9 @@ private:
     }
 
     // open-astro#339: the "no QHY fake method may block" rule was prose in two
-    // headers, and two things depend on it -- the camera driver's detachable
-    // workers (a blocking fake turns a timed-out join into a detached thread
-    // still calling into a fake the test body has already destroyed) and the
-    // cancel_exposure exemption above. A future fake method gaining a
+    // headers, and two things depend on it -- the camera driver's joined
+    // bodies (a blocking fake hangs its disconnect or teardown, since #1736 with
+    // no time bound) and the cancel_exposure exemption above. A future fake method gaining a
     // perfectly reasonable-looking sleep_for silently broke both, and the
     // symptom was a HUNG [stress] run rather than a named failure.
     //
@@ -271,13 +270,13 @@ private:
  * lifetime rule cannot be written wrong (open-astro#338).
  *
  * Every QHY seam test must outlive the driver with the fake: the driver holds
- * a QHYSDK& and its detachable workers capture a raw QHYSDK*, so a case that
+ * a QHYSDK& and the bodies it joins call through it, so a case that
  * declares them the other way round -- or stashes the driver in a Catch2
  * fixture member, a vector, or anything outliving the fake -- compiles
- * cleanly and is undefined behaviour, most likely a use-after-free inside a
- * detached worker. That is the failure mode hardest to attribute when it
- * surfaces, and the [stress] storms raise the stakes: the exposure worker is
- * detachable, and the slot bodies outlive a disconnect until the destructor.
+ * cleanly and is undefined behaviour, most likely a use-after-free of the
+ * fake. That is the failure mode hardest to attribute when it surfaces, and
+ * the [stress] storms raise the stakes: the slot bodies outlive a disconnect
+ * until the destructor joins them.
  *
  * The rule was stated in three places (the QHYSDK interface comment, the
  * FakeQHYSDK class comment, and testing.instructions.md) and enforced by nothing. Member
@@ -309,8 +308,8 @@ public:
 
 private:
     // DECLARATION ORDER IS THE CONTRACT. Members destroy in reverse, so the
-    // driver goes first (joining or detaching its workers), then the
-    // decorator, then the fake those workers may still be calling into.
+    // driver goes first (joining its exposure body and slot bodies), then the
+    // decorator, then the fake those bodies called into.
     // Reordering these three lines reintroduces exactly the bug this exists
     // to make unwritable.
     // destroys_driver_first() asserts the order, so reordering fails its test.

@@ -16,11 +16,13 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -35,6 +37,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 
 #ifndef _WIN32
@@ -43,6 +46,7 @@
 #include <unistd.h>
 
 #include "fake_celestron_focuser.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #endif
 
@@ -813,6 +817,27 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     CHECK(rig.driver->get_position() == 31000);
 }
 
+// Issue #2262: EBADF on the focus motor's own fd is a lost link, as on every serial vendor (the AUX link feeds the
+// errno to the shared util::SerialLink verdict). Before #2262 the wrapper's own list was EIO/ENXIO/ENODEV: the Move
+// failed with DriverException and Connected kept reading true.
+TEST_CASE("Celestron Focuser Driver - EBADF on a Move's write loses the link at once",
+          "[celestron][focuser][unit][fake][link-lost][issue2262]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    const auto before = alpacacore::test::fds_open_on(rig.node);
+    REQUIRE(alpacacore::test::connect_and_park(*rig.driver, rig.clock, kBound));  // the poll waits on the clock
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(rig.node));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { rig.driver->move(5000); }, AlpacaError::NotConnected);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(write: " + alpacacore::util::errno_string(EBADF) + ")") !=
+          std::string::npos);
+    rig.driver->set_connected(false);
+    CHECK(rig.driver->get_link_fault().empty());
+}
+
 TEST_CASE("Celestron Focuser Driver - a cable pulled during the state poll ends the poll in that tick",
           "[celestron][focuser][unit][fake][link-lost]") {
     FocuserLinkRig rig;
@@ -872,19 +897,25 @@ TEST_CASE("Celestron Focuser Driver - a Disconnect during a connect returns at o
     REQUIRE(rig.fake->ok());
     rig.fake->gate_next(0x2C);
     rig.driver->connect();
+    REQUIRE(rig.driver->get_connecting());  // read before the gate wait: the held read times out (500 ms) on its own
     REQUIRE(rig.fake->wait_gate_reached(kBound));
-    REQUIRE(rig.driver->get_connecting());
-    // The gate opens 300 ms from now on its own, so a disconnect that waits for the connect ends (late) instead of
-    // waiting on a gate this thread would only open after it returns.
-    std::thread opener([&rig] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the held read
+    // The test opens the gate once it has read Connecting, not after a fixed time: a timed opener could fire in a
+    // scheduler pause before disconnect() ran, and Connecting then read false with a correct driver. A disconnect
+    // that waits for the connect never lets the test get there, so the opener also fires on its own after
+    // ConnectHoldGate::kCap (connect_hold_gate.h): that disconnect returns late and fails the timing check.
+    std::promise<void> checked;
+    std::thread opener([&rig, done = checked.get_future()] {
+        (void)done.wait_for(alpacacore::test::ConnectHoldGate::kCap);
         rig.fake->release_gate();
     });
     const auto t0 = std::chrono::steady_clock::now();
     rig.driver->disconnect();
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
-    CHECK(rig.driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = rig.driver->get_connecting();
+    checked.set_value();
     opener.join();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
     const auto deadline = std::chrono::steady_clock::now() + kBound;
     while (rig.driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

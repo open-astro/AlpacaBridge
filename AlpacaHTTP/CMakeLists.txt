@@ -258,8 +258,16 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/core/catalog_json.cpp
     src/http/router.cpp
+    src/http/routes/camera_routes.cpp
     src/http/routes/covercalibrator_routes.cpp
+    src/http/routes/dome_routes.cpp
+    src/http/routes/filterwheel_routes.cpp
+    src/http/routes/focuser_routes.cpp
+    src/http/routes/observingconditions_routes.cpp
+    src/http/routes/rotator_routes.cpp
     src/http/routes/safetymonitor_routes.cpp
+    src/http/routes/switch_routes.cpp
+    src/http/routes/telescope_routes.cpp
     src/http/device_call.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
@@ -384,15 +392,72 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_compile_definitions(test_routing PRIVATE
         ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-    # Test-only server for the hardware-free ConformU job: a test catalog
-    # descriptor over FakeSkyWatcherMount. Not installed and not linked into
-    # alpacabridge or alpacahttp_server. The fake header lives under
-    # AlpacaCore/tests, so that directory is on this target's include path only.
+    # Test-only server for the hardware-free ConformU job (#2078): a test catalog
+    # descriptor over the fake of one scripts/conformu_fake_runs.tsv row. Not
+    # installed and not linked into alpacabridge or alpacahttp_server. The fake
+    # headers live under AlpacaCore/tests, so that directory is on this target's
+    # include path only. Each vendor that is built adds its hosts: the server
+    # links it and gets FAKE_CONFORMU_<VENDOR>, which guards that vendor's
+    # factories (one vendor per CI matrix job, conformu-fake.yml).
+    add_executable(fake_conformu_server tests/fake_conformu_server.cpp)
+    target_link_libraries(fake_conformu_server alpacahttp)
+    target_include_directories(fake_conformu_server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
     if(TARGET alpacacore_skywatcher)
-        add_executable(fake_skywatcher_server tests/fake_skywatcher_server.cpp)
-        target_link_libraries(fake_skywatcher_server alpacahttp alpacacore_skywatcher)
-        target_include_directories(fake_skywatcher_server PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
+        target_link_libraries(fake_conformu_server alpacacore_skywatcher)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_SKYWATCHER)
+    endif()
+    if(TARGET alpacacore_zwo)
+        target_link_libraries(fake_conformu_server alpacacore_zwo)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ZWO)
+    endif()
+    if(TARGET alpacacore_celestron)
+        target_link_libraries(fake_conformu_server alpacacore_celestron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_CELESTRON)
+    endif()
+    if(TARGET alpacacore_onstep)
+        target_link_libraries(fake_conformu_server alpacacore_onstep)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ONSTEP)
+    endif()
+    if(TARGET alpacacore_ioptron)
+        target_link_libraries(fake_conformu_server alpacacore_ioptron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_IOPTRON)
+    endif()
+    if(TARGET alpacacore_astroasis)
+        target_link_libraries(fake_conformu_server alpacacore_astroasis)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ASTROASIS)
+    endif()
+    if(TARGET alpacacore_gemini)
+        target_link_libraries(fake_conformu_server alpacacore_gemini)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GEMINI)
+    endif()
+    if(TARGET alpacacore_qhy)
+        target_link_libraries(fake_conformu_server alpacacore_qhy)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_QHY)
+    endif()
+    if(TARGET alpacacore_playerone)
+        target_link_libraries(fake_conformu_server alpacacore_playerone)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_PLAYERONE)
+    endif()
+    if(TARGET alpacacore_wandererastro)
+        target_link_libraries(fake_conformu_server alpacacore_wandererastro)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_WANDERERASTRO)
+    endif()
+    if(TARGET alpacacore_touptek)
+        target_link_libraries(fake_conformu_server alpacacore_touptek)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_TOUPTEK)
+    endif()
+    if(TARGET alpacacore_altair)
+        target_link_libraries(fake_conformu_server alpacacore_altair)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ALTAIR)
+    endif()
+    if(TARGET alpacacore_svbony)
+        target_link_libraries(fake_conformu_server alpacacore_svbony)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_SVBONY)
+    endif()
+    if(TARGET alpacacore_gphoto)
+        target_link_libraries(fake_conformu_server alpacacore_gphoto)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GPHOTO)
     endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own

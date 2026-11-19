@@ -289,6 +289,40 @@ TEST_CASE("GPhoto Camera Driver - Connected ROI round-trips and rejects negative
     driver->set_connected(false);
 }
 
+// #2261: StartExposure checks the frame against the sensor through util::camera_frame_request.h, NumX/NumY above the
+// sensor before StartX/StartY off it, as on every camera. A frame bad both ways therefore answers the above-the-sensor
+// check, which GPhoto words as "ROI extends beyond sensor bounds" (it checked the start first before #2261); each
+// one-way misfit keeps its own text.
+TEST_CASE("GPhoto Camera Driver - StartExposure names the first way a frame misses the sensor",
+          "[gphoto][camera][unit]") {
+    alpacacore::test::reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_connectable_camera(alpacacore::test::unique_test_model("Nikon DSC D5300")));
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_camera_x_size() == 8);  // the canned 8x6 priming frame
+
+    const auto refusal = [&] {
+        try {
+            driver->start_exposure(0.01, true);
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+            return std::string(e.what());
+        }
+        return std::string("accepted");
+    };
+    driver->set_num_x(9);    // above the 8-pixel sensor
+    driver->set_start_x(8);  // and starting off it
+    CHECK(refusal() == "ROI extends beyond sensor bounds");
+    driver->set_num_x(4);  // only the start is off the sensor
+    CHECK(refusal() == "Start position outside sensor bounds");
+    driver->set_start_x(5);  // on the sensor, but 5 + 4 runs past its edge
+    CHECK(refusal() == "ROI extends beyond sensor bounds");
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto Camera Driver - ROI and cooler setters throw NotConnected while disconnected",
           "[gphoto][camera][unit]") {
     // Falsified by: dropping ensure_connected() from set_roi_dimension_locked or set_cooler_on.

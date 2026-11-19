@@ -15,6 +15,8 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -22,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -47,6 +50,7 @@
 #include "concurrency_stress.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_mount_server.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #include "pty_responder.h"
 #endif
@@ -684,6 +688,30 @@ TEST_CASE("Celestron Telescope Driver - non-finite guide rate is rejected", "[ce
     require_alpaca_error([&]() { driver->set_guide_rate({-0.004, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate_declination(-0.004); }, alpacacore::AlpacaError::InvalidValue);
     driver->set_connected(false);
+}
+
+// #2379: disconnected, a NaN or infinite rate is InvalidValue on the per-axis setters as on set_guide_rate(); they
+// used to read GuideRate first and answer NotConnected. A negative rate keeps NotConnected (#2257 decision: the
+// autoguider port is known only once connected). Falsified by: dropping the finite check from either per-axis
+// override, or calling the base setter before it.
+TEST_CASE("Celestron Telescope Driver - per-axis guide-rate setters refuse a non-finite rate before the connection",
+          "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    for (const double bad : {nan, inf, -inf}) {
+        require_alpaca_error([&]() { driver->set_guide_rate({bad, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(-1.0); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
@@ -2222,6 +2250,29 @@ TEST_CASE("Celestron Link - a write to a pulled mount loses the link at once and
     }
     check_lost(driver);
     CHECK(driver.get_link_fault().find("serial link lost (write)") != std::string::npos);
+    driver.set_connected(false);
+    CHECK(driver.get_link_fault().empty());
+}
+
+// Issue #2262: EBADF on the mount's own serial fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException
+// and Connected kept reading true over a dead fd.
+TEST_CASE("Celestron Link - EBADF on a command write loses the link at once",
+          "[celestron][telescope][unit][fake][link-lost][issue2262]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    const std::string pts = rig.mount->slave_path();
+    const auto before = alpacacore::test::fds_open_on(pts);
+    rig.connect();  // the poll is parked: only the case's own call reaches the fd
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(pts));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    check_lost(driver);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(pts));
+    CHECK(driver.get_link_fault().find("serial link lost (write): " + alpacacore::util::errno_string(EBADF)) !=
+          std::string::npos);
     driver.set_connected(false);
     CHECK(driver.get_link_fault().empty());
 }

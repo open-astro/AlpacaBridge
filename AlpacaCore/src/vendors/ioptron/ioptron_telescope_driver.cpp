@@ -25,6 +25,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
@@ -49,6 +50,25 @@
 #include <type_traits>
 
 namespace alpacacore::vendor::ioptron {
+
+// iOptron's limits for the telescope command gate (#2258). PulseGuide takes up to 99999 ms (the protocol's 5-digit
+// duration field); MoveAxis moves axes 0 and 1, and its discrete arrow speeds stay the driver's check after the gate.
+// The guide-rate static check is finite and greater than 0 (denorm_min is the smallest double above 0); its range
+// depends on the calibration scale, known only once connected, so it stays the driver's check after the connection.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 99999;
+    limits.move_axis_axes = 2;
+    limits.guide_rate_ra_min = std::numeric_limits<double>::denorm_min();
+    limits.guide_rate_dec_min = std::numeric_limits<double>::denorm_min();
+    limits.texts.pulse_direction = "PulseGuide direction must be 0-3";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0-99999 ms";
+    limits.texts.move_axis_axis = "Axis must be 0 (Primary) or 1 (Secondary)";
+    limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
+    limits.texts.guide_rate_not_finite = "GuideRate must be a finite number greater than 0";
+    limits.texts.guide_rate_range = "GuideRate must be a finite number greater than 0";
+    return limits;
+}();
 
 /**
  * @brief iOptron mount telescope driver implementation.
@@ -392,15 +412,7 @@ public:
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
     // and the destructor serialize behind it for the duration. Deliberate
     // (base class "COST" note); this driver is the worst case of it.
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // The auto-detect factories need the driver's unique id inside the resolver,
     // and the id is assigned only after the driver exists. Call before the first connect.
@@ -983,17 +995,11 @@ public:
     }
 
     // #2257: the static check (finite, > 0) runs before the connection check.
-    static void validate_guide_rate_value(double value) {
-        if (!std::isfinite(value) || value <= 0.0) {
-            throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
-        }
-    }
-
     void set_guide_rate(const GuideRate& rate) override {
-        validate_guide_rate_value(rate.ra);
-        validate_guide_rate_value(rate.dec);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRate"});
 
         // The range depends on the calibration scale, known only once connected. Out of range is refused, never
         // clamped (#2257); the clamp below only absorbs rounding inside kEps of a bound.
@@ -1018,11 +1024,11 @@ public:
     // The base per-axis setters read the rate first, which throws NotConnected while disconnected: check the
     // argument before it (#2257).
     void set_guide_rate_right_ascension(double value) override {
-        validate_guide_rate_value(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
         TelescopeDriver::set_guide_rate_right_ascension(value);
     }
     void set_guide_rate_declination(double value) override {
-        validate_guide_rate_value(value);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
         TelescopeDriver::set_guide_rate_declination(value);
     }
 
@@ -1258,19 +1264,14 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
-                                  AlpacaError::InvalidValue);
-        }
-
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         double abs_rate = std::abs(rate);
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
+        util::check_move_axis_state(kCommandLimits, abs_rate == 0.0, GateChecks{*this, "MoveAxis"});
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         const Wire protocol = wire();
@@ -1756,16 +1757,9 @@ public:
     
     void pulse_guide(int direction, int duration) override {
         // Argument validation precedes the connection and park checks (ASCOM).
-        // 99999 ms is the protocol's 5-digit duration field.
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("PulseGuide direction must be 0-3", AlpacaError::InvalidValue);
-        }
-        if (duration < 0 || duration > 99999) {
-            throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_fast_locked("PulseGuide");
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", /*fast_parked=*/true});
         // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
         // status is still the GOTO's: the pulse itself makes the firmware report slewing.
         if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
@@ -1875,12 +1869,12 @@ public:
     }
     
     void slew_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinates");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
@@ -1889,7 +1883,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
@@ -1901,7 +1895,7 @@ public:
             phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             equatorial_slew_ = true;
             generation = slew_operation_generation_;
@@ -2444,17 +2438,30 @@ private:
         }
     }
 
-    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Runs after the parked check and before the new slew
-    // supersedes a dispatch in flight, so a refusal leaves that motion alone.
-    // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
-    void check_equatorial_slew_allowed_locked(const char* label) const {
-        check_connected();
-        ensure_not_parked_locked(label);
-        if (tracking_off_for_slew_locked()) {
-            throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+    // The command gate's state checks in iOptron's words (#2258): util/telescope_command_gate.h decides the order,
+    // these answer each step with the driver's own texts and reads. check_connected() also refuses a latched fault,
+    // so the gate's fault step has nothing left to check. PulseGuide reads the parked flag from the cache
+    // (`fast_parked`); the other families may refresh it from the mount.
+    struct GateChecks {
+        const iOptronTelescopeDriver& driver;
+        const char* who = nullptr;
+        bool fast_parked = false;
+        void check_connected() const { driver.check_connected(); }
+        void check_not_parked(bool /*stop*/) const {
+            fast_parked ? driver.ensure_not_parked_fast_locked(who) : driver.ensure_not_parked_locked(who);
         }
-    }
+        void check_no_fault() const {}
+        // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+        // (open-astro#1274). Runs after the parked check and before the new slew
+        // supersedes a dispatch in flight, so a refusal leaves that motion alone.
+        // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
+        void check_tracking() const {
+            if (driver.tracking_off_for_slew_locked()) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+    };
 
     // Not get_tracking_locked(): :GLS reports slewing (2) instead of tracking,
     // so the getter reads a GOTO as off, and refusing there would refuse a

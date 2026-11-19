@@ -1283,12 +1283,21 @@ nlohmann::json WifiManager::profiles() {
     return list;
 }
 
+namespace {
+// A NUL byte would cut the passphrase short where it reaches NetworkManager as a C string (sd_bus_message_append),
+// so a profile would save a shorter secret than the 8-63 bytes the length check passed (#2292).
+void refuse_nul_passphrase(const std::string& passphrase) {
+    if (passphrase.find('\0') != std::string::npos) throw WifiError("Passphrase must not contain a NUL byte");
+}
+}  // namespace
+
 nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::string& passphrase, bool autoconnect,
                                          int priority) {
     if (ssid.empty() || ssid.size() > 32) throw WifiError("Ssid must be 1-32 bytes");
     if (!passphrase.empty() && (passphrase.size() < 8 || passphrase.size() > 63)) {
         throw WifiError("Passphrase must be 8-63 characters (or empty for open networks)");
     }
+    refuse_nul_passphrase(passphrase);
     std::lock_guard<std::mutex> lock(mutex_);
     auto& backend = profile_backend_locked();
 
@@ -1436,6 +1445,7 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     if (!passphrase.empty() && (passphrase.size() < 8 || passphrase.size() > 63)) {
         throw WifiError("Passphrase must be 8-63 characters");
     }
+    refuse_nul_passphrase(passphrase);
     if (band != "a" && band != "bg") throw WifiError("Band must be \"a\" (5 GHz) or \"bg\" (2.4 GHz)");
     if (band == "a") {
         // Under the world regulatory domain (country 00) most 5 GHz channels

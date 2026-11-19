@@ -874,6 +874,23 @@ TEST_CASE("SVBONY Camera Driver - a removal error on a control write drops Conne
 }
 
 // Rule 1: the pulse-guide call-site group (a call made without the driver mutex).
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("SVBONY Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[svbony][camera][unit][fake-sdk][issue2292]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    int code = 0;
+    try {
+        camera->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    camera->set_connected(false);
+}
+
 TEST_CASE("SVBONY Camera Driver - a removal error from a pulse guide drops Connected",
           "[svbony][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeSVBSDK sdk;
@@ -1118,4 +1135,47 @@ TEST_CASE("SVBONY Camera Driver - a disconnected bin write answers NotConnected"
     require_alpaca_error([&] { camera->set_bin_x(2); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { camera->set_bin_y(1); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { camera->set_bin_x(0); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// Issue #2260 (decision 0020 rule 9): an AbortExposure that arrives while a StartExposure is reserved, waiting in the
+// session behind a body the watchdog left in its read, is recorded and ends that start as it publishes: no second
+// capture starts and no frame is served. SVBONY dropped it: abort_exposure returned when nothing was exposing, and the
+// new exposure ran to its end.
+TEST_CASE("SVBONY Camera Driver - an AbortExposure during a StartExposure still in flight is not dropped",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_on_clock(sdk, clock);
+    ReleaseReadOnExit release{sdk};
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    clock.advance(16s);  // past exposure + 15 s: the watchdog fails the exposure; its body is still in the read
+    REQUIRE(camera->get_camera_state() == alpacacore::CameraState::Idle);
+
+    std::atomic<int> start_code{-1};
+    std::thread starter([&] { start_code = error_of([&] { camera->start_exposure(0.001, true); }).first; });
+    struct JoinStarter {
+        std::thread& thread;
+        alpacacore::test::FakeSVBSDK& sdk;
+        ~JoinStarter() {
+            sdk.release_video_data();
+            if (thread.joinable()) thread.join();
+        }
+    } join_starter{starter, sdk};
+    const bool start_waiting = clock.wait_for_waiter_thread(starter.get_id(), 2s);
+    int abort_code = -1;
+    if (start_waiting) {
+        abort_code = error_of([&] { camera->abort_exposure(); }).first;  // the start window: nothing is Exposing
+    }
+    sdk.release_video_data();  // the earlier body returns; the waiting start goes on
+    starter.join();
+    REQUIRE(start_waiting);
+    CHECK(abort_code == 0);
+    CHECK(start_code.load() == 0);
+    // The recorded abort ended the start as it published: Idle at once, no frame, no second capture.
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(error_of([&] { CHECK_FALSE(camera->get_image_ready()); }).first == 0);
+    CHECK(sdk.call_count("start_video_capture") == 1);
 }

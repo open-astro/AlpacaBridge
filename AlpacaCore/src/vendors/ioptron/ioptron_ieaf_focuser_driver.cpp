@@ -107,11 +107,7 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other (issue #528): the

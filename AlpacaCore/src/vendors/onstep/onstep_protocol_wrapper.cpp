@@ -18,6 +18,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -41,6 +42,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -63,8 +65,9 @@ constexpr int kSetAckTimeoutMs = 1000;
 
 // Operator-facing owner name for the serial-port registry (#1202): the probe
 // and the connected link use the same one, so the auto-detect scan can tell
-// a connected OnStep mount (a sibling) from another vendor's device.
-constexpr const char* kSerialOwner = "OnStep mount";
+// a connected OnStep controller (a sibling) from another vendor's device. One
+// name for every OnStep device on the link (decision 0017 rule 4, #2223).
+constexpr const char* kSerialOwner = "OnStep";
 
 // The connected link's read slice, the old VTIME=1 (100 ms) read window: the
 // idle gap that ends drain_stale(), its shortest wait for a first byte, and
@@ -120,133 +123,14 @@ constexpr std::chrono::milliseconds kDrainCap{2000};
 // The probe keeps at most 31 bytes before the '#' (a '#' as the 31st byte still ends it).
 constexpr std::size_t kProbeReplyMax = 31;
 
-// Parse a generic sexagesimal LX200 field ("HH:MM:SS", "HH:MM.T", "sDD*MM:SS",
-// "sDD*MM", "sHH.H", ...) into a decimal value. Any run of non-digit,
-// non-decimal-point characters is treated as a field separator, so this
-// single parser covers RA, Dec, latitude, longitude, sidereal time and UTC
-// offset responses without per-field grammars.
-std::optional<double> parse_sexagesimal(const std::string& raw) {
-    std::string s = raw;
-    while (!s.empty() && (s.back() == '#' || s.back() == '\r' || s.back() == '\n')) {
-        s.pop_back();
-    }
-    if (s.empty()) {
-        return std::nullopt;
-    }
+// The LX200 reply parse and the wire text are util/sexagesimal.h's (#1757).
+using util::parse_sexagesimal;
 
-    bool negative = false;
-    std::size_t start = 0;
-    if (s[0] == '+') {
-        start = 1;
-    } else if (s[0] == '-') {
-        negative = true;
-        start = 1;
-    }
+std::string format_target_ra(double hours) { return ":Sr" + util::format_hms(hours) + "#"; }
 
-    std::vector<double> parts;
-    std::string current;
-    auto flush_current = [&]() -> bool {
-        if (current.empty()) {
-            return true;
-        }
-        try {
-            parts.push_back(std::stod(current));
-        } catch (const std::exception&) {
-            return false;
-        }
-        current.clear();
-        return true;
-    };
+std::string format_target_dec(double degrees) { return ":Sd" + util::format_dms(degrees, 2, '*') + "#"; }
 
-    for (std::size_t i = start; i <= s.size(); ++i) {
-        char c = (i < s.size()) ? s[i] : '\0';
-        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
-            current.push_back(c);
-        } else {
-            if (!flush_current()) {
-                return std::nullopt;
-            }
-        }
-    }
-
-    if (parts.empty()) {
-        return std::nullopt;
-    }
-
-    double value = parts[0];
-    if (parts.size() > 1) {
-        value += parts[1] / 60.0;
-    }
-    if (parts.size() > 2) {
-        value += parts[2] / 3600.0;
-    }
-    if (negative) {
-        value = -value;
-    }
-    return value;
-}
-
-std::string format_target_ra(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-    int h = static_cast<int>(wrapped);
-    double rem_min = (wrapped - h) * 60.0;
-    int m = static_cast<int>(rem_min);
-    int s = static_cast<int>(std::lround((rem_min - m) * 60.0));
-    if (s >= 60) {
-        s = 0;
-        ++m;
-    }
-    if (m >= 60) {
-        m = 0;
-        ++h;
-        if (h >= 24) {
-            h = 0;
-        }
-    }
-    // h/m/s are runtime-bounded to [0,24)/[0,60)/[0,60) above, but GCC's
-    // format-truncation checker can't prove that from an `int` parameter —
-    // size the buffer for the worst case %d could ever produce.
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), ":Sr%02d:%02d:%02d#", h, m, s);
-    return buf;
-}
-
-std::string format_target_dec(double degrees) {
-    char sign = degrees < 0.0 ? '-' : '+';
-    double abs_deg = std::abs(degrees);
-    int d = static_cast<int>(abs_deg);
-    double rem_min = (abs_deg - d) * 60.0;
-    int m = static_cast<int>(rem_min);
-    int s = static_cast<int>(std::lround((rem_min - m) * 60.0));
-    if (s >= 60) {
-        s = 0;
-        ++m;
-    }
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":Sd%c%02d*%02d:%02d#", sign, d, m, s);
-    return buf;
-}
-
-std::string format_latitude(double latitude_degrees) {
-    char sign = latitude_degrees < 0.0 ? '-' : '+';
-    double abs_lat = std::abs(latitude_degrees);
-    int d = static_cast<int>(abs_lat);
-    int m = static_cast<int>(std::lround((abs_lat - d) * 60.0));
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":St%c%02d*%02d#", sign, d, m);
-    return buf;
-}
+std::string format_latitude(double latitude_degrees) { return ":St" + util::format_dm(latitude_degrees, 2, '*') + "#"; }
 
 // :Sg#'s parser accepts a signed value literally (no conversion), but the
 // firmware's OWN sidereal-time formula (which drives :GS# and therefore
@@ -258,18 +142,7 @@ std::string format_latitude(double latitude_degrees) {
 // value to within a second. get_site_info() negates back on read so this
 // wrapper's public API stays in ASCOM's East-positive convention throughout.
 std::string format_longitude(double longitude_degrees) {
-    const double wire_longitude_degrees = -longitude_degrees;
-    char sign = wire_longitude_degrees < 0.0 ? '-' : '+';
-    double abs_lon = std::abs(wire_longitude_degrees);
-    int d = static_cast<int>(abs_lon);
-    int m = static_cast<int>(std::lround((abs_lon - d) * 60.0));
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":Sg%c%03d*%02d#", sign, d, m);
-    return buf;
+    return ":Sg" + util::format_dm(-longitude_degrees, 3, '*') + "#";
 }
 
 // A whole number with an optional sign and nothing else (a reply like "60", "-5", "+10"), or nullopt.
@@ -289,6 +162,25 @@ std::optional<int> parse_whole_number(const std::string& text) {
         value = value * 10 + (text[i] - '0');
     }
     return text[0] == '-' ? -value : value;
+}
+
+// A signed whole number of steps ("%ld": "-1500", "125000"), at most 10 digits, nothing else, or nullopt.
+std::optional<long> parse_steps(const std::string& text) {
+    std::size_t first = (!text.empty() && (text[0] == '-' || text[0] == '+')) ? 1 : 0;
+    if (text.size() == first || text.size() - first > 10) {
+        return std::nullopt;
+    }
+    long long value = 0;
+    for (std::size_t i = first; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (text[i] - '0');
+    }
+    if (value > std::numeric_limits<long>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<long>(text[0] == '-' ? -value : value);
 }
 
 // A decimal number with a fractional part ("60.16427", "-0.50000000"), nothing else, or nullopt. The fraction is
@@ -408,9 +300,10 @@ void configure_onstep_line(struct termios& tty, speed_t speed) {
 
 // Send one '#'-terminated query on an open probe link and collect the reply
 // (without the '#') for at most @p budget_ms. Empty on a write failure,
-// silence or a read error.
-std::string probe_query(int fd, const char* cmd, int budget_ms) {
-    if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) {
+// silence or a read error. The writes and reads go through the link
+// (util::SerialLink, #2262); a probe judges only the bytes it got.
+std::string probe_query(util::SerialLink& link, const char* cmd, int budget_ms) {
+    if (!link.write_all(cmd, std::char_traits<char>::length(cmd))) {
         return "";
     }
     // Up to 31 bytes before the '#', CR/LF included; a timeout or a hangup
@@ -418,7 +311,8 @@ std::string probe_query(int fd, const char* cmd, int budget_ms) {
     util::ReadSpec spec;
     spec.skip.clear();
     spec.max_len = kProbeReplyMax;
-    const auto r = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms));
+    const auto r =
+        util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms));
     std::string resp = r.bytes;
     if (r.outcome == util::ReadOutcome::Terminator) {
         resp.pop_back();
@@ -453,10 +347,10 @@ std::string probe_onstep_port(const std::string& port_path, std::string& version
         std::this_thread::sleep_for(std::chrono::seconds(attempt == 0 ? 2 : 1));
         tcflush(fd, TCIOFLUSH);
 
-        const std::string response = probe_query(fd, ":GVP#", 3000);
+        const std::string response = probe_query(link, ":GVP#", 3000);
         if (response.find("OnStep") != std::string::npos || response.find("On-Step") != std::string::npos) {
             tcflush(fd, TCIOFLUSH);
-            version = probe_query(fd, ":GVN#", 2000);
+            version = probe_query(link, ":GVN#", 2000);
             return response;
         }
 
@@ -508,8 +402,8 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
 }
 #endif
 
-// Never destroyed: the wrapper singleton can disconnect from its destructor at
-// exit, after function-local statics built later than it are gone.
+// Never destroyed: a link still held at exit disconnects from its destructor,
+// after function-local statics built later than it are gone.
 std::mutex& link_loss_hook_mutex() {
     static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
     return *m;
@@ -521,7 +415,17 @@ std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
     return *hook;
 }
 
+// Set while a test hook is installed, so the drivers' connection checks, which run on every member, skip the hook's
+// mutex in production.
+std::atomic<bool>& link_loss_hook_set() {
+    static std::atomic<bool> set{false};
+    return set;
+}
+
 void run_link_loss_hook(detail::LinkLossHookPoint point) {
+    if (!link_loss_hook_set().load(std::memory_order_acquire)) {
+        return;
+    }
     std::function<void(detail::LinkLossHookPoint)> hook;
     {
         std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
@@ -532,7 +436,64 @@ void run_link_loss_hook(detail::LinkLossHookPoint point) {
     }
 }
 
+// One link per controller (#2223): the live links by key, held weakly, so a link closes when its last holder lets
+// go. Never destroyed (exit order, as above).
+std::mutex& link_registry_mutex() {
+    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
+    return *m;
+}
+
+std::map<std::string, std::weak_ptr<OnStepProtocolWrapper>>& link_registry() {
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): never destroyed (exit order)
+    static auto* registry = new std::map<std::string, std::weak_ptr<OnStepProtocolWrapper>>;
+    return *registry;
+}
+
+// The controller a ConnectionInfo names: the serial port by its canonical path (a by-id symlink and the node it
+// points at are one port), or the host and TCP port as typed.
+std::string link_key(const ConnectionInfo& info) {
+    if (info.type == ConnectionType::Network) {
+        return "tcp:" + info.host + ":" + std::to_string(info.tcp_port);
+    }
+#ifndef _WIN32
+    std::error_code ec;
+    const auto canonical = std::filesystem::canonical(info.port_path, ec);
+    if (!ec) {
+        return "serial:" + canonical.string();
+    }
+#endif
+    return "serial:" + info.port_path;
+}
+
+// The focuser number of an addressed command, 1-6 (OnStepX Focuser.command.cpp: :F1...# to :F6...#).
+char focuser_digit(int focuser) {
+    if (focuser < 1 || focuser > 6) {
+        throw AlpacaException("Invalid OnStep focuser number " + std::to_string(focuser) + " (1-6)",
+                              AlpacaError::InvalidValue);
+    }
+    return static_cast<char>('0' + focuser);
+}
+
+// The slot of an auxiliary feature command, 1-8 (OnStepX Features.command.cpp: :GXY1# to :GXY8#).
+std::string aux_slot_digit(int slot) {
+    if (slot < 1 || slot > 8) {
+        throw AlpacaException("Invalid OnStep auxiliary feature slot " + std::to_string(slot) + " (1-8)",
+                              AlpacaError::InvalidValue);
+    }
+    return std::string(1, static_cast<char>('0' + slot));
+}
+
+std::string focuser_command(int focuser, const std::string& body) {
+    return std::string(":F") + focuser_digit(focuser) + body + "#";
+}
+
 }  // namespace
+
+bool is_onstepx_version(const std::string& version) {
+    std::size_t digits = 0;
+    while (digits < version.size() && std::isdigit(static_cast<unsigned char>(version[digits]))) ++digits;
+    return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
+}
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     std::vector<OnStepPortInfo> results;
@@ -545,15 +506,15 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     // One candidate, in scan order (#1202). A port another vendor's connected
     // device holds is never opened. A port a connected OnStep mount holds is
     // not probed either, but keeps its place in the results so the auto-detect
-    // index of every other mount stays stable; a driver that picks it is
-    // refused by its link claim, which names the holder.
+    // index of every other mount stays stable; a driver that picks it joins
+    // that open link through acquire() (#2223), as the focuser's auto-detect does.
     auto consider = [&results](const std::string& resolved, const std::string& name) {
         switch (util::serial_candidate_use(resolved, kSerialOwner)) {
             case util::SerialCandidateUse::HeldByOther:
                 ALPACA_LOG_DEBUG("OnStep", "Skipping " + resolved + ": held by another connected device");
                 return;
             case util::SerialCandidateUse::HeldBySibling:
-                ALPACA_LOG_DEBUG("OnStep", "Not probing " + resolved + ": a connected OnStep mount holds it");
+                ALPACA_LOG_DEBUG("OnStep", "Not probing " + resolved + ": a connected OnStep device holds it");
                 results.push_back({resolved, name, ""});
                 return;
             case util::SerialCandidateUse::Free:
@@ -640,19 +601,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         // A lost link whose fd could not be closed when the loss was found
-        // (an exchange held the mutex) is closed here, so a reconnect is not
-        // refused as a second mount.
+        // (an exchange held the mutex) is closed here, so a reconnect opens a
+        // fresh link instead of finding the dead one still connected.
         if (connected_ && link_lost_) {
             disconnect_locked();
         }
 
         if (connected_) {
-            // The protocol wrapper is a per-vendor singleton: a second device
-            // connecting through it would silently steal/tear down the first
-            // device's connection. Refuse instead.
-            throw AlpacaException(
-                "Only one OnStep mount per bridge: the shared OnStep "
-                "protocol wrapper is already connected");
+            // One link, one connection: a device that wants this controller
+            // joins the link through acquire() instead of opening it again.
+            throw AlpacaException("This OnStep link is already connected");
         }
 
         connection_type_ = info.type;
@@ -689,6 +647,21 @@ public:
         disconnect_locked();
         clear_loss();
     }
+
+    // acquire() replacing a lost link on the same key: its port is released for the fresh one, and the loss and
+    // its reason stay for the holders that have not let go yet (decision 0009 rule 5).
+    void close_lost_link() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_ && link_lost_) {
+            disconnect_locked();
+        }
+    }
+
+    std::unique_lock<std::recursive_mutex> hold_sequence() {
+        return std::unique_lock<std::recursive_mutex>(sequence_mutex_);
+    }
+
+    const ConnectionInfo& connection_info() const { return connection_info_; }
 
     void disconnect_locked() {
         if (!connected_) {
@@ -824,6 +797,8 @@ public:
     }
 
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override) {
+        run_link_loss_hook(detail::LinkLossHookPoint::BeforeExchange);    // a test lands a sibling's exchange here
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);  // no other device's turn inside a Sequence
         std::lock_guard<std::mutex> lock(mutex_);
         require_live_link_locked();
 
@@ -859,6 +834,7 @@ public:
     }
 
     void send_command_blind(const std::string& command) {
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         require_live_link_locked();
 
@@ -906,6 +882,7 @@ public:
     }
 
     void flush_input() {
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_) {
             return;
@@ -1369,6 +1346,169 @@ public:
         }
     }
 
+    // ── Focuser (OnStepX Focuser.command.cpp, af1d26bf; #2223) ──
+
+    std::optional<FocuserStatus> focuser_status(int focuser) {
+        // numericReply=false: "M3#" / "S3#". A controller without focuser n passes the command on and answers the
+        // unknown-command "0", a bare digit, so the read does not need the '#'.
+        const std::string reply = send_command(focuser_command(focuser, "T"), false, kSetAckTimeoutMs);
+        if (reply.size() == 2 && (reply[0] == 'M' || reply[0] == 'S') && reply[1] >= '0' && reply[1] <= '9') {
+            return FocuserStatus{reply[0] == 'M', reply[1] - '0'};
+        }
+        return std::nullopt;
+    }
+
+    std::optional<long> focuser_steps(int focuser, const char* what) {
+        return parse_steps(send_command(focuser_command(focuser, what), true, kSetAckTimeoutMs));
+    }
+
+    std::optional<double> focuser_microns_per_step(int focuser) {
+        const auto value = parse_decimal(send_command(focuser_command(focuser, "u"), true, kSetAckTimeoutMs),
+                                         /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value) || !(*value > 0.0)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    std::optional<double> focuser_temperature(int focuser) {
+        // "%3.1f" of the sensor channel, NAN with no probe ("nan"), which parse_decimal() refuses.
+        const auto value = parse_decimal(send_command(focuser_command(focuser, "t"), true, kSetAckTimeoutMs),
+                                         /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    std::optional<bool> focuser_temp_comp(int focuser) {
+        // numericReply=true: a bare '1' enabled, '0' disabled (CE_0).
+        const std::string reply = send_command(focuser_command(focuser, "c"), false, kSetAckTimeoutMs);
+        if (reply == "1") {
+            return true;
+        }
+        if (reply == "0") {
+            return false;
+        }
+        return std::nullopt;
+    }
+
+    bool focuser_numeric(int focuser, const std::string& body) {
+        const std::string reply = send_command(focuser_command(focuser, body), false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
+    void focuser_halt(int focuser) { send_command_blind(focuser_command(focuser, "Q")); }
+
+    // ── Rotator (OnStepX Rotator.command.cpp, af1d26bf; #2221) ──
+
+    std::optional<char> rotator_capability() {
+        // numericReply=false: "D#" or "R#" (a firmware built with a rotator; Rotator.command.cpp), "N#" without one.
+        // A firmware that does not know :GX98# answers the unknown-command "0", a bare digit.
+        const std::string reply = send_command(":GX98#", false, kSetAckTimeoutMs);
+        if (reply == "R" || reply == "D") {
+            return reply[0];
+        }
+        return std::nullopt;
+    }
+
+    std::optional<RotatorStatus> rotator_status() {
+        // numericReply=false: "M3#" while it moves, else "S" then "D" (derotation on) and "R" (derotator reversed)
+        // then the goto-rate digit: "S3#", "SD3#", "SDR3#". A firmware without the rotator answers a bare "0".
+        const std::string reply = send_command(":rT#", false, kSetAckTimeoutMs);
+        if (reply.size() < 2 || reply.size() > 4 || reply.back() < '0' || reply.back() > '9') {
+            return std::nullopt;
+        }
+        const std::string flags = reply.substr(0, reply.size() - 1);
+        RotatorStatus status;
+        status.goto_rate = reply.back() - '0';
+        if (flags == "M") {
+            status.moving = true;
+        } else if (flags == "S" || flags == "SD" || flags == "SR" || flags == "SDR") {
+            status.derotating = flags.find('D') != std::string::npos;
+            status.derotation_reversed = flags.find('R') != std::string::npos;
+        } else {
+            return std::nullopt;
+        }
+        return status;
+    }
+
+    std::optional<double> rotator_angle() {
+        // convert.doubleToDms(..., fullRange=true, signPresent=true, PM_LOW): "+123*45#", "-045*30#". The sign and
+        // the '*' are required, so the unknown-command "0" never reads as 0 degrees.
+        const std::string reply = send_command(":rG#", true, kSetAckTimeoutMs);
+        if (reply.size() < 4 || (reply[0] != '+' && reply[0] != '-') || reply.find('*') == std::string::npos) {
+            return std::nullopt;
+        }
+        const auto degrees = util::parse_sexagesimal(reply);
+        if (!degrees || !std::isfinite(*degrees)) {
+            return std::nullopt;
+        }
+        return degrees;
+    }
+
+    std::optional<long> rotator_limit(const char* command) {
+        // "%ld" of the rounded limit in degrees.
+        return parse_steps(send_command(command, true, kSetAckTimeoutMs));
+    }
+
+    std::optional<double> rotator_degrees_per_step() {
+        const auto value = parse_decimal(send_command(":rD#", true, kSetAckTimeoutMs), /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value) || !(*value > 0.0)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    bool rotator_goto(double degrees) {
+        // :rS takes an optional sign, then "DDD*MM:SS" (Convert::dmsToDouble without a sign, 0-360 degrees); the
+        // reply is the numeric '1' or '0'.
+        const std::string reply =
+            send_command(":rS" + util::format_dms(degrees, 3, '*') + "#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
+    void rotator_halt() { send_command_blind(":rQ#"); }
+
+    // ── Auxiliary features (OnStepX Features.command.cpp, af1d26bf; #2222) ──
+
+    std::optional<std::string> aux_feature_slots() {
+        // numericReply=false: eight '0'/'1', '#'-terminated. A firmware without the features answers a bare "0".
+        std::string reply = send_command(":GXY0#", false, kSetAckTimeoutMs);
+        if (reply.empty() || reply.size() > 8 || reply.find_first_not_of("01") != std::string::npos) {
+            return std::nullopt;
+        }
+        return reply;
+    }
+
+    std::optional<AuxFeature> aux_feature(int slot) {
+        // "name,purpose#", the name cut to 10 characters; a slot that is off answers CE_0, the bare "0". The name may
+        // hold a ',', so the purpose is after the last one.
+        const std::string reply = send_command(":GXY" + aux_slot_digit(slot) + "#", false, kSetAckTimeoutMs);
+        const auto comma = reply.rfind(',');
+        if (comma == std::string::npos) {
+            return std::nullopt;
+        }
+        const auto purpose = parse_steps(reply.substr(comma + 1));
+        if (!purpose || *purpose < 0 || *purpose > 99) {
+            return std::nullopt;
+        }
+        return AuxFeature{reply.substr(0, comma), static_cast<int>(*purpose)};
+    }
+
+    std::optional<long> aux_feature_value(int slot) {
+        // A switch or analog output: "value", a dew heater: "enabled,zero,span,deltaT", each with ";volts,amps,flags"
+        // appended when power monitoring is built in. The first field is the value.
+        const std::string reply = send_command(":GXX" + aux_slot_digit(slot) + "#", true, kSetAckTimeoutMs);
+        return parse_steps(reply.substr(0, reply.find_first_of(",;")));
+    }
+
+    bool set_aux_feature_value(int slot, long value) {
+        const std::string reply =
+            send_command(":SXX" + aux_slot_digit(slot) + ",V" + std::to_string(value) + "#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
 private:
     static std::string normalize_command(const std::string& command) {
         std::string full = command;
@@ -1575,7 +1715,7 @@ private:
 
     bool write_data(const std::string& data) {
         if (connection_type_ == ConnectionType::Serial) {
-            return util::tty_write_all(serial_fd_, data.c_str(), data.length());
+            return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
         }
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
@@ -1597,7 +1737,8 @@ private:
     // (decision 0009 rule 2a, #2220).
     util::ReadResult checked_read(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
         if (connection_type_ == ConnectionType::Serial) {
-            const auto r = util::read_until(serial_fd_, spec, deadline);
+            // The link judges a LinkDead read (util::SerialLink, #2262): a hangup errno on its fd is a loss.
+            const auto r = util::read_until(link_, spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) {
                 lose_link_locked("read failed: " + util::errno_string(r.err));
             }
@@ -1669,8 +1810,6 @@ private:
     }
 
     // ── Link-loss helpers (decision 0009, #1241) ──
-
-    static bool is_loss_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV || err == EBADF; }
 
     // Caller holds mutex_. True when the open fd's node is gone.
     bool node_removed_locked() const {
@@ -1757,7 +1896,10 @@ private:
         (void)link_lost_at_.consume();  // its own mutex, after loss_mutex_ as in record_loss()
     }
 
+    // A successful connect and an explicit Disconnect (decision 0009 rule 5): the wrapper's latch and the serial
+    // link's verdict both start clear. The port release after a loss (disconnect_locked()) keeps both.
     void clear_loss() {
+        link_.clear_loss();
         std::lock_guard<std::mutex> lock(loss_mutex_);
         link_lost_ = false;
         lost_reason_.clear();
@@ -1796,11 +1938,14 @@ private:
 
     // Caller holds mutex_; errno is from the failed write. A write that failed
     // because the link is gone loses it (decision 0009 rule 2a); one that timed
-    // out on a link still there stays a DriverException.
+    // out on a link still there stays a DriverException. Over serial the
+    // verdict is the link's (util::SerialLink, #2262: EIO, ENXIO, ENODEV and
+    // EBADF on its fd, judged by link_.write_all()); this wrapper keeps no
+    // serial errno list.
     [[noreturn]] void fail_write_locked() {
         const int err = errno;
         if (connection_type_ == ConnectionType::Serial) {
-            if (is_loss_errno(err)) {
+            if (link_.lost()) {
                 lose_link_locked("write failed: " + util::errno_string(err));
             }
             if (node_removed_locked()) {
@@ -1813,6 +1958,8 @@ private:
     }
 
     std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
+    // Above mutex_: an exchange takes it, then mutex_; a Sequence holds it across several exchanges (#2223).
+    std::recursive_mutex sequence_mutex_;
     mutable std::mutex mutex_;
     std::atomic<bool> connected_;
     std::atomic<bool> link_lost_{false};
@@ -1841,9 +1988,99 @@ private:
 OnStepProtocolWrapper::OnStepProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
 OnStepProtocolWrapper::~OnStepProtocolWrapper() = default;
 
-OnStepProtocolWrapper& OnStepProtocolWrapper::instance() {
-    static OnStepProtocolWrapper wrapper;
-    return wrapper;
+std::shared_ptr<OnStepProtocolWrapper> OnStepProtocolWrapper::acquire(const ConnectionInfo& info, std::string* error) {
+    const std::string key = link_key(info);
+    std::lock_guard<std::mutex> lock(link_registry_mutex());
+    auto& registry = link_registry();
+    if (const auto it = registry.find(key); it != registry.end()) {
+        if (auto live = it->second.lock()) {
+            if (live->link_alive()) {
+                const ConnectionInfo& opened = live->pimpl_->connection_info();
+                if (info.type == ConnectionType::Serial && info.baud_rate != opened.baud_rate) {
+                    ALPACA_LOG_WARN("OnStep", "Joining the open link on " + info.port_path + " at its " +
+                                                  std::to_string(opened.baud_rate) + " baud, not the " +
+                                                  std::to_string(info.baud_rate) + " this device is set to");
+                }
+                return live;
+            }
+            live->pimpl_->close_lost_link();
+        }
+        registry.erase(it);
+    }
+    for (auto it = registry.begin(); it != registry.end();) {
+        it = it->second.expired() ? registry.erase(it) : std::next(it);
+    }
+    auto link = std::make_shared<OnStepProtocolWrapper>();
+    if (!link->connect(info)) {
+        if (error != nullptr) {
+            *error = link->last_connect_error();
+        }
+        return nullptr;
+    }
+    registry[key] = link;
+    return link;
+}
+
+OnStepProtocolWrapper::Sequence OnStepProtocolWrapper::hold_sequence() { return Sequence(pimpl_->hold_sequence()); }
+
+std::optional<FocuserStatus> OnStepProtocolWrapper::focuser_status(int focuser) {
+    return pimpl_->focuser_status(focuser);
+}
+
+std::optional<long> OnStepProtocolWrapper::focuser_position(int focuser) { return pimpl_->focuser_steps(focuser, "g"); }
+
+std::optional<long> OnStepProtocolWrapper::focuser_min_position(int focuser) {
+    return pimpl_->focuser_steps(focuser, "i");
+}
+
+std::optional<long> OnStepProtocolWrapper::focuser_max_position(int focuser) {
+    return pimpl_->focuser_steps(focuser, "m");
+}
+
+std::optional<double> OnStepProtocolWrapper::focuser_microns_per_step(int focuser) {
+    return pimpl_->focuser_microns_per_step(focuser);
+}
+
+std::optional<double> OnStepProtocolWrapper::focuser_temperature(int focuser) {
+    return pimpl_->focuser_temperature(focuser);
+}
+
+std::optional<bool> OnStepProtocolWrapper::focuser_temp_comp(int focuser) { return pimpl_->focuser_temp_comp(focuser); }
+
+bool OnStepProtocolWrapper::set_focuser_temp_comp(int focuser, bool enabled) {
+    return pimpl_->focuser_numeric(focuser, enabled ? "c1" : "c0");
+}
+
+bool OnStepProtocolWrapper::focuser_goto(int focuser, long steps) {
+    return pimpl_->focuser_numeric(focuser, "s" + std::to_string(steps));
+}
+
+void OnStepProtocolWrapper::focuser_halt(int focuser) { pimpl_->focuser_halt(focuser); }
+
+std::optional<char> OnStepProtocolWrapper::rotator_capability() { return pimpl_->rotator_capability(); }
+
+std::optional<RotatorStatus> OnStepProtocolWrapper::rotator_status() { return pimpl_->rotator_status(); }
+
+std::optional<double> OnStepProtocolWrapper::rotator_angle() { return pimpl_->rotator_angle(); }
+
+std::optional<long> OnStepProtocolWrapper::rotator_min_angle() { return pimpl_->rotator_limit(":rI#"); }
+
+std::optional<long> OnStepProtocolWrapper::rotator_max_angle() { return pimpl_->rotator_limit(":rM#"); }
+
+std::optional<double> OnStepProtocolWrapper::rotator_degrees_per_step() { return pimpl_->rotator_degrees_per_step(); }
+
+bool OnStepProtocolWrapper::rotator_goto(double degrees) { return pimpl_->rotator_goto(degrees); }
+
+void OnStepProtocolWrapper::rotator_halt() { pimpl_->rotator_halt(); }
+
+std::optional<std::string> OnStepProtocolWrapper::aux_feature_slots() { return pimpl_->aux_feature_slots(); }
+
+std::optional<AuxFeature> OnStepProtocolWrapper::aux_feature(int slot) { return pimpl_->aux_feature(slot); }
+
+std::optional<long> OnStepProtocolWrapper::aux_feature_value(int slot) { return pimpl_->aux_feature_value(slot); }
+
+bool OnStepProtocolWrapper::set_aux_feature_value(int slot, long value) {
+    return pimpl_->set_aux_feature_value(slot, value);
 }
 
 bool OnStepProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
@@ -1990,7 +2227,16 @@ void OnStepProtocolWrapper::flush_input() { pimpl_->flush_input(); }
 namespace detail {
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
     std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+    link_loss_hook_set().store(static_cast<bool>(hook), std::memory_order_release);
     link_loss_hook() = std::move(hook);
+}
+
+void run_connection_check_hook() { run_link_loss_hook(LinkLossHookPoint::AfterConnectionCheck); }
+
+std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info) {
+    std::lock_guard<std::mutex> lock(link_registry_mutex());
+    const auto it = link_registry().find(link_key(info));
+    return it == link_registry().end() ? nullptr : it->second.lock();
 }
 }  // namespace detail
 

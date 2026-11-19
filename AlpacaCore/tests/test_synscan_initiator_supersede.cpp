@@ -365,7 +365,7 @@ TEST_CASE(
     "[synscan][initiator-supersede]") {
     Rig rig;
     rig.st->gate_t_ms.store(600);
-    std::thread pulse([&] { rig.driver->pulse_guide(2, 600000); });  // west: the RA axis reads the tracking mode
+    std::thread pulse([&] { rig.driver->pulse_guide(2, 60000); });  // west: the RA axis reads the tracking mode
     REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5000));
     std::thread tracking([&] { rig.driver->set_tracking(false); });
     // The write takes its ticket well inside the 600 ms the `t` reply is held; tickets are served in order, so a

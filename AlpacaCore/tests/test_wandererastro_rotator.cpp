@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_pty_write.h"
 #include "pty_responder.h"
@@ -90,11 +91,8 @@ private:
                     acc.erase(0, 1);
                 }
                 if (cmd == "1500001") {
-                    const auto until =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(handshake_hold_ms_.load());
-                    while (!stop_ && std::chrono::steady_clock::now() < until) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // the held reply (real time)
-                    }
+                    // The held reply: until the test's ConnectHoldGate is released, else this long (real time).
+                    alpacacore::test::connect_hold(std::chrono::milliseconds(handshake_hold_ms_.load()));
                     const std::string reply = "WandererRotatorMiniA20250101A0A0A0A";
                     alpacacore::test::pty_write_bounded(pty_.master_fd(), reply.data(), reply.size(), stop_);
                 } else if (!move_reply_.empty()) {
@@ -519,14 +517,21 @@ TEST_CASE("WandererAstro Rotator Driver - a Disconnect during a connect returns 
           "[wandererastro][rotator][unit][issue1757]") {
     alpacacore::test::TempSyncOffsetDir dir;
     SilentMotorRotator rotator;
-    rotator.hold_handshake(std::chrono::milliseconds(300));  // the handshake read waits serial_timeout_s (3 s)
+    // The held handshake ends at gate.release(), not after a fixed time (connect_hold_gate.h): a timed hold could
+    // end in a scheduler pause before disconnect() ran. The handshake read waits serial_timeout_s (3 s).
+    alpacacore::test::ConnectHoldGate gate;
+    rotator.hold_handshake(std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
     driver->connect();
     REQUIRE(driver->get_connecting());
+    REQUIRE(gate.wait_entered(std::chrono::seconds(10)));  // inside the held handshake, past every cancel point
     const auto t0 = std::chrono::steady_clock::now();
     driver->disconnect();
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
-    CHECK(driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = driver->get_connecting();
+    gate.release();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -890,4 +895,29 @@ TEST_CASE("WandererRotator auto-detect names why it skips a raw node (#2212)", "
     // The rotator's CH340 (raw sysfs spelling, with its space): probed, so no reason.
     CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"1a86", "", "USB Serial"}).has_value());
     CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"0000", "", "USB2.0-Serial CH340"}).has_value());
+}
+
+// Issue #2262: EBADF on the rotator's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the command failed with DriverException "Serial write
+// failed" and Connected kept reading true over a dead fd.
+TEST_CASE("WandererAstro Rotator Driver - EBADF on a command write loses the link at once",
+          "[wandererastro][rotator][serial][unit][link-lost][issue2262]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    const std::string port = rotator.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, port);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));
+
+    // Idle: nothing reads the port, so the next command is the one that meets the dead fd.
+    require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5
 }

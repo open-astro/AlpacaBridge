@@ -38,7 +38,7 @@ Symbol: `CaptureSession`
 | ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | partial | #1973 | the exposure runs in a session; rule 4: the body waits in `CaptureControl::wait_for_signal` until the SDK frame event, then makes one `Toupcam_PullImageV4` call; adopted after a run on a real camera is reported; Altair rides this driver |
 | SVBONY camera | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | adopted | #1980 | rule 4: each bounded 500 ms `SVBGetVideoData` read is the poll step, and the loop checks the stop reason and a task-clock deadline on every pass (ToupTek waits for its frame event instead) |
 | gphoto camera | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | planned | | adds the actual exposure length (rule 7) |
-| QHY camera | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | planned | | last: `GetQHYCCDSingleFrame` has no timeout, and its `detach()` sites go with the slice |
+| QHY camera | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | partial | #1736 | the exposure runs in a session; no `detach()` left; rule 5: `GetQHYCCDSingleFrame` has no timeout, so when `cancel_exposure` does not interrupt it an abort or a disconnect waits for one whole call; adopted after a ConformU run on a real QHY camera is reported |
 
 ## Alternatives rejected
 

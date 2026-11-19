@@ -1768,6 +1768,181 @@ TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep]
     CHECK_FALSE(catalog.normalize(kOnStepKey, config, Source::Api).rejection.has_value());
 }
 
+// The OnStep focuser (#2223): the telescope's connection fields and rules, plus the focuser number 1-6; auto-detect
+// is the telescope's scan with the same mount index, at connect time.
+TEST_CASE("Builtin catalog - the OnStep focuser joins the telescope's connection fields with a focuser number 1-6",
+          "[catalog][onstep][focuser][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Focuser};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{"connectionType",    "mountIndex",   "portPath",
+                                                          "baudRate",          "host",         "tcpPort",
+                                                          "responseTimeoutMs", "focuserNumber"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        const FieldRef* number = find_field(v->fields, "focuserNumber");
+        REQUIRE(number != nullptr);
+        CHECK(same_scalar(number->default_value, std::int64_t{1}));
+
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set("focuserNumber", std::int64_t{7});
+        const auto api = catalog.normalize(key, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "focuserNumber is out of range (min 1) (max 6)");
+        config.set("focuserNumber", std::int64_t{6});
+        CHECK_FALSE(catalog.normalize(key, config, Source::Api).rejection.has_value());
+        // The telescope's endpoint rules apply as they are.
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        const auto no_host = catalog.normalize(key, network, Source::Api);
+        REQUIRE(no_host.rejection.has_value());
+        CHECK(*no_host.rejection == "Host IP address is required");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    config.set("focuserNumber", std::int64_t{2});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Focuser);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "OnStepX focuser 2 (LX200 protocol)");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(key, network, 4);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_description() == "OnStepX focuser 1 (LX200 protocol)");  // the default number
+    CHECK_FALSE(network_driver->get_connected());
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
+// #2221: the rotator joins the controller's link with the telescope's connection fields and nothing else.
+// Falsified by: onstep_schema.cpp register_onstep_schema() not adding the rotator Schema.
+TEST_CASE("Builtin catalog - the OnStep rotator joins the telescope's connection fields",
+          "[catalog][onstep][rotator][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Rotator};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{
+            "connectionType", "mountIndex", "portPath", "baudRate", "host", "tcpPort", "responseTimeoutMs"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        // The telescope's endpoint rules apply as they are.
+        DeviceConfig serial;
+        serial.set("connectionType", std::string{"serial"});
+        const auto no_port = catalog.normalize(key, serial, Source::Api);
+        REQUIRE(no_port.rejection.has_value());
+        CHECK(*no_port.rejection == "Serial port path is required");
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        network.set("host", std::string{"192.0.2.1"});
+        network.set("tcpPort", std::int64_t{65536});
+        const auto bad_port = catalog.normalize(key, network, Source::Api);
+        REQUIRE(bad_port.rejection.has_value());
+        CHECK(*bad_port.rejection == "tcpPort is out of range (min 1) (max 65535)");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Rotator);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_name() == "OnStep Rotator");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(key, network, 4);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_device_type() == DeviceType::Rotator);
+    CHECK_FALSE(network_driver->get_connected());
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
+// #2222: the auxiliary features join the controller's link as one Switch, with the telescope's connection fields.
+// Falsified by: onstep_schema.cpp register_onstep_schema() not adding the switch Schema.
+TEST_CASE("Builtin catalog - the OnStep switch joins the telescope's connection fields",
+          "[catalog][onstep][switch][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Switch};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{
+            "connectionType", "mountIndex", "portPath", "baudRate", "host", "tcpPort", "responseTimeoutMs"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        const auto no_host = catalog.normalize(key, network, Source::Api);
+        REQUIRE(no_host.rejection.has_value());
+        CHECK(*no_host.rejection == "Host IP address is required");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Switch);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_name() == "OnStep Switch");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/null"});
+    auto serial_driver = catalog.create(key, serial, 4);
+    REQUIRE(serial_driver != nullptr);
+    CHECK(serial_driver->get_device_type() == DeviceType::Switch);
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
 // auto-detect factory constructs without a scan (#659), so no port is opened here.
@@ -3959,4 +4134,64 @@ TEST_CASE("Builtin catalog - iOptron sanitize keeps the declared fields per devi
     const DeviceConfig kept_camera = catalog.sanitize(kIoptronCameraKey, camera);
     CHECK(kept_camera.has("cameraIndex"));
     CHECK_FALSE(kept_camera.has("connectionType"));
+}
+
+TEST_CASE(
+    "Builtin catalog - a network mount's port outside 1 to 65535 is refused from the API and kept when saved (#2292)",
+    "[catalog][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Row {
+        DeviceKey key;
+        const char* port_key;
+        bool has_connection_type;
+        bool needs_site;  // Sky-Watcher stores no site (decision 0019 rule 3)
+    };
+    const std::vector<Row> rows = {
+        {kBisqueKey, "tcpPort", false, false},          {kCelestronKey, "tcpPort", true, false},
+        {kIoptronTelescopeKey, "tcpPort", true, false}, {kSkyWatcherKey, "udpPort", true, true},
+        {kSynScanKey, "tcpPort", true, false},          {kZwoTelescopeKey, "tcpPort", true, false},
+        {kOnStepKey, "tcpPort", true, false},  // the rule's source (#2220)
+    };
+    for (const Row& row : rows) {
+        INFO(row.key.vendor);
+        DeviceConfig site;
+        if (row.needs_site) {
+            site.set("siteLatitude", 40.0);
+            site.set("siteLongitude", -74.0);
+        }
+        DeviceConfig network = site;
+        if (row.has_connection_type) network.set("connectionType", std::string{"network"});
+        network.set("host", std::string{"mount.local"});
+        for (const std::int64_t port : {std::int64_t{1}, std::int64_t{65535}}) {
+            DeviceConfig edge = network;
+            edge.set(row.port_key, port);
+            CHECK_FALSE(catalog.normalize(row.key, edge, Source::Api).rejection.has_value());
+        }
+        const std::string message = std::string(row.port_key) + " is out of range (min 1) (max 65535)";
+        for (const std::int64_t port : {std::int64_t{0}, std::int64_t{65536}, std::int64_t{-1}}) {
+            INFO(row.port_key << " " << port);
+            DeviceConfig config = network;
+            config.set(row.port_key, port);
+            const auto api = catalog.normalize(row.key, config, Source::Api);
+            REQUIRE(api.rejection.has_value());
+            CHECK(*api.rejection == message);
+            const auto persisted = catalog.normalize(row.key, config, Source::Persisted);
+            CHECK_FALSE(persisted.rejection.has_value());
+            REQUIRE(persisted.warnings.size() == 1);
+            CHECK(persisted.warnings[0] == message);
+            const auto* kept = persisted.config.find_value(row.port_key);  // kept: the factory hands 0, refused
+            REQUIRE(kept != nullptr);
+            CHECK(std::get<std::int64_t>(*kept) == port);
+        }
+        if (row.has_connection_type) {
+            // A serial entry's port is unused, so it is not checked.
+            DeviceConfig serial = site;
+            serial.set("connectionType", std::string{"serial"});
+            serial.set("portPath", std::string{"/dev/ttyUSB0"});
+            serial.set(row.port_key, std::int64_t{0});
+            CHECK_FALSE(catalog.normalize(row.key, serial, Source::Api).rejection.has_value());
+        }
+    }
 }

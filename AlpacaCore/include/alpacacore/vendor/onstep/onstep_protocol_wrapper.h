@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,9 @@ struct OnStepPortInfo {
 };
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports();
+
+/// OnStepX numbers its releases from 10 (`:GVN#` "10.23a"); OnStep 4.x and older are below it.
+bool is_onstepx_version(const std::string& version);
 
 /// The USB descriptor tokens of a OnStep mount adapter: the raw-node filter of the scan above
 /// matches them, and the catalog registers them as the device's USB identity
@@ -162,21 +166,87 @@ struct TimeInfo {
     double utc_offset_hours = 0.0;  // :SG#/:GG#: hours to ADD to local time for UTC, e.g. +5.0 for EST
 };
 
+/// The :F<n>T# focuser status (OnStepX Focuser.command.cpp, af1d26bf): 'M' moving or 'S' stopped, then the goto-rate
+/// digit.
+struct FocuserStatus {
+    bool moving = false;
+    int goto_rate = 0;
+};
+
+/// One OnStepX auxiliary feature slot from :GXY<n># (OnStepX Features.command.cpp, af1d26bf): its name (at most 10
+/// characters) and its purpose code (Constants.h: 1 switch, 2 analog output, 3 dew heater, 4 intervalometer, 6 hidden
+/// switch; :GXY reports a momentary switch, 5, and a cover switch, 7, as 1).
+struct AuxFeature {
+    std::string name;
+    int purpose = 0;
+};
+
+/// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
+/// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
+/// written only while the rotator is stopped.
+struct RotatorStatus {
+    bool moving = false;
+    bool derotating = false;
+    bool derotation_reversed = false;
+    int goto_rate = 0;
+};
+
 /**
- * @brief Clean C++ interface wrapping the OnStep (LX200-derived) serial
- *        protocol.
+ * @brief One link to one OnStep controller: the LX200-derived command set over
+ *        its serial port or its TCP command channel.
  *
- * This wrapper isolates the serial command protocol and transport layer from
- * the driver implementation. All platform-specific code is hidden using the
- * PIMPL pattern. See .github/instructions/onstep.instructions.md for the command reference.
+ * Every OnStep device on a controller (the telescope, a focuser, the rotator, the switch) shares one
+ * link, which acquire() hands out (#2223, the iOptron iFR precedent of decision
+ * 0017): the first device to connect opens it, later devices join it, and it
+ * closes when the last holder lets go. Every exchange holds the link's own lock
+ * for its command and reply, so wire turns never interleave; a command whose
+ * error code is read next with :GE# holds a Sequence across both. A lost link
+ * is lost for every holder (decision 0009). All platform-specific code is hidden
+ * using the PIMPL pattern. See .github/instructions/onstep.instructions.md for
+ * the command reference.
  */
 class OnStepProtocolWrapper {
 public:
-    static OnStepProtocolWrapper& instance();
+    /**
+     * @brief Join the live link to @p info's controller, or open one (#2223).
+     *
+     * The key is the serial port (its canonical path) or "host:port". A live
+     * link on the key is returned as it is: its line settings and response
+     * timeout are the first opener's. A lost one is closed and a fresh link
+     * opened in its place; its holders keep it, and its loss reason, until they
+     * let go (decision 0009 rule 5). The registry lock is held across the open,
+     * so two connects at once open the port once. Returns null, with the
+     * operator-facing reason in @p error, when the open fails.
+     */
+    static std::shared_ptr<OnStepProtocolWrapper> acquire(const ConnectionInfo& info, std::string* error = nullptr);
 
+    /// A link outside the registry, closed until connect(): what acquire() builds. Tests drive one directly.
+    OnStepProtocolWrapper();
+    ~OnStepProtocolWrapper();
+
+    /// Opens this link. False, with last_connect_error(), when it cannot; a lost link still open is closed first.
     bool connect(const ConnectionInfo& info);
+    /// Closes this link and forgets its loss reason (the loss stamps stay for consume_*()).
     void disconnect();
     bool is_connected() const;
+
+    /**
+     * @brief Holds the link's sequence lock (#2223): the exchanges of the holding thread run back to back, with no
+     *        other device's exchange between them.
+     *
+     * For a command and the :GE# that reads its error code: any later command on the channel replaces the code,
+     * a sibling device's poll included. Recursive, so the holder's own exchanges take it again. Take it with no
+     * driver state lock held (decision 0016); hold it only for the exchanges that must stay together.
+     */
+    class Sequence {
+    public:
+        Sequence() = default;
+        explicit Sequence(std::unique_lock<std::recursive_mutex> lock) : lock_(std::move(lock)) {}
+
+    private:
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+    Sequence hold_sequence();
 
     /// Operator-facing reason the last connect() returned false (e.g. the
     /// serial port is held by another connected device, #1202); empty when
@@ -197,10 +267,10 @@ public:
 
     /**
      * @brief The clock the link-loss and last-alive stamps read (decision 0005,
-     *        #1378): the driver's injected TaskClock, set at connect, so the
-     *        driver times the #521 outage on the clock it runs on. Default:
+     *        #1378): the telescope's injected TaskClock, set when it takes the
+     *        link, so it times the #521 outage on the clock it runs on. Default:
      *        util::default_task_clock(). release_task_clock() puts the default
-     *        back if `clock` is still the one set (a driver going away). A
+     *        back if `clock` is still the one set (a telescope letting go). A
      *        change of the clock in use forgets the loss and last-alive
      *        stamps: one taken on another clock means nothing here (#1460).
      */
@@ -634,12 +704,72 @@ public:
      */
     void flush_input();
 
-private:
-    OnStepProtocolWrapper();
-    ~OnStepProtocolWrapper();
+    // ── Focuser (OnStepX, #2223). Only the addressed form :F<n>...# with n 1-6 is sent: the controller's active
+    // focuser (:FA<n>#), which the handset and the OnStepX web page use, is never changed, and the bare rate preset
+    // :F<d># is never sent. Replies from OnStepX Focuser.command.cpp at af1d26bf.
+
+    /// :F<n>T#: "M" or "S" then the goto-rate digit, '#'-terminated. std::nullopt for any other reply, which is what
+    /// a controller without focuser n answers (the unknown-command "0").
+    std::optional<FocuserStatus> focuser_status(int focuser);
+    /// :F<n>g#: the position in steps ("%ld", '#'-terminated). std::nullopt when it does not parse.
+    std::optional<long> focuser_position(int focuser);
+    /// :F<n>i# / :F<n>m#: the minimum / maximum position in steps. std::nullopt when it does not parse.
+    std::optional<long> focuser_min_position(int focuser);
+    std::optional<long> focuser_max_position(int focuser);
+    /// :F<n>u#: microns per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> focuser_microns_per_step(int focuser);
+    /// :F<n>t#: the temperature in degrees C ("%3.1f" of the firmware's sensor, which prints "nan" with no probe).
+    /// std::nullopt for anything that is not a finite number.
+    std::optional<double> focuser_temperature(int focuser);
+    /// :F<n>c#: temperature compensation on ('1') or off ('0'), a bare digit. std::nullopt for any other reply.
+    std::optional<bool> focuser_temp_comp(int focuser);
+    /// :F<n>c0# / :F<n>c1#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_focuser_temp_comp(int focuser, bool enabled);
+    /// :F<n>s<steps>#: an absolute goto in steps; a bare '1' accepted or '0' refused.
+    bool focuser_goto(int focuser, long steps);
+    /// :F<n>Q#: stop. No reply (sent blind).
+    void focuser_halt(int focuser);
+
+    // ── Rotator (OnStepX, #2221). Replies from OnStepX Rotator.command.cpp at af1d26bf. The derotator commands
+    // (:r+#, :r-#, :rP#) and the derotation reverse toggle (:rR#) are never sent.
+
+    /// :GX98#: 'R' rotate only or 'D' rotate and derotate. std::nullopt for anything else: 'N' (no rotator) or the
+    /// unknown-command "0" of a firmware without the rotator.
+    std::optional<char> rotator_capability();
+    /// :rT#: the status, '#'-terminated. std::nullopt for any other reply (the unknown-command "0").
+    std::optional<RotatorStatus> rotator_status();
+    /// :rG#: the rotator's angle in degrees ("sDDD*MM", whole arcminutes; signed, inside the travel limits).
+    /// std::nullopt when it does not parse.
+    std::optional<double> rotator_angle();
+    /// :rI# / :rM#: the travel limits in whole degrees ("%ld"). std::nullopt when they do not parse.
+    std::optional<long> rotator_min_angle();
+    std::optional<long> rotator_max_angle();
+    /// :rD#: degrees per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> rotator_degrees_per_step();
+    /// :rS<sDDD*MM:SS>#: an absolute goto to `degrees` (inside the travel limits); a bare '1' accepted or '0' refused
+    /// (get_last_command_error() says why).
+    bool rotator_goto(double degrees);
+    /// :rQ#: stop. No reply (sent blind).
+    void rotator_halt();
+
+    // ── Auxiliary features (OnStepX, #2222), slots 1-8. Replies from OnStepX Features.command.cpp at af1d26bf.
+
+    /// :GXY0#: one '0'/'1' per slot, slot 1 first ("11010000#"). std::nullopt for anything else (the
+    /// unknown-command "0" of a firmware without the features is read as one absent slot, not as nullopt).
+    std::optional<std::string> aux_feature_slots();
+    /// :GXY<n>#: "name,purpose#". std::nullopt for anything else (a slot that is off answers the bare "0").
+    std::optional<AuxFeature> aux_feature(int slot);
+    /// :GXX<n>#: the slot's value, the first field of the reply ('#'-terminated; a ',' or ';' ends it, so a dew
+    /// heater's zero, span and delta-T and any power telemetry are not read). std::nullopt when it is not a whole
+    /// number.
+    std::optional<long> aux_feature_value(int slot);
+    /// :SXX<n>,V<v>#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_aux_feature_value(int slot, long value);
+
     OnStepProtocolWrapper(const OnStepProtocolWrapper&) = delete;
     OnStepProtocolWrapper& operator=(const OnStepProtocolWrapper&) = delete;
 
+private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
@@ -650,10 +780,18 @@ enum class LinkLossHookPoint : std::uint8_t {
     AliveBeforeRecord,      ///< link_alive(): node found gone, loss not yet recorded; no lock held
     AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
     DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
+    BeforeExchange,         ///< send_command(): before this exchange takes the wire; only a caller's Sequence held
+    AfterConnectionCheck,   ///< a focuser, rotator or switch member passed its connection check; no lock held
 };
-/// Test hook: lets a test land a Disconnect or a reconnect at the points above.
+/// Test hook: lets a test land a Disconnect, a reconnect or a sibling's exchange at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+/// Runs the hook at AfterConnectionCheck: the OnStep focuser, rotator and switch call it at the end of their
+/// connection check, so a test can land a Disconnect between that check and the member's read of the connect-time
+/// state. Does nothing (and takes no lock) while no hook is set.
+void run_connection_check_hook();
+/// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.
+std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info);
 }  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

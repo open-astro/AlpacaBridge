@@ -1133,6 +1133,26 @@ std::unique_ptr<alpacacore::CameraDriver> make_clocked_driver(alpacacore::test::
 
 }  // namespace
 
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("Player One Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[playerone][camera][unit][issue2292]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+    int code = 0;
+    try {
+        driver->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(sdk.pulse_off_count() == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - pulse guide timer waits on the task clock",
           "[playerone][camera][unit][taskclock]") {
     alpacacore::test::FakePlayerOneSDK sdk;
@@ -1921,11 +1941,8 @@ TEST_CASE("Player One Camera Driver - an AbortExposure during a StartExposure st
     REQUIRE(start_waiting);
     CHECK(abort_returned);
     CHECK(start_error.load() == 0);
-    // The recorded abort stopped the new exposure: it never serves a frame, however long the clock runs.
-    for (int i = 0; i < 20; ++i) {
-        clock.advance(50ms);
-        std::this_thread::sleep_for(5ms);  // room for a missed exposure's poll to publish its frame
-    }
+    // The session applied the recorded abort as the start published the exposure, so its body never ran: the camera is
+    // Idle with no frame at once, with no clock step and no real-time wait (#2337 flaked on a 5 ms sleep loop here).
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     bool frame = false;
     try {

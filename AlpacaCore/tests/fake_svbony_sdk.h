@@ -31,6 +31,8 @@
 #include <utility>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // KNOWN PARITY LIMITS:
@@ -111,7 +113,7 @@ public:
         // Outside the mutex, so the delay holds only the caller (the driver's connect), not other fake calls.
         if (before_call) before_call("open_camera");
         const auto delay = std::chrono::milliseconds(open_delay_ms_.load());
-        if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        alpacacore::test::connect_hold(delay);  // connect_hold_gate.h
         std::lock_guard lock(mutex_);
         record_locked("open_camera");
         maybe_fail_locked("open_camera");

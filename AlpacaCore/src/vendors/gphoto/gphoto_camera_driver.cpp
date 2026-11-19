@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/last_exposure.h>
@@ -46,6 +47,20 @@ namespace alpacacore::vendor::gphoto {
 namespace {
 
 constexpr const char* kLogTag = "GPhoto";
+
+// The frame-request texts (#2261) in GPhoto's words. A DSLR bins 1 only.
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_overflow = "Exposure duration out of range";
+    texts.bin_not_positive = "Binning not supported by DSLR cameras";
+    texts.bin_not_supported = "Binning not supported by DSLR cameras";
+    texts.start_negative = "ROI start must be non-negative";
+    texts.frame_size_not_positive = "ROI is not valid for exposure";
+    texts.frame_above_sensor = "ROI extends beyond sensor bounds";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
+constexpr int kDslrBins[] = {1};
 
 std::string to_lower(std::string_view s) {
     std::string out(s);
@@ -453,9 +468,7 @@ public:
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
     bool get_connected() const override { return connected_.load(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Decision 0016 rule 4 and driver-lifecycle #528: transition_mutex_ serialises every sync transition, so the
@@ -842,13 +855,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return num_x_;
     }
-    void set_num_x(int num_x) override { set_roi_dimension_locked(&num_x_, num_x); }
+    void set_num_x(int num_x) override { set_roi_dimension_locked(&num_x_, num_x, util::check_frame_size); }
 
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
-    void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y); }
+    void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y, util::check_frame_size); }
 
     int get_offset() const override {
         ensure_connected();
@@ -928,13 +941,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return start_x_;
     }
-    void set_start_x(int start_x) override { set_roi_dimension_locked(&start_x_, start_x); }
+    void set_start_x(int start_x) override { set_roi_dimension_locked(&start_x_, start_x, util::check_frame_start); }
 
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
-    void set_start_y(int start_y) override { set_roi_dimension_locked(&start_y_, start_y); }
+    void set_start_y(int start_y) override { set_roi_dimension_locked(&start_y_, start_y, util::check_frame_start); }
 
     double get_sub_exposure_duration() const override {
         ensure_connected();
@@ -956,9 +969,9 @@ public:
     void start_exposure(double duration, bool light) override {
         (void)light;  // A DSLR's mechanical shutter always opens; dark frames require capping the lens.
 
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h), then GPhoto's static 3600 s cap (a vendor limit), all
+        // before the connection check.
+        util::check_exposure_duration(duration, kRequestTexts);
         if (duration > 3600.0) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
@@ -1203,10 +1216,10 @@ private:
         }
     }
 
+    // The DSLR's one bin is known without the camera, so the supported-bin check runs with no connection check.
     static void reject_non_unity_bin(int value) {
-        if (value != 1) {
-            throw AlpacaException("Binning not supported by DSLR cameras", AlpacaError::InvalidValue);
-        }
+        util::check_bin(value, kRequestTexts);
+        util::check_bin_supported(value, kDslrBins, kRequestTexts);
     }
 
     void reset_exposure_state_locked() {
@@ -1236,21 +1249,16 @@ private:
 
     double get_exposure_max_locked() const { return has_bulb_ ? 3600.0 : max_native_shutter_seconds_; }
 
+    // ExposureMax stays GPhoto's own check (vendor reason): the duration maps to the nearest shutter speed, not to
+    // microseconds. The frame is checked once the sensor size is known (the priming capture or a first exposure).
     void validate_exposure_locked(double duration) const {
         ensure_connected();
         if (duration > get_exposure_max_locked()) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
         if (geometry_known_) {
-            if (num_x_ <= 0 || num_y_ <= 0) {
-                throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
-            }
-            if (start_x_ < 0 || start_y_ < 0 || start_x_ >= camera_x_size_ || start_y_ >= camera_y_size_) {
-                throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
-            }
-            if (start_x_ + num_x_ > camera_x_size_ || start_y_ + num_y_ > camera_y_size_) {
-                throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-            }
+            util::check_frame_on_sensor(util::CameraFrame{1, 1, num_x_, num_y_, start_x_, start_y_}, camera_x_size_,
+                                        camera_y_size_, kRequestTexts);
         }
     }
 
@@ -1270,12 +1278,13 @@ private:
         return *best;
     }
 
-    void set_roi_dimension_locked(int* field, int value) {
+    // #2259 canonical order: the static value check (util/camera_frame_request.h, check_frame_size for NumX/NumY,
+    // check_frame_start for StartX/StartY) precedes the connection check. The sensor bound stays at StartExposure. No
+    // exposing check here yet (#1982).
+    void set_roi_dimension_locked(int* field, int value, void (*check)(int, const util::CameraRequestTexts&)) {
+        check(value, kRequestTexts);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (value < 0) {
-            throw AlpacaException("ROI value must be non-negative", AlpacaError::InvalidValue);
-        }
         *field = value;
     }
 

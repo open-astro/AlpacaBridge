@@ -107,7 +107,7 @@ bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);
  * its pointer, so the focuser and the rotator connect and disconnect independently while sharing one fd.
  *
  * Every exchange runs under the session's I/O lock, the per-link lock of decision 0016; nothing else is held
- * across the wire. A hangup, or EIO/ENXIO/ENODEV on a write, loses the link at once for both devices
+ * across the wire. A hangup, or EIO/ENXIO/ENODEV/EBADF on a write, loses the link at once for both devices
  * (decision 0009 rule 2): the port is released, link_alive() turns false and the reason is kept for
  * link_fault(). The next acquire() then opens a fresh session.
  */

@@ -71,6 +71,7 @@
 #include "../core/catalog_json.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "router_helpers.h"
 #include "thread_join.h"
 
 namespace {
@@ -774,6 +775,24 @@ constexpr const char* kAnonymousClientKey = "<anonymous>";
 // device refreshes its registration, so ordinary polling keeps it alive.
 constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
 
+// open-astro#2292 (ADR 0007 rules 4 and 10): the most (address, ClientID)
+// registrations one device holds. A uint32 ClientID per request (#1738) still
+// let one host add an entry per request for the whole stale window; past this
+// a new client's Connected=true is refused until an entry leaves or goes
+// stale. A rig has a handful of clients per device.
+constexpr std::size_t kMaxClientsPerDevice = 256;
+
+// The answer to a Connected=true past kMaxClientsPerDevice. Returned, not
+// thrown: a client can cause it, so it logs at DEBUG (ADR 0007 rule 9), where
+// a thrown InvalidOperation logs at ERROR.
+alpacahttp::Response refuse_full_client_registry(const alpacahttp::DeviceCall& call) {
+    const std::string message = "Connected refused: " + std::to_string(kMaxClientsPerDevice) +
+                                " clients already hold this device; a client that stops polling is dropped after 10 "
+                                "minutes";
+    alpacahttp::util::log_debug(message);
+    return call.error(alpacacore::AlpacaError::InvalidOperation, message);
+}
+
 // Issue #1764: the web UI marks its own device requests (the Celestron
 // calibration action) with this header, so they never refresh a client's
 // registration and the Devices dot shows only real client activity. Kept in
@@ -885,6 +904,8 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
     return reason.empty() ? std::string("Connection failed") : reason;
 }
 
+}  // namespace
+
 // open-astro#1660: SlewToCoordinates and SlewToTarget are served by starting
 // the async slew and waiting here, so a driver that cannot slew is refused
 // before anything is parsed or written.
@@ -920,11 +941,17 @@ void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono
     }
 }
 
+namespace {
+
 // open-astro#711: libstdc++ std::regex recurses once per repeated character,
 // so a long path segment overflowed the worker stack and killed the server.
 // route() refuses anything longer before a regex sees it. The longest valid
 // path today is under 100 bytes; 2048 stays far below the crash depth.
 constexpr std::size_t kMaxRequestPathBytes = 2048;
+
+// open-astro#2292 (ADR 0007 rule 10): the most entries configuredevice keeps.
+// A new entry past it is refused; replacing an entry is not. A rig has tens.
+constexpr std::size_t kMaxConfiguredDevices = 128;
 
 // open-astro#392: the host part of a Host header or an http.allowed_hosts
 // entry: port removed, lowercased, one trailing dot removed. A bracketed IPv6
@@ -1153,17 +1180,6 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
     resp.set_body(alpaca_response);
     return resp;
 }
-
-// Defined further down with the management guards, but declared here because
-// every state-changing management handler needs it and handle_description()
-// is the first of them in file order. Also used by the four device setters
-// with a side effect beyond the driver: UTCDate steps the host clock
-// (open-astro#401) and the three site setters rewrite persisted config (#444).
-//
-// Takes the client's ClientTransactionID as well as the server's: the 403 body
-// echoes it like every other error path in these handlers (open-astro#384).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
-                                                    std::uint32_t server_tx_id, const char* what);
 
 // A verb the Alpaca Management API does not define for `what`: HTTP 400 with a
 // text/plain message (Alpaca API Reference s2.5, #1508).
@@ -1857,6 +1873,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             const std::optional<std::string> new_location = read_string_field({"Location", "location"});
             const std::optional<std::string> new_profile_name =
                 read_string_field({"ProfileName", "profileName", "profile_name"});
+            if (new_location) refuse_over_long("Location", *new_location, kMaxNameBytes);
+            if (new_profile_name) refuse_over_long("ProfileName", *new_profile_name, kMaxNameBytes);
 
             std::optional<bool> new_sync_clock;
             for (const char* key :
@@ -2516,11 +2534,14 @@ void prune_stale_client_connections(std::unordered_map<std::string, std::chrono:
 
 }  // namespace
 
-std::size_t Router::register_client_connection(const void* device, const std::string& client_key) {
+std::optional<std::size_t> Router::register_client_connection(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto& clients = client_connections_[device];
     const auto now = client_clock_();
     prune_stale_client_connections(clients, now);
+    if (clients.size() >= kMaxClientsPerDevice && clients.find(client_key) == clients.end()) {
+        return std::nullopt;
+    }
     clients[client_key] = now;
     return clients.size();
 }
@@ -2745,7 +2766,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         throw alpacacore::AlpacaException("Device has been removed",
                                                           alpacacore::AlpacaError::InvalidOperation);
                     }
-                    register_client_connection(device.get(), client_key);
+                    if (!register_client_connection(device.get(), client_key)) {
+                        return refuse_full_client_registry(call);
+                    }
                 }
 
                 // get_connecting() is read first at every step here: a
@@ -2891,7 +2914,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (action_name.empty()) {
                     throw_bad_request("Missing parameter: Action");
                 }
-                
+                refuse_over_long("Action", action_name, kMaxActionNameBytes);
+                refuse_over_long("Parameters", action_parameters, kMaxActionParametersBytes);
+
                 std::string result = device->action(action_name, action_parameters);
                 return call.ok(result);
             }
@@ -2927,7 +2952,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 device->command_blind(command, raw);
                 return call.ok_void();
             }
@@ -2963,7 +2989,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 bool result = device->command_bool(command, raw);
                 return call.ok(result);
             }
@@ -2999,7 +3026,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 std::string result = device->command_string(command, raw);
                 return call.ok(result);
             }
@@ -3023,7 +3051,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                     throw alpacacore::AlpacaException("Device has been removed",
                                                       alpacacore::AlpacaError::InvalidOperation);
                 }
-                register_client_connection(device.get(), extract_client_key(request).key);
+                if (!register_client_connection(device.get(), extract_client_key(request).key)) {
+                    return refuse_full_client_registry(call);
+                }
                 // get_connecting() first (see PUT connected): a mid-task
                 // connect goes to the driver, whose base class reconciles it.
                 if (device->get_connecting() || !device->get_connected()) {
@@ -3149,1207 +3179,6 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
         return call.error(util::ErrorCode::NOT_IMPLEMENTED,
                           "Method '" + method_name + "' not yet implemented for device type " +
                               std::string(alpacacore::device_type_to_string(device_type)));
-    });
-}
-
-Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::TelescopeDriver> telescope,
-                                           const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("telescope method '" + method_name + "'", [&]() -> Response {
-        // GET-only boolean properties
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "cansetrightascensionrate") {
-                return call.ok(telescope->get_can_set_right_ascension_rate());
-            }
-            else if (method_name == "cansetdeclinationrate") {
-                return call.ok(telescope->get_can_set_declination_rate());
-            }
-            else if (method_name == "cansetguiderates") {
-                return call.ok(telescope->get_can_set_guide_rates());
-            }
-            else if (method_name == "cansettracking") {
-                return call.ok(telescope->get_can_set_tracking());
-            }
-            else if (method_name == "cansetpark") {
-                return call.ok(telescope->get_can_set_park());
-            }
-            else if (method_name == "cansetpierside") {
-                return call.ok(telescope->get_can_set_pier_side());
-            }
-            else if (method_name == "canfindhome") {
-                return call.ok(telescope->get_can_find_home());
-            }
-            else if (method_name == "canpark") {
-                return call.ok(telescope->get_can_park());
-            }
-            else if (method_name == "canpulseguide") {
-                return call.ok(telescope->get_can_pulse_guide());
-            }
-            else if (method_name == "canslew") {
-                return call.ok(telescope->get_can_slew());  // #1660: the driver's value again
-            }
-            else if (method_name == "canslewasync") {
-                return call.ok(telescope->get_can_slew_async());
-            }
-            else if (method_name == "cansync") {
-                return call.ok(telescope->get_can_sync());
-            }
-            else if (method_name == "canunpark") {
-                return call.ok(telescope->get_can_unpark());
-            }
-            else if (method_name == "canslewaltaz") {
-                return call.ok(false);  // #775: synchronous slews are not served
-            }
-            else if (method_name == "canslewaltazasync") {
-                return call.ok(telescope->get_can_slew_alt_az_async());
-            }
-            else if (method_name == "cansyncaltaz") {
-                return call.ok(telescope->get_can_sync_alt_az());
-            }
-            else if (method_name == "alignmentmode") {
-                int mode = static_cast<int>(telescope->get_alignment_mode());
-                return call.ok(mode);
-            }
-            else if (method_name == "equatorialsystem") {
-                return call.ok(static_cast<int>(telescope->get_equatorial_system()));
-            }
-            else if (method_name == "doesrefraction") {
-                return call.ok(telescope->get_does_refraction());
-            }
-            else if (method_name == "ispulseguiding") {
-                return call.ok(telescope->get_is_pulse_guiding());
-            }
-            else if (method_name == "slewsettletime") {
-                return call.ok(telescope->get_slew_settle_time());
-            } else if (method_name == "utcdate") {
-                return call.ok(alpacacore::device_state_timestamp(telescope->get_utc_date()));
-            } else if (method_name == "axisrates") {
-                int axis = call.get_int("Axis");
-                // AxisRates must return an array of rate objects, even if only one range.
-                auto ranges = telescope->get_axis_rate_ranges(axis);
-                nlohmann::json rates_array = nlohmann::json::array();
-                for (const auto& range : ranges) {
-                    nlohmann::json rate_obj;
-                    rate_obj["Minimum"] = range.first;
-                    rate_obj["Maximum"] = range.second;
-                    rates_array.push_back(rate_obj);
-                }
-                return call.ok(rates_array);
-            } else if (method_name == "canmoveaxis") {
-                int axis = call.get_int("Axis");
-                bool can_move = telescope->get_can_move_axis(axis);
-                return call.ok(can_move);
-            } else if (method_name == "destinationsideofpier") {
-                if (!request.has_query_param("RightAscension")) {
-                    throw_bad_request("Missing parameter: RightAscension");
-                }
-                if (!request.has_query_param("Declination")) {
-                    throw_bad_request("Missing parameter: Declination");
-                }
-                double ra = parse_double_value(request.get_query_param("RightAscension"), "RightAscension");
-                double dec = parse_double_value(request.get_query_param("Declination"), "Declination");
-                int side = telescope->get_destination_side_of_pier(ra, dec);
-                return call.ok(side);
-            } else if (method_name == "athome") {
-                return call.ok(telescope->get_at_home());
-            } else if (method_name == "atpark") {
-                return call.ok(telescope->get_at_park());
-            } else if (method_name == "slewing") {
-                return call.ok(telescope->get_slewing());
-            } else if (method_name == "tracking") {
-                return call.ok(telescope->get_tracking());
-            } else if (method_name == "altitude") {
-                return call.ok(telescope->get_altitude());
-            } else if (method_name == "azimuth") {
-                return call.ok(telescope->get_azimuth());
-            } else if (method_name == "declination") {
-                return call.ok(telescope->get_declination());
-            } else if (method_name == "rightascension") {
-                return call.ok(telescope->get_right_ascension());
-            } else if (method_name == "declinationrate") {
-                return call.ok(telescope->get_declination_rate());
-            } else if (method_name == "rightascensionrate") {
-                return call.ok(telescope->get_right_ascension_rate());
-            } else if (method_name == "trackingrate") {
-                int rate = telescope->get_tracking_rate();
-                return call.ok(rate);
-            } else if (method_name == "trackingrates") {
-                auto rates = telescope->get_tracking_rates();
-                nlohmann::json rates_array = nlohmann::json::array();
-                for (int rate : rates) {
-                    rates_array.push_back(rate);
-                }
-                return call.ok(rates_array);
-            } else if (method_name == "targetdeclination") {
-                return call.ok(telescope->get_target_declination());
-            } else if (method_name == "targetrightascension") {
-                return call.ok(telescope->get_target_right_ascension());
-            } else if (method_name == "siderealtime") {
-                return call.ok(telescope->get_sidereal_time());
-            } else if (method_name == "siteelevation") {
-                return call.ok(telescope->get_site_elevation());
-            } else if (method_name == "sitelatitude") {
-                return call.ok(telescope->get_site_latitude());
-            } else if (method_name == "sitelongitude") {
-                return call.ok(telescope->get_site_longitude());
-            } else if (method_name == "focallength") {
-                return call.ok(telescope->get_focal_length());
-            } else if (method_name == "aperturediameter") {
-                return call.ok(telescope->get_aperture_diameter());
-            } else if (method_name == "aperturearea") {
-                return call.ok(telescope->get_aperture_area());
-            } else if (method_name == "sideofpier") {
-                return call.ok(telescope->get_side_of_pier());
-            } else if (method_name == "guideratedeclination") {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.dec);
-            } else if (method_name == "guideraterightascension") {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.ra);
-            }
-        }
-        
-        // GET/PUT properties
-        if (method_name == "doesrefraction") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_does_refraction());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                bool value = call.get_bool("DoesRefraction");
-                telescope->set_does_refraction(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "slewsettletime") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_slew_settle_time());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("SlewSettleTime");
-                telescope->set_slew_settle_time(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "utcdate") {
-            // open-astro#401: a UTCDate write can step the host clock (#289)
-            // and latch ClockSource, the same host-level effect the synctime
-            // endpoint guards. A browser page on another origin must not be
-            // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected =
-                    reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(), "UTCDate")) {
-                return *rejected;
-            }
-            if (request.method() == HttpMethod::GET) {
-                auto utc = telescope->get_utc_date();
-                auto time_t = std::chrono::system_clock::to_time_t(utc);
-                std::ostringstream oss;
-                oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    utc.time_since_epoch()) % 1000;
-                oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
-                return call.ok(oss.str());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                const std::string date_str = call.find_string("UTCDate").value_or("");
-                if (date_str.empty()) {
-                    throw_bad_request("Missing parameter: UTCDate or Value");
-                }
-                std::string cleaned = date_str;
-                if (!cleaned.empty() && (cleaned.back() == 'Z' || cleaned.back() == 'z')) {
-                    cleaned.pop_back();
-                }
-                std::string base = cleaned;
-                int millis = 0;
-                auto dot_pos = cleaned.find('.');
-                if (dot_pos != std::string::npos) {
-                    base = cleaned.substr(0, dot_pos);
-                    std::string frac = cleaned.substr(dot_pos + 1);
-                    if (frac.size() > 3) {
-                        frac.resize(3);
-                    }
-                    while (frac.size() < 3) {
-                        frac.push_back('0');
-                    }
-                    try {
-                        millis = std::stoi(frac);
-                    } catch (const std::exception&) {
-                        throw_bad_request("Invalid UTC date format: " + date_str);
-                    }
-                }
-
-                std::tm tm = {};
-                std::istringstream ss(base);
-                ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-                if (ss.fail()) {
-                    throw_bad_request("Invalid UTC date format: " + date_str);
-                }
-                auto utc_time = timegm(&tm);
-                if (utc_time == static_cast<std::time_t>(-1)) {
-                    throw_bad_request("Failed to convert UTC date: " + date_str);
-                }
-                auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
-                    std::chrono::milliseconds(millis);
-                // open-astro#289: on an SBC with no NTP and no RTC this write is
-                // the only correct time the host will ever see. Step the system
-                // clock from it when the kernel reports the clock undisciplined
-                // (never over NTP/chrony/GPS), then hand the driver the same value.
-                // The step does not depend on the driver's result: it runs before
-                // set_utc_date and stays if the driver throws (Bisque refuses every
-                // write; most drivers throw NotConnected before connect, though the
-                // ZWO AM mount caches an offline write and succeeds), because a
-                // rejection says nothing about whether the client's time is right.
-                // The driver's own result goes back to the client unchanged.
-                {
-                    const auto step = host_clock_.step_from_client(time_point);
-                    using Outcome = alpacacore::util::HostClock::Outcome;
-                    const std::string what = "UTCDate from " + request.remote_address() + " for telescope/" +
-                                             std::to_string(telescope->get_device_number()) + ": host clock " +
-                                             alpacacore::util::HostClock::outcome_name(step.outcome) +
-                                             " (client - host = " + std::to_string(step.delta.count()) + " ms)";
-                    if (step.outcome == Outcome::Stepped) {
-                        util::log_info(what);
-                    } else if (step.outcome == Outcome::Failed) {
-                        util::log_warning(what + ": " + step.error);
-                    } else if (step.outcome == Outcome::SkippedSynchronized &&
-                               (step.delta > alpacacore::util::HostClock::kClientDisagreementWarn ||
-                                step.delta < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
-                        // Rendered in ms, not seconds: the threshold is a
-                        // millisecond constant, and dividing by 1000 would
-                        // log "2 s" for a future 2500 ms value -- which
-                        // defeats the point of having one shared constant.
-                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than " +
-                                          std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count()) +
-                                          " ms");
-                    } else {
-                        util::log_debug(what);
-                    }
-                }
-                telescope->set_utc_date(time_point);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "tracking") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_tracking());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                bool value = call.get_bool("Tracking");
-                telescope->set_tracking(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "declinationrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_declination_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("DeclinationRate");
-                telescope->set_declination_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "rightascensionrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_right_ascension_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("RightAscensionRate");
-                telescope->set_right_ascension_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "trackingrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_tracking_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("TrackingRate");
-                telescope->set_tracking_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "targetdeclination") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_target_declination());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("TargetDeclination");
-                telescope->set_target_declination(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "targetrightascension") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_target_right_ascension());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("TargetRightAscension");
-                telescope->set_target_right_ascension(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "siteelevation") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_elevation());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteElevation")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteElevation");
-                telescope->set_site_elevation(value);
-                persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sitelatitude") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_latitude());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLatitude")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteLatitude");
-                telescope->set_site_latitude(value);
-                persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sitelongitude") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_longitude());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLongitude")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteLongitude");
-                telescope->set_site_longitude(value);
-                persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sideofpier") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_side_of_pier());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("SideOfPier");
-                telescope->set_side_of_pier(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "guideratedeclination") {
-            if (request.method() == HttpMethod::GET) {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.dec);
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("GuideRateDeclination");
-                telescope->set_guide_rate_declination(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "guideraterightascension") {
-            if (request.method() == HttpMethod::GET) {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.ra);
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("GuideRateRightAscension");
-                telescope->set_guide_rate_right_ascension(value);
-                return call.ok_void();
-            }
-        }
-        
-        // PUT-only methods (actions)
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "abortslew") {
-                telescope->abort_slew();
-                return call.ok_void();
-            }
-            else if (method_name == "moveaxis") {
-                // Debug logging
-                if (!request.body().empty()) {
-                    util::log_info("moveaxis body: " + util::escape_for_log(request.body()));
-                }
-                int axis = call.get_int("Axis");
-                double rate = call.get_double("Rate");
-                util::log_info("moveaxis parsed: Axis=" + std::to_string(axis) + ", Rate=" + std::to_string(rate));
-                telescope->move_axis(axis, rate);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtoaltazasync") {
-                double altitude = call.get_double("Altitude");
-                double azimuth = call.get_double("Azimuth");
-                telescope->slew_to_alt_az_async(altitude, azimuth);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtoaltaz") {
-                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
-                // any parameter parse, target write or driver call.
-                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
-                                                  alpacacore::AlpacaError::MethodNotImplemented);
-            }
-            else if (method_name == "synctoaltaz") {
-                double altitude = call.get_double("Altitude");
-                double azimuth = call.get_double("Azimuth");
-                telescope->sync_to_alt_az(altitude, azimuth);
-                return call.ok_void();
-            }
-            else if (method_name == "park") {
-                telescope->park();
-                return call.ok_void();
-            }
-            else if (method_name == "unpark") {
-                telescope->unpark();
-                return call.ok_void();
-            }
-            else if (method_name == "findhome") {
-                telescope->find_home();
-                return call.ok_void();
-            }
-            else if (method_name == "setpark") {
-                telescope->set_park();
-                return call.ok_void();
-            }
-            else if (method_name == "slewtotarget") {
-                // #1660: refused untouched when the driver cannot slew; else the
-                // async initiator, then a bounded wait for Slewing to clear.
-                require_can_slew(*telescope);
-                telescope->slew_to_target_async();
-                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtotargetasync") {
-                telescope->slew_to_target_async();
-                return call.ok_void();
-            }
-            else if (method_name == "slewtocoordinates") {
-                require_can_slew(*telescope);
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                telescope->slew_to_coordinates_async(ra, dec);
-                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtocoordinatesasync") {
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                // slew_to_coordinates_async sets targets internally; skip
-                // redundant set_target calls to avoid extra mutex round-trips.
-                telescope->slew_to_coordinates_async(ra, dec);
-                return call.ok_void();
-            }
-            else if (method_name == "synctotarget") {
-                telescope->sync_to_target();
-                return call.ok_void();
-            }
-            else if (method_name == "synctocoordinates") {
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                telescope->sync_to_coordinates(ra, dec);
-                return call.ok_void();
-            }
-            else if (method_name == "pulseguide") {
-                int direction = call.get_int("Direction");
-                int duration = call.get_int("Duration");
-                telescope->pulse_guide(direction, duration);
-                return call.ok_void();
-            }
-        }
-        
-        // Method not found
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Telescope");
-    });
-}
-
-Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver> camera,
-                                        const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    auto dispatch_start = std::chrono::steady_clock::now();
-    alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
-        "dispatch_camera_method entry: method=" + method_name);
-    struct DispatchExitLog {
-        std::string method_name;
-        std::chrono::steady_clock::time_point start;
-        ~DispatchExitLog() {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
-                "dispatch_camera_method exit: method=" + method_name + " duration_ms=" + std::to_string(ms));
-        }
-    } dispatch_exit_log{method_name, dispatch_start};
-
-    auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
-        auto time_t = std::chrono::system_clock::to_time_t(time_point);
-        std::ostringstream oss;
-        oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-        return oss.str();
-    };
-
-    return call.run("camera method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "bayeroffsetx") {
-                return call.ok(camera->get_bayer_offset_x());
-            } else if (method_name == "bayeroffsety") {
-                return call.ok(camera->get_bayer_offset_y());
-            } else if (method_name == "binx") {
-                return call.ok(camera->get_bin_x());
-            } else if (method_name == "biny") {
-                return call.ok(camera->get_bin_y());
-            } else if (method_name == "camerastate") {
-                return call.ok(static_cast<int>(camera->get_camera_state()));
-            } else if (method_name == "cameraxsize") {
-                return call.ok(camera->get_camera_x_size());
-            } else if (method_name == "cameraysize") {
-                return call.ok(camera->get_camera_y_size());
-            } else if (method_name == "canabortexposure") {
-                return call.ok(camera->get_can_abort_exposure());
-            } else if (method_name == "canasymmetricbin") {
-                return call.ok(camera->get_can_asymmetric_bin());
-            } else if (method_name == "canfastreadout") {
-                return call.ok(camera->get_can_fast_readout());
-            } else if (method_name == "cangetcoolerpower") {
-                return call.ok(camera->get_can_get_cooler_power());
-            } else if (method_name == "canpulseguide") {
-                return call.ok(camera->get_can_pulse_guide());
-            } else if (method_name == "cansetccdtemperature") {
-                return call.ok(camera->get_can_set_ccd_temperature());
-            } else if (method_name == "canstopexposure") {
-                return call.ok(camera->get_can_stop_exposure());
-            } else if (method_name == "ccdtemperature") {
-                return call.ok(camera->get_ccd_temperature());
-            } else if (method_name == "cooleron") {
-                return call.ok(camera->get_cooler_on());
-            } else if (method_name == "coolerpower") {
-                return call.ok(camera->get_cooler_power());
-            } else if (method_name == "electronsperadu") {
-                return call.ok(camera->get_electrons_per_adu());
-            } else if (method_name == "exposuremax") {
-                return call.ok(camera->get_exposure_max());
-            } else if (method_name == "exposuremin") {
-                return call.ok(camera->get_exposure_min());
-            } else if (method_name == "exposureresolution") {
-                return call.ok(camera->get_exposure_resolution());
-            } else if (method_name == "fastreadout") {
-                return call.ok(camera->get_fast_readout());
-            } else if (method_name == "fullwellcapacity") {
-                return call.ok(camera->get_full_well_capacity());
-            } else if (method_name == "gain") {
-                return call.ok(camera->get_gain());
-            } else if (method_name == "gainmax") {
-                return call.ok(camera->get_gain_max());
-            } else if (method_name == "gainmin") {
-                return call.ok(camera->get_gain_min());
-            } else if (method_name == "gains") {
-                nlohmann::json gains = nlohmann::json::array();
-                for (const auto& gain : camera->get_gains()) {
-                    gains.push_back(gain);
-                }
-                return call.ok(gains);
-            } else if (method_name == "hasshutter") {
-                return call.ok(camera->get_has_shutter());
-            } else if (method_name == "heatsinktemperature") {
-                return call.ok(camera->get_heat_sink_temperature());
-            } else if (method_name == "imagearray") {
-                const bool has_accept = request.has_header("accept");
-                const std::string accept = has_accept ? request.get_header("accept") : std::string();
-                util::log_debug("Camera imagearray Accept: " + (has_accept ? util::escape_for_log(accept) : "<none>") +
-                                ", imagebytes=" + std::string(accepts_imagebytes(accept) ? "true" : "false"));
-                auto payload =
-                    build_shared(camera.get(), [&camera] { return camera->get_image_array(); }, accept, call);
-                Response response;
-                response.set_content_type(payload.content_type);
-                response.set_body(std::move(payload.body), std::move(payload.tail), payload.tail_offset);
-                return response;
-            } else if (method_name == "imagearrayvariant") {
-                if (camera->get_connecting() || !camera->get_connected()) {
-                    throw alpacacore::AlpacaException("Camera is not connected", alpacacore::AlpacaError::NotConnected);
-                }
-                // ImageArrayVariant is COM-only; Alpaca must refuse it without retrieving a frame.
-                throw alpacacore::AlpacaException("ImageArrayVariant is not supported by Alpaca; use ImageArray",
-                                                  alpacacore::AlpacaError::PropertyNotImplemented);
-            } else if (method_name == "imageready") {
-                return call.ok(camera->get_image_ready());
-            } else if (method_name == "ispulseguiding") {
-                return call.ok(camera->get_is_pulse_guiding());
-            } else if (method_name == "lastexposureduration") {
-                return call.ok(camera->get_last_exposure_duration());
-            } else if (method_name == "lastexposurestarttime") {
-                return call.ok(format_utc(camera->get_last_exposure_start_time()));
-            } else if (method_name == "maxadu") {
-                return call.ok(camera->get_max_adu());
-            } else if (method_name == "maxbinx") {
-                return call.ok(camera->get_max_bin_x());
-            } else if (method_name == "maxbiny") {
-                return call.ok(camera->get_max_bin_y());
-            } else if (method_name == "numx") {
-                return call.ok(camera->get_num_x());
-            } else if (method_name == "numy") {
-                return call.ok(camera->get_num_y());
-            } else if (method_name == "offset") {
-                return call.ok(camera->get_offset());
-            } else if (method_name == "offsetmax") {
-                return call.ok(camera->get_offset_max());
-            } else if (method_name == "offsetmin") {
-                return call.ok(camera->get_offset_min());
-            } else if (method_name == "offsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (const auto& offset : camera->get_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            } else if (method_name == "percentcompleted") {
-                auto percent = camera->get_percent_completed_checked();
-                auto value = static_cast<std::int32_t>(percent);
-                return call.ok(value);
-            } else if (method_name == "pixelsizex") {
-                return call.ok(camera->get_pixel_size_x());
-            } else if (method_name == "pixelsizey") {
-                return call.ok(camera->get_pixel_size_y());
-            } else if (method_name == "readoutmode") {
-                return call.ok(camera->get_readout_mode());
-            } else if (method_name == "readoutmodes") {
-                nlohmann::json modes = nlohmann::json::array();
-                for (const auto& mode : camera->get_readout_modes()) {
-                    modes.push_back(mode);
-                }
-                return call.ok(modes);
-            } else if (method_name == "sensorname") {
-                return call.ok(camera->get_sensor_name());
-            } else if (method_name == "sensortype") {
-                return call.ok(static_cast<int>(camera->get_sensor_type()));
-            } else if (method_name == "setccdtemperature") {
-                return call.ok(camera->get_set_ccd_temperature());
-            } else if (method_name == "startx") {
-                return call.ok(camera->get_start_x());
-            } else if (method_name == "starty") {
-                return call.ok(camera->get_start_y());
-            } else if (method_name == "subexposureduration") {
-                return call.ok(camera->get_sub_exposure_duration());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "binx") {
-                int value = call.get_int("BinX");
-                camera->set_bin_x(value);
-                return call.ok_void();
-            } else if (method_name == "biny") {
-                int value = call.get_int("BinY");
-                camera->set_bin_y(value);
-                return call.ok_void();
-            } else if (method_name == "fastreadout") {
-                bool value = call.get_bool("FastReadout");
-                camera->set_fast_readout(value);
-                return call.ok_void();
-            } else if (method_name == "gain") {
-                int value = call.get_int("Gain");
-                camera->set_gain(value);
-                return call.ok_void();
-            } else if (method_name == "cooleron") {
-                bool value = call.get_bool("CoolerOn");
-                camera->set_cooler_on(value);
-                return call.ok_void();
-            } else if (method_name == "setccdtemperature") {
-                double value = call.get_double("SetCCDTemperature");
-                camera->set_set_ccd_temperature(value);
-                return call.ok_void();
-            } else if (method_name == "numx") {
-                int value = call.get_int("NumX");
-                camera->set_num_x(value);
-                return call.ok_void();
-            } else if (method_name == "numy") {
-                int value = call.get_int("NumY");
-                camera->set_num_y(value);
-                return call.ok_void();
-            } else if (method_name == "offset") {
-                int value = call.get_int("Offset");
-                camera->set_offset(value);
-                return call.ok_void();
-            } else if (method_name == "readoutmode") {
-                int value = call.get_int("ReadoutMode");
-                camera->set_readout_mode(value);
-                return call.ok_void();
-            } else if (method_name == "startx") {
-                int value = call.get_int("StartX");
-                camera->set_start_x(value);
-                return call.ok_void();
-            } else if (method_name == "starty") {
-                int value = call.get_int("StartY");
-                camera->set_start_y(value);
-                return call.ok_void();
-            } else if (method_name == "subexposureduration") {
-                double value = call.get_double("SubExposureDuration");
-                camera->set_sub_exposure_duration(value);
-                return call.ok_void();
-            } else if (method_name == "startexposure") {
-                double duration = call.get_double("Duration");
-                bool light = call.get_bool("Light");
-                camera->start_exposure(duration, light);
-                return call.ok_void();
-            } else if (method_name == "pulseguide") {
-                int direction = call.get_int("Direction");
-                int duration = call.get_int("Duration");
-                camera->pulse_guide(direction, duration);
-                return call.ok_void();
-            } else if (method_name == "stopexposure") {
-                camera->stop_exposure();
-                return call.ok_void();
-            } else if (method_name == "abortexposure") {
-                camera->abort_exposure();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Camera");
-    });
-}
-
-Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver> sw, const std::string& method_name,
-                                        const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("switch method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "maxswitch") {
-                return call.ok(sw->get_max_switch());
-            } else if (method_name == "cancelasync") {
-                // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576). The Id is
-                // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(call.get_int("Id"));
-                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
-                                                  alpacacore::AlpacaError::NotImplemented);
-            } else if (method_name == "canasync") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_can_async(id));
-            } else if (method_name == "canwrite") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_can_write(id));
-            } else if (method_name == "getswitch") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch(id));
-            } else if (method_name == "getswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_value(id));
-            } else if (method_name == "getswitchname") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_name(id));
-            } else if (method_name == "getswitchdescription") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_description(id));
-            } else if (method_name == "minswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_min_switch_value(id));
-            } else if (method_name == "maxswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_max_switch_value(id));
-            } else if (method_name == "statechangecomplete") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_state_change_complete(id));
-            } else if (method_name == "switchstep") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_step(id));
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "setswitch") {
-                int id = call.get_int("Id");
-                bool state = call.get_bool("State");
-                sw->set_switch(id, state);
-                return call.ok_void();
-            } else if (method_name == "cancelasync") {
-                // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576). The Id is
-                // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(call.get_int("Id"));
-                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
-                                                  alpacacore::AlpacaError::NotImplemented);
-            } else if (method_name == "setasync") {
-                int id = call.get_int("Id");
-                bool state = call.get_bool("State");
-                sw->set_async(id, state);
-                return call.ok_void();
-            } else if (method_name == "setswitchvalue") {
-                int id = call.get_int("Id");
-                double value = call.get_double("Value");
-                sw->set_switch_value(id, value);
-                return call.ok_void();
-            } else if (method_name == "setasyncvalue") {
-                int id = call.get_int("Id");
-                double value = call.get_double("Value");
-                sw->set_async_value(id, value);
-                return call.ok_void();
-            } else if (method_name == "setswitchname") {
-                int id = call.get_int("Id");
-                std::string name = call.get_string("Name");
-                sw->set_switch_name(id, name);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Switch");
-    });
-}
-
-Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-                                             const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("filter wheel method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "position") {
-                return call.ok(filterwheel->get_position());
-            } else if (method_name == "names") {
-                nlohmann::json names = nlohmann::json::array();
-                for (const auto& name : filterwheel->get_names()) {
-                    names.push_back(name);
-                }
-                return call.ok(names);
-            } else if (method_name == "focusoffsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (int offset : filterwheel->get_focus_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "position") {
-                int value = call.get_int("Position");
-                filterwheel->set_position(value);
-                return call.ok_void();
-            } else if (method_name == "names") {
-                const auto* names_val = call.json_field("Names");
-                if (!names_val) {
-                    throw_bad_request("Missing parameter: Names");
-                }
-                if (!names_val->is_array()) {
-                    throw_bad_request("Names must be an array of strings");
-                }
-                for (const auto& name : *names_val) {
-                    if (!name.is_string()) {
-                        throw_bad_request("Names must be an array of strings");
-                    }
-                }
-                std::vector<std::string> names = names_val->get<std::vector<std::string>>();
-                filterwheel->set_names(names);
-                return call.ok_void();
-            } else if (method_name == "focusoffsets") {
-                const auto* offsets_val = call.json_field("FocusOffsets");
-                if (!offsets_val) {
-                    throw_bad_request("Missing parameter: FocusOffsets");
-                }
-                if (!offsets_val->is_array()) {
-                    throw_bad_request("FocusOffsets must be an array of integers");
-                }
-                std::vector<int> offsets;
-                offsets.reserve(offsets_val->size());
-                for (const auto& offset : *offsets_val) {
-                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
-                }
-                filterwheel->set_focus_offsets(offsets);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for FilterWheel");
-    });
-}
-
-Response Router::dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser,
-                                         const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("focuser method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "absolute") {
-                return call.ok(focuser->get_absolute());
-            } else if (method_name == "ismoving") {
-                return call.ok(focuser->get_is_moving());
-            } else if (method_name == "maxincrement") {
-                return call.ok(focuser->get_max_increment());
-            } else if (method_name == "maxstep") {
-                return call.ok(focuser->get_max_step());
-            } else if (method_name == "position") {
-                return call.ok(focuser->get_position());
-            } else if (method_name == "stepsize") {
-                return call.ok(focuser->get_step_size());
-            } else if (method_name == "tempcompavailable") {
-                return call.ok(focuser->get_temp_comp_available());
-            } else if (method_name == "tempcomp") {
-                return call.ok(focuser->get_temp_comp());
-            } else if (method_name == "temperature") {
-                return call.ok(focuser->get_temperature());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "tempcomp") {
-                bool value = call.get_bool("TempComp");
-                focuser->set_temp_comp(value);
-                return call.ok_void();
-            } else if (method_name == "move") {
-                int position = call.get_int("Position");
-                focuser->move(position);
-                return call.ok_void();
-            } else if (method_name == "halt") {
-                focuser->halt();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Focuser");
-    });
-}
-
-Response Router::dispatch_rotator_method(std::shared_ptr<alpacacore::RotatorDriver> rotator,
-                                         const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("rotator method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "canreverse") {
-                return call.ok(rotator->get_can_reverse());
-            } else if (method_name == "reverse") {
-                return call.ok(rotator->get_reverse());
-            } else if (method_name == "ismoving") {
-                return call.ok(rotator->get_is_moving());
-            } else if (method_name == "mechanicalposition") {
-                return call.ok(rotator->get_mechanical_position());
-            } else if (method_name == "position") {
-                return call.ok(rotator->get_position());
-            } else if (method_name == "stepsize") {
-                return call.ok(rotator->get_step_size());
-            } else if (method_name == "targetposition") {
-                return call.ok(rotator->get_target_position());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "reverse") {
-                bool value = call.get_bool("Reverse");
-                rotator->set_reverse(value);
-                return call.ok_void();
-            } else if (method_name == "move") {
-                double position = call.get_double("Position");
-                rotator->move(position);
-                return call.ok_void();
-            } else if (method_name == "moveabsolute") {
-                double position = call.get_double("Position");
-                rotator->move_absolute(position);
-                return call.ok_void();
-            } else if (method_name == "movemechanical") {
-                double position = call.get_double("Position");
-                rotator->move_mechanical(position);
-                return call.ok_void();
-            } else if (method_name == "halt") {
-                rotator->halt();
-                return call.ok_void();
-            } else if (method_name == "sync") {
-                double position = call.get_double("Position");
-                rotator->sync(position);
-                return call.ok_void();
-            } else if (method_name == "targetposition") {
-                double position = call.get_double("TargetPosition");
-                rotator->set_target_position(position);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Rotator");
-    });
-}
-
-Response Router::dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> dome, const std::string& method_name,
-                                      const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("dome method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "altitude") {
-                return call.ok(dome->get_altitude());
-            } else if (method_name == "athome") {
-                return call.ok(dome->get_at_home());
-            } else if (method_name == "atpark") {
-                return call.ok(dome->get_at_park());
-            } else if (method_name == "azimuth") {
-                return call.ok(dome->get_azimuth());
-            } else if (method_name == "canfindhome") {
-                return call.ok(dome->get_can_find_home());
-            } else if (method_name == "canpark") {
-                return call.ok(dome->get_can_park());
-            } else if (method_name == "cansetaltitude") {
-                return call.ok(dome->get_can_set_altitude());
-            } else if (method_name == "cansetazimuth") {
-                return call.ok(dome->get_can_set_azimuth());
-            } else if (method_name == "cansetpark") {
-                return call.ok(dome->get_can_set_park());
-            } else if (method_name == "cansetshutter") {
-                return call.ok(dome->get_can_set_shutter());
-            } else if (method_name == "cansyncazimuth") {
-                return call.ok(dome->get_can_sync_azimuth());
-            } else if (method_name == "canslave") {
-                return call.ok(dome->get_can_slave());
-            } else if (method_name == "slaved") {
-                return call.ok(dome->get_slaved());
-            } else if (method_name == "slewing") {
-                return call.ok(dome->get_slewing());
-            } else if (method_name == "shutterstatus") {
-                return call.ok(dome->get_shutter_status());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "slaved") {
-                bool value = call.get_bool("Slaved");
-                dome->set_slaved(value);
-                return call.ok_void();
-            } else if (method_name == "abortslew") {
-                dome->abort_slew();
-                return call.ok_void();
-            } else if (method_name == "closeshutter") {
-                dome->close_shutter();
-                return call.ok_void();
-            } else if (method_name == "findhome") {
-                dome->find_home();
-                return call.ok_void();
-            } else if (method_name == "openshutter") {
-                dome->open_shutter();
-                return call.ok_void();
-            } else if (method_name == "park") {
-                dome->park();
-                return call.ok_void();
-            } else if (method_name == "setpark") {
-                dome->set_park();
-                return call.ok_void();
-            } else if (method_name == "slewtoazimuth") {
-                double azimuth = call.get_double("Azimuth");
-                dome->slew_to_azimuth(azimuth);
-                return call.ok_void();
-            } else if (method_name == "slewtoaltitude") {
-                double altitude = call.get_double("Altitude");
-                dome->slew_to_altitude(altitude);
-                return call.ok_void();
-            } else if (method_name == "synctoazimuth") {
-                double azimuth = call.get_double("Azimuth");
-                dome->sync_to_azimuth(azimuth);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Dome");
-    });
-}
-
-Response Router::dispatch_observingconditions_method(
-    std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
-    const DeviceCall& call) {
-    const Request& request = call.request();
-
-    auto parse_property_name = [&]() -> std::string {
-        if (request.has_query_param("PropertyName")) {
-            return request.get_query_param("PropertyName");
-        }
-        if (request.has_query_param("SensorName")) {
-            return request.get_query_param("SensorName");
-        }
-        if (const auto* val = call.json_field("PropertyName")) {
-            if (!val->is_string()) {
-                throw_bad_request("Invalid JSON value for parameter: PropertyName");
-            }
-            return val->get<std::string>();
-        }
-        if (const auto* val = call.json_field("SensorName")) {
-            if (!val->is_string()) {
-                throw_bad_request("Invalid JSON value for parameter: SensorName");
-            }
-            return val->get<std::string>();
-        }
-        if (auto value = call.form_field("PropertyName")) {
-            return *value;
-        }
-        if (auto value = call.form_field("SensorName")) {
-            return *value;
-        }
-        throw_bad_request("Missing parameter: SensorName");
-    };
-
-    return call.run("observing conditions method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "averageperiod") {
-                return call.ok(observingconditions->get_average_period());
-            } else if (method_name == "cloudcover") {
-                return call.ok(observingconditions->get_cloud_cover());
-            } else if (method_name == "dewpoint") {
-                return call.ok(observingconditions->get_dew_point());
-            } else if (method_name == "humidity") {
-                return call.ok(observingconditions->get_humidity());
-            } else if (method_name == "pressure") {
-                return call.ok(observingconditions->get_pressure());
-            } else if (method_name == "rainrate") {
-                return call.ok(observingconditions->get_rain_rate());
-            } else if (method_name == "skybrightness") {
-                return call.ok(observingconditions->get_sky_brightness());
-            } else if (method_name == "skyquality") {
-                return call.ok(observingconditions->get_sky_quality());
-            } else if (method_name == "skytemperature") {
-                return call.ok(observingconditions->get_sky_temperature());
-            } else if (method_name == "starfwhm") {
-                return call.ok(observingconditions->get_star_fwhm());
-            } else if (method_name == "temperature") {
-                return call.ok(observingconditions->get_temperature());
-            } else if (method_name == "winddirection") {
-                return call.ok(observingconditions->get_wind_direction());
-            } else if (method_name == "windgust") {
-                return call.ok(observingconditions->get_wind_gust());
-            } else if (method_name == "windspeed") {
-                return call.ok(observingconditions->get_wind_speed());
-            } else if (method_name == "timesincelastupdate") {
-                std::string property_name = parse_property_name();
-                return call.ok(observingconditions->get_time_since_last_update(property_name));
-            } else if (method_name == "sensordescription") {
-                std::string property_name = parse_property_name();
-                return call.ok(observingconditions->get_sensor_description(property_name));
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "averageperiod") {
-                double value = call.get_double("AveragePeriod");
-                observingconditions->set_average_period(value);
-                return call.ok_void();
-            } else if (method_name == "refresh") {
-                observingconditions->refresh();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for ObservingConditions");
     });
 }
 
@@ -5078,6 +3907,10 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         // (same vendor, type and number, as add_or_replace_persisted_device()
         // matches) is not another entry. The choice is reserved until this call
         // stores its entry or fails.
+        // open-astro#2292: a call that adds an entry counts against
+        // kMaxConfiguredDevices with the adding calls still in flight
+        // (pending_new_entries_), so concurrent calls cannot pass it together.
+        bool adds_entry = true;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             std::set<std::string> taken = reserved_unique_ids_;
@@ -5086,19 +3919,29 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 const auto key = persisted_key(entry);
                 if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
                     key->device_number == replaced->device_number) {
+                    adds_entry = false;
                     continue;
                 }
                 if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
             }
+            if (adds_entry && persisted_devices_.size() + pending_new_entries_ >= kMaxConfiguredDevices) {
+                response.set_body(make_error_response(
+                    client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                    "The server holds " + std::to_string(kMaxConfiguredDevices) +
+                        " configured devices, the most it keeps; remove one before adding another"));
+                return response;
+            }
             config["uniqueId"] = choose_unique_id(config, taken);
             reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
+            if (adds_entry) ++pending_new_entries_;
         }
         struct UniqueIdReservation {
             std::function<void()> release;
             ~UniqueIdReservation() { release(); }
-        } reservation{[this, unique_id = config["uniqueId"].get<std::string>()] {
+        } reservation{[this, adds_entry, unique_id = config["uniqueId"].get<std::string>()] {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             reserved_unique_ids_.erase(unique_id);
+            if (adds_entry) --pending_new_entries_;
         }};
 
         std::string error_message;
@@ -5928,8 +4771,6 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     }
 }
 
-namespace {
-
 // CSRF guard shared by the state-changing management endpoints (PR #198
 // follow-up; extended to synctime by issue #298). These endpoints are
 // unauthenticated under the trusted-LAN threat model, so a malicious page
@@ -5978,8 +4819,6 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
     resp.set_body(alpaca_response);
     return resp;
 }
-
-}  // namespace
 
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
     // Note: like the restart/shutdown management endpoints, this is

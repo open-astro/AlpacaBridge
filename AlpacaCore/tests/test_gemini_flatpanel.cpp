@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
 #include "fake_task_clock.h"
@@ -879,18 +880,62 @@ TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without 
 TEST_CASE("Gemini Flat Panel Driver - a Disconnect during a connect returns at once (#1757)",
           "[gemini][flatpanel][unit][issue1757]") {
     alpacacore::test::FakeGeminiFlatPanel panel;
-    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));  // the handshake read timeout is 2 s
+    // The held handshake reply ends at gate.release(), not after a fixed time: a timed hold could end in a
+    // scheduler pause before disconnect() ran (connect_hold_gate.h). The handshake read timeout is 2 s.
+    alpacacore::test::ConnectHoldGate gate;
+    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path());
     driver->connect();
     REQUIRE(driver->get_connecting());
+    REQUIRE(gate.wait_entered(std::chrono::seconds(10)));  // inside the held handshake, past every cancel point
     const auto t0 = std::chrono::steady_clock::now();
     driver->disconnect();
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
-    CHECK(driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = driver->get_connecting();
+    gate.release();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     CHECK_FALSE(driver->get_connecting());
     CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #2262: EBADF on the panel's own fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 this wrapper's comment said "EBADF is not one": the write failed with
+// DriverException "Write failed", link_alive() stayed true and Connected kept reading true over a dead fd.
+TEST_CASE("Gemini flat panel protocol wrapper - EBADF on a command write is a lost link with the errno",
+          "[gemini][flatpanel][unit][link-lost][issue2262]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    const auto before = alpacacore::test::fds_open_on(panel.slave_path());
+    wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(panel.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    std::string what;
+    require_alpaca_error(
+        [&]() {
+            try {
+                (void)wrapper.get_light_on();
+            } catch (const alpacacore::AlpacaException& ex) {
+                what = ex.what();
+                throw;
+            }
+        },
+        kNotConnected);
+    CHECK(what == "Serial link lost (errno 9)");
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK(wrapper.link_fault() == "Serial link lost (errno 9)");
+    // The port was released at the loss (the fd number now names nothing of ours); the reason stays.
+    CHECK(alpacacore::test::fds_open_on(panel.slave_path()) == before);
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+    CHECK(wrapper.link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
 }

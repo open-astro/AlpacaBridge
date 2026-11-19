@@ -113,9 +113,7 @@ public:
     bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // A sync connect here is slow (the wheel's post-reset boot is ~17 s),

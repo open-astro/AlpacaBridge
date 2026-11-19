@@ -860,6 +860,25 @@ TEST_CASE("iOptron Link - EIO on a command write that waits for a reply loses th
     require_lost(*driver, "serial link lost (write)");
 }
 
+// Issue #2262: EBADF on the mount's own serial fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iOptron Link - EBADF on a command write loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost][issue2262]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    const auto before = alpacacore::test::fds_open_on(mount.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(mount.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->set_tracking(false); }, AlpacaError::NotConnected);
+    require_lost(*driver, "serial link lost (write): " + alpacacore::util::errno_string(EBADF));
+}
+
 TEST_CASE("iOptron Link - a hangup in a Park's ack drain loses the link at once",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;

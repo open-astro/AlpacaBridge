@@ -420,7 +420,9 @@ int main() {
                  {"", "", "Ssid must be 1-32 bytes"},
                  {std::string(33, 'x'), "", "Ssid must be 1-32 bytes"},
                  {"Home", "1234567", "Passphrase must be 8-63 characters (or empty for open networks)"},
-                 {"Home", std::string(64, 'p'), "Passphrase must be 8-63 characters (or empty for open networks)"}}) {
+                 {"Home", std::string(64, 'p'), "Passphrase must be 8-63 characters (or empty for open networks)"},
+                 // #2292: a NUL inside a passphrase of valid length would reach NetworkManager cut short.
+                 {"Home", std::string("pass\0word", 9), "Passphrase must not contain a NUL byte"}}) {
             FakeWifiProfileBackend backend;
             WifiManager manager("unused", backend);
             bool rejected = false;
@@ -525,6 +527,20 @@ int main() {
         std::ifstream in(country);
         in.read(stored, 2);
         EXPECT(threw || std::string(stored) == "US");
+    }
+
+    {
+        // case: set_ap refuses a NUL in the passphrase before backend access (#2292)
+        FakeWifiProfileBackend backend;
+        WifiManager manager("unused", backend);
+        std::string message;
+        try {
+            manager.set_ap("Hotspot", std::string("pass\0word", 9), "bg", 0, true);
+        } catch (const WifiError& e) {
+            message = e.what();
+        }
+        EXPECT(message == "Passphrase must not contain a NUL byte");
+        EXPECT(backend.connection_reads == 0 && backend.add_calls == 0 && backend.update_calls == 0);
     }
 
     {
