@@ -511,6 +511,31 @@ function wifiSsidLabel(item, displayCount) {
     return displayCount > 1 && hex ? `${label} (${hex})` : label;
 }
 
+// Issue #856: the Client adapter choices from GET wifi/status. The first is
+// Automatic (no preference, value ""); then each adapter by interface and
+// permanent MAC, its value the MAC. One that reports no MAC (a virtual
+// interface) or is the hotspot's own interface is listed but cannot be chosen;
+// its value is never a MAC, so a second interface sharing the radio's MAC
+// keeps the selection. `selected` is the stored preference when an option can
+// carry it, else "".
+function wifiAdapterOptions(status) {
+    const adapters = status && Array.isArray(status.Adapters) ? status.Adapters : [];
+    const device = String((status && status.Device) || '');
+    const options = [{ value: '', label: 'Automatic', disabled: false }];
+    for (const adapter of adapters) {
+        const iface = String((adapter && adapter.Interface) || '?');
+        const mac = String((adapter && adapter.Mac) || '');
+        const isAp = !!(adapter && adapter.IsAp);
+        let label = iface + (mac ? ' (' + mac + ')' : ' (no MAC)');
+        if (isAp) label += ', hotspot';
+        else if (iface === device) label += ', in use';
+        options.push({ value: isAp || !mac ? 'none:' + iface : mac, label, disabled: isAp || !mac });
+    }
+    const preferred = String((status && status.PreferredMac) || '');
+    const selected = preferred && options.some((o) => o.value === preferred) ? preferred : '';
+    return { options, selected };
+}
+
 // The server accepts each ASIAIR GPIO line on at most one port (router.cpp).
 // Returns a message naming the first repeated line, or null. `gpios` holds one
 // number per port row in order; NaN (a blank row) is skipped.
@@ -1004,7 +1029,7 @@ if (typeof module !== 'undefined' && module.exports) {
                        updateStatusText, installerStateText, renderReleaseNotes,
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
-                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError, asiairRepeatedGpioPort,
+                        wifiSsidKey, wifiSsidLabel, wifiAdapterOptions, asiairDuplicateGpioError, asiairRepeatedGpioPort,
                         normalizeAlignmentMode, deviceStatus, linkStatus, STATUS_POLL_MS, STATUS_POLL_TIMEOUT_MS,
                         formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,

@@ -32,6 +32,8 @@
 #include <map>
 #include <vector>
 
+#include "alpacahttp/util/logging_adapter.h"
+
 namespace alpacahttp::util {
 
 namespace detail {
@@ -699,6 +701,19 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         out.client_if = client->second;
         out.ap_path = ap->first;
         out.ap_if = ap->second;
+        // Issue #856: each device with its permanent MAC, read as a typed "s"
+        // property and accepted only in the six-pair form (a virtual interface
+        // or an older NM reports none, and that adapter cannot be chosen).
+        const bool dedicated_ap = out.ap_path != out.client_path;
+        for (const auto& d : devs) {
+            detail::WifiAdapter adapter;
+            adapter.path = d.first;
+            adapter.interface = d.second;
+            adapter.mac =
+                detail::normalize_mac(prop_string(d.first.c_str(), kNmWirelessIface, "PermHwAddress")).value_or("");
+            adapter.is_ap = dedicated_ap && d.first == out.ap_path;
+            out.adapters.push_back(std::move(adapter));
+        }
         return out;
     }
 
@@ -926,6 +941,43 @@ std::string security_label(std::uint32_t wpa_flags, std::uint32_t rsn_flags) {
 
 // ---- WifiManager ------------------------------------------------------------
 
+namespace detail {
+
+std::optional<std::string> normalize_mac(std::string_view mac) {
+    if (mac.size() != 17) return std::nullopt;
+    std::string out(mac);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const auto c = static_cast<unsigned char>(out[i]);
+        if (i % 3 == 2) {
+            if (c != ':') return std::nullopt;
+        } else if (std::isxdigit(c) == 0) {
+            return std::nullopt;
+        } else {
+            out[i] = static_cast<char>(std::tolower(c));
+        }
+    }
+    return out;
+}
+
+WifiDeviceRoles apply_client_preference(WifiDeviceRoles roles, const std::string& preferred_mac, std::string& note) {
+    note.clear();
+    if (preferred_mac.empty() || roles.count == 0) return roles;
+    const bool dedicated_ap = roles.ap_path != roles.client_path;
+    for (const auto& adapter : roles.adapters) {
+        if (adapter.mac != preferred_mac) continue;
+        // The hotspot's own interface (often a virtual one on the same radio,
+        // sharing its MAC) is never the client device on such a board.
+        if (dedicated_ap && adapter.path == roles.ap_path) continue;
+        roles.client_path = adapter.path;
+        roles.client_if = adapter.interface;
+        return roles;
+    }
+    note = "preferred Wi-Fi client adapter " + preferred_mac + " is absent; using " + roles.client_if;
+    return roles;
+}
+
+}  // namespace detail
+
 WifiManager::WifiManager(std::string state_dir) : state_dir_(std::move(state_dir)) {}
 
 WifiManager::WifiManager(std::string state_dir, detail::WifiProfileBackend& backend)
@@ -954,6 +1006,81 @@ detail::WifiProfileBackend& WifiManager::profile_backend_locked() {
 
 std::string WifiManager::country_file() const { return state_dir_ + "/wifi_country"; }
 
+std::string WifiManager::client_adapter_file() const { return state_dir_ + "/wifi_client_adapter"; }
+
+std::string WifiManager::preferred_mac_locked() const {
+    std::ifstream f(client_adapter_file());
+    std::string mac;
+    if (!f || !std::getline(f, mac)) return {};
+    return detail::normalize_mac(mac).value_or("");
+}
+
+detail::WifiDeviceRoles WifiManager::resolved_roles_locked(detail::WifiProfileBackend& backend) {
+    std::string note;
+    auto roles = detail::apply_client_preference(backend.device_roles(), preferred_mac_locked(), note);
+    // Once per change: status() is polled, and an unplugged dongle is not an error (INFO, decision 0007 rule 9).
+    if (note != logged_absent_note_) {
+        if (!note.empty()) log_info("wifi: " + note);
+        logged_absent_note_ = note;
+    }
+    return roles;
+}
+
+void WifiManager::repin_client_profiles_locked(detail::WifiProfileBackend& backend,
+                                               const detail::WifiDeviceRoles& roles) {
+    if (roles.count <= 1 || roles.client_if.empty()) return;  // single radio: no pin, as before
+    for (const auto& [path, s] : backend.wifi_connections()) {
+        const bool is_ap = s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap";
+        if (is_ap || !s.contains("connection")) continue;
+        if (s["connection"].value("interface-name", "") == roles.client_if) continue;
+        // Read-modify-write of the one key: every other setting stays as stored (issue #1690).
+        backend.patch_connection(path, {{"connection", {{"interface-name", SVal::str(roles.client_if)}}}});
+    }
+}
+
+nlohmann::json WifiManager::set_client_adapter(const std::string& mac) {
+    std::string preferred;
+    if (!mac.empty()) {
+        auto normalized = detail::normalize_mac(mac);
+        if (!normalized) throw WifiError("Mac must be six hex pairs separated by ':' (or empty to clear)");
+        preferred = *normalized;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& backend = profile_backend_locked();
+    const auto roles = backend.device_roles();
+    if (!preferred.empty()) {
+        bool usable = false;
+        bool hotspot_radio = false;
+        for (const auto& adapter : roles.adapters) {
+            if (adapter.mac != preferred) continue;
+            if (adapter.is_ap) {
+                hotspot_radio = true;
+            } else {
+                usable = true;
+            }
+        }
+        if (!usable) {
+            throw WifiError(hotspot_radio ? "Mac " + preferred + " is the hotspot's own interface; pick another adapter"
+                                          : "no Wi-Fi adapter reports Mac " + preferred);
+        }
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(state_dir_, ec);
+    try {
+        if (preferred.empty()) {
+            std::filesystem::remove(client_adapter_file(), ec);
+        } else {
+            alpacacore::util::write_file_atomic(client_adapter_file(), preferred + "\n");
+        }
+    } catch (const std::exception& e) {
+        throw WifiError("could not store the client adapter in " + client_adapter_file() + ": " + e.what());
+    }
+    std::string note;
+    const auto resolved = detail::apply_client_preference(roles, preferred, note);
+    repin_client_profiles_locked(backend, resolved);
+    return {{"PreferredMac", preferred}, {"Device", resolved.client_if}};
+}
+
 bool WifiManager::available() {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
@@ -968,7 +1095,7 @@ nlohmann::json WifiManager::status() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
     nlohmann::json out;
-    auto roles = bus_->device_roles();
+    auto roles = resolved_roles_locked(*bus_);
     out["Available"] = roles.count > 0;
     if (roles.count == 0) return out;
     const std::string& dev = roles.client_path;
@@ -976,6 +1103,12 @@ nlohmann::json WifiManager::status() {
     out["Device"] = roles.client_if;
     out["ApDevice"] = roles.ap_if;
     out["DeviceCount"] = roles.count;
+    nlohmann::json adapters = nlohmann::json::array();
+    for (const auto& adapter : roles.adapters) {
+        adapters.push_back({{"Interface", adapter.interface}, {"Mac", adapter.mac}, {"IsAp", adapter.is_ap}});
+    }
+    out["Adapters"] = std::move(adapters);
+    out["PreferredMac"] = preferred_mac_locked();
     out["WirelessEnabled"] = bus_->prop_trivial(kNmPath, kNmIface, "WirelessEnabled", 'b') != 0;
 
     auto caps =
@@ -1064,7 +1197,7 @@ void WifiManager::set_wireless_enabled(bool enabled) {
 nlohmann::json WifiManager::scan() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto roles = bus_->device_roles();
+    auto roles = resolved_roles_locked(*bus_);
     if (roles.count == 0) throw WifiError("no wifi device");
     // Scans go to the client device: a dedicated AP interface often cannot
     // scan while beaconing, and the client device is where a join lands.
@@ -1185,7 +1318,7 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
     // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
     std::string pin_interface;
     {
-        auto roles = backend.device_roles();
+        auto roles = resolved_roles_locked(backend);
         if (roles.count > 1 && !roles.client_if.empty()) pin_interface = roles.client_if;
     }
 
@@ -1256,24 +1389,27 @@ void WifiManager::delete_profile(const std::string& uuid) {
 
 void WifiManager::connect_profile(const std::string& uuid) {
     std::lock_guard<std::mutex> lock(mutex_);
-    ensure_bus_locked();
-    auto roles = bus_->device_roles();
+    auto& backend = profile_backend_locked();
+    auto roles = resolved_roles_locked(backend);
     if (roles.count == 0) throw WifiError("no wifi device");
-    for (const auto& [path, s] : bus_->wifi_connections()) {
+    for (const auto& [path, s] : backend.wifi_connections()) {
         if (s["connection"].value("uuid", "") == uuid) {
             // AP profiles activate on the AP device, client profiles on the
             // managed device — never let NM pick (OPi 4 Pro field bug).
             bool is_ap = s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap";
-            // Pre-fix client profiles lack the interface-name pin; add it on
-            // connect so a later nmcli join or a boot-time autoconnect race
-            // cannot land them on the AP interface either. Message-level
-            // rewrite preserves every other setting verbatim (PR #202
-            // review: a rebuilt minimal spec would strip static IPs, 802.1x,
-            // hidden-ssid flags... from profiles the app didn't create).
+            // Pre-fix client profiles lack the interface-name pin, and a udev
+            // rename or a changed adapter preference leaves a stale one (issue
+            // #856); pin it to the resolved client interface on connect so a
+            // later nmcli join or a boot-time autoconnect race cannot land it
+            // on the AP interface either. Message-level rewrite preserves every
+            // other setting verbatim (PR #202 review: a rebuilt minimal spec
+            // would strip static IPs, 802.1x, hidden-ssid flags... from
+            // profiles the app didn't create).
             if (!is_ap && roles.count > 1 && !roles.client_if.empty() &&
-                s["connection"].value("interface-name", "").empty()) {
-                bus_->patch_connection(path, {{"connection", {{"interface-name", SVal::str(roles.client_if)}}}});
+                s["connection"].value("interface-name", "") != roles.client_if) {
+                backend.patch_connection(path, {{"connection", {{"interface-name", SVal::str(roles.client_if)}}}});
             }
+            ensure_bus_locked();  // activation needs the real bus; refuses an injected test backend
             bus_->activate(path, is_ap ? roles.ap_path : roles.client_path);
             return;
         }
