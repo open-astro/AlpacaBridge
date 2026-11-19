@@ -48,7 +48,9 @@ namespace alpacacore::test {
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
  * default: most cases read the fixed position).
  *
- * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA.
+ * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA. `guide_commands` counts every DirectGuide and
+ * `guide_ms` delays its reply by that many real milliseconds. `find_home_commands` counts every FindHome; while
+ * `fail_find_home` > 0 a FindHome answers a TheSkyX error (the count drops by one).
  *
  * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
  *
@@ -101,6 +103,10 @@ public:
     std::atomic<bool> land_on_target{false};
     /// Added to the reported RA by every DirectGuide pulse, as a guide pulse moves the mount.
     std::atomic<double> guide_ra_step_hours{0.0};
+    std::atomic<int> guide_commands{0};
+    std::atomic<int> guide_ms{0};
+    std::atomic<int> find_home_commands{0};
+    std::atomic<int> fail_find_home{0};
 
     std::function<std::string(const std::string&)> responder() {
         return [this](const std::string& command) { return answer(command); };
@@ -120,7 +126,12 @@ private:
                    (use_computer_clock ? std::to_string(utc_millis.load()) : std::string("unavailable")) + "#";
         }
         if (has(command, "FindHome")) {
+            ++find_home_commands;
             if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
+            if (fail_find_home.load() > 0) {
+                --fail_find_home;
+                return "|No error. Error = 0.TypeError: FindHome failed#";
+            }
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
@@ -196,6 +207,8 @@ private:
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
         }
         if (has(command, "DirectGuide")) {
+            ++guide_commands;
+            if (guide_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(guide_ms.load()));
             ra_hours = ra_hours.load() + guide_ra_step_hours.load();
             return "|No error. Error = 0.OK#";
         }

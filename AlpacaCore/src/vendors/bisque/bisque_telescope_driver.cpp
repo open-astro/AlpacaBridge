@@ -17,6 +17,7 @@
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/telescope_command_gate.h>
@@ -230,10 +231,10 @@ public:
                 published_connected_ = false;
                 connected_ = false;
                 link_lost_ = false;
-                // Retires a Park poll still running, which then leaves parking_ alone: clear it here, as the other
-                // retire paths do, or the next session refuses every slew as parked (open-astro#2062).
+                // Cancels a Park poll still running, which then leaves parking_ alone: clear it here, as the other
+                // cancel paths do, or the next session refuses every slew as parked (open-astro#2062).
                 parking_ = false;
-                ++park_epoch_;
+                motion_owner_.cancel(util::MotionOwner::kBothAxes);
                 ++pulse_request_;
                 pulse_generation_.bump();
                 pulse_guiding_ = false;
@@ -254,8 +255,8 @@ public:
             published_connected_ = false;
             connected_ = false;
             link_lost_ = false;
-            parking_ = false;  // retires a Park poll still running, as the lost-link disconnect above does
-            ++park_epoch_;     // (open-astro#2062)
+            parking_ = false;  // cancels a Park poll still running, as the lost-link disconnect above does
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);  // (open-astro#2062)
             ++pulse_request_;
             pulse_generation_.bump();
             pulse_guiding_ = false;
@@ -306,7 +307,6 @@ public:
             target_dec_set_ = false;
             parked_ = parked_now;
             at_home_ = false;
-            homing_ = false;
             slewing_cached_ = false;
             slew_hold_.clear();
             slew_poll_error_.clear();
@@ -335,9 +335,9 @@ public:
             target_dec_set_ = false;
             parked_ = false;
             parking_ = false;
-            ++park_epoch_;  // a Park poll still running must not set parked_ in a later session (open-astro#2062)
+            // A Park poll or a FindHome still running must not set parked_ or at_home_ in a later session (#2062).
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);
             at_home_ = false;
-            homing_ = false;
             slewing_cached_ = false;
             slew_hold_.clear();  // decision 0022 rule 2
             link_lost_ = false;
@@ -705,17 +705,31 @@ public:
     // ── Telescope methods ──
 
     void find_home() override {
+        // Counted from the gate to every exit, a throw included: PulseGuide is refused while a FindHome runs.
+        struct HomeGuard {
+            BisqueTelescopeDriver& self;
+            ~HomeGuard() {
+                std::lock_guard<std::mutex> lock(self.mutex_);
+                --self.homes_in_flight_;
+            }
+        };
+        util::MotionClaim claim;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_link_locked();
             check_not_parked("FindHome");
+            claim = motion_owner_.claim(util::MotionCommand::Slew);
+            ++homes_in_flight_;
         }
+        const HomeGuard guard{*this};
         auto& protocol = BisqueProtocolWrapper::instance();
         // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
         protocol.find_home();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            homing_ = false;
+            // A MoveAxis, slew or Park claimed the axes while TheSkyX homed, or a stop cancelled the home: the mount
+            // is no longer this call's to report home (#2263).
+            if (motion_owner_.stop_reason(claim) != util::StopReason::None) return;
             at_home_ = true;
         }
         publish_measurement();
@@ -727,15 +741,15 @@ public:
         struct ParkingGuard {
             BisqueTelescopeDriver& self;
             bool armed = false;
-            uint64_t epoch = 0;
+            util::MotionClaim claim;
             ~ParkingGuard() {
                 if (!armed) return;
                 std::lock_guard<std::mutex> lock(self.mutex_);
-                // A newer Park owns the flag now (park_epoch_).
-                if (self.park_epoch_ == epoch) self.parking_ = false;
+                // A newer Park owns the flag now, or a stop cleared it already.
+                if (self.motion_owner_.stop_reason(claim) == util::StopReason::None) self.parking_ = false;
             }
         };
-        ParkingGuard guard{*this};
+        ParkingGuard guard{*this, false, {}};
         {
             // Initiator lock for the gate and the Park send only: a slew either went to the wire before the park
             // or sees parking_ after it (#1838).
@@ -743,18 +757,19 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
-                parking_ = true;
-                guard.epoch = ++park_epoch_;
+                guard.claim = motion_owner_.claim(util::MotionCommand::Slew);  // before its flag (0006 rule 3)
                 guard.armed = true;
+                parking_ = true;
             }
             protocol.park();
         }
-        // AbortSlew, Unpark, a newer Park and a disconnect bump park_epoch_: this Park no longer owns the outcome.
-        // A retired Park returns quietly at its next poll boundary and writes neither parked_ nor parking_
-        // (open-astro#2062), as AbortSlew already returned the Park caller promptly.
+        // A newer Park supersedes this one; AbortSlew, Unpark and a disconnect cancel it: either way it no longer owns
+        // the outcome. A retired Park returns quietly at its next poll boundary and writes neither parked_ nor
+        // parking_ (open-astro#2062), as AbortSlew already returned the Park caller promptly. A slew, a FindHome or a
+        // MoveAxis cannot claim meanwhile: parking_ refuses each of them.
         const auto retired = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
-            return park_epoch_ != guard.epoch;
+            return motion_owner_.stop_reason(guard.claim) != util::StopReason::None;
         };
         // Poll until parked.
         auto start = clock_.now();
@@ -775,7 +790,8 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (park_epoch_ != guard.epoch) return;  // retired while its last IsParked was on the wire
+            // Retired while its last IsParked was on the wire.
+            if (motion_owner_.stop_reason(guard.claim) != util::StopReason::None) return;
             parked_ = true;
             parking_ = false;
         }
@@ -797,6 +813,12 @@ public:
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
         if (duration == 0) {
             return;
+        }
+        // #2263: a slew or a home owns both axes. A Park was refused above (InvalidWhileParked). The slews, parks and
+        // homes run in TheSkyX, not in a body here, so the refusal reads their own state, not slew_running().
+        if (slewing_cached_ || homes_in_flight_ > 0) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
         }
         if (pulse_guiding_ && pulse_guide_error_.empty()) {
             throw AlpacaException("TheSkyX DirectGuide is already guiding; wait for IsPulseGuiding=false",
@@ -942,12 +964,11 @@ public:
             throw;
         }
         lock.lock();
-        const uint64_t epoch = start.epoch;
         ilock.unlock();
 
         // Wait for completion.
         const SlewWaitGuard waiting(slew_waiters_);
-        wait_for_slew_complete(lock, epoch);
+        wait_for_slew_complete(lock, start.claim);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1051,7 +1072,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
         parking_ = false;  // a park poll still running no longer blocks slews
-        ++park_epoch_;     // and no longer sets parked_ when the mount reports parked (open-astro#2062)
+        // and no longer sets parked_ when the mount reports parked (open-astro#2062)
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1074,6 +1096,14 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
+            // #2263: a move claims its own axis, so a FindHome in flight loses it; a stop cancels its own axis. A
+            // Park refuses both above, and a slew's Slewing stays the slew's own (slew_claim_) until TheSkyX reports
+            // it complete. MoveAxis runs no body, so the claim is not kept.
+            if (stop) {
+                motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+            } else {
+                static_cast<void>(motion_owner_.claim(util::MotionCommand::MoveAxis, axis));
+            }
         }
 
         auto& protocol = BisqueProtocolWrapper::instance();
@@ -1123,9 +1153,11 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         // Only a lost link refuses: a latched fault still lets the stop try, as OnStep and SynScan do (#2102).
         check_connected();
-        ++slew_epoch_;
+        // Cancels a Park poll (it no longer sets parked_ when the mount reports parked, open-astro#2062) and a
+        // FindHome; and no SlewToCoordinates wait owns Slewing any more.
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
+        slew_claim_ = {};
         parking_ = false;  // a park poll still running no longer blocks slews
-        ++park_epoch_;     // and no longer sets parked_ when the mount reports parked (open-astro#2062)
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1333,7 +1365,6 @@ private:
     }
 
     void note_slew_started_locked() {
-        ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();
         slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
@@ -1342,35 +1373,44 @@ private:
 
     // The slew state a SlewToRaDec replaces (decision 0022 rule 2). The window and Slewing are armed before the
     // command goes out; a command TheSkyX refused started nothing, so undo_failed_slew_locked() puts back what an
-    // accepted earlier slew had: its window, its Slewing, its kept poll error and its epoch, so a SlewToCoordinates
-    // still waiting for that slew lowers Slewing when it lands. The caller holds initiator_mutex_ from the arm to
-    // the undo, as every slew_epoch_ writer does, so no other slew start or abort lands in between.
+    // accepted earlier slew had: its window, its Slewing, its kept poll error and its slew_claim_, so a
+    // SlewToCoordinates still waiting for that slew lowers Slewing when it lands. The owner's own claim cannot be
+    // handed back (its generations only grow), which is why slew_claim_ is kept apart from it. The caller holds
+    // initiator_mutex_ from the arm to the undo, as every slew_claim_ writer does, so no other slew start or abort
+    // lands in between.
     struct SlewStart {
         util::HoldWindow hold;
         bool slewing = false;
         std::string poll_error;
         int poll_error_code = AlpacaError::DriverException;
-        uint64_t epoch_before = 0;
-        uint64_t epoch = 0;  // slew_epoch_ once this slew is armed
+        util::MotionClaim claim_before;
+        util::MotionClaim claim;  // this slew's, once it is armed
     };
 
+    // A slew claims both axes (#2263) before it sets its flags (decision 0006 rule 3).
     SlewStart begin_slew_locked() {
-        SlewStart start{slew_hold_, slewing_cached_, slew_poll_error_, slew_poll_error_code_, slew_epoch_, 0};
+        SlewStart start{slew_hold_, slewing_cached_, slew_poll_error_, slew_poll_error_code_, slew_claim_, {}};
+        slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
+        start.claim = slew_claim_;
         note_slew_started_locked();
-        start.epoch = slew_epoch_;
         return start;
+    }
+
+    // True while `claim` is the slew whose Slewing flag slewing_cached_ is.
+    bool owns_slewing_locked(const util::MotionClaim& claim) const {
+        return slew_claim_.generation == claim.generation;
     }
 
     // Unless a disconnect, a connect or a landing has lowered Slewing since the arm: the state those wrote stands.
     void undo_failed_slew_locked(const SlewStart& start) {
-        if (slew_epoch_ != start.epoch || !slewing_cached_) {
+        if (!owns_slewing_locked(start.claim) || !slewing_cached_) {
             return;
         }
         slew_hold_ = start.hold;
         slewing_cached_ = start.slewing;
         slew_poll_error_ = start.poll_error;
         slew_poll_error_code_ = start.poll_error_code;
-        slew_epoch_ = start.epoch_before;
+        slew_claim_ = start.claim_before;
     }
 
     // One sample, taken without mutex_ (the protocol wrapper serialises each exchange). The position is
@@ -1690,7 +1730,7 @@ private:
         if (!complete) {
             return true;
         }
-        // No slew start or abort wrote meanwhile: both callers hold initiator_mutex_, as every slew_epoch_ writer does.
+        // No slew start or abort wrote meanwhile: both callers hold initiator_mutex_, as every slew_claim_ writer does.
         // No measurement here: an initiator is timed against the 1 s target, and a retarget starts a new slew at
         // once. Drop the tick in flight; the next poll publishes the position.
         drop_poll_in_flight_locked();
@@ -1723,8 +1763,8 @@ private:
     }
 
     // Called with `lock` held; each exchange runs with it released, so a getter never waits for a poll of TheSkyX.
-    // `epoch` is slew_epoch_ right after this slew started: a newer slew start or an abort keeps the flag it wrote.
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t epoch) {
+    // `claim` is this slew's: a newer slew start or an abort since keeps the flag it wrote.
+    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock, const util::MotionClaim& claim) {
         // One failed poll is tolerated (a transient TheSkyX hiccup); this many in a
         // row is a persistent fault and is reported as such, not as a 120 s timeout.
         constexpr int kMaxConsecutivePollFailures = 3;
@@ -1762,7 +1802,7 @@ private:
                 publish_measurement();
                 run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
                 lock.lock();
-                if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
+                if (owns_slewing_locked(claim)) {  // a retarget or abort since this slew started owns the flag
                     slewing_cached_ = false;
                     slew_hold_.clear();  // landed: decision 0022 rule 2
                 }
@@ -1848,14 +1888,19 @@ private:
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
-    // Under mutex_; bumped by each Park, AbortSlew, Unpark and a disconnect. A Park whose epoch no longer matches is
-    // retired: its exit leaves a newer one's parking_ and never sets parked_ (open-astro#2062).
-    uint64_t park_epoch_ = 0;
+    // Under mutex_ (#2263). A slew, Park or FindHome claims both axes, a MoveAxis its own; AbortSlew, Unpark and a
+    // disconnect cancel both, MoveAxis(axis, 0) its own. A Park or FindHome that is no longer None is retired: it
+    // writes neither parked_, parking_ nor at_home_ (open-astro#2062). The driver never asks slew_running() and never
+    // calls finished(): TheSkyX runs the slews, parks and homes, and the PulseGuide refusal reads slewing_cached_ and
+    // homes_in_flight_. Pulses are not claimed: one DirectGuide holds the socket and nothing can end it early.
+    util::MotionOwner motion_owner_;
     bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
-    mutable bool homing_ = false;
+    int homes_in_flight_ = 0;  // under mutex_; FindHome calls between their gate and their exit
     mutable bool slewing_cached_ = false;
-    uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
+    // Under mutex_; the claim of the slew whose flag slewing_cached_ is. Set by a slew start, put back by a refused
+    // SlewToRaDec, emptied by AbortSlew; a SlewToCoordinates wait lowers Slewing only while it is its own.
+    util::MotionClaim slew_claim_;
     util::HoldWindow slew_hold_;  // under mutex_; Slewing's 8 s hold after a slew command (decision 0022)
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
