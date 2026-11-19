@@ -2196,11 +2196,16 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (parked_) throw AlpacaException("Cannot slew while parked", AlpacaError::InvalidWhileParked);
-        if (!reference_valid_locked())
-            throw AlpacaException("Run FindHome before slewing the Celestron CGX", AlpacaError::InvalidOperation);
         // A retarget of this driver's own slew still in flight is not Tracking off (ascom-contract, "Equatorial slews
         // require Tracking"): that slew turned Tracking off for its GOTO and owes the restore this one takes over.
         const bool retarget = motion_owner_.slew_running() && restore_tracking_after_slew_;
+        // A flip slew homing to its rebase has no reference yet; FindHome and Park owe no restore, so they keep the
+        // FindHome advice.
+        if (!reference_valid_locked() && retarget)
+            throw AlpacaException("Celestron CGX is homing for a meridian flip; wait for it or AbortSlew first",
+                                  AlpacaError::InvalidOperation);
+        if (!reference_valid_locked())
+            throw AlpacaException("Run FindHome before slewing the Celestron CGX", AlpacaError::InvalidOperation);
         if (!tracking_ && !retarget)
             throw AlpacaException("Enable tracking before starting an equatorial slew", AlpacaError::InvalidOperation);
         if (!tracking_state_valid_)

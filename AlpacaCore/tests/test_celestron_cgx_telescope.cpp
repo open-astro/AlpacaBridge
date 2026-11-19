@@ -3621,4 +3621,62 @@ TEST_CASE(
     CHECK(dec_packets_after == dec_packets);
     CHECK(done);
 }
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew sent while a meridian-flip slew, FindHome or Park homes is "
+    "refused (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a flip slew, FindHome, Park
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // Each first command homes both axes, which drops the pointing reference. A negative hour angle puts the flip
+    // slew's target on the BeyondPole side, so it routes through home and rebases there.
+    mount.set_auto_complete_motions(false);
+    const double flip_ra = std::fmod(driver->get_sidereal_time() + 1.0, 24.0);
+    if (leg == 0) driver->slew_to_coordinates_async(flip_ra, 25.0);
+    if (leg == 1) driver->find_home();
+    if (leg == 2) driver->park();
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const auto frames_before = mount.requests().size();
+
+    const auto second = call_result(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    const auto frames_after = mount.requests().size();
+
+    INFO("second slew: " << second.text);
+    CHECK(second.code == alpacacore::AlpacaError::InvalidOperation);
+    if (leg == 0) {
+        // Not FindHome advice: the client only has to wait for the flip, or abort it.
+        CHECK(second.text == "Celestron CGX is homing for a meridian flip; wait for it or AbortSlew first");
+    } else {
+        CHECK(second.text == "Run FindHome before slewing the Celestron CGX");
+    }
+    CHECK(frames_after == frames_before);
+    CHECK(driver->get_slewing());
+
+    // The first command is untouched and still finishes.
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_home(0x10);
+    mount.complete_axis_home(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    if (leg == 0) {
+        CHECK(driver->get_tracking());
+        CHECK(driver->get_target_right_ascension() == flip_ra);
+    }
+    if (leg == 1) CHECK(driver->get_at_home());
+    if (leg == 2) CHECK(driver->get_at_park());
+}
 #endif
