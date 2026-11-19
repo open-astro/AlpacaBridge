@@ -26,6 +26,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -616,4 +617,80 @@ TEST_CASE("RelinkMotionStop - a loss during a GoTo or MoveAxis owes one stop unt
     CHECK(relink.stop_owed());
     relink.stop_sent();
     CHECK_FALSE(relink.stop_owed());
+}
+
+// ── AbortSlew racing a slew-deadline expiry ───────────────────────────────────────────────────────────────────
+
+// Tagged [stress-guard], not [stress]: this file is in the unconditional TEST_SOURCES and is not a vendor driver
+// registration (scripts/check_stress_registration.py rules 2 and 3); the sanitizers-tsan job runs "[stress-guard]"
+// under ThreadSanitizer. A slot body polls a slew deadline (enforce_motion_deadline) and, once it has passed, runs the
+// verified stop; an AbortSlew on the test thread cancels the slot under a stand-in for the driver mutex_ and sends its
+// own stop over a stand-in for the I/O lock. In the gated rounds the body's first stop blocks on a latch until the
+// AbortSlew has run, so the AbortSlew provably lands while the deadline body is inside its stop; the ungated rounds
+// let the two race freely. Either way the deadline body sends at most one stop and keeps no error: the canceller
+// owns the mount (decision 0006 rule 6).
+TEST_CASE("enforce_motion_deadline - an AbortSlew racing the deadline expiry leaves one owner of the stop",
+          "[motion-guards][stress-guard]") {
+    for (int round = 0; round < 100; ++round) {
+        const bool gated = round % 2 == 0;
+        CAPTURE(round, gated);
+        FakeTaskClock clock;
+        std::mutex driver;  // the driver's state mutex_
+        std::mutex wire;    // the per-link I/O lock
+        std::atomic<int> body_stops{0};
+        std::atomic<int> abort_stops{0};
+        std::atomic<int> reads{0};
+        alpacacore::test::Latch in_stop;
+        const auto send_on_wire = [&wire](std::atomic<int>& count) {
+            const std::lock_guard<std::mutex> lock(wire);
+            ++count;
+        };
+        const StopVerifyHooks hooks{
+            [&] {
+                if (gated && body_stops == 0) {
+                    in_stop.block();
+                }
+                send_on_wire(body_stops);
+            },
+            [&]() -> std::optional<MotionStatusReading> {
+                const std::lock_guard<std::mutex> lock(driver);
+                ++reads;
+                return MotionStatusReading{false, clock.now()};
+            },
+            [&]() -> std::optional<PositionReading> {
+                const std::lock_guard<std::mutex> lock(driver);
+                return PositionReading{MountPosition{1.0, 10.0}, clock.now()};
+            },
+        };
+        HoldWindow deadline;
+        deadline.arm(clock.now(), slew_time_budget(1.0, 1.0));
+        OperationGeneration generation;
+        AsyncOperation slot("motion-guards-stress", generation, clock);
+        slot.start([&](OperationContext& ctx) {
+            while (enforce_motion_deadline(ctx, clock, deadline, hooks, "the slew ran past 12 s")) {
+                if (!ctx.wait_for(kStopVerifyPollInterval)) {
+                    return;
+                }
+            }
+        });
+        REQUIRE(clock.wait_for_waiters(1, 2s));
+        clock.advance(12s);
+        if (gated) {
+            REQUIRE(in_stop.wait_entered());
+        }
+        {
+            const std::lock_guard<std::mutex> lock(driver);
+            slot.cancel();
+        }
+        send_on_wire(abort_stops);
+        in_stop.release();
+        slot.cancel_all_and_join();
+        CHECK_FALSE(slot.last_failure().has_value());
+        CHECK(abort_stops == 1);
+        CHECK(body_stops <= 1);
+        CHECK(reads == 0);  // a cancelled stop reads nothing more
+        if (gated) {
+            CHECK(body_stops == 1);
+        }
+    }
 }

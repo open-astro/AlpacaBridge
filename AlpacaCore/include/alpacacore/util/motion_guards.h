@@ -83,22 +83,26 @@ public:
         if (!reading || reading->measured_at < not_before_) {
             return false;
         }
-        if (!anchor_ || axis_miss_arcsec(anchor_->position, reading->position) > kStillToleranceArcsec) {
-            anchor_ = reading;
+        if (!have_anchor_ || axis_miss_arcsec(anchor_.position, reading->position) > kStillToleranceArcsec) {
+            anchor_ = *reading;
+            have_anchor_ = true;
             return false;
         }
-        return reading->measured_at - anchor_->measured_at >= kStillSampleSpacing;
+        return reading->measured_at - anchor_.measured_at >= kStillSampleSpacing;
     }
 
     /// Forgets the kept read; reads measured before `not_before` prove nothing from now on.
     void restart(MotionTime not_before) {
         not_before_ = not_before;
-        anchor_.reset();
+        have_anchor_ = false;
     }
 
 private:
     MotionTime not_before_;
-    std::optional<PositionReading> anchor_;
+    // A plain value and a flag, not std::optional: GCC 14 at -O1 and above reports the optional's payload as maybe
+    // uninitialized here (-Werror=maybe-uninitialized in the sanitizer and release builds).
+    PositionReading anchor_{};
+    bool have_anchor_ = false;
 };
 
 // ── Verified stop ────────────────────────────────────────────────────────────────────────────────────────────────
