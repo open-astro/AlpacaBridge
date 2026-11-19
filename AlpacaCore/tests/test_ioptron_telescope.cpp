@@ -2251,7 +2251,8 @@ TEST_CASE("iOptron zero search - a search with no status 7 in 120 s is stopped a
         CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(e.what()).find("zero sensor search") != std::string::npos);
     }
-    CHECK(mount.count(":Q#") == 1);
+    // This read or the bound's own watchdog (issue #2432), whichever came first, sent the one stop.
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK_FALSE(driver->get_at_home());
     // Kept until the client acts on it (ASCOM async FAQ): AbortSlew clears it.
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
@@ -2314,8 +2315,9 @@ TEST_CASE("iOptron zero search - MoveAxis rate 0 keeps the search and its bound"
     CHECK_FALSE(driver->get_at_home());
     clock.advance(std::chrono::seconds(115));
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
-    CHECK(mount.count(":Q#") == 1);
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));  // this read or the watchdog (#2432) stopped it
     driver->set_connected(false);
+    CHECK(mount.count(":Q#") == 1);
 }
 
 TEST_CASE("iOptron zero search - other models keep :MH# and the at-home return",
@@ -2409,8 +2411,8 @@ TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it an
     REQUIRE(mount.count(":MSH#") == 2);
     const auto commands = mount.commands();
     const auto stop = std::find(commands.begin(), commands.end(), ":Q#");
-    const auto second_search = std::find(std::next(std::find(commands.begin(), commands.end(), ":MSH#")),
-                                         commands.end(), ":MSH#");
+    const auto second_search =
+        std::find(std::next(std::find(commands.begin(), commands.end(), ":MSH#")), commands.end(), ":MSH#");
     CHECK(stop < second_search);
 
     // The new search runs, with no failure kept from the old one, and has a bound of its own.
@@ -2420,6 +2422,63 @@ TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it an
     CHECK(driver->get_slewing());
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
+}
+
+// Issue #2432: the slot that holds the bound cannot start (no thread). A zero search with no bound must not run, so
+// FindHome stops the mount it has just sent searching and throws, and Slewing keeps the failure.
+TEST_CASE("iOptron zero search - a FindHome whose bound cannot start stops the search and throws",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    const std::string message =
+        alpacacore::test::alpaca_error_message([&] { driver->find_home(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("watchdog could not start") != std::string::npos);
+    CHECK(message.find("the mount was stopped") != std::string::npos);
+    CHECK(mount.count(":MSH#") == 1);
+    CHECK(mount.count(":Q#") == 1);
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    driver->set_connected(false);
+}
+
+// Issue #2432: the bound's watchdog is the first to stop an overdue search, and a status read past the bound is the
+// backstop. Here the watchdog's thread is held, so the client's Slewing read is the one that stops the search; the
+// watchdog, once released, finds no search left and sends nothing.
+TEST_CASE("iOptron zero search - a status read past the bound stops the search while the watchdog is held",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    HeldSlewBody watchdog;  // released before the driver joins its slot
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [gate = watchdog.gate](std::function<void()> body) {
+        return std::thread([body = std::move(body), gate] {
+            gate.wait();
+            body();
+        });
+    });
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(121));
+    CHECK(mount.count(":Q#") == 0);
+    const std::string message = alpacacore::test::alpaca_error_message([&] { (void)driver->get_slewing(); },
+                                                                       alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("zero sensor search") != std::string::npos);
+    CHECK(mount.count(":Q#") == 1);
+
+    watchdog.release();
+    driver->set_connected(false);  // joins the watchdog
+    CHECK(mount.count(":Q#") == 1);
 }
 
 // The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 1.6 s at the

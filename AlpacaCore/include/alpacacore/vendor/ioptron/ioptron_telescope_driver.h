@@ -102,6 +102,11 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam (issue #2432): replaces the thread factory of the zero search watchdog slot, so a case can refuse or
+/// hold its body. Call only while no FindHome runs. A driver not from the factories is ignored.
+void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
+                                                std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: `hook` runs on the clock-sync body after its start delay (it may block or throw).
 /// Set it before connecting. A driver not from the factories above is ignored.
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
