@@ -669,14 +669,27 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
     driver_.motion_transition_ = true;
     // An AUX guide packet cannot be interrupted, so the new command sends nothing while one runs (#1156).
     std::array<bool, 2> superseded_pulses{};
+    // IsPulseGuiding stays true from the supersede until the wait below ends, on every exit: the woken body can end
+    // its slot before this initiator reaches the wait (get_is_pulse_guiding()).
+    struct GuideEndPending {
+        std::atomic<bool>* pending = nullptr;
+        ~GuideEndPending() {
+            if (pending) pending->store(false);
+        }
+    } guide_end_pending;
     if (supersede_motion) {
         // A slew, Park or FindHome supersedes a running pulse without a join (decision 0006 rule 3, #2263): the bump
         // under motion_start_mutex_ marks the body Superseded, so it sends its axis nothing more, the next chunk and
         // the end-of-pulse read included, and the cancel only wakes it (Superseded wins). The packet it left on the
         // mount is waited out below, on the mount's own report.
         std::lock_guard<std::mutex> state_lock(driver_.mutex_);
-        for (std::size_t index = 0; index < 2; ++index) {
+        for (std::size_t index = 0; index < 2; ++index)
             superseded_pulses[index] = driver_.pulse_slots_[index].running();
+        if (superseded_pulses[0] || superseded_pulses[1]) {
+            driver_.guide_end_pending_.store(true);  // before the bump, so no reader sees neither
+            guide_end_pending.pending = &driver_.guide_end_pending_;
+        }
+        for (std::size_t index = 0; index < 2; ++index) {
             if (!superseded_pulses[index]) continue;
             static_cast<void>(driver_.pulse_generations_[index].bump());
             driver_.pulse_slots_[index].cancel();
@@ -730,12 +743,8 @@ CelestronCgxTelescopeDriver::MotionTransition::~MotionTransition() { driver_.mot
 
 void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& axes) {
     if (!axes[0] && !axes[1]) return;
-    // IsPulseGuiding stays true until the mount reports the packet inactive (get_is_pulse_guiding()).
-    guide_end_pending_.store(true);
-    struct PendingEnd {
-        std::atomic<bool>& pending;
-        ~PendingEnd() { pending.store(false); }
-    } const pending_end{guide_end_pending_};
+    // MotionTransition holds guide_end_pending_ true across this wait, so IsPulseGuiding stays true until the mount
+    // reports the packet inactive (get_is_pulse_guiding()).
     const auto bound = kGuidePacketMax + kGuideEndMargin;
     // One deadline for both axes, on purpose: both packets started before the supersede, so neither outlives the
     // longest packet plus the margin from now; a per-axis deadline would let two packets wait twice as long.
@@ -1766,7 +1775,9 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     pulse_slots_[index].start([this, claim, axis, index, velocity, first_chunk,
                                remaining = total_centiseconds - first_chunk,
                                start_result](util::OperationContext& context) {
-        // Only the body whose own first packet went unacknowledged hands the axis back; it is never superseded.
+        // Only the body whose own first packet went unacknowledged hands the axis back. A newer pulse on its axis never
+        // supersedes it (pulse_start_ambiguous_ refuses one); a slew, Park or FindHome can, and it then returns at once
+        // and clears the flag while that command owns the axis (#2263).
         const auto end_ambiguity = [&] {
             if (start_result.get() == PulseGuideStart::Ambiguous) end_ambiguous_pulse_start(index);
         };

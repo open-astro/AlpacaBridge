@@ -3990,4 +3990,50 @@ TEST_CASE(
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_tracking());
 }
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - IsPulseGuiding stays true from the supersede of a pulse to the wait on the "
+    "mount (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);  // the Dec packet stays active until the case ends it
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_wait_count(1, 2s));  // the pulse body, between its guide reads
+
+    // The command stops in its handoff, after the supersede woke the pulse body and before its wait on the mount.
+    // The body returns on Superseded meanwhile, so its slot ends while the packet is still active.
+    std::atomic<bool> guiding_in_handoff{true};
+    std::atomic<bool> hook_ran{false};
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, [&] {
+        const auto until = std::chrono::steady_clock::now() + 300ms;
+        while (std::chrono::steady_clock::now() < until) {
+            if (!driver->get_is_pulse_guiding()) guiding_in_handoff = false;
+            std::this_thread::yield();
+        }
+        hook_ran = true;
+    });
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    REQUIRE(wait_until([&] { return hook_ran.load(); }));
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, {});
+    mount.complete_axis_guide(0x11);
+    REQUIRE(wait_until([&] {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        return second.wait_for(0ms) == std::future_status::ready;
+    }));
+    INFO("second command: " << second.get().text);
+    CHECK(guiding_in_handoff);
+}
 #endif
