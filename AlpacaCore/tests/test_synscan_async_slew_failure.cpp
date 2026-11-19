@@ -1744,6 +1744,35 @@ bool returned(const ParkedPulse& pulse) {
     return pulse.ended.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
 }
 
+// Names the next pulse body the driver spawns. A pulse started after start_pulse_parked() runs through that call's
+// hook unnamed, so a case that steps such a pulse to its end installs this hook first.
+std::shared_future<std::thread::id> name_next_pulse_body(alpacacore::TelescopeDriver& driver) {
+    auto id = std::make_shared<std::promise<std::thread::id>>();
+    auto named = std::make_shared<std::atomic<bool>>(false);
+    auto body = id->get_future().share();
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(driver, [id, named](std::function<void()> fn) {
+        std::thread thread(std::move(fn));
+        if (!named->exchange(true)) {
+            id->set_value(thread.get_id());
+        }
+        return thread;
+    });
+    return body;
+}
+
+// Steps a pulse named by name_next_pulse_body() to its end: waits until its body is parked on the clock, steps until
+// its window closes (the body's wait, due before that, has run out), then waits in real time for `ended`, the body's
+// own end command on the wire. Stepping until `ended` instead let a loaded runner spend every step of advance_until()
+// before the woken body got to send its command.
+bool step_pulse_to_end(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                       const std::shared_future<std::thread::id>& body, const std::function<bool()>& ended) {
+    if (body.wait_for(std::chrono::seconds(5)) != std::future_status::ready ||
+        !clock.wait_for_waiter_thread(body.get(), std::chrono::milliseconds(5000))) {
+        return false;
+    }
+    return advance_until(clock, [&] { return !driver.get_is_pulse_guiding(); }) && wait_until(ended, 5000);
+}
+
 // Zero-rate variable-rate commands on `device` (16 RA, 17 Dec): two per axis stop.
 int zero_rate_commands(FakeSynScanHandset& st, int device) {
     const auto commands = st.command_snapshot();
@@ -1981,13 +2010,15 @@ TEST_CASE("SynScan PulseGuide - a replacement takes over from an older pulse who
     REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));  // parked before its retry
     st->reject_tracking.store(false);
 
+    const auto replacement = name_next_pulse_body(*driver);
     driver->pulse_guide(3, 3000);
     REQUIRE(returned(first));
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
     CHECK(st->command_count('T') == tracking_writes + 1);  // the older body sent no retry
-    REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
-    CHECK(st->command_count('T') > tracking_writes + 1);  // the replacement's end restores tracking
+    // The replacement's end restores tracking (its `T`).
+    REQUIRE(
+        step_pulse_to_end(clock, *driver, replacement, [&] { return st->command_count('T') > tracking_writes + 1; }));
     CHECK(driver->get_tracking());
     driver->set_connected(false);
 }
@@ -2027,6 +2058,7 @@ TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the repl
     st->reject_tracking.store(false);
 
     wake_on_rate->store(true);
+    const auto replacement = name_next_pulse_body(*driver);
     auto second = std::async(std::launch::async, [&] { driver->pulse_guide(3, 3000); });
     REQUIRE(rate->wait_entered());
     REQUIRE(returned(first));
@@ -2037,7 +2069,7 @@ TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the repl
 
     const int tracking_writes = st->command_count('T');
     // The replacement's end restores tracking (its `T`), whatever the old body did to the window.
-    REQUIRE(advance_until_pulse_ended(clock, *driver, [&] { return st->command_count('T') > tracking_writes; }));
+    REQUIRE(step_pulse_to_end(clock, *driver, replacement, [&] { return st->command_count('T') > tracking_writes; }));
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_tracking());
     driver->set_connected(false);
