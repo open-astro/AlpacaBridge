@@ -121,6 +121,35 @@ void write_lines(int count) {
     }
 }
 
+// Starts logging through init_logging from a yaml file, as the server does, with
+// file logging in @p dir and the two caps set; returns the text of today's file.
+std::string init_from_yaml(const fs::path& dir, int max_file_size_mb, int max_total_size_mb) {
+    for (const char* name : {"ALPACAHTTP_LOG_LEVEL", "ALPACAHTTP_LOG_DIRECTORY", "ALPACAHTTP_LOG_RETENTION_DAYS",
+                             "ALPACAHTTP_LOG_MAX_FILE_SIZE_MB", "ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB"}) {
+        ::unsetenv(name);
+    }
+    const fs::path yaml = dir / "config.yaml";
+    {
+        std::ofstream out(yaml);
+        out << "logging:\n"
+            << "  level: INFO\n"
+            << "  directory: " << dir.string() << "\n"
+            << "  file_enabled: true\n"
+            << "  retention_days: 0\n"
+            << "  max_file_size_mb: " << max_file_size_mb << "\n"
+            << "  max_total_size_mb: " << max_total_size_mb << "\n";
+    }
+    alpacahttp::Config config;
+    EXPECT(config.load(yaml.string()));
+    EXPECT(config.log_max_file_size_mb() == max_file_size_mb);
+    EXPECT(config.log_max_total_size_mb() == max_total_size_mb);
+    util::set_external_log_sink([](alpacacore::logging::LogLevel, std::string_view, std::string_view) {});
+    util::init_logging(config);
+    return read_all(dir / util::current_log_filename());
+}
+
+constexpr const char* kTotalBelowFileWarning = "smaller than logging.max_file_size_mb";
+
 }  // namespace
 
 int main() {
@@ -479,6 +508,27 @@ int main() {
         EXPECT(loaded("") == 1024);
         ::unsetenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB");
         ::unlink(path.c_str());
+    }
+
+    {
+        // case: start-up warns when the total cap is smaller than the per-file cap
+        const fs::path dir = make_dir();
+        const std::string text = init_from_yaml(dir, 10, 4);
+        EXPECT(text.find(kTotalBelowFileWarning) != std::string::npos);
+        EXPECT(text.find("logging.max_total_size_mb (4 MiB)") != std::string::npos);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: start-up does not warn when the total cap is off or at least the per-file cap
+        for (const int total : {0, 10, 1024}) {
+            const fs::path dir = make_dir();
+            const std::string text = init_from_yaml(dir, 10, total);
+            EXPECT(text.find("File logging active") != std::string::npos);
+            EXPECT(text.find(kTotalBelowFileWarning) == std::string::npos);
+            fs::remove_all(dir);
+        }
+        util::set_log_max_total_bytes(0);
     }
 
     return 0;
