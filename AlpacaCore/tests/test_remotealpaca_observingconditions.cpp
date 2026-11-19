@@ -472,6 +472,45 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded Refresh sends
     CHECK(rig.http.calls() == calls);
 }
 
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a Refresh superseded during its measurement stops calling",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    // At the first measurement GET after the Refresh PUT, an AveragePeriod write supersedes the Refresh body. That
+    // GET answers once the write's body has started; the write's PUT then waits for the client's call lock.
+    std::atomic<bool> triggered{false};
+    std::thread second;
+    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (request.method == "GET" && rig.upstream.calls("refresh") == 1 && !triggered.exchange(true)) {
+            const auto before = remote::command_generation_for_testing(*rig.driver);
+            second = std::thread([&] { rig.driver->set_average_period(0.0); });
+            const auto deadline = std::chrono::steady_clock::now() + kRendezvous;
+            while (remote::command_generation_for_testing(*rig.driver) == before &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+        }
+        return rig.upstream.answer(request);
+    });
+    const std::size_t before_refresh = rig.http.requests().size();
+    rig.driver->refresh();
+    if (second.joinable()) second.join();
+    REQUIRE(triggered.load());
+    // Decision 0006 rule 6: after the GET that saw the supersede, the only request is the write's PUT; the rest of the
+    // superseded body's measurement is never sent.
+    const auto requests = rig.http.requests();
+    std::size_t trigger = requests.size();
+    for (std::size_t i = before_refresh; i < requests.size(); ++i) {
+        if (requests[i].method == "GET") {
+            trigger = i;
+            break;
+        }
+    }
+    REQUIRE(trigger + 2 == requests.size());
+    CHECK(requests[trigger + 1].method == "PUT");
+    CHECK(requests[trigger + 1].url.find("averageperiod") != std::string::npos);
+}
+
 TEST_CASE("Remote Alpaca ObservingConditions Driver - a reconnect rebuilds the Description, not appends to it",
           "[remotealpaca][observingconditions][unit]") {
     Rig rig;

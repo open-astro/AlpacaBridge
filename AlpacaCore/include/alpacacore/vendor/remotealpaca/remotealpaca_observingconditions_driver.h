@@ -25,6 +25,7 @@
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -66,5 +67,8 @@ void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused)
 // Runs `hook` inside each AveragePeriod and Refresh body, after its PUT and before the body touches driver state, so a
 // test can hold a body there. Set it while no command runs.
 void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
+
+// The command slot's generation: it moves when a command body starts, so a test sees a newer command supersede one.
+std::uint64_t command_generation_for_testing(ObservingConditionsDriver& driver);
 
 }  // namespace alpacacore::vendor::remotealpaca

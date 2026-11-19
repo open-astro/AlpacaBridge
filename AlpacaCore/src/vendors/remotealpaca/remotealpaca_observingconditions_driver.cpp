@@ -349,11 +349,13 @@ public:
         run_command([this](util::OperationContext& ctx) {
             client_.put("refresh");
             if (command_hook_) command_hook_();
-            // A superseded body measures nothing and publishes nothing (decision 0006 rule 6).
-            if (ctx.stop_reason() == util::StopReason::Superseded) return;
+            // A superseded body sends nothing more and publishes nothing (decision 0006 rule 6), also when the
+            // supersede lands during the measurement.
+            const auto superseded = [&ctx] { return ctx.stop_reason() == util::StopReason::Superseded; };
+            if (superseded()) return;
             const auto token = snapshot_.begin_poll();
-            Frame frame = sample(supported_copy());
-            if (ctx.stop_reason() == util::StopReason::Superseded) return;
+            Frame frame = sample(supported_copy(), superseded);
+            if (superseded()) return;
             if (note_reply(token, std::move(frame))) {
                 ALPACA_LOG_INFO(kComponent, "Upstream " + upstream_label_ + " restored: Refresh answered");
             }
@@ -364,6 +366,8 @@ public:
 
     // Set while no command runs; an AveragePeriod or Refresh body calls it after its PUT, before it touches state.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
+
+    std::uint64_t command_generation() const { return command_generation_.current(); }
 
 private:
     static RemoteObservingConditionsConfig validated(RemoteObservingConditionsConfig config) {
@@ -445,17 +449,23 @@ private:
     }
 
     // One measurement of the upstream, with no lock held (decision 0016 rule 1). Throws RemoteTransportError when a
-    // call gets no usable reply; an upstream error is kept in the frame.
-    Frame sample(const std::array<bool, kSensorCount>& supported) {
+    // call gets no usable reply; an upstream error is kept in the frame. When `stop` answers true before a call, it
+    // returns the partial frame at once and the caller must not publish it.
+    Frame sample(const std::array<bool, kSensorCount>& supported, const std::function<bool()>& stop = {}) {
+        const auto stopped = [&stop] { return stop && stop(); };
         Frame frame;
         for (std::size_t i = 0; i < kSensorCount; ++i) {
             if (!supported[i]) continue;
+            if (stopped()) return frame;
             frame.sensors[i] = answer_of([&] { return client_.get_double(kSensors[i].member); });
+            if (stopped()) return frame;
             frame.since_update[i] = answer_of(
                 [&] { return client_.get_double("timesincelastupdate", {{"SensorName", kSensors[i].name}}); });
         }
+        if (stopped()) return frame;
         frame.since_any_update =
             answer_of([&] { return client_.get_double("timesincelastupdate", {{"SensorName", ""}}); });
+        if (stopped()) return frame;
         frame.average_period = answer_of([&] { return client_.get_double("averageperiod"); });
         return frame;
     }
@@ -800,6 +810,11 @@ void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::functi
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_command_hook(std::move(hook));
     }
+}
+
+std::uint64_t command_generation_for_testing(ObservingConditionsDriver& driver) {
+    auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver);
+    return remote ? remote->command_generation() : 0;
 }
 
 }  // namespace alpacacore::vendor::remotealpaca
