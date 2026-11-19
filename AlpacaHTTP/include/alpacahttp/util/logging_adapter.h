@@ -86,8 +86,11 @@ bool is_valid_log_filename(const std::string& name);
 // at configure time and then on every day-rollover inside the file sink.
 void set_log_retention_days(int days);
 
-// Rotated parts kept per day (alpacabridge-YYYY-MM-DD.1.log is the newest).
-inline constexpr int kMaxRotatedLogFiles = 19;
+// Rotated parts a day can hold (alpacabridge-YYYY-MM-DD.1.log is the newest).
+// A backstop only: the total size cap (set_log_max_total_bytes) is the limit
+// that applies in practice, so a night logged at TRACE is not cut at a part
+// count (#2422). 999 parts of the default 5 MiB file are about 4.9 GiB a day.
+inline constexpr int kMaxRotatedLogFiles = 999;
 
 // Cap one day's log file at `bytes` (0 = unlimited). When the next line would
 // not fit, the file is rotated to part .1 (older parts shift up, the part past
@@ -95,13 +98,23 @@ inline constexpr int kMaxRotatedLogFiles = 19;
 // never dropped. init_logging applies logging.max_file_size_mb here.
 void set_log_max_file_bytes(std::uintmax_t bytes);
 
+// Cap the bytes all log files in the log directory may hold together, across
+// days (0 = unlimited; #2422). Over the cap, the oldest files go first: the
+// oldest date first and, within a date, its highest part first and its
+// current file last. The file being written is counted but never deleted.
+// Enforced after every rotation, at day rollover and by prune_old_log_files()
+// (at start-up); with no per-file cap there is no rotation, so only the last
+// two apply. init_logging applies logging.max_total_size_mb here.
+void set_log_max_total_bytes(std::uintmax_t bytes);
+
 // Delete daily log files whose embedded date is older than retention_days
 // before today, unless two logged days are further apart than the retention
 // (a clock jump, or a rig left off that long): then the days logged since the
 // gap count as if they had followed the last day logged before it, so the
-// earlier files stay until that many days of newer logs exist (#2292). Safe to
-// call repeatedly; no-op when retention is disabled. Returns the number of
-// files removed.
+// earlier files stay until that many days of newer logs exist (#2292). Then
+// delete the oldest files until the directory fits the total size cap
+// (set_log_max_total_bytes). Safe to call repeatedly; each step is a no-op
+// when its limit is disabled. Returns the number of files removed by both.
 std::size_t prune_old_log_files();
 
 // The one table of log-level spellings (config file, env var, API, runtime

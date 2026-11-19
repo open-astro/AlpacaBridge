@@ -13,6 +13,8 @@
 // Per-day log file size cap (logging.max_file_size_mb): at the cap the sink
 // rotates the day's file to a numbered part and keeps logging; it never drops
 // a line. Only the newest util::kMaxRotatedLogFiles parts of a day are kept.
+// Total cap (logging.max_total_size_mb, #2422): all log files together, the
+// oldest deleted first across days, the open file never.
 
 #include <alpacahttp/config.h>
 #include <alpacahttp/util/logging_adapter.h>
@@ -21,6 +23,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -37,10 +40,33 @@ namespace {
 
 constexpr std::uintmax_t kMiB = 1024ull * 1024;
 
+// A fresh directory under $TMPDIR (or /tmp).
+std::string temp_template(const char* stem) {
+    const char* tmpdir = std::getenv("TMPDIR");
+    return std::string(tmpdir && *tmpdir ? tmpdir : "/tmp") + "/" + stem + "_XXXXXX";
+}
+
 fs::path make_dir() {
-    char tmpl[] = "/tmp/alpacahttp_log_cap_XXXXXX";
-    EXPECT(::mkdtemp(tmpl) != nullptr);
+    std::string tmpl = temp_template("alpacahttp_log_cap");
+    EXPECT(::mkdtemp(tmpl.data()) != nullptr);
     return tmpl;
+}
+
+// A log file of exactly @p bytes.
+void write_file(const fs::path& p, std::size_t bytes) { std::ofstream(p, std::ios::binary) << std::string(bytes, 'z'); }
+
+// Bytes of all regular files in @p dir.
+std::uintmax_t dir_bytes(const fs::path& dir) {
+    std::uintmax_t total = 0;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file()) total += entry.file_size();
+    }
+    return total;
+}
+
+// alpacabridge-<date>.log, or its part N.
+fs::path dated(const fs::path& dir, const std::string& date, int n = 0) {
+    return dir / ("alpacabridge-" + date + (n > 0 ? "." + std::to_string(n) : "") + ".log");
 }
 
 std::string read_all(const fs::path& p) {
@@ -68,15 +94,17 @@ std::string local_date_days_ago(int days) {
     return buf;
 }
 
-// Points the sink at `dir`, silences stderr, and sets the cap before the file
-// is opened (as init_logging does), so a reopened file is judged against it.
-fs::path start(const fs::path& dir, std::uintmax_t cap) {
+// Points the sink at `dir`, silences stderr, and sets the caps before the file
+// is opened (as init_logging does), so a reopened file is judged against them.
+// The total cap is off unless a case sets it.
+fs::path start(const fs::path& dir, std::uintmax_t cap, std::uintmax_t total_cap = 0) {
     alpacahttp::Config config;
     config.set_file_logging_enabled(false);
     config.set_log_level(alpacahttp::LogLevel::INFO);
     util::init_logging(config);
     util::set_external_log_sink([](alpacacore::logging::LogLevel, std::string_view, std::string_view) {});
     util::set_log_max_file_bytes(cap);
+    util::set_log_max_total_bytes(total_cap);
     EXPECT(util::configure_log_directory(dir.string(), true) == dir.string());
     return dir / util::current_log_filename();
 }
@@ -118,9 +146,10 @@ int main() {
 
     {
         // case: only the newest kMaxRotatedLogFiles parts of a day are kept
+        // A 1-byte cap rotates on every line after the first.
         const fs::path dir = make_dir();
-        start(dir, 4096);
-        write_lines(2000);
+        start(dir, 1);
+        write_lines(util::kMaxRotatedLogFiles + 5);
         for (int i = 1; i <= util::kMaxRotatedLogFiles; ++i) {
             EXPECT(fs::exists(dir / part_name(i)));
         }
@@ -177,15 +206,17 @@ int main() {
     {
         // case: parts are log files the viewer lists (newest first), reads and deletes
         const fs::path dir = make_dir();
-        start(dir, 4096);
-        write_lines(2000);
+        start(dir, 1);
+        write_lines(13);  // 12 rotations: parts .1 .. .12
         EXPECT(util::is_valid_log_filename(part_name(1)));
         EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.0.log"));
         EXPECT(util::is_valid_log_filename("alpacabridge-2026-01-01.19.log"));
+        EXPECT(util::is_valid_log_filename("alpacabridge-2026-01-01.100.log"));
+        EXPECT(util::is_valid_log_filename("alpacabridge-2026-01-01.999.log"));
         EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.01.log"));
-        EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.100.log"));
+        EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.1000.log"));
         const auto files = util::list_log_files();
-        EXPECT(files.size() == static_cast<std::size_t>(util::kMaxRotatedLogFiles) + 1);
+        EXPECT(files.size() == 13);
         EXPECT(files[0].name == util::current_log_filename());
         for (std::size_t i = 1; i < files.size(); ++i) {
             EXPECT(files[i].name == part_name(static_cast<int>(i)));  // .1, .2, ... .10 in number order
@@ -201,6 +232,133 @@ int main() {
         alpacahttp::Config config;
         EXPECT(config.log_max_file_size_mb() == 5);
         EXPECT(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * kMiB <= util::kMaxLogFileReadBytes);
+        // The total cap holds a night at TRACE (~30 MiB/h on an iOptron rig) and more than one day's part ceiling,
+        // so the total cap, not the part count, decides what survives (#2422).
+        EXPECT(config.log_max_total_size_mb() == 1024);
+        EXPECT(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * (1 + util::kMaxRotatedLogFiles) >
+               static_cast<std::uintmax_t>(config.log_max_total_size_mb()));
+    }
+
+    {
+        // case: the total cap deletes the oldest files first, across days, at rotation
+        // Two seeded days, each a current file and parts .1-.3 of 1000 bytes. The first rotation today makes part .1
+        // (just under 4096 bytes) and a fresh, empty file: 8000 + .1 is over 8000, so files go oldest first, the
+        // oldest day whole (.3, .2, .1, then its current file), then the next day's .3, and no more.
+        const fs::path dir = make_dir();
+        const std::string d3 = local_date_days_ago(3);
+        const std::string d2 = local_date_days_ago(2);
+        for (const auto& date : {d3, d2}) {
+            for (int n = 0; n <= 3; ++n) write_file(dated(dir, date, n), 1000);
+        }
+        const std::uintmax_t total_cap = 8000;
+        const fs::path file = start(dir, 4096, total_cap);
+        for (int i = 0; i < 1000 && !fs::exists(dir / part_name(1)); ++i) write_lines(1);
+        EXPECT(fs::file_size(dir / part_name(1)) > 4000);
+        for (int n = 0; n <= 3; ++n) EXPECT(!fs::exists(dated(dir, d3, n)));
+        EXPECT(!fs::exists(dated(dir, d2, 3)));
+        EXPECT(fs::exists(dated(dir, d2, 2)));
+        EXPECT(fs::exists(dated(dir, d2, 1)));
+        EXPECT(fs::exists(dated(dir, d2)));  // the evening before stays while today grows
+        EXPECT(fs::exists(dir / part_name(1)));
+        EXPECT(fs::exists(file));
+        // Every later rotation brings the other files back under the cap; only the open file has grown since.
+        write_lines(400);
+        EXPECT(dir_bytes(dir) - fs::file_size(file) <= total_cap);
+        EXPECT(fs::exists(dir / part_name(1)));
+        EXPECT(fs::exists(file));
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: the file being written counts toward the total cap
+        // Yesterday's 1000 bytes alone fit 3000; with today's open file (about 2600 bytes) they do not.
+        const fs::path dir = make_dir();
+        const fs::path yesterday = dated(dir, local_date_days_ago(1));
+        write_file(yesterday, 1000);
+        const fs::path file = start(dir, 0, 3000);
+        write_lines(30);
+        EXPECT(fs::file_size(file) > 2000);
+        EXPECT(util::prune_old_log_files() == 1);
+        EXPECT(!fs::exists(yesterday));
+        EXPECT(fs::exists(file));
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: the file being written is never deleted, even when it alone is over the total cap
+        const fs::path dir = make_dir();
+        const fs::path yesterday = dated(dir, local_date_days_ago(1));
+        write_file(yesterday, 1000);
+        const fs::path file = start(dir, 0, 100);
+        write_lines(50);
+        EXPECT(util::prune_old_log_files() == 1);
+        EXPECT(!fs::exists(yesterday));
+        EXPECT(fs::exists(file));
+        const std::string text = read_all(file);
+        EXPECT(text.find("line 0 ") != std::string::npos);
+        EXPECT(text.find("line 49 ") != std::string::npos);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: total cap 0 keeps every file
+        const fs::path dir = make_dir();
+        const fs::path old_file = dated(dir, local_date_days_ago(3));
+        const fs::path old_part = dated(dir, local_date_days_ago(3), 1);
+        write_file(old_file, 100000);
+        write_file(old_part, 100000);
+        start(dir, 4096, 0);
+        write_lines(500);
+        EXPECT(util::prune_old_log_files() == 0);
+        EXPECT(fs::exists(old_file));
+        EXPECT(fs::exists(old_part));
+        EXPECT(fs::exists(dir / part_name(1)));
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: start-up applies logging.max_total_size_mb from the config file, oldest day first
+        // Three earlier days of 600 KiB each are over 1 MiB: init_logging deletes the oldest two.
+        const fs::path dir = make_dir();
+        const fs::path d3 = dated(dir, local_date_days_ago(3));
+        const fs::path d2 = dated(dir, local_date_days_ago(2));
+        const fs::path d1 = dated(dir, local_date_days_ago(1));
+        for (const auto& p : {d3, d2, d1}) write_file(p, 600 * 1024);
+        const fs::path yaml = dir / "config.yaml";
+        std::ofstream(yaml) << "logging:\n  directory: " << dir.string()
+                            << "\n  retention_days: 0\n  max_total_size_mb: 1\n";
+        ::unsetenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB");
+        ::unsetenv("ALPACAHTTP_LOG_DIRECTORY");
+        ::unsetenv("ALPACAHTTP_LOG_RETENTION_DAYS");
+        alpacahttp::Config config;
+        EXPECT(config.load(yaml.string()));
+        util::init_logging(config);
+        EXPECT(!fs::exists(d3));
+        EXPECT(!fs::exists(d2));
+        EXPECT(fs::exists(d1));
+        EXPECT(fs::exists(yaml));  // not a log file
+        util::set_log_max_total_bytes(0);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: a rotation shifts only the parts below the first missing number
+        // Parts .1 and .2 exist, .3 was deleted from the viewer, .4 is older: .4 stays put and nothing is overwritten.
+        const fs::path dir = make_dir();
+        const fs::path file = dir / util::current_log_filename();
+        std::ofstream(dir / part_name(1)) << "was 1\n";
+        std::ofstream(dir / part_name(2)) << "was 2\n";
+        std::ofstream(dir / part_name(4)) << "was 4\n";
+        std::ofstream(file) << std::string(5000, 'x') << '\n';
+        start(dir, 4096);
+        util::log_info("after rotation");
+        EXPECT(read_all(dir / part_name(1)).size() == 5001);
+        EXPECT(read_all(dir / part_name(2)) == "was 1\n");
+        EXPECT(read_all(dir / part_name(3)) == "was 2\n");
+        EXPECT(read_all(dir / part_name(4)) == "was 4\n");
+        EXPECT(!fs::exists(dir / part_name(5)));
+        EXPECT(read_all(file).find("after rotation") != std::string::npos);
+        fs::remove_all(dir);
     }
 
     {
@@ -289,8 +447,8 @@ int main() {
 
     {
         // case: logging.max_file_size_mb from yaml, env, 0 = off, bad values keep the default
-        char path_template[] = "/tmp/alpacahttp_log_cap_cfg_XXXXXX";
-        const int fd = ::mkstemp(path_template);
+        std::string path_template = temp_template("alpacahttp_log_cap_cfg");
+        const int fd = ::mkstemp(path_template.data());
         EXPECT(fd >= 0);
         ::close(fd);
         const std::string path = path_template;
@@ -320,6 +478,42 @@ int main() {
         ::setenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB", "junk", 1);
         EXPECT(loaded("") == 5);
         ::unsetenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB");
+        ::unlink(path.c_str());
+    }
+
+    {
+        // case: logging.max_total_size_mb from yaml, env, 0 = off, bad values keep the default
+        std::string path_template = temp_template("alpacahttp_log_total_cfg");
+        const int fd = ::mkstemp(path_template.data());
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        const auto loaded = [&path](const char* value) {
+            std::ofstream out(path);
+            out << "logging:\n";
+            if (*value != '\0') out << "  max_total_size_mb: " << value << "\n";
+            out.close();
+            alpacahttp::Config c;
+            EXPECT(c.load(path));
+            return c.log_max_total_size_mb();
+        };
+        ::unsetenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB");
+        EXPECT(loaded("") == 1024);
+        EXPECT(loaded("4096") == 4096);
+        EXPECT(loaded("0") == 0);
+        EXPECT(loaded("-5") == 1024);
+        EXPECT(loaded("abc") == 1024);
+        EXPECT(loaded("99999999999999999999") == 1024);
+
+        ::setenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB", "512", 1);
+        EXPECT(loaded("4096") == 512);
+        ::setenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB", "0", 1);
+        EXPECT(loaded("4096") == 0);
+        ::setenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB", "-1", 1);
+        EXPECT(loaded("4096") == 4096);
+        ::setenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB", "junk", 1);
+        EXPECT(loaded("") == 1024);
+        ::unsetenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB");
         ::unlink(path.c_str());
     }
 
