@@ -22,6 +22,7 @@
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
@@ -59,9 +60,9 @@ namespace {
 
 constexpr double kHoursToDegrees = 15.0;
 // A Park that ends farther than this from the saved park position did not arrive (a GOTO the handset acked and never
-// ran). An arrival test, not a pointing-accuracy test: it also covers sidereal drift over the settle time. The same
-// 600 arcsec as the SynScan landing limit.
-constexpr double kParkArrivalToleranceArcsec = 600.0;
+// ran). An arrival test, not a pointing-accuracy test: it also covers sidereal drift over the settle time. The shared
+// landing far miss (util/motion_policy.h), the same as the SynScan landing limit.
+constexpr double kParkArrivalToleranceArcsec = util::kLandingFarMissArcsec;
 // Decision 0010, Celestron adoption. A poll body samples the mount every kStatusPollPeriod (start to start; ticks
 // missed behind a slow link are skipped, never made up): the slewing flag and the equatorial pair on every tick, the
 // slower-moving fields (alt/az, pier side, tracking mode) on every kSlowPollEvery-th. A full frame is up to five
