@@ -1434,4 +1434,33 @@ TEST_CASE("Celestron motion owner - MoveAxis on one axis leaves a pulse on the o
     rig.driver->move_axis(0, 0.0);
 }
 
+// A refused command changes nothing (decision 0006 rule 2): a Park or async slew that the slew-safety gate refuses
+// (unaligned, no Sync this session) leaves the running pulse alone. IsPulseGuiding and the chain agree: the window
+// stays open and the chain sends its next chunk.
+TEST_CASE("Celestron motion owner - a refused Park or async slew leaves a running pulse and its window alone (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    const int operation = GENERATE(0, 1);
+    CAPTURE(operation);
+    SupersedeRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    const std::size_t idle = rig.clock.waiter_count();
+    rig.driver->pulse_guide(2, 25500);  // RA: 255 cs now, the chain body waits 2.55 s for its next chunk
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));
+    REQUIRE(rig.st->guide_command_count(0) == 1);
+    rig.st->aligned.store(false);
+    if (operation == 0) {
+        require_alpaca_error([&] { rig.driver->park(); }, alpacacore::AlpacaError::InvalidOperation);
+    } else {
+        require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    }
+    CHECK(rig.driver->get_is_pulse_guiding());
+    CHECK_FALSE(rig.driver->get_slewing());
+    step_virtual(rig.clock, std::chrono::milliseconds(3000));  // past the chain's next chunk
+    CHECK(wait_until([&] { return rig.st->guide_command_count(0) == 2; }, 2000));
+    CHECK(rig.driver->get_is_pulse_guiding());  // the window still covers the chunk that went out
+    rig.driver->abort_slew();
+}
+
 #endif  // !_WIN32

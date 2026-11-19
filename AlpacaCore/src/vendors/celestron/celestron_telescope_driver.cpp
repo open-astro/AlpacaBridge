@@ -1034,7 +1034,6 @@ public:
         }
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        clear_pulse_guiding_locked();
         check_not_parked_locked("FindHome");
         claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
         const util::MotionClaim mine = slew_claim_;
@@ -1110,7 +1109,6 @@ public:
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
-            clear_pulse_guiding_locked();
             if (parked_ || parking_) {
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
@@ -1725,7 +1723,6 @@ public:
         }
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
         const util::MotionClaim mine = slew_claim_;
@@ -1770,7 +1767,6 @@ public:
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
-            clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
             check_slew_safety(lock, "SlewToCoordinatesAsync");
 
@@ -2599,11 +2595,15 @@ private:
 
     // A slew, Park or FindHome: claims the slew slot and both axes (#2263), which supersedes both pulses as well.
     // Their bodies are woken, never joined (decision 0006 rule 3); each checks its claim under mutex_ before a chunk.
+    // The pulse windows close in this same locked step, never before a check that can still refuse the command: a
+    // refused command changes nothing, as a refused start() does (decision 0006 rule 2), so its pulse keeps running
+    // and IsPulseGuiding stays true.
     bool claim_slew_locked() {
         const bool displaced = claim_slew_slot_locked();
         slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
         pulse_ops_[0].cancel();
         pulse_ops_[1].cancel();
+        clear_pulse_guiding_locked();
         return displaced;
     }
 
@@ -2711,7 +2711,8 @@ public:
 
 private:
     // Ends every pulse's state: the IsPulseGuiding windows and the position holds and corrections they armed
-    // (decision 0022 rule 2). AbortSlew, the slews, Park, FindHome, connect and disconnect call it.
+    // (decision 0022 rule 2). AbortSlew, connect, disconnect and claim_slew_locked() (the slews, Park, FindHome) call
+    // it.
     void clear_pulse_guiding_locked() {
         for (auto& window : pulse_hold_) {
             window.clear();
