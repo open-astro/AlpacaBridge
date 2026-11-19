@@ -202,6 +202,9 @@ private:
         void go_to_home() const {
             call([](auto& p) { p.go_to_home(); });
         }
+        void find_home() const {
+            call([](auto& p) { p.find_home(); });
+        }
         void pulse_guide(int direction, int duration_ms) const {
             call([&](auto& p) { p.pulse_guide(direction, duration_ms); });
         }
@@ -782,7 +785,10 @@ public:
         return serve_cached_or_refill([&] { return status_cache_fresh_locked(); },
                                       [&] {
                                           refresh_status_cache_locked();
-                                          return cached_status_.is_at_home;
+                                          // Issue #2420: the status 7 a zero search starts from is the false zero
+                                          // it is there to correct. AtHome only once the search has landed.
+                                          return driver_motion_ != DriverMotion::HomeSearch &&
+                                                 cached_status_.is_at_home;
                                       });
     }
     
@@ -1405,6 +1411,14 @@ public:
                     throw RefillNeedsOperationLock{};
                 }
                 refresh_status_cache_locked();
+                // Issue #2420: a zero sensor search moves until a fresh status past its hold reads 7 (the refresh
+                // above ends it then) or its bound stops it with a stored error, whatever status it reports meanwhile.
+                if (!last_slew_error_.empty()) {
+                    throw AlpacaException(last_slew_error_);
+                }
+                if (driver_motion_ == DriverMotion::HomeSearch) {
+                    return true;
+                }
                 if (cached_status_.is_slewing) {
                     // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
                     // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
@@ -1612,15 +1626,26 @@ public:
         // unpark cycle, which never touches it) short-circuits the whole home
         // operation and the client then sees AtHome == false.
         refresh_status_cache_locked(true);
-        if (cached_status_.is_at_home) {
+        const bool zero_search = zero_search_active();
+        // Issue #2420: a mount with a zero sensor search wakes from a power loss at status 7 wherever it points, so
+        // status 7 proves nothing there and the search always runs (about 20 s from a true zero too).
+        if (!zero_search && cached_status_.is_at_home) {
             return;
         }
 
         const Wire protocol = wire();
-        // Use a direct go-to-zero command to avoid aggressive sensor searches.
-        send_with_slew_hold_locked(std::chrono::seconds(5), [&] { protocol.go_to_home(); });
+        // ASCOM FindHome locates home with sensors: :MSH# on the verified zero-search models, otherwise :MH#
+        // (go to zero by the position model).
+        send_with_slew_hold_locked(std::chrono::seconds(5), [&] {
+            if (zero_search) {
+                protocol.find_home();
+            } else {
+                protocol.go_to_home();
+            }
+        });
         supersede_slew_dispatch_locked();
-        driver_motion_ = DriverMotion::Home;
+        driver_motion_ = zero_search ? DriverMotion::HomeSearch : DriverMotion::Home;
+        home_search_deadline_ = clock_.now() + kZeroSearchTimeout;
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
@@ -2104,6 +2129,11 @@ private:
     // other iOptron mounts (HAE43, HEM27, ...) keep the original,
     // hardware-validated behavior.
     bool hae29c_quirks_active() const { return mount_info_.model_code == "0036"; }
+
+    // Issue #2420: FindHome runs the :MSH# zero sensor search. Hardware-verified on the HAE29C EQ (0036, RC51,
+    // 2026-11-19); other models (HAE29C EC/AA 0037-0039 and the CEM models the v3.10 spec lists included) keep
+    // :MH# until a rig log verifies the search on them.
+    bool zero_search_active() const { return mount_info_.model_code == "0036"; }
 
     // GOTO final-approach RA refinement. Hardware-verified on HAE29C EQ
     // (0036, 2026-07-14) and HAE16 EQ (0012, ConformU 2026-08-25: same
@@ -2723,13 +2753,18 @@ private:
                                   AlpacaError::DriverException);
         }
         finalize_wedged_park_locked();
+        stop_overdue_zero_search_locked(now);
         // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
         // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
         // initiator's override (the firmware can still report its old status just after the command). A Park
         // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
         // Runs after the finalizer, which may have re-read the status.
+        // A zero search (issue #2420) ends only on status 7 past its hold: the false zero it starts from reads 7
+        // too, and what it reports while it runs is unverified, so another no-motion status does not end it.
         const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
-        if (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now))) {
+        const bool search_running =
+            driver_motion_ == DriverMotion::HomeSearch && (!cached_status_.is_at_home || slew_hold_.active(now));
+        if (!search_running && (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now)))) {
             driver_motion_ = DriverMotion::None;
         }
         // Issue #2063: a status that shows the mount stopped past the dispatch window ends the GOTO for the
@@ -2738,6 +2773,31 @@ private:
         if (!cached_status_.is_slewing && !slew_hold_.active(now)) {
             goto_seen_stopped_ = true;
         }
+    }
+
+    // Issue #2420: bound a zero sensor search. Past kZeroSearchTimeout with no status 7 the mount is stopped (:Q#,
+    // best-effort like the park finalizer) and the failure is kept for Slewing until AbortSlew or a new initiator
+    // (the failed-async-body rule). Runs before the landing clause, so a search that lands this read is not stopped.
+    void stop_overdue_zero_search_locked(std::chrono::steady_clock::time_point now) const {
+        if (driver_motion_ != DriverMotion::HomeSearch || cached_status_.is_at_home || now < home_search_deadline_) {
+            return;
+        }
+        driver_motion_ = DriverMotion::None;
+        clear_slew_hold_locked();
+        // Stored before the stop goes out: the exchange gives up mutex_, and a reader in that gap must not take
+        // the stale status for a finished search.
+        last_slew_error_ = "FindHome: the zero sensor search did not reach the zero position within " +
+                           std::to_string(kZeroSearchTimeout.count()) + " s; the mount was stopped";
+        try {
+            wire().stop_slewing();
+        } catch (const std::exception& e) {
+            throw_if_link_lost();  // a pulled cable is NotConnected
+            last_slew_error_ = "FindHome: the zero sensor search did not reach the zero position within " +
+                               std::to_string(kZeroSearchTimeout.count()) +
+                               " s, and stopping the mount failed: " + e.what();
+        }
+        ALPACA_LOG_WARN("iOptron", last_slew_error_);
+        status_cache_valid_ = false;  // the status just read is from before the stop
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
@@ -3521,12 +3581,20 @@ private:
     // refresh_status_cache_locked() once a fresh status reports at home after a FindHome, or no motion
     // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
-    enum class DriverMotion : std::uint8_t { None, Park, Home, Goto };
+    // HomeSearch (issue #2420) is a FindHome running the :MSH# zero sensor search: MoveAxis keeps it like the others,
+    // and it ends only on status 7 past its hold, on its bound (home_search_deadline_) or on AbortSlew, a new
+    // initiator or a disconnect.
+    enum class DriverMotion : std::uint8_t { None, Park, Home, HomeSearch, Goto };
     // Under mutex_: the GOTO in slew_in_progress_ came from SlewToCoordinates* or SlewToTarget* (which route through
     // them), so AbortSlew turns Tracking back on (issue #2000). False for an Alt/Az slew, cleared by a superseding
     // initiator and by AbortSlew.
     bool equatorial_slew_ = false;
     mutable DriverMotion driver_motion_ = DriverMotion::None;
+    // Task-clock instant past which a zero search with no status 7 is stopped (issue #2420). Set by find_home(), read
+    // only while driver_motion_ is HomeSearch, so the sites that end the motion need not reset it.
+    std::chrono::steady_clock::time_point home_search_deadline_{};
+    // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
+    static constexpr std::chrono::seconds kZeroSearchTimeout{120};
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set

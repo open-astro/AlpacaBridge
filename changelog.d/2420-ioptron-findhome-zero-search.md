@@ -1,0 +1,5 @@
+### Fixed
+- **iOptron HAE29C: FindHome runs the `:MSH#` zero sensor search** (AlpacaCore, issue #2420): after a power loss the HAE29C EQ (0036) reports status 7 (at zero) wherever it points, and FindHome returned at once on that status, so Home did nothing while the position model was wrong. On 0036 FindHome now always sends `:MSH#` (blind, since the firmware acks it with a bare `1` and no `#`, which made a raw `CommandString(":MSH#")` report 1280), keeps Slewing true and AtHome false until the mount reports status 7 past the 5 s hold, keeps the search through a MoveAxis stop, and stops the mount with `:Q#` and a stored DriverException on Slewing if no status 7 arrives within 120 s. Other iOptron models keep `:MH#` and the at-home early return.
+
+### Added (tests)
+- **iOptron zero search cases** (issue #2420): seven `iOptron zero search - ...` cases and a 0036 counterpart of the quick-FindHome PulseGuide case; three existing 0036 FindHome PulseGuide cases now also run on a `:MH#` model (0040), and the quick-FindHome case moved to 0040.
