@@ -2993,3 +2993,89 @@ TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait
     (void)reply.get();
     driver->set_connected(false);
 }
+
+// ── Issue #2424: the MoveAxis sign on both axes ──────────────────────────────────────────────────────────────
+//
+// AlpacaBridge's convention (ascom-contract.instructions.md, "iOptron MoveAxis signs"): a positive primary rate
+// turns the tube east, so the reported RightAscension rises; a positive secondary rate turns it north, so the
+// reported Declination rises, on both pier sides. The fake steps its position on each arrow command in iOptron's
+// own labels (fake_ioptron_mount.h); the HAE29C rig check of #2424 confirms or corrects that model.
+namespace {
+
+// The first arrow command (:mw#, :me#, :mn#, :ms#) the mount received at or after index `from`.
+std::string arrow_command_since(const FakeIoptronMount& mount, std::size_t from) {
+    const auto sent = mount.commands();
+    for (std::size_t i = from; i < sent.size(); ++i) {
+        if (sent[i] == ":mw#" || sent[i] == ":me#" || sent[i] == ":mn#" || sent[i] == ":ms#") {
+            return sent[i];
+        }
+    }
+    return "";
+}
+
+}  // namespace
+
+TEST_CASE("iOptron MoveAxis - a positive primary rate sends :mw# and RightAscension rises, on both pier sides",
+          "[ioptron][telescope][unit][fake][moveaxis]") {
+    for (const int pier : {0, 1}) {
+        for (const double sign : {1.0, -1.0}) {
+            INFO("pier side digit " << pier << ", primary rate sign " << sign);
+            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            mount.set_position(10.0, 20.0);
+            mount.set_pier_side(pier);
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            const double ra0 = driver->get_right_ascension();
+
+            const std::size_t before = mount.commands().size();
+            driver->move_axis(0, sign * driver->get_axis_rate_range(0).first);
+            CHECK(arrow_command_since(mount, before) == (sign > 0.0 ? ":mw#" : ":me#"));
+            driver->move_axis(0, 0.0);
+
+            pass_connect_cache(clock);  // the next read reaches the mount
+            const double ra_moved_arcsec = (driver->get_right_ascension() - ra0) * 15.0 * 3600.0;
+            INFO("reported RA moved " << ra_moved_arcsec << " arcsec");
+            if (sign > 0.0) {
+                CHECK(ra_moved_arcsec > 30.0);  // east: RA rises
+            } else {
+                CHECK(ra_moved_arcsec < -30.0);  // west: RA falls
+            }
+            driver->set_connected(false);
+        }
+    }
+}
+
+TEST_CASE("iOptron MoveAxis - a positive secondary rate raises Declination on both pier sides",
+          "[ioptron][telescope][unit][fake][moveaxis]") {
+    for (const int pier : {0, 1}) {
+        for (const double sign : {1.0, -1.0}) {
+            INFO("pier side digit " << pier << ", secondary rate sign " << sign);
+            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            mount.set_position(10.0, 20.0);
+            mount.set_pier_side(pier);
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            const double dec0 = driver->get_declination();
+
+            // Dec+ (:ms#) is north on pier side 1 and south on side 0, the pulse-guide Dec polarity.
+            const bool north = sign > 0.0;
+            const std::string expected = (north == (pier == 1)) ? ":ms#" : ":mn#";
+            const std::size_t before = mount.commands().size();
+            driver->move_axis(1, sign * driver->get_axis_rate_range(1).first);
+            CHECK(arrow_command_since(mount, before) == expected);
+            driver->move_axis(1, 0.0);
+
+            pass_connect_cache(clock);  // the next read reaches the mount
+            const double dec_moved_arcsec = (driver->get_declination() - dec0) * 3600.0;
+            INFO("reported Dec moved " << dec_moved_arcsec << " arcsec");
+            if (north) {
+                CHECK(dec_moved_arcsec > 30.0);  // north: Dec rises
+            } else {
+                CHECK(dec_moved_arcsec < -30.0);  // south: Dec falls
+            }
+            driver->set_connected(false);
+        }
+    }
+}
