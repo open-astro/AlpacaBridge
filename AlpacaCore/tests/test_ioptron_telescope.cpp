@@ -1727,20 +1727,24 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
 
 TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arrives during a FindHome",
           "[ioptron][telescope][unit][fake][pulseguide]") {
-    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
-    REQUIRE(mount.ok());
-    mount.set_system_status(2);
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
+    // 0036 runs the :MSH# zero search (issue #2420), 0040 the :MH# go-to-zero.
+    for (const char* model : {"0036", "0040"}) {
+        CAPTURE(model);
+        alpacacore::test::FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        mount.set_system_status(2);
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
 
-    driver->find_home();
-    clock.advance(std::chrono::milliseconds(5500));
-    CHECK(driver->get_slewing());
-    driver->pulse_guide(3, 3000);
-    CHECK(driver->get_slewing());
-    driver->set_connected(false);
+        driver->find_home();
+        clock.advance(std::chrono::milliseconds(5500));
+        CHECK(driver->get_slewing());
+        driver->pulse_guide(3, 3000);
+        CHECK(driver->get_slewing());
+        driver->set_connected(false);
+    }
 }
 
 // Review of #843: MoveAxis(axis, 0) sends :qR#/:qD#, which stop arrow motion only; the iOptron RS-232 command
@@ -1790,61 +1794,68 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
 // The end of the home motion must still be seen, or the next PulseGuide is not masked.
 TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after a FindHome seen through AtHome",
           "[ioptron][telescope][unit][fake][pulseguide]") {
-    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
-    REQUIRE(mount.ok());
-    mount.set_system_status(2);
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-    const auto connected_at = clock.now();
+    for (const char* model : {"0036", "0040"}) {
+        CAPTURE(model);
+        alpacacore::test::FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        mount.set_system_status(2);
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        const auto connected_at = clock.now();
 
-    driver->find_home();
-    // Past the 5 s Slewing override and the driver's 30 s post-connect status cache, so the reads below
-    // reach the mount.
-    clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
-    mount.set_system_status(7);
-    CHECK(driver->get_at_home());
+        driver->find_home();
+        // Past the 5 s Slewing override and the driver's 30 s post-connect status cache, so the reads below
+        // reach the mount.
+        clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
+        mount.set_system_status(7);
+        CHECK(driver->get_at_home());
 
-    driver->set_tracking(true);
-    mount.set_system_status(2);
-    driver->pulse_guide(3, 3000);
-    clock.advance(std::chrono::milliseconds(1100));
-    CHECK(driver->get_is_pulse_guiding());
-    CHECK_FALSE(driver->get_slewing());
-    driver->set_connected(false);
+        driver->set_tracking(true);
+        mount.set_system_status(2);
+        driver->pulse_guide(3, 3000);
+        clock.advance(std::chrono::milliseconds(1100));
+        CHECK(driver->get_is_pulse_guiding());
+        CHECK_FALSE(driver->get_slewing());
+        driver->set_connected(false);
+    }
 }
 
 // The firmware can still report its old status for a moment after the home command, so a status read
 // inside the 5 s Slewing override must not end the FindHome motion window.
 TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during a FindHome read early through AtHome",
           "[ioptron][telescope][unit][fake][pulseguide]") {
-    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
-    REQUIRE(mount.ok());
-    mount.set_system_status(1);
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-    const auto connected_at = clock.now();
-    // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
-    clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
+    for (const char* model : {"0036", "0040"}) {
+        CAPTURE(model);
+        alpacacore::test::FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        mount.set_system_status(1);
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        const auto connected_at = clock.now();
+        // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
+        clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
 
-    driver->find_home();
-    CHECK_FALSE(driver->get_at_home());  // still the old tracking status
-    mount.set_system_status(2);
-    clock.advance(std::chrono::milliseconds(5500));
-    driver->pulse_guide(3, 3000);
-    CHECK(driver->get_is_pulse_guiding());
-    CHECK(driver->get_slewing());
-    driver->set_connected(false);
+        driver->find_home();
+        CHECK_FALSE(driver->get_at_home());  // still the old tracking status
+        mount.set_system_status(2);
+        clock.advance(std::chrono::milliseconds(5500));
+        driver->pulse_guide(3, 3000);
+        CHECK(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+        driver->set_connected(false);
+    }
 }
 
 // A FindHome that lands inside its 5 s Slewing override: the at-home status read then ends the motion window,
-// so a PulseGuide sent right after is masked once the override has passed.
+// so a PulseGuide sent right after is masked once the override has passed. A :MH# model (CEM40): the HAE29C zero
+// search does not end on a status 7 inside its hold (issue #2420, the case after this one).
 TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after a quick FindHome",
           "[ioptron][telescope][unit][fake][pulseguide]") {
-    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    alpacacore::test::FakeIoptronMount mount("0040", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     mount.set_system_status(1);
     alpacacore::test::FakeTaskClock clock;
@@ -1867,6 +1878,36 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Issue #2420: the HAE29C zero search starts from a false zero that reads 7, so a status 7 inside its hold is not
+// the landing: the motion window stays open and a PulseGuide sent then does not mask Slewing.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after a status 7 inside a zero search hold",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto connected_at = clock.now();
+    // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
+    clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    const auto home_at = clock.now();
+    mount.set_system_status(7);
+    CHECK_FALSE(driver->get_at_home());  // the search has not landed
+
+    mount.set_system_status(2);
+    clock.advance(home_at + std::chrono::seconds(2) - clock.now());
+    driver->pulse_guide(3, 3000);
+    clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
 
@@ -2115,6 +2156,202 @@ TEST_CASE("iOptron hold window - FindHome, Park and Unpark hold Slewing for 5 s,
     CHECK(driver->get_slewing());
     clock.advance(std::chrono::milliseconds(100));
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// ── Issue #2420: FindHome on the HAE29C EQ (0036) is the :MSH# zero sensor search ─────────────────────────────
+//
+// After a power loss the HAE29C reports status 7 (at zero) wherever it points, so FindHome always searches there,
+// sends :MSH# blind (the ack is a bare '1' with no '#'), keeps Slewing true and AtHome false until a status 7 past
+// its 5 s hold, and stops the mount with a stored error once kZeroSearchTimeout (120 s) passes with no status 7.
+
+TEST_CASE("iOptron zero search - a HAE29C FindHome at a false zero sends :MSH# and returns at once",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);  // the false zero a power loss leaves
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    REQUIRE(driver->get_at_home());
+
+    // The fake acks :MSH# with '1' and no '#', as the firmware does: a reply read would wait out its 5 s timeout
+    // and throw (the 1280 of the issue).
+    const auto started = std::chrono::steady_clock::now();
+    REQUIRE_NOTHROW(driver->find_home());
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
+    CHECK(mount.count(":MSH#") == 1);
+    CHECK(mount.count(":MH#") == 0);
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - Slewing and AtHome follow the search until a status 7 past its hold",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    clock.advance(std::chrono::milliseconds(1100));  // past the 1 s status cache, inside the 5 s hold
+    CHECK_FALSE(driver->get_at_home());              // the false zero, read before the search moves
+    CHECK(driver->get_slewing());
+
+    mount.set_system_status(2);
+    clock.advance(std::chrono::milliseconds(4400));  // past the hold
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+
+    mount.set_system_status(0);  // a no-motion status other than 7 does not end the search
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+
+    mount.set_system_status(7);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_at_home());
+
+    // Landed: a later pulse's status 2 is masked again, as after any FindHome.
+    driver->set_tracking(true);
+    mount.set_system_status(2);
+    driver->pulse_guide(3, 3000);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - a search with no status 7 in 120 s is stopped and Slewing raises it",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(119));
+    CHECK(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 0);
+
+    clock.advance(std::chrono::milliseconds(1500));
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing did not raise the zero search timeout");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("zero sensor search") != std::string::npos);
+    }
+    CHECK(mount.count(":Q#") == 1);
+    CHECK_FALSE(driver->get_at_home());
+    // Kept until the client acts on it (ASCOM async FAQ): AbortSlew clears it.
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    driver->abort_slew();
+    CHECK_NOTHROW(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before its bound",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(0);
+    clock.advance(std::chrono::seconds(10));
+    REQUIRE(driver->get_slewing());
+    driver->abort_slew();
+    CHECK(mount.count(":Q#") == 1);
+    clock.advance(std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_slewing());  // status 0 is the mount's own answer again
+    clock.advance(std::chrono::seconds(130));
+    CHECK_NOTHROW(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 1);
+
+    mount.set_system_status(7);
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 2);
+    mount.set_system_status(0);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    clock.advance(std::chrono::seconds(130));
+    CHECK_NOTHROW(driver->get_slewing());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// :qR#/:qD# stop arrow motion only (RS-232 v3.10), so a MoveAxis stop does not end the search or its bound.
+TEST_CASE("iOptron zero search - MoveAxis rate 0 keeps the search and its bound",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);
+    driver->move_axis(0, 0.0);
+    mount.set_system_status(0);
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+    clock.advance(std::chrono::seconds(115));
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - other models keep :MH# and the at-home return",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    for (const char* model : {"0025", "0037", "0040"}) {
+        CAPTURE(model);
+        FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        mount.set_system_status(7);
+        FakeTaskClock clock;
+        auto driver = hold_driver(mount, clock);
+        pass_connect_cache(clock);
+
+        driver->find_home();  // already at home: nothing is sent
+        CHECK(mount.count(":MH#") == 0);
+        CHECK(mount.count(":MSH#") == 0);
+        CHECK_FALSE(driver->get_slewing());
+
+        mount.set_system_status(1);
+        driver->find_home();
+        CHECK(mount.count(":MH#") == 1);
+        CHECK(mount.count(":MSH#") == 0);
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("iOptron zero search - a parked HAE29C refuses FindHome and sends no search",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(6);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(mount.count(":MSH#") == 0);
     driver->set_connected(false);
 }
 
