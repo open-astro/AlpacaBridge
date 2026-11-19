@@ -456,3 +456,164 @@ TEST_CASE("enforce_motion_deadline - a MoveAxis past its cap whose stop does not
     CHECK(*failure == kStopNotVerifiedText);
     CHECK(mount.stops == 3);
 }
+
+// ── Landing gate ──────────────────────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("LandingGate - landed only after two reads 500 ms apart agree within 30 arcsec", "[motion-guards]") {
+    LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+    CHECK(gate.feed(read_at(100ms, 6.0, 20.0)) == Landing::Settling);
+    CHECK(gate.feed(read_at(599ms, 6.0, 20.0)) == Landing::Settling);
+    // 100 arcsec off the target is a landing: refining it is the driver's business, a far miss starts above 600.
+    CHECK(gate.feed(read_at(600ms, 6.0, 20.0 + 100 * kArcsecToDegrees)) == Landing::Settling);
+    CHECK(gate.feed(read_at(1099ms, 6.0, 20.0 + 110 * kArcsecToDegrees)) == Landing::Settling);
+    CHECK(gate.feed(read_at(1100ms, 6.0, 20.0 + 110 * kArcsecToDegrees)) == Landing::Landed);
+}
+
+TEST_CASE("LandingGate - a still mount more than 600 arcsec off in RA or Dec is a far miss", "[motion-guards]") {
+    const double ra_arcsec_hours = 1.0 / 15.0 / 3600.0;
+    SECTION("Dec 600.1 arcsec off") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, 20.0 + 600.1 * kArcsecToDegrees)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, 6.0, 20.0 + 600.1 * kArcsecToDegrees)) == Landing::FarMiss);
+    }
+    SECTION("Dec 599.9 arcsec off lands") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, 20.0 - 599.9 * kArcsecToDegrees)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, 6.0, 20.0 - 599.9 * kArcsecToDegrees)) == Landing::Landed);
+    }
+    SECTION("RA 600.1 arcsec off across 0 h, unprojected even at Dec 80") {
+        LandingGate gate(MountPosition{0.0, 80.0}, at(0ms));
+        const double ra = 24.0 - 600.1 * ra_arcsec_hours;
+        CHECK(gate.feed(read_at(0ms, ra, 80.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, ra, 80.0)) == Landing::FarMiss);
+    }
+    SECTION("RA 599.9 arcsec off lands") {
+        LandingGate gate(MountPosition{0.0, 80.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 599.9 * ra_arcsec_hours, 80.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, 599.9 * ra_arcsec_hours, 80.0)) == Landing::Landed);
+    }
+}
+
+TEST_CASE("LandingGate - status stopped 4.7 deg off and still moving, then settling on target, lands",
+          "[motion-guards]") {
+    // #2396 rig evidence (HAE29C over USB): the status read stopped while Dec was still 4.7 deg from the target, and
+    // the mount arrived about 1.6 s later. The gate is fed from the status-stop on; it must never call that a miss.
+    LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+    const double offsets[] = {4.7, 3.2, 1.8, 0.6, 0.05, 0.0, 0.0, 0.0};
+    Landing last = Landing::Settling;
+    for (int i = 0; i < 8; ++i) {
+        const auto t = std::chrono::milliseconds(250 * i);
+        last = gate.feed(read_at(t, 6.0, 20.0 + offsets[i]));
+        CAPTURE(i);
+        CHECK(last != Landing::FarMiss);
+    }
+    CHECK(last == Landing::Landed);
+}
+
+TEST_CASE("LandingGate - failed and stale reads keep it settling", "[motion-guards]") {
+    LandingGate gate(MountPosition{6.0, 20.0}, at(1000ms));
+    CHECK(gate.feed(read_at(200ms, 6.0, 20.0)) == Landing::Settling);
+    CHECK(gate.feed(read_at(900ms, 6.0, 20.0)) == Landing::Settling);
+    CHECK(gate.feed(std::nullopt) == Landing::Settling);
+    CHECK(gate.feed(read_at(1000ms, 6.0, 20.0)) == Landing::Settling);
+    CHECK(gate.feed(std::nullopt) == Landing::Settling);
+    CHECK(gate.feed(read_at(1500ms, 6.0, 20.0)) == Landing::Landed);
+}
+
+// ── Sync bound ────────────────────────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("validate_max_sync_offset_degrees - 1 to 30 degrees, else InvalidValue", "[motion-guards]") {
+    CHECK(kMaxSyncOffsetDegrees == 5.0);
+    CHECK(validate_max_sync_offset_degrees(1.0) == 1.0);
+    CHECK(validate_max_sync_offset_degrees(30.0) == 30.0);
+    for (const double bad : {0.999, 30.001, 0.0, -5.0, std::nan(""), std::numeric_limits<double>::infinity()}) {
+        CAPTURE(bad);
+        alpacacore::test::require_alpaca_error([bad] { validate_max_sync_offset_degrees(bad); },
+                                               AlpacaError::InvalidValue);
+    }
+}
+
+TEST_CASE("check_sync_bound - accepts a sync exactly at each limit", "[motion-guards]") {
+    // 5 deg in Dec.
+    CHECK_NOTHROW(
+        check_sync_bound("SyncToCoordinates", MountPosition{0.0, 0.0}, MountPosition{0.0, 5.0}, kMaxSyncOffsetDegrees));
+    // 20 min of RA at Dec 60 (about 2.5 deg on the sky).
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, 60.0}, MountPosition{20.0 / 60.0, 60.0},
+                                   kMaxSyncOffsetDegrees));
+    // 12 min the short way round 0 h.
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{23.9, 60.0}, MountPosition{0.1, 60.0},
+                                   kMaxSyncOffsetDegrees));
+    // An offset model that lands exactly on a pole.
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, 87.0}, MountPosition{0.0, 89.0},
+                                   kMaxSyncOffsetDegrees, 90.0));
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{0.0, -87.0}, MountPosition{0.0, -89.0},
+                                   kMaxSyncOffsetDegrees, -90.0));
+}
+
+TEST_CASE("check_sync_bound - refuses a sync past any limit with InvalidValue", "[motion-guards]") {
+    using alpacacore::test::alpaca_error_message;
+    const auto separation = alpaca_error_message(
+        [] {
+            check_sync_bound("SyncToCoordinates", MountPosition{0.0, 0.0}, MountPosition{0.0, 5.01},
+                             kMaxSyncOffsetDegrees);
+        },
+        AlpacaError::InvalidValue);
+    CHECK(separation ==
+          "SyncToCoordinates: the sync would move the pointing by 5.01 degrees, more than the 5.00 "
+          "degree limit");
+    const auto ra = alpaca_error_message(
+        [] {
+            check_sync_bound("SyncToTarget", MountPosition{0.0, 60.0}, MountPosition{20.1 / 60.0, 60.0},
+                             kMaxSyncOffsetDegrees);
+        },
+        AlpacaError::InvalidValue);
+    CHECK(ra == "SyncToTarget: the sync would change RightAscension by 20.10 minutes, more than 20 minutes");
+    const auto dec = alpaca_error_message(
+        [] {
+            check_sync_bound("SyncToCoordinates", MountPosition{0.0, 87.0}, MountPosition{0.0, 89.0},
+                             kMaxSyncOffsetDegrees, -90.01);
+        },
+        AlpacaError::InvalidValue);
+    CHECK(dec == "SyncToCoordinates: the sync would put Declination at -90.01 degrees, beyond +/-90");
+    alpacacore::test::require_alpaca_error(
+        [] {
+            check_sync_bound("SyncToCoordinates", MountPosition{0.0, 87.0}, MountPosition{0.0, 89.0},
+                             kMaxSyncOffsetDegrees, 90.01);
+        },
+        AlpacaError::InvalidValue);
+}
+
+TEST_CASE("check_sync_bound - the offset limit is the caller's configured value", "[motion-guards]") {
+    alpacacore::test::require_alpaca_error(
+        [] { check_sync_bound("SyncToCoordinates", MountPosition{1.0, 10.0}, MountPosition{1.0, 11.5}, 1.0); },
+        AlpacaError::InvalidValue);
+    CHECK_NOTHROW(check_sync_bound("SyncToCoordinates", MountPosition{1.0, 10.0}, MountPosition{1.0, 35.0}, 30.0));
+}
+
+TEST_CASE("check_sync_bound - a position that is not a number is refused", "[motion-guards]") {
+    const double nan = std::nan("");
+    alpacacore::test::require_alpaca_error(
+        [nan] { check_sync_bound("SyncToCoordinates", MountPosition{nan, 10.0}, MountPosition{1.0, 10.0}, 5.0); },
+        AlpacaError::InvalidValue);
+    alpacacore::test::require_alpaca_error(
+        [nan] { check_sync_bound("SyncToCoordinates", MountPosition{1.0, 10.0}, MountPosition{1.0, 10.0}, 5.0, nan); },
+        AlpacaError::InvalidValue);
+}
+
+// ── Relink stop ───────────────────────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("RelinkMotionStop - a loss during a GoTo or MoveAxis owes one stop until it is sent", "[motion-guards]") {
+    RelinkMotionStop relink;
+    CHECK_FALSE(relink.stop_owed());
+    relink.note_link_lost(false);
+    CHECK_FALSE(relink.stop_owed());
+    relink.note_link_lost(true);
+    CHECK(relink.stop_owed());
+    // A second loss while the stop is still owed (the first relink failed) keeps it owed.
+    relink.note_link_lost(false);
+    CHECK(relink.stop_owed());
+    // Connect reads it as often as it asks, and a Disconnect calls nothing on it: only the sent stop clears it.
+    CHECK(relink.stop_owed());
+    relink.stop_sent();
+    CHECK_FALSE(relink.stop_owed());
+}

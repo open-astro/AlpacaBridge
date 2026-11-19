@@ -85,4 +85,21 @@ constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
 constexpr auto kMoveAxisDurationMin = std::chrono::seconds(5);
 constexpr auto kMoveAxisDurationMax = std::chrono::seconds(300);
 
+// open-astro#2405: the landing gate's far miss. A mount that has come to rest more than 600 arcsec (10 arcmin) from
+// its target on either axis did not land: the GOTO was refused, stopped at a limit or never ran. Smaller residuals
+// are pointing error a re-GOTO or a sync corrects, not a failure. The Celestron Park arrival check and the SynScan
+// landing refine limit use the same value.
+constexpr double kLandingFarMissArcsec = 600.0;
+
+// open-astro#2405: the sync bound. A sync re-defines where the mount points, so a sync far from where the mount
+// believes it is (a wrong target, a client that synced to the wrong object, a plate solve of the wrong field) would
+// throw every later GOTO off by that much, with no motion to notice. 5 deg covers any real polar alignment or cone
+// error; the operator may set 1 to 30 deg per device. Independently a sync may change RA by at most 20 minutes of
+// time: the RA rule is one constant here and one function in util/motion_guards.h (sync_ra_change_exceeds_bound), so
+// a rule that scales with cos(Dec) near the pole would be a change in one place.
+constexpr double kMaxSyncOffsetDegrees = 5.0;
+constexpr double kSyncOffsetMinDegrees = 1.0;
+constexpr double kSyncOffsetMaxDegrees = 30.0;
+constexpr double kMaxSyncRaChangeMinutes = 20.0;
+
 }  // namespace alpacacore::util

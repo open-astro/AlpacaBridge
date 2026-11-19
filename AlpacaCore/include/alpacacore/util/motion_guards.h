@@ -22,13 +22,16 @@
 #include <alpacacore/util/task_clock.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 // The shared telescope motion guards (#2405): protocol-neutral checks that make motion fail closed, the same on every
 // mount. Every threshold is in util/motion_policy.h. A guard is a clock-free decision object (the caller passes the
@@ -263,5 +266,113 @@ inline bool enforce_motion_deadline(OperationContext& ctx, TaskClock& clock, Hol
     }
     throw AlpacaException(expired_text, AlpacaError::DriverException);
 }
+
+// ── Landing gate ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+enum class Landing : std::uint8_t { Settling, Landed, FarMiss };
+
+/**
+ * Decides when a slew has landed, fed the position reads that follow the device's own slew-end (which may come early:
+ * #2396). Settling until the mount is still (StillnessCheck); then Landed, or FarMiss when the still position is
+ * more than kLandingFarMissArcsec from `target` on either axis (axis_miss_arcsec). A moving mount is never a far
+ * miss, however far it still is. Holds the earlier read and its time, never waits, takes no lock; the driver keeps
+ * Slewing true while it is Settling.
+ */
+class LandingGate {
+public:
+    LandingGate(MountPosition target, MotionTime not_before) : target_(target), still_(not_before) {}
+
+    Landing feed(const std::optional<PositionReading>& reading) {
+        if (!reading || !still_.feed(reading)) {
+            return Landing::Settling;
+        }
+        return axis_miss_arcsec(reading->position, target_) > kLandingFarMissArcsec ? Landing::FarMiss
+                                                                                    : Landing::Landed;
+    }
+
+private:
+    MountPosition target_;
+    StillnessCheck still_;
+};
+
+// ── Sync bound ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A configured sync offset limit in degrees: kSyncOffsetMinDegrees to kSyncOffsetMaxDegrees, else InvalidValue
+/// (never clamped). The default is kMaxSyncOffsetDegrees.
+inline double validate_max_sync_offset_degrees(double degrees) {
+    if (!std::isfinite(degrees) || degrees < kSyncOffsetMinDegrees || degrees > kSyncOffsetMaxDegrees) {
+        throw AlpacaException("The sync offset limit must be from " +
+                                  std::to_string(static_cast<int>(kSyncOffsetMinDegrees)) + " to " +
+                                  std::to_string(static_cast<int>(kSyncOffsetMaxDegrees)) + " degrees",
+                              AlpacaError::InvalidValue);
+    }
+    return degrees;
+}
+
+/// The sync RA rule (#2405): the short-way RA change in minutes of time, true when it is above
+/// kMaxSyncRaChangeMinutes.
+inline bool sync_ra_change_exceeds_bound(double target_ra_hours, double current_ra_hours) {
+    return !(std::abs(shortest_ra_delta_hours(target_ra_hours, current_ra_hours)) * 60.0 <= kMaxSyncRaChangeMinutes);
+}
+
+namespace detail {
+inline std::string two_decimals(double value) {
+    std::array<char, 32> text{};
+    std::snprintf(text.data(), text.size(), "%.2f", value);
+    return text.data();
+}
+}  // namespace detail
+
+/**
+ * Refuses a sync with InvalidValue when it would move the pointing from `current` to `target` by more than
+ * `max_offset_degrees` on the sky, change RA by more than kMaxSyncRaChangeMinutes (sync_ra_change_exceeds_bound),
+ * or, for a driver that keeps the sync as an offset, leave `resulting_dec_degrees` beyond +/-90. Each limit itself is
+ * accepted; a value that is not a number is refused. `label` names the member ("SyncToCoordinates"). Reads nothing; the
+ * driver passes the position it holds.
+ */
+inline void check_sync_bound(std::string_view label, const MountPosition& current, const MountPosition& target,
+                             double max_offset_degrees, std::optional<double> resulting_dec_degrees = std::nullopt) {
+    const double separation_degrees =
+        angular_separation_arcsec(current.ra_hours * kPointingHoursToDegrees, current.dec_degrees,
+                                  target.ra_hours * kPointingHoursToDegrees, target.dec_degrees) /
+        3600.0;
+    if (!(separation_degrees <= max_offset_degrees)) {
+        throw AlpacaException(std::string(label) + ": the sync would move the pointing by " +
+                                  detail::two_decimals(separation_degrees) + " degrees, more than the " +
+                                  detail::two_decimals(max_offset_degrees) + " degree limit",
+                              AlpacaError::InvalidValue);
+    }
+    if (sync_ra_change_exceeds_bound(target.ra_hours, current.ra_hours)) {
+        throw AlpacaException(
+            std::string(label) + ": the sync would change RightAscension by " +
+                detail::two_decimals(std::abs(shortest_ra_delta_hours(target.ra_hours, current.ra_hours)) * 60.0) +
+                " minutes, more than " + std::to_string(static_cast<int>(kMaxSyncRaChangeMinutes)) + " minutes",
+            AlpacaError::InvalidValue);
+    }
+    if (resulting_dec_degrees && !(std::abs(*resulting_dec_degrees) <= 90.0)) {
+        throw AlpacaException(std::string(label) + ": the sync would put Declination at " +
+                                  detail::two_decimals(*resulting_dec_degrees) + " degrees, beyond +/-90",
+                              AlpacaError::InvalidValue);
+    }
+}
+
+// ── Relink stop ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The stop a relink owes (#2405, #2396 AB-9): a link lost while a GoTo or a MoveAxis was running leaves the mount
+ * moving with nobody in control, so the next Connect sends the stop before any other command. The driver notes each
+ * loss with whether it owned such a motion then, asks stop_owed() at Connect and calls stop_sent() once the stop went
+ * out. Only a sent stop clears it: a Disconnect leaves it owed (decision 0009, alternative E), and a failed stop is
+ * tried again at the next Connect. Not thread-safe: the driver guards it with its state lock.
+ */
+class RelinkMotionStop {
+public:
+    void note_link_lost(bool goto_or_move_axis_active) { owed_ = owed_ || goto_or_move_axis_active; }
+    bool stop_owed() const { return owed_; }
+    void stop_sent() { owed_ = false; }
+
+private:
+    bool owed_ = false;
+};
 
 }  // namespace alpacacore::util
