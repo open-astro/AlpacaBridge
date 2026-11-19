@@ -25,6 +25,7 @@
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -61,5 +62,9 @@ std::unique_ptr<ObservingConditionsDriver> create_remotealpaca_observingconditio
 // Test seam: while paused the poll keeps its period and samples nothing, so the frame ages without a failed poll
 // (the contract sweep's stale-frame case). No effect on a driver of another type.
 void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused);
+
+// Runs `hook` inside each AveragePeriod body, after its PUT and before its write-through, so a test can hold a body
+// there. Set it while no command runs.
+void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::remotealpaca

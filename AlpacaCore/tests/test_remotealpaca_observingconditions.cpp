@@ -23,6 +23,7 @@
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -436,19 +437,16 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded AveragePeriod
           "[remotealpaca][observingconditions][unit]") {
     Rig rig;
     rig.connect();
-    // The first write reaches the upstream, then its reply waits until the second write has returned.
-    alpacacore::test::Latch first_reply;
-    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
-        auto reply = rig.upstream.answer(request);
-        if (request.method == "PUT" && request.form_body.find("AveragePeriod=5") != std::string::npos) {
-            first_reply.block();
-        }
-        return reply;
+    // The first write's body holds after its PUT, before its write-through, until the second write has returned.
+    alpacacore::test::Latch first_body;
+    std::atomic<bool> held{false};  // only the first body holds
+    remote::set_command_hook_for_testing(*rig.driver, [&] {
+        if (!held.exchange(true)) first_body.block();
     });
     std::thread first([&] { rig.driver->set_average_period(5.0); });
-    REQUIRE(first_reply.wait_entered());
+    REQUIRE(first_body.wait_entered());
     rig.driver->set_average_period(0.0);  // supersedes the first body; the upstream now holds 0
-    first_reply.release();
+    first_body.release();
     first.join();
     // Decision 0006 rule 6: the superseded body writes nothing, so the read matches the upstream before any poll.
     CHECK(rig.driver->get_average_period() == 0.0);

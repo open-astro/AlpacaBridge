@@ -288,6 +288,7 @@ public:
         require_connected();
         run_command([this, period] {
             client_.put("averageperiod", {{"AveragePeriod", number_text(period)}});
+            if (command_hook_) command_hook_();
             // Write-through (decision 0010 rule 2): the next read sees the period before the next poll.
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot_.write([period](Frame& frame) { frame.average_period = {period, 0, {}}; });
@@ -354,6 +355,9 @@ public:
     }
 
     void set_poll_paused(bool paused) { poll_paused_.store(paused); }
+
+    // Set while no command runs; an AveragePeriod body calls it after its PUT, before its write-through.
+    void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
 
 private:
     static RemoteObservingConditionsConfig validated(RemoteObservingConditionsConfig config) {
@@ -733,6 +737,7 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> poll_paused_{false};
+    std::function<void()> command_hook_;  // test seam: set_command_hook_for_testing()
     // Under transition_mutex_: the upstream was told Connect and not yet Disconnect, and its InterfaceVersion then.
     bool forwarded_connect_ = false;
     int forwarded_version_ = 0;
@@ -777,6 +782,12 @@ std::unique_ptr<ObservingConditionsDriver> create_remotealpaca_observingconditio
 void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_poll_paused(paused);
+    }
+}
+
+void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_command_hook(std::move(hook));
     }
 }
 
