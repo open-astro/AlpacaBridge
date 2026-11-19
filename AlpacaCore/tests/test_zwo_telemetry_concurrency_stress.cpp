@@ -811,9 +811,9 @@ TEST_CASE("ZWO a long pulse pause preserves the link without renewing measuremen
 }
 
 // open-astro#1834 PIN: an AbortSlew late in a long guide pause ends the pulse at once, and the no-sample deadline then
-// counts from the abort, not from the last measurement before the pause: reset_position_offsets() leaves the pulse
+// counts from the abort, not from the last measurement before the pause: end_pulses() leaves the pulse
 // window's end at "now" rather than clearing it, so the first poll after the abort does not find 35 s of silence.
-// Falsified by: zwo_telescope_driver.cpp reset_position_offsets(): clearing the pulse window instead of ending it at
+// Falsified by: zwo_telescope_driver.cpp end_pulses(): clearing the pulse window instead of ending it at
 // now, so the staleness base falls back to the measurement 35 s before and the link is dropped after the abort.
 TEST_CASE("ZWO an AbortSlew late in a long pulse pause keeps the link (#1834 PIN)",
           "[zwo][telescope][telemetry][pulseguide]") {

@@ -1,0 +1,7 @@
+### Breaking changes
+
+- **ZWO AM mounts: a PulseGuide during a GOTO or FindHome is refused** (AlpacaCore, issue #2263): it answers `InvalidOperation` ("PulseGuide is not allowed while a slew, park or home is running") and changes nothing, where it used to be accepted and its `:Mg` went out while the mount slewed. A PulseGuide during a Park was already refused (the Tracking check, since Park turns tracking off) and still is. The refusal ends with the motion: once the GOTO lands, fails or is stopped, the FindHome lands, or a MoveAxis takes an axis, a PulseGuide is accepted again. **After upgrading:** a client waits for Slewing to read false before it pulse-guides, as ConformU and the guiding programs already do.
+
+### Changed
+
+- **ZWO AM mounts: a MoveAxis no longer ends a guide pulse on the other axis** (AlpacaCore, issue #2263): each axis now has its own pulse queue, drain and IsPulseGuiding window, so a MoveAxis (a jog or a stop) on RA ends only the RA pulses and a Dec pulse keeps running, and the other way round, as on Sky-Watcher. An East or West pulse and a North or South pulse now run at the same time instead of one after the other. A slew, Park, FindHome, AbortSlew, Sync, Unpark and SetPark still end the pulses on both axes. A MoveAxis stop that restores tracking while the other axis pulses waits up to 1.5 s for that pulse, as a Tracking=true write already did. A pulse that ends while the other axis jogs no longer freezes that axis's reported position. The driver's motion bookkeeping moves onto the per-axis motion owner (`util::MotionOwner`).

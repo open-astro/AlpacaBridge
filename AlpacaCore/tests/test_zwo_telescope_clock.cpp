@@ -186,21 +186,198 @@ TEST_CASE("ZWO telescope clock - a slew ends IsPulseGuiding at once", "[zwo][tel
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
 }
 
-// open-astro#2094: MoveAxis, like every other motion initiator, cancels the queued and running guide pulses: after the
-// stop no further ":Mg" is sent and IsPulseGuiding reads false; the same for a jog.
-// Falsified by: zwo_telescope_driver.cpp move_axis() not calling reset_position_offsets() after fence_goto().
-TEST_CASE("ZWO telescope clock - MoveAxis stop cancels a running guide pulse (2094)", "[zwo][telescope][unit][clock]") {
+// open-astro#2094, #2263: a MoveAxis (stop or jog) ends the queued and running guide pulses on its own axis: after
+// it no further ":Mg" on that axis is sent and IsPulseGuiding reads false.
+// Falsified by: zwo_telescope_driver.cpp move_axis() not ending its own axis's pulses after fence_goto().
+TEST_CASE("ZWO motion owner - MoveAxis ends a running guide pulse on its own axis (#2094, #2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
     const double rate = GENERATE(0.0, 1.0);
+    const int axis = GENERATE(0, 1);
+    CAPTURE(rate, axis);
     Rig rig;
     rig.connect();
-    rig.driver->pulse_guide(0, 3000);
-    rig.driver->pulse_guide(0, 500);  // queued behind the running pulse
+    rig.driver->pulse_guide(axis == 0 ? 2 : 0, 3000);
+    rig.driver->pulse_guide(axis == 0 ? 3 : 1, 500);  // queued behind the running pulse
     REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
     CHECK(rig.driver->get_is_pulse_guiding());
-    rig.driver->move_axis(0, rate);
+    rig.driver->move_axis(axis, rate);
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     for (int i = 0; i < 10; ++i) rig.advance(500ms);
     CHECK(rig.mount.count(":Mg") == 1);
+    if (rate != 0.0) rig.driver->move_axis(axis, 0.0);
+}
+
+// #2263: a command owns only the axes it moves. A MoveAxis (stop or jog) on one axis leaves a guide pulse on the other
+// axis running: IsPulseGuiding stays true, the pulse's second step still goes out, and its position offset is kept.
+// Falsified by: zwo_telescope_driver.cpp move_axis() ending the pulses on both axes (kBothAxes in place of its own).
+TEST_CASE("ZWO motion owner - MoveAxis on one axis leaves a pulse on the other axis running (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const double rate = GENERATE(0.0, 1.0);
+    const int axis = GENERATE(0, 1);  // the MoveAxis axis; the pulse is on the other one
+    CAPTURE(rate, axis);
+    Rig rig;
+    rig.connect();
+    rig.advance(250ms);
+    const int direction = axis == 0 ? 0 : 2;  // North (Dec) during an RA MoveAxis, East (RA) during a Dec one
+    const std::string guide = axis == 0 ? ":Mgn" : ":Mge";
+    rig.driver->pulse_guide(direction, 5000);  // two steps: 3000 ms, then 2000 ms
+    REQUIRE(rig.mount.wait_for_count(guide, 1, kReal));
+    const double guided = axis == 0 ? rig.driver->get_declination() : rig.driver->get_right_ascension();
+    rig.driver->move_axis(axis, rate);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    CHECK((axis == 0 ? rig.driver->get_declination() : rig.driver->get_right_ascension()) == guided);
+    rig.wait_for_blocked_caller();  // the drain waits out the first step, besides the poll loop
+    rig.advance(3000ms);
+    CHECK(rig.mount.wait_for_count(guide, 2, kReal));  // the second step reached the mount
+    CHECK(rig.driver->get_is_pulse_guiding());
+    // The stop's tracking restore waits on the clock for the running pulse; the Rig advances until it returns.
+    if (rate != 0.0) rig.call([&] { rig.driver->move_axis(axis, 0.0); });
+}
+
+// #2263: a MoveAxis on one axis waits only for a ":Mg" on its own axis (#2072). A North step held between its check
+// and its send does not hold up an RA jog.
+// Falsified by: zwo_telescope_driver.cpp end_pulses(): waiting for the sends in flight on both axes, so the RA jog
+// waits for the held Dec ":Mg".
+TEST_CASE("ZWO motion owner - MoveAxis does not wait for the other axis's guide pulse send (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    alpacacore::test::Latch latch;
+    std::atomic<int> sends{0};
+    Rig rig;
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == ":Mg" && sends.fetch_add(1) == 0) latch.block();
+    });
+    rig.connect();
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(latch.wait_entered());
+    auto& jog = rig.call([&] { rig.driver->move_axis(0, 1.0); });
+    const bool returned = ready(jog, 1000ms);  // a rendezvous on the wire, within the latch's 2 s self-release
+    latch.release();
+    REQUIRE(ready(jog, kReal));
+    jog.get();
+    CHECK(returned);
+    rig.call([&] { rig.driver->move_axis(0, 0.0); });  // its tracking restore waits on the clock for the Dec pulse
+}
+
+// #2263: the per-axis split. An East and a North pulse run at the same time, each on its own axis, rather than one
+// after the other: both ":Mg" go out at once and IsPulseGuiding ends 500 ms after the longer one.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() queueing every pulse on axis 0 (one drain for both axes), so
+// the North pulse waits for the East one.
+TEST_CASE("ZWO motion owner - an RA and a Dec pulse run at the same time (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(2, 1000);
+    rig.driver->pulse_guide(0, 1000);
+    CHECK(rig.mount.wait_for_count(":Mge", 1, kReal));
+    CHECK(rig.mount.wait_for_count(":Mgn", 1, kReal));
+    rig.advance(1499ms);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.advance(1ms);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+// #2263: a pulse on one axis that ends while the other axis jogs reconciles only its own axis. The jogging axis reads
+// the mount once the poll resumes, instead of the position it had when the pulse started.
+// Falsified by: zwo_telescope_driver.cpp run_pulse_task(): rebasing both offsets against the cached position in the
+// reconciliation, so the jogged RA reads its old value.
+TEST_CASE("ZWO motion owner - a pulse ending during an other-axis jog leaves that axis reading the mount (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const bool jog_first = GENERATE(true, false);
+    CAPTURE(jog_first);
+    Rig rig;
+    rig.connect();
+    rig.advance(250ms);
+    REQUIRE(rig.driver->get_right_ascension() == Catch::Approx(12.0).margin(1e-6));
+    if (jog_first) rig.driver->move_axis(0, 1.0);
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.mount.wait_for_count(":Mgn", 1, kReal));
+    if (!jog_first) rig.driver->move_axis(0, 1.0);
+    rig.mount.set_position(13.0, 45.0);  // the jog moved RA
+    rig.wait_for_blocked_caller();       // the drain waits out its step, besides the poll loop
+    const int pairs = rig.mount.count(":GR");
+    rig.advance(1000ms);
+    REQUIRE(rig.mount.wait_for_count(":GR", pairs + 1, kReal));  // the drain's reconciliation read
+    for (int i = 0; i < 4; ++i) rig.advance(250ms);              // the pulse window ends and the poll reads again
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(13.0).margin(1e-6));
+    rig.driver->move_axis(0, 0.0);
+}
+
+namespace {
+
+// The slew, park and home commands the PulseGuide refusal covers (#2263).
+void start_slew(TelescopeDriver& driver, const std::string& name) {
+    if (name == "GOTO") driver.slew_to_coordinates_async(6.0, 30.0);
+    if (name == "FindHome") driver.find_home();
+    if (name == "Park") driver.park();
+}
+
+}  // namespace
+
+// #2263, ITelescopeV4: a PulseGuide while a slew, park or home runs is refused with InvalidOperation and changes
+// nothing: no ":Mg", IsPulseGuiding false, the motion still runs and nothing stops it.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): never taking the slew_running() refusal branch (GOTO and
+// FindHome; a Park is already refused by the Tracking check, since Park sends ":Td").
+TEST_CASE("ZWO motion owner - PulseGuide during a slew, park or home is refused and changes nothing (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const std::string slew = GENERATE(as<std::string>{}, "GOTO", "FindHome", "Park");
+    CAPTURE(slew);
+    Rig rig("AM5");
+    rig.connect();
+    rig.mount.set_slew_duration(30s);
+    start_slew(*rig.driver, slew);
+    if (slew == "GOTO") {
+        REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+        rig.await_poll_resumed();
+    }
+    REQUIRE(rig.driver->get_slewing());
+    const auto before = rig.mount.commands().size();
+    require_alpaca_error([&] { rig.driver->pulse_guide(0, 1000); }, AlpacaError::InvalidOperation);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    for (int i = 0; i < 8; ++i) rig.advance(250ms);
+    CHECK(rig.driver->get_slewing());
+    CHECK(rig.mount.count(":Mg") == 0);
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = before; i < sent.size(); ++i) {
+        INFO("after the refusal: " << sent[i]);
+        CHECK(sent[i].rfind(":Q", 0) != 0);
+    }
+}
+
+// #2263: the slew, park or home claim ends with the motion on every exit path, so a PulseGuide is accepted again: a
+// GOTO that landed, a GOTO the mount rejected, an AbortSlew, a FindHome that landed, and a jog that took an axis from
+// a GOTO (a pulse on the other axis).
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the motion_owner_.finished() call, so the first slew
+// keeps every later PulseGuide refused.
+TEST_CASE("ZWO motion owner - PulseGuide is accepted once the slew, park or home has ended (#2263)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const std::string exit = GENERATE(as<std::string>{}, "landed", "rejected", "AbortSlew", "home landed", "jog");
+    CAPTURE(exit);
+    Rig rig("AM5");
+    rig.connect();
+    rig.mount.set_slew_duration(exit == "landed" || exit == "home landed" ? 1s : 30s);
+    if (exit == "rejected") rig.mount.reject_goto("2");
+    if (exit == "home landed") {
+        rig.driver->find_home();
+    } else {
+        rig.driver->slew_to_coordinates_async(6.0, 30.0);
+        REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+        rig.await_poll_resumed();
+    }
+    if (exit == "rejected") {
+        rig.advance(250ms);  // two poll cycles publish the idle mount
+        rig.advance(250ms);
+    }
+    if (exit == "AbortSlew") rig.driver->abort_slew();
+    if (exit == "jog") rig.driver->move_axis(0, 1.0);
+    if (exit == "landed" || exit == "home landed") {
+        rig.advance_until([&] { return !rig.driver->get_slewing(); }, 250ms, 10s);
+        REQUIRE_FALSE(rig.driver->get_slewing());
+    }
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 1000));
+    CHECK(rig.mount.wait_for_count(":Mgn", 1, kReal));
+    CHECK(rig.driver->get_is_pulse_guiding());
+    // The stop's tracking restore waits on the clock for the Dec pulse; the Rig advances until it returns.
+    if (exit == "jog") rig.call([&] { rig.driver->move_axis(0, 0.0); });
 }
 
 TEST_CASE("ZWO telescope clock - Tracking on waits for an in-flight pulse that ends within 1500 ms",
@@ -1039,28 +1216,29 @@ TEST_CASE("ZWO telescope clock - a pulse step is one clock wait, so one advance 
     CHECK(rig.mount.wait_for_count(":GD", positions + 1, 500ms));
 }
 
-// PIN (passes on the current code; must keep passing once the pulse body moves to an operation slot): an accepted
-// PulseGuide is never dropped because a slew superseded the pulse before it. Pulse, slew mid-step, pulse again:
-// the second pulse still reaches the mount.
+// PIN: an accepted PulseGuide is never dropped because a command superseded the pulse before it. Pulse, a MoveAxis
+// on the same axis mid-step, pulse again: the second pulse still reaches the mount. (Before #2263 the superseding
+// command was a slew; a PulseGuide during a slew is now refused.)
 // Falsified by: pulse_guide() leaving a pulse queued behind a superseded drain body that never sends it.
-TEST_CASE("ZWO telescope clock - a pulse queued after a slew superseded the previous pulse is still sent (PIN)",
-          "[zwo][telescope][unit][clock][operation-slot]") {
+TEST_CASE("ZWO telescope clock - a pulse queued after a MoveAxis superseded the previous pulse is still sent (PIN)",
+          "[zwo][telescope][unit][clock][operation-slot][motion-owner]") {
     Rig rig;
     rig.connect();
     rig.driver->pulse_guide(0, 3000);
     REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
-    rig.driver->slew_to_coordinates_async(6.0, 30.0);  // mid-step: supersedes the pulse and clears its queue
-    CHECK(rig.mount.wait_for_count(":MS", 1, kReal));  // the slew reached the mount
+    rig.driver->move_axis(1, 1.0);                     // mid-step: supersedes the Dec pulse and clears its queue
+    CHECK(rig.mount.wait_for_count(":Mn", 1, kReal));  // the jog reached the mount
     rig.driver->pulse_guide(1, 500);
     // Virtual time only: the superseded body wakes and the new pulse is drained.
     rig.advance_until([&] { return rig.mount.count(":Mg") >= 2; }, 100ms, 10s);
     CHECK(rig.mount.wait_for_count(":Mg", 2, kReal));
+    rig.driver->move_axis(1, 0.0);
 }
 
 // Round 2 finding 3: the flag that says a pulse drain runs is cleared on disconnect and on connect, so a pulse after
 // a reconnect starts a new drain and reaches the mount.
 // Falsified by: zwo_telescope_driver.cpp stop_pulse_drain() and the connect reset (reset_session_state_for_connect)
-// both keeping pulse_drain_active_ (the two clears removed together), so the pulse after the reconnect waits for a
+// both keeping drain_active (the two clears removed together), so the pulse after the reconnect waits for a
 // drain that no longer runs and no ":Mg" is sent.
 TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
           "[zwo][telescope][unit][clock][operation-slot]") {
@@ -1079,9 +1257,9 @@ TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
 // #2095: a redundant Connected=true drops the queued pulses but leaves the running drain in charge, so the next
 // PulseGuide queues behind the step in flight instead of sending its ":Mg" over it. IsPulseGuiding covers the
 // running pulse and B's wait behind it.
-// Falsified by: zwo_telescope_driver.cpp reset_session_state_for_connect() clearing pulse_drain_active_ on the
+// Falsified by: zwo_telescope_driver.cpp reset_session_state_for_connect() clearing drain_active on the
 // redundant path too, so the next pulse starts a new drain that supersedes the running one; or zeroing
-// pulse_guiding_end_ and pulse_queue_end_ there while the drain is kept, so IsPulseGuiding reads false while A runs.
+// the pulse window and queue_end there while the drain is kept, so IsPulseGuiding reads false while A runs.
 TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running pulse (#2095)",
           "[zwo][telescope][unit][clock][operation-slot]") {
     Rig rig;
@@ -1089,7 +1267,7 @@ TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running 
     rig.driver->pulse_guide(0, 6000);  // A: two 3000 ms steps
     REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
     rig.wait_for_blocked_caller();    // the drain waits out A's first step
-    rig.driver->pulse_guide(2, 500);  // C: queued behind A
+    rig.driver->pulse_guide(1, 500);  // C: queued behind A, on the same axis
     auto& redundant = rig.call([&] { rig.driver->set_connected(true); });
     for (int i = 0; i < 200 && redundant.wait_for(10ms) != std::future_status::ready; ++i) rig.advance(10ms);
     REQUIRE(redundant.wait_for(0ms) == std::future_status::ready);
@@ -1262,7 +1440,7 @@ TEST_CASE("ZWO hold window - a rejected GOTO leaves no slew window behind (#1834
 
 // A ":Mg" that fails to send starts no pulse; with nothing queued behind it, IsPulseGuiding is false at once rather
 // than for the pulse plus 500 ms.
-// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): removing the pulse_hold_.arm(...) statement,
+// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): removing the pulse.hold.arm(...) statement,
 // so the window armed for the 3000 ms pulse stays.
 TEST_CASE("ZWO hold window - a failed :Mg ends IsPulseGuiding at once (#1834)",
           "[zwo][telescope][unit][clock][hold-window]") {
@@ -1277,11 +1455,11 @@ TEST_CASE("ZWO hold window - a failed :Mg ends IsPulseGuiding at once (#1834)",
     CHECK(rig.mount.count(":Mg") == 0);
 }
 
-// One window covers both axes and the queue: a failed ":Mg" gives up only its own share. The pulse queued behind it
-// still owns the window (true while the drain reconciles, before the queued task starts), and the window then ends
-// at that pulse plus 500 ms, with no time counted for the failed 3000 ms pulse.
-// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): pulse_hold_.clear() in place of the
-// pulse_hold_.arm(...) that covers the queue, so IsPulseGuiding reads false while the queued pulse waits.
+// One window covers an axis's queue (#2263: each axis has its own): a failed ":Mg" gives up only its own share. The
+// pulse queued behind it on that axis still owns the window (true while the drain reconciles, before the queued task
+// starts), and the window then ends at that pulse plus 500 ms, with no time counted for the failed 3000 ms pulse.
+// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): pulse.hold.clear() in place of the
+// pulse.hold.arm(...) that covers the queue, so IsPulseGuiding reads false while the queued pulse waits.
 TEST_CASE("ZWO hold window - a failed :Mg keeps the window for the pulse queued behind it (#1834)",
           "[zwo][telescope][unit][clock][hold-window]") {
     Rig rig;
@@ -1299,7 +1477,7 @@ TEST_CASE("ZWO hold window - a failed :Mg keeps the window for the pulse queued 
     rig.mount.hold_reply(":GR");  // the drain's reconciliation read after the failed step (the poll is paused)
     rig.driver->pulse_guide(0, 3000);
     REQUIRE(first_entered.get_future().wait_for(kReal) == std::future_status::ready);
-    rig.driver->pulse_guide(2, 1000);  // queued before the first ":Mg" fails
+    rig.driver->pulse_guide(1, 1000);  // queued on the same axis before the first ":Mg" fails
     second_queued.set_value();
     const bool held = rig.mount.wait_until_held(kReal);
     const bool guiding_while_queued = rig.driver->get_is_pulse_guiding();
@@ -1333,7 +1511,7 @@ TEST_CASE("ZWO hold window - a failed :Mg keeps the completion hold of the step 
     // queued behind it fails its first.
     const auto sent_step = queued ? 1000ms : 3000ms;
     rig.driver->pulse_guide(0, queued ? 1000 : 5000);
-    if (queued) rig.driver->pulse_guide(2, 1000);
+    if (queued) rig.driver->pulse_guide(1, 1000);  // the same axis
     // The sent step's end is stamped at virtual time 0; the drain then waits it out, besides the poll loop.
     REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
     rig.wait_for_blocked_caller();
@@ -1371,7 +1549,7 @@ TEST_CASE("ZWO hold window - a MoveAxis stop ends an accepted GOTO's window (#18
 
 // A PulseGuide whose drain the slot refuses to start sends nothing, so it gives the pulse window back:
 // IsPulseGuiding is false after the refusal, not for the pulse plus 500 ms.
-// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse_hold_ = pulse_before restore in the
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse.hold = pulse_before restore in the
 // refused-start catch, so the window armed for the 1000 ms pulse stays.
 TEST_CASE("ZWO hold window - a refused pulse drain start leaves IsPulseGuiding false (#1834)",
           "[zwo][telescope][unit][clock][hold-window]") {
