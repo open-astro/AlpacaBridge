@@ -21,6 +21,7 @@
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -92,6 +93,44 @@ TEST_CASE("ZWO USB Limit defaults clamp and only real connects write", "[zwo][ca
     camera->set_connected(false);
     connect_camera(*camera);
     CHECK(sdk.call_count("set_bandwidth") == 2);
+}
+
+// ASI SDK 1.41 on the rig (ASI120MM Mini, SDK debug log): an exposure register above 100 ms drops the sensor clock
+// to its slowest (Fclk 24), and a frame-format or USB Limit write at that clock paces RAW16 at 23.95 MB/s instead of
+// the 17.20 MB/s USB Limit 40 allows; written under 100 ms the clock recovers (Fclk 41) and the pacing stays safe
+// when the exposure later goes long. The SDK reloads the last exposure from ASIconfig.xml at every open, and a
+// Bin or ROI change follows a long exposure, so every format write must see a short register.
+TEST_CASE("ZWO frame-format writes run with a sub-100 ms exposure register", "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    constexpr long kSavedExposureUs = 1'000'000;  // what ASIconfig.xml held after a guiding session
+    constexpr long kSlowClockAboveUs = 100'000;
+    std::vector<long> register_at_format_write;
+    sdk.before_call = [&](const std::string& name) {
+        if (name == "get_control_caps") {  // the camera is open: the SDK has loaded the saved exposure
+            sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Exposure, kSavedExposureUs, false);
+        } else if (name == "set_roi_format") {
+            long value = -1;  // stays -1 (a failure below) when the read is refused
+            bool is_auto = false;
+            sdk.raw_get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Exposure, value, is_auto);
+            register_at_format_write.push_back(value);
+        }
+    };
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    SECTION("connect") {}
+    SECTION("bin change after a long exposure") {
+        sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Exposure, kSavedExposureUs, false);
+        camera->set_bin_x(2);
+    }
+    SECTION("ROI change after a long exposure") {
+        sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Exposure, kSavedExposureUs, false);
+        camera->set_num_x(8);
+    }
+    REQUIRE_FALSE(register_at_format_write.empty());
+    for (const long us : register_at_format_write) {
+        CHECK(us >= 0);
+        CHECK(us < kSlowClockAboveUs);
+    }
 }
 
 TEST_CASE("ZWO USB Limit applies explicit values and rejects unsupported settings",
