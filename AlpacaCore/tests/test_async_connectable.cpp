@@ -37,10 +37,12 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 
 namespace {
 
 using namespace std::chrono_literals;
+using alpacacore::test::ConnectHoldGate;
 
 // Minimal driver double. Mirrors the QHY camera's real pattern: connected_
 // clears at the START of a (simulated slow) disconnect, and is set only at
@@ -68,7 +70,7 @@ public:
             }
             connected_.store(false);  // cleared FIRST, before the "slow" teardown
             link_lost_.store(false);
-            std::this_thread::sleep_for(op_delay_);
+            alpacacore::test::connect_hold(op_delay_);  // the "slow" teardown; a case's ConnectHoldGate holds it
             if (fail_disconnect_.load()) {
                 // Mirrors a throwing SDK close mid-teardown: connected_ is
                 // already cleared (driver-lifecycle.instructions.md pattern) but the teardown did
@@ -89,7 +91,7 @@ public:
         if (connected_.load()) {
             return;
         }
-        std::this_thread::sleep_for(op_delay_);
+        alpacacore::test::connect_hold(op_delay_);  // the "slow" connect work; a case's ConnectHoldGate holds it
         if (fail_connect_.load()) {
             // A driver that refuses a connect and says why -- the shape every
             // real driver's guard has (issue #358).
@@ -160,13 +162,14 @@ TEST_CASE("AsyncConnectable - get_connected() is not a valid completion signal",
     wait_until_idle(d);
     REQUIRE(d.get_connected());
 
+    ConnectHoldGate gate;
     d.disconnect();
-    // Give the task time to clear connected_ (near-instant) but not enough
-    // to finish the simulated slow teardown (100ms).
-    std::this_thread::sleep_for(20ms);
+    // Held inside the teardown: connected_ is already clear, the task is not done.
+    REQUIRE(gate.wait_entered(2000ms));
     CHECK_FALSE(d.get_connected());
     CHECK(d.get_connecting());  // <-- the signal a waiter must actually trust
 
+    gate.release();
     wait_until_idle(d);
     REQUIRE_FALSE(d.get_connecting());
     REQUIRE(d.disconnect_completions_.load() == 1);
@@ -179,9 +182,11 @@ TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is queued",
     wait_until_idle(d);
     REQUIRE(d.get_connected());
 
+    ConnectHoldGate gate;
     d.disconnect();
-    std::this_thread::sleep_for(10ms);  // disconnect is now in flight
-    d.connect();                        // queued; the task tail runs it
+    REQUIRE(gate.wait_entered(2000ms));  // disconnect is now in flight
+    d.connect();                         // queued; the task tail runs it
+    gate.release();
 
     wait_until_idle(d);
     // The caller's newest instruction wins: the queued connect runs after
@@ -194,9 +199,11 @@ TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is queued",
 TEST_CASE("AsyncConnectable - disconnect racing an in-flight connect is never dropped", "[async_connectable][unit]") {
     TestConnectable d;
     d.op_delay_ = 100ms;
+    ConnectHoldGate gate;
     d.connect();
-    std::this_thread::sleep_for(10ms);  // connect is now in flight
-    d.disconnect();                     // must be recorded, not dropped
+    REQUIRE(gate.wait_entered(2000ms));  // connect is now in flight, past its pending-disconnect gate
+    d.disconnect();                      // must be recorded, not dropped
+    gate.release();
 
     wait_until_idle(d);
     // The device must end up disconnected: the deferred disconnect the task
@@ -213,9 +220,13 @@ TEST_CASE("AsyncConnectable - a disconnect queued against a connect reaches a dr
     TestConnectable d;
     d.op_delay_ = 100ms;
     d.lose_link_on_connect_.store(true);
+    ConnectHoldGate gate;
     d.connect();
-    std::this_thread::sleep_for(10ms);  // connect is now in flight
-    d.disconnect();                     // queued against it
+    // Past its pending-disconnect gate (#2402): a Disconnect recorded before the connect thread reaches it is
+    // consumed there instead, the newer request winning, and neither counter moves.
+    REQUIRE(gate.wait_entered(2000ms));
+    d.disconnect();  // queued against it
+    gate.release();
 
     wait_until_idle(d);
     CHECK(d.connect_completions_.load() == 1);
@@ -234,11 +245,12 @@ TEST_CASE("AsyncConnectable - disconnect/connect/disconnect chain lands disconne
     wait_until_idle(d);
     REQUIRE(d.get_connected());
 
+    ConnectHoldGate gate;
     d.disconnect();
-    std::this_thread::sleep_for(10ms);  // disconnect in flight
-    d.connect();                        // queued
-    std::this_thread::sleep_for(10ms);
-    d.disconnect();  // must cancel the queued connect
+    REQUIRE(gate.wait_entered(2000ms));  // disconnect in flight
+    d.connect();                         // queued
+    d.disconnect();                      // must cancel the queued connect
+    gate.release();
 
     wait_until_idle(d);
     CHECK_FALSE(d.get_connected());
@@ -257,9 +269,11 @@ TEST_CASE("AsyncConnectable - failed disconnect drops a queued connect", "[async
     REQUIRE(d.get_connected());
 
     d.fail_disconnect_.store(true);
+    ConnectHoldGate gate;
     d.disconnect();
-    std::this_thread::sleep_for(10ms);  // failing disconnect in flight
-    d.connect();                        // queued; must be dropped
+    REQUIRE(gate.wait_entered(2000ms));  // failing disconnect in flight
+    d.connect();                         // queued; must be dropped
+    gate.release();
 
     wait_until_idle(d);
     CHECK_FALSE(d.get_connecting());
@@ -425,12 +439,14 @@ TEST_CASE("AsyncConnectable - a connect failure superseded by a disconnect is no
     TestConnectable d;
     d.op_delay_ = 200ms;
     d.fail_connect_.store(true);
+    ConnectHoldGate gate;
     d.connect();
-    std::this_thread::sleep_for(20ms);
+    REQUIRE(gate.wait_entered(2000ms));  // inside the connect, past its pending-disconnect gate
     REQUIRE(d.get_connecting());
     // The client has moved on: its newest request is the Disconnect, which
     // succeeds, so Connecting must not then raise the older connect's error.
     d.disconnect();
+    gate.release();
     wait_until_idle(d);
     CHECK_FALSE(d.get_connected());
     CHECK(d.connecting_error().empty());
