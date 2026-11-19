@@ -1012,10 +1012,11 @@ bool snapshot_has_entry(const alpacacore::TelescopeDriver& driver, const std::st
 
 }  // namespace
 
-// #1408: the pulse body takes no driver mutex, but joining it waits out the serial transaction it is in.
-// Joining with mutex_ held stalls every getter for that long. The mount is the snapshot fake, which answers
-// every poll query with a valid frame, so the link cannot fault and let the case pass without the join.
-TEST_CASE("Celestron Telescope Driver - PulseGuide joins the previous pulse without holding the driver mutex",
+// #1408: a second PulseGuide waits out the serial transaction the previous pulse's chunk is in (since #2263 it
+// supersedes that pulse in the send gate instead of joining it). Waiting with mutex_ held stalls every getter for
+// that long. The mount is the snapshot fake, which answers every poll query with a valid frame, so the link cannot
+// fault and let the case pass without the wait.
+TEST_CASE("Celestron Telescope Driver - PulseGuide supersedes the previous pulse without holding the driver mutex",
           "[celestron][telescope][unit][pulseguide]") {
     auto st = std::make_shared<SnapshotMount>();
     auto chunk_in_flight = std::make_shared<std::atomic<bool>>(false);
@@ -1060,7 +1061,7 @@ TEST_CASE("Celestron Telescope Driver - PulseGuide joins the previous pulse with
         }
     });
 
-    // Same axis: must cancel and join the body while its chunk is in flight.
+    // Same axis: supersedes the body while its chunk is in flight, and waits for that exchange in the send gate.
     bool second_threw = false;
     try {
         driver->pulse_guide(2, 1000);

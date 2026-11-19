@@ -34,6 +34,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -1231,6 +1232,206 @@ TEST_CASE("Celestron case B - already at park target still parks", "[park][celes
     CHECK(at_park);
     CHECK_FALSE(read_slewing_error(*driver));
     driver->set_connected(false);
+}
+
+// ---- Motion owner (#2263, decision 0006 rule 3) ----
+//
+// A motion command owns only the axes it moves, and it supersedes the body it replaces instead of cancelling and
+// joining it: a MoveAxis takes the pulse on its own axis, a PulseGuide the older pulse on its axis, a slew, Park or
+// FindHome both pulses. A pulse body that is parked between chunks returns as soon as it is woken, so a join cannot
+// be seen from the call alone; as in the initiator-supersede cases above, the pulse slot's spawn seam keeps the old
+// body's thread alive kTailMs after its body returned. A join waits out that tail; a supersede does not.
+
+namespace {
+
+// The first pulse body started keeps its thread alive tail_ms after the body returned.
+void keep_first_pulse_thread_alive(alpacacore::TelescopeDriver& driver, int tail_ms) {
+    auto spawns = std::make_shared<std::atomic<int>>(0);
+    cel::set_pulse_spawn_for_testing(driver, [spawns, tail_ms](std::function<void()> body) {
+        const bool first = spawns->fetch_add(1) == 0;
+        return std::thread([body = std::move(body), first, tail_ms] {
+            body();
+            if (first) std::this_thread::sleep_for(std::chrono::milliseconds(tail_ms));
+        });
+    });
+}
+
+// Steps the clock `span` in 250 ms steps, each settled.
+void step_virtual(alpacacore::test::FakeTaskClock& clock, std::chrono::milliseconds span) {
+    for (auto done = std::chrono::milliseconds(0); done < span; done += std::chrono::milliseconds(250)) {
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+}
+
+// A long RA pulse: 255 cs now, the chain body then waits 2.55 s on the clock for its next chunk.
+std::size_t start_long_ra_pulse(SupersedeRig& rig) {
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the paused poll, parked
+    const std::size_t idle = rig.clock.waiter_count();
+    keep_first_pulse_thread_alive(*rig.driver, kTailMs);
+    rig.driver->pulse_guide(2, 25500);
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));  // the chain body, between chunks
+    REQUIRE(rig.st->guide_command_count(0) == 1);
+    return idle;
+}
+
+}  // namespace
+
+TEST_CASE("Celestron motion owner - MoveAxis supersedes the pulse on its axis without joining it (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    SupersedeRig rig;
+    start_long_ra_pulse(rig);
+    const auto t0 = Clock::now();
+    rig.driver->move_axis(0, 0.5);
+    const long took = ms_since(t0);
+    std::printf("MoveAxis over an RA pulse took %ld ms (old pulse thread alive %d ms past its body)\n", took, kTailMs);
+    CHECK(took < kPastHoldMarginMs);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());  // the pulse ended when the MoveAxis took RA
+    CHECK(rig.driver->get_slewing());
+    // Past the chain's next chunk (2.55 s): the superseded body sent RA nothing more.
+    step_virtual(rig.clock, std::chrono::milliseconds(3000));
+    CHECK(rig.st->guide_command_count(0) == 1);
+    rig.driver->move_axis(0, 0.0);
+}
+
+TEST_CASE("Celestron motion owner - a second PulseGuide supersedes the older pulse on its axis without a join (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    SupersedeRig rig;
+    start_long_ra_pulse(rig);
+    const auto t0 = Clock::now();
+    rig.driver->pulse_guide(2, 1000);  // one chunk of 100 cs, no chain
+    const long took = ms_since(t0);
+    std::printf("PulseGuide over an RA pulse took %ld ms (old pulse thread alive %d ms past its body)\n", took,
+                kTailMs);
+    CHECK(took < kPastHoldMarginMs);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    // Past the old chain's next chunk: only the two first chunks went out, and the newer pulse (1 s plus the 1 s
+    // completion delay) has ended; the older 25.5 s window ended with it.
+    step_virtual(rig.clock, std::chrono::milliseconds(3000));
+    CHECK(rig.st->guide_command_count(0) == 2);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+TEST_CASE("Celestron motion owner - a slew, Park or FindHome supersedes a pulse without joining it (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    const int operation = GENERATE(0, 1, 2);
+    CAPTURE(operation);
+    SupersedeRig rig;
+    start_long_ra_pulse(rig);
+    const auto t0 = Clock::now();
+    if (operation == 0) {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    } else if (operation == 1) {
+        rig.driver->park();
+    } else {
+        rig.driver->find_home();
+    }
+    const long took = ms_since(t0);
+    std::printf("operation %d over an RA pulse took %ld ms (old pulse thread alive %d ms past its body)\n", operation,
+                took, kTailMs);
+    CHECK(took < kPastHoldMarginMs);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_slewing());
+    rig.driver->abort_slew();
+    step_virtual(rig.clock, std::chrono::milliseconds(3000));
+    CHECK(rig.st->guide_command_count(0) == 1);  // the superseded chain sent nothing more
+}
+
+// The policy table (#2263, the maintainer's ruling of 2026-11-16): a PulseGuide while a slew, Park or FindHome runs is
+// refused and changes nothing. InvalidOperation for the slew and FindHome; a Park keeps its older InvalidWhileParked
+// refusal.
+TEST_CASE("Celestron motion owner - PulseGuide during a slew, Park or FindHome is refused and changes nothing (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    const int operation = GENERATE(0, 1, 2);
+    CAPTURE(operation);
+    SupersedeRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    if (operation == 0) {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    } else if (operation == 1) {
+        rig.driver->park();
+    } else {
+        rig.driver->find_home();
+    }
+    REQUIRE(rig.driver->get_slewing());
+    for (const int direction : {0, 2}) {  // a Dec pulse and an RA pulse
+        CAPTURE(direction);
+        bool refused = false;
+        try {
+            rig.driver->pulse_guide(direction, 500);
+        } catch (const alpacacore::AlpacaException& ex) {
+            refused = true;
+            if (operation == 1) {
+                CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+            } else {
+                CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+                CHECK(std::string(ex.what()) == "PulseGuide is not allowed while a slew, park or home is running");
+            }
+        }
+        CHECK(refused);
+    }
+    CHECK(rig.st->guide_command_count(0) == 0);
+    CHECK(rig.st->guide_command_count(1) == 0);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_slewing());
+    rig.driver->abort_slew();
+}
+
+// The refusal ends with the operation, on every way it ends: a landing, an AbortSlew, a FindHome the poll completes,
+// a slew start the slot refuses, a reconnect, and a MoveAxis that takes an axis from the slew.
+TEST_CASE("Celestron motion owner - PulseGuide is accepted again once the slew, Park or FindHome has ended (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    const int leg = GENERATE(0, 1, 2, 3, 4, 5);
+    CAPTURE(leg);
+    SupersedeRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    if (leg == 0) {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+        REQUIRE(advance_until(rig.clock, [&] { return !rig.driver->get_slewing(); }, 2));
+    } else if (leg == 1) {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+        rig.driver->abort_slew();
+    } else if (leg == 2) {
+        rig.driver->find_home();
+        REQUIRE(cel::poll_status_now_for_testing(*rig.driver));  // MC_LEVEL_DONE answers done
+        REQUIRE(rig.driver->get_at_home());
+    } else if (leg == 3) {
+        cel::set_slew_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                             alpacacore::AlpacaError::DriverException);
+    } else if (leg == 4) {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+        rig.driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*rig.driver, true, std::chrono::seconds(10)));
+        cel::set_status_poll_paused_for_testing(*rig.driver, true);
+    } else {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+        rig.driver->move_axis(0, 0.5);  // takes RA, and with it the slew, which owned both axes
+    }
+    CHECK_NOTHROW(rig.driver->pulse_guide(0, 100));
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.driver->abort_slew();
+}
+
+// The other axis is not the MoveAxis's: a Dec pulse keeps its chain while RA moves.
+TEST_CASE("Celestron motion owner - MoveAxis on one axis leaves a pulse on the other axis running (#2263)",
+          "[celestron][telescope][pulseguide][motion-owner]") {
+    SupersedeRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    const std::size_t idle = rig.clock.waiter_count();
+    rig.driver->pulse_guide(0, 5000);  // Dec: 255 cs now, 245 cs chained at 2.55 s
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));
+    rig.driver->move_axis(0, 0.5);
+    step_virtual(rig.clock, std::chrono::milliseconds(3000));
+    REQUIRE(wait_until([&] { return rig.st->guide_command_count(1) == 2; }, 2000));  // the server logs the chunk
+    CHECK(rig.st->guide_command_count(0) == 0);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.driver->move_axis(0, 0.0);
 }
 
 #endif  // !_WIN32
