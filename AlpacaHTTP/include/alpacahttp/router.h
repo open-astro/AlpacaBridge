@@ -28,6 +28,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/software_update.h>
@@ -223,6 +224,17 @@ public:
     // mutex_, so calling it under a router lock would be a new, undocumented
     // lock-order edge).
     void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
+
+    // open-astro#2419: watch the host realtime clock for a step against the
+    // monotonic clock, and util::HostClockTrust::trusted() for its false ->
+    // true edge, and hand either to every registered telescope's
+    // on_host_clock_changed(), so a mount that keeps its own clock re-syncs
+    // it. A step also latches HostClockTrust (something set the clock). Called
+    // on every tick of the same timer thread as run_motion_watchdogs(),
+    // before it and whatever the watchdog interval is; `sys` and `mono` are
+    // that tick's two clock readings, so a test feeds synthetic pairs. Only
+    // that thread touches the detector state.
+    void check_host_clock(std::chrono::system_clock::time_point sys, std::chrono::steady_clock::time_point mono);
 
     // Software update (docs/software-update.md): the manager behind
     // /management/v1/update/*. Server installs one over the production
@@ -560,6 +572,10 @@ private:
     // const-propagation, which a unique_ptr silently drops: a const Router
     // method could reach a non-const HostClock through the pointer.
     alpacacore::util::HostClock host_clock_;
+    // open-astro#2419: check_host_clock()'s state, touched only by the
+    // server's timer thread (or a test standing in for it).
+    alpacacore::util::HostClockStepDetector host_clock_step_detector_;
+    bool host_clock_was_trusted_ = false;
     // open-astro#675: replaced wholesale by set_now_fn(), never mutated; see
     // current_now_fn().
     std::shared_ptr<const NowFn> now_fn_ =

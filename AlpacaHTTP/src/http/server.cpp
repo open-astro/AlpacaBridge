@@ -1537,6 +1537,9 @@ void Server::rtc_probe_loop() {
             }
         }
         const auto now = std::chrono::steady_clock::now();
+        // open-astro#2419: every tick, before the watchdog and whatever its
+        // interval (<= 0 disables only the watchdog).
+        router_.check_host_clock(std::chrono::system_clock::now(), now);
         router_.run_motion_watchdogs(now);
         if (now >= next_rtc) {
             router_.refresh_rtc_probe();

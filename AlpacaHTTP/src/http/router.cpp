@@ -1266,6 +1266,47 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
     }
 }
 
+void Router::check_host_clock(std::chrono::system_clock::time_point sys, std::chrono::steady_clock::time_point mono) {
+    using alpacacore::util::HostClockEvent;
+    using alpacacore::util::HostClockTrust;
+    std::optional<HostClockEvent> event;
+    if (const auto step = host_clock_step_detector_.observe(sys, mono)) {
+        const auto t = std::chrono::system_clock::to_time_t(sys);
+        std::tm tm{};
+        char text[32] = "unknown";
+        if (gmtime_r(&t, &tm) != nullptr) {
+            std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &tm);
+        }
+        util::log_info("Host clock stepped by " + std::to_string(step->count()) + " ms (now " + text + ")");
+        // Something set the clock (an outside clock_settime, NTP's first step).
+        // Never host_clock_.mark_stepped() here: that writes the hardware RTC
+        // with a time nothing has verified.
+        HostClockTrust::mark_set("host clock step");
+        event = HostClockEvent{HostClockEvent::Kind::Stepped, *step};
+    }
+    // Read after the latch above, so a step is one Stepped event and never
+    // also a BecameTrusted one. Starts false, so a host that is trusted at the
+    // first tick re-checks a mount that connected before it.
+    const bool trusted = HostClockTrust::trusted();
+    if (!event && trusted && !host_clock_was_trusted_) {
+        event = HostClockEvent{HostClockEvent::Kind::BecameTrusted, std::chrono::milliseconds(0)};
+    }
+    host_clock_was_trusted_ = trusted;
+    if (!event) {
+        return;
+    }
+    // Snapshot as shared_ptr copies, as run_motion_watchdogs() does: no
+    // registry lock is held while the drivers run.
+    auto devices =
+        alpacacore::management::DeviceRegistry::instance().get_devices_by_type(alpacacore::DeviceType::Telescope);
+    for (const auto& device : devices) {
+        if (auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get())) {
+            // noexcept: a driver must catch its own failures (TelescopeDriver's contract).
+            telescope->on_host_clock_changed(*event);
+        }
+    }
+}
+
 void Router::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
     management_driver_ = mgmt_driver;
 }
@@ -4936,6 +4977,8 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // The clock is now client-set for the management readout and the
     // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
     host_clock_.mark_stepped();
+    // open-astro#2419: and trusted for a mount's own clock.
+    alpacacore::util::HostClockTrust::mark_set("Sync Time");
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;

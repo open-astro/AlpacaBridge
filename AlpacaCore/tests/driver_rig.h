@@ -18,6 +18,7 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -38,6 +39,22 @@
 #include "fake_task_clock.h"
 
 namespace alpacacore::test {
+
+// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
+// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
+// from the host at connect holds one, so it does not depend on the runner's NTP state.
+struct HostClockTrustGuard {
+    explicit HostClockTrustGuard(bool synchronized) {
+        util::HostClockTrust::reset_for_testing();
+        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
+    }
+    ~HostClockTrustGuard() {
+        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+        util::HostClockTrust::reset_for_testing();
+    }
+    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
+    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
+};
 
 // A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
 struct Latch {
