@@ -12,7 +12,7 @@
 
 #pragma once
 
-// OnStep telescope catalog field declarations, shared by onstep_schema.cpp
+// OnStep telescope, focuser, rotator and switch catalog field declarations, shared by onstep_schema.cpp
 // (no vendor header) and onstep_catalog.cpp (the factory, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -74,6 +74,9 @@ inline const Field<bool> kOnStepSyncTimeOnConnect{.key = "syncTimeOnConnect", .d
 inline const Field<double> kOnStepApertureDiameter{.key = "apertureDiameter", .default_value = 0.0};
 inline const Field<double> kOnStepFocalLength{.key = "focalLength", .default_value = 0.0};
 
+// Which of the controller's up to six focusers (OnStepX :F1...# to :F6...#) the Focuser device drives (#2223).
+inline const Field<std::int64_t> kOnStepFocuserNumber{.key = "focuserNumber", .default_value = 1, .min = 1, .max = 6};
+
 inline const std::vector<FieldRef>& onstep_telescope_fields() {
     static const std::vector<FieldRef> fields{kOnStepConnectionType.ref(),
                                               kOnStepMountIndex.ref(),
@@ -90,6 +93,29 @@ inline const std::vector<FieldRef>& onstep_telescope_fields() {
                                               kOnStepFocalLength.ref()};
     return fields;
 }
+
+// The focuser joins the telescope's link (#2223): the same connection fields, plus the focuser number. No site or
+// optics.
+inline const std::vector<FieldRef>& onstep_focuser_fields() {
+    static const std::vector<FieldRef> fields{
+        kOnStepConnectionType.ref(),    kOnStepMountIndex.ref(),   kOnStepPortPath.ref(),
+        kOnStepBaudRate.ref(),          kOnStepHost.ref(),         kOnStepTcpPort.ref(),
+        kOnStepResponseTimeoutMs.ref(), kOnStepFocuserNumber.ref()};
+    return fields;
+}
+
+// The rotator joins the telescope's link (#2221): the same connection fields, nothing else (the controller has one
+// rotator).
+inline const std::vector<FieldRef>& onstep_rotator_fields() {
+    static const std::vector<FieldRef> fields{
+        kOnStepConnectionType.ref(), kOnStepMountIndex.ref(), kOnStepPortPath.ref(),         kOnStepBaudRate.ref(),
+        kOnStepHost.ref(),           kOnStepTcpPort.ref(),    kOnStepResponseTimeoutMs.ref()};
+    return fields;
+}
+
+// The switch joins the telescope's link (#2222): the same connection fields, nothing else (its switches are the
+// controller's auxiliary features, read at connect).
+inline const std::vector<FieldRef>& onstep_switch_fields() { return onstep_rotator_fields(); }
 
 }  // namespace alpacacore::catalog
 

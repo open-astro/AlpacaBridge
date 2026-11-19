@@ -4,11 +4,15 @@
 # run list it starts the test-only fake_conformu_server on that row's fake,
 # runs ConformU against it and writes a report that says it is fake evidence.
 #
-#   scripts/run_fake_conformu.sh <fake_conformu_server> <conformu-binary> <output-dir> [run-list]
+#   scripts/run_fake_conformu.sh <fake_conformu_server> <conformu-binary> <output-dir> [run-list] [row]
 #
 # The run list defaults to scripts/conformu_fake_runs.tsv (columns vendor,
-# deviceType, fakeHeader, status, slice, reportPath; check 30 of
+# deviceType, fakeHeader, status, slice, reportPath, reason; check 30 of
 # scripts/check_docs_drift.py keeps it in step with kFakeConnectableRoster).
+# [row] is "<vendor>/<deviceType>/<fakeHeader>": only that `run` row runs, and
+# the script fails when the list has no such run row (the workflow runs one row
+# per matrix job). FAKE_CONFORMU_PORT overrides the server's port (11111), so
+# two rows can run side by side on one host.
 # Each row writes <output-dir>/<reportPath below AlpacaCore/conformu/>, whose
 # first line is "FAKE REPORT: ..." (see scripts/check_conformu_reports.py),
 # with its server.log, register.json and the raw ConformU log beside it.
@@ -22,7 +26,8 @@ server_bin="$(realpath "${1:?$usage}")"
 conformu_bin="${2:?$usage}"
 out_dir="${3:?$usage}"
 run_list="${4:-scripts/conformu_fake_runs.tsv}"
-port=11111
+only_row="${5:-}"
+port="${FAKE_CONFORMU_PORT:-11111}"
 base="http://127.0.0.1:${port}"
 
 mkdir -p "$out_dir"
@@ -110,10 +115,11 @@ PY
 rows=0
 failed=0
 # The list is read on fd 3, so nothing a row runs can read it from stdin.
-while IFS=$'\t' read -r vendor device_type fake_header status _slice report_path <&3; do
+while IFS=$'\t' read -r vendor device_type fake_header status _slice report_path _reason <&3; do
   [ "$vendor" = "vendor" ] && continue  # the header
   case "$vendor" in "" | "#"*) continue ;; esac  # blank and comment lines, as check 30 skips them
   [ "$status" = "run" ] || continue
+  [ -z "$only_row" ] || [ "$only_row" = "$vendor/$device_type/$fake_header" ] || continue
   rows=$((rows + 1))
   echo "== ConformU: $vendor $device_type over $fake_header -> $report_path"
   if ! run_row "$vendor" "$device_type" "$fake_header" "$report_path"; then
@@ -122,7 +128,7 @@ while IFS=$'\t' read -r vendor device_type fake_header status _slice report_path
 done 3<"$run_list"
 
 if [ "$rows" -eq 0 ]; then
-  echo "no run rows in $run_list" >&2
+  echo "no run rows${only_row:+ matching $only_row} in $run_list" >&2
   exit 1
 fi
 if [ "$failed" -ne 0 ]; then

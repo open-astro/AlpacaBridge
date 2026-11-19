@@ -21,6 +21,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
@@ -135,7 +136,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.guide_rate_ra_min = limits.guide_rate_dec_min = 0.0;
     limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegPerSec;
-    limits.texts.pulse_duration = "PulseGuide duration must be >= 0";
+    limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: the motor controller sets no bound of its own
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
     return limits;
@@ -1003,7 +1005,7 @@ public:
         // Kept as a write under the state lock, not moved into the poll's publish (#1600): the settle
         // writes only tracking_, tracking_stop_unconfirmed_ and restore_tracking_after_slew_, all guarded
         // by mutex_, which this getter holds, and reads the published snapshot, so it touches no wire and
-        // needs no io_mutex_. It settles only while its stop still owns RA (motion_generation_,
+        // needs no io_mutex_. It settles only while its stop still owns RA (its motion claim,
         // axis_busy_locked() and restoring_tracking_ checks inside). Settling here keeps Tracking exact
         // at the read; a settle in the publish would leave it true until the next poll.
         settle_unconfirmed_tracking_stop_locked();
@@ -1572,6 +1574,7 @@ public:
         stop_pulse_ops();
         bool displaced = false;
         uint64_t home_error_epoch = 0;
+        util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
             check_writable_locked();
@@ -1582,7 +1585,7 @@ public:
             if (at_home_ && !get_hardware_slewing_locked(true)) {
                 return;  // already at home
             }
-            displaced = claim_slew_slot_locked();
+            displaced = claim_slew_slot_locked(claim);
             invalidate_position_cache_locked(false);
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
@@ -1599,9 +1602,10 @@ public:
         }
 
         start_slew_body(
-            [this, home_error_epoch](util::OperationContext& ctx) {
+            [this, home_error_epoch, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
                 StateLock lock(lock_gate_);
+                SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     if (owns_slew_state_locked(ctx)) {
                         homing_ = false;
@@ -1660,7 +1664,7 @@ public:
                     }
                 }
             },
-            displaced,
+            displaced, claim,
             [this] {
                 homing_ = false;
                 set_slewing_cached_false_locked();
@@ -1692,6 +1696,7 @@ public:
         double target_dec_axis = 0.0;
         bool displaced = false;
         uint64_t park_error_epoch = 0;
+        util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
             check_writable_locked();
@@ -1706,7 +1711,7 @@ public:
             }
             target_ra_axis = park_ra_axis_deg_;
             target_dec_axis = park_dec_axis_deg_;
-            displaced = claim_slew_slot_locked();
+            displaced = claim_slew_slot_locked(claim);
             invalidate_position_cache_locked(false);
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
@@ -1723,9 +1728,10 @@ public:
         }
 
         start_slew_body(
-            [this, target_ra_axis, target_dec_axis, park_error_epoch](util::OperationContext& ctx) {
+            [this, target_ra_axis, target_dec_axis, park_error_epoch, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
                 StateLock lock(lock_gate_);
+                SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     if (owns_slew_state_locked(ctx)) {
                         parking_ = false;
@@ -1761,7 +1767,7 @@ public:
                     }
                 }
             },
-            displaced,
+            displaced, claim,
             [this] {
                 parking_ = false;
                 set_slewing_cached_false_locked();
@@ -1789,6 +1795,12 @@ public:
             check_writable_locked();
             check_not_parked_locked("PulseGuide");
             require_site_locked();  // the guide signs read the hemisphere
+            // #2263: one rule on every mount. A slew, Park or FindHome owns both axes until it ends; a pulse
+            // then is refused and changes nothing. Its dispatch claims the axis in the body, as before.
+            if (motion_owner_.slew_running()) {
+                throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                      AlpacaError::InvalidOperation);
+            }
 
             const auto now = clock_.now();
 
@@ -1867,6 +1879,10 @@ public:
             // re-commands the axes itself.
             const auto stopped_by_other = [&ctx] { return ctx.stop_reason() != util::StopReason::None; };
             const auto may_resend_locked = [&stopped_by_other] { return !stopped_by_other(); };
+            // #2263: a MoveAxis on this axis took the pulse over (supersede_pulse_locked()) without waiting
+            // for this body. From then on the body sends its axis nothing; checked under mutex_ before every
+            // exchange. A reaper's cancel is not this: its join waits for the stop below to finish.
+            const auto superseded_locked = [this, ai, my_seq] { return pulse_seq_[ai] != my_seq; };
             // open-astro#559: a task clears pulse state only while its pulse
             // is still the current one. A superseding pulse sets both flags
             // before it reaps this task, and this task's exit used to clear
@@ -1920,7 +1936,7 @@ public:
             // Same re-derivation as stop_axis() below, for the same reason:
             // this runs after the pulse, so a SiteLatitude write during it
             // must be honoured rather than the dispatch-time snapshot.
-            auto recover_ra_drive_rate = [this, &ra_live_write_sent]() {
+            auto recover_ra_drive_rate = [this, &ra_live_write_sent, &superseded_locked]() {
                 if (!ra_live_write_sent) {
                     return;
                 }
@@ -1930,6 +1946,9 @@ public:
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
                         StateLock lock(lock_gate_);
+                        if (superseded_locked()) {
+                            return;  // the MoveAxis that took RA re-commanded it
+                        }
                         if (ra_drive_needs_duty_locked()) {
                             // A sub-floor rate written since the dispatch: stop RA and leave the drive to the
                             // duty worker, never a floor-clamped ":I" (open-astro#1720).
@@ -1968,6 +1987,9 @@ public:
             };
             try {
                 StateLock lock(lock_gate_);
+                if (superseded_locked()) {
+                    return;  // superseded before it dispatched: nothing sent, nothing to release
+                }
                 // An in-place RA pulse never goes through a stop-wait: reap a
                 // pending RightAscensionRate check here so it cannot sample
                 // the pulse rate and "restore" the tracking rate mid-pulse.
@@ -1981,7 +2003,7 @@ public:
                 }
                 const Wire proto = wire();
                 if (axis == kAxisDec) {
-                    start_speed_motion_locked(lock, kAxisDec, dec_rate, false, /*axis_owner=*/true);
+                    start_speed_motion_locked(lock, kAxisDec, dec_rate);
                 } else if (restore_tracking && !pulse_restart) {
                     // No ":i" readback here: the axis is already running at
                     // the pulse rate once ":I" is acknowledged, and the pulse
@@ -2018,12 +2040,12 @@ public:
                     // north of the equator and >= 0 south of it): a live ":I"
                     // write cannot reverse the axis — stop and restart in the
                     // pulse direction instead.
-                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate, false, /*axis_owner=*/true);
+                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC, in
                     // the hemisphere's axis sense for East/West.
                     double rate = ra_axis_sign_locked() * (direction == 2 ? -guide_rate_.ra : guide_rate_.ra);
-                    start_speed_motion_locked(lock, kAxisRa, rate, false, /*axis_owner=*/true);
+                    start_speed_motion_locked(lock, kAxisRa, rate);
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
@@ -2099,9 +2121,14 @@ public:
             // open-astro#1720: set when the restore handed RA to apply_ra_drive_locked() (a sub-floor rate written
             // during the pulse): the axis is stopped for the duty worker, so there is no live rate to verify.
             bool restored_by_drive_applier = false;
+            // #2263: set when stop_axis() found the pulse superseded under mutex_ and sent nothing more.
+            bool lost_axis = false;
             auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
-                              &restore_still_wanted, &restored_by_drive_applier, &stop_ra_if_tracking_off_locked]() {
+                              &restore_still_wanted, &restored_by_drive_applier, &stop_ra_if_tracking_off_locked,
+                              &superseded_locked, &lost_axis]() {
                 restored_by_drive_applier = false;  // a retried stop decides afresh
+                // Every exchange below runs under a lock that first checks the pulse still owns its axis.
+                const auto lost_locked = [&] { return lost_axis = superseded_locked(); };
                 const Wire proto = wire();
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -2124,6 +2151,9 @@ public:
                 bool faulted = false;
                 {
                     StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
                     faulted = link_faulted_locked();
                     restore = restore && !faulted && tracking_effectively_on_locked();
                     restore_still_wanted = restore;
@@ -2138,6 +2168,9 @@ public:
                 // (#770), not undone by this restart.
                 if (!restore && axis == kAxisRa && !faulted) {
                     StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
                     if (tracking_effectively_on_locked()) {
                         apply_ra_drive_locked(lock);
                         return;
@@ -2158,6 +2191,9 @@ public:
                 };
                 if (restore) {
                     StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
                     if (ra_drive_needs_duty_locked()) {
                         restore_through_drive_applier(lock);
                         return;
@@ -2177,14 +2213,24 @@ public:
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason, and skipped
-                    // on the same boards.
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
-                                          /*with_readback=*/false);
+                    // on the same boards. Each write in a lock that checks the
+                    // pulse still owns RA; the hook between them runs unlocked.
+                    {
+                        StateLock lock(lock_gate_);
+                        if (lost_locked()) {
+                            return;
+                        }
+                        proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                                              /*with_readback=*/false);
+                    }
                     detail::run_pulse_restore_hook();
+                    StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
                     if (live_rate_relatch_) {
                         proto.start_motion(kAxisRa);
                     }
-                    StateLock lock(lock_gate_);
                     // Fold the pulse rate into the model up to now first: a
                     // rate change applied from an older anchor (one the limit
                     // guard takes mid-pulse) drops the pulse distance driven
@@ -2217,14 +2263,20 @@ public:
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
                     StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
                     applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                 } else {
-                    proto.stop_motion(axis);
                     // Zero the dead-reckoning rate: this direct stop bypasses
                     // stop_axis_and_wait_locked, and a stale rate kept the
                     // reads drifting after the pulse ended (ConformU 4.5 pulse
                     // displacement tests read phantom motion).
                     StateLock lock(lock_gate_);
+                    if (lost_locked()) {
+                        return;
+                    }
+                    proto.stop_motion(axis);
                     // Fold the motion since the last anchor into the model first: with the rate
                     // zeroed the getters serve the cached angle until the next status poll, and
                     // an anchor up to the cache TTL old made ConformU's read at the end of the
@@ -2284,6 +2336,9 @@ public:
                 if (!stopped && !ctx.wait_for(std::chrono::milliseconds(100))) {
                     break;
                 }
+            }
+            if (lost_axis) {
+                return;  // #2263: superseded; the MoveAxis owns the axis and the pulse's state
             }
             // Same duration guard as the dispatch check: this one runs after
             // the motion, so it costs no pulse distance, but it does hold the
@@ -2358,8 +2413,10 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
-        StateLock lock = start_goto("SlewToCoordinates", ra, dec, nullptr);
-        uint64_t owner_generation = motion_generation_;
+        util::MotionClaim first_claim;
+        StateLock lock = start_goto("SlewToCoordinates", ra, dec, nullptr, &first_claim);
+        // The goto's claim, followed through its re-dispatches (see "Motion claims").
+        SlewClaimScope owner(*this, lock, first_claim);
         // A slew with no slot bumps the slot generation itself: its flags are
         // its own until a newer goto, Park or FindHome claims the slot.
         const uint64_t slew_owner = slew_generation_.bump();
@@ -2367,16 +2424,15 @@ public:
         restoring_tracking_ = false;
         try {
             do_slew_to_ra_dec_locked(lock, ra, dec);
-            owner_generation = motion_generation_;
             goto_in_progress_ = true;
             ilock.unlock();
-            if (!wait_for_slew_complete(lock, owner_generation)) {
+            if (!wait_for_slew_complete(lock, &owner.claim)) {
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }
-            if (!refine_goto_landing(lock, ra, dec, &owner_generation)) {
+            if (!refine_goto_landing(lock, ra, dec, &owner.claim)) {
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }
-            if (motion_generation_ != owner_generation) {
+            if (claim_lost_locked(owner.claim)) {
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }
         } catch (...) {
@@ -2428,9 +2484,11 @@ public:
     void slew_to_coordinates_async(double ra, double dec) override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         start_goto(
-            "SlewToCoordinatesAsync", ra, dec, [this, ra, dec](util::OperationContext& ctx, uint64_t slew_epoch) {
+            "SlewToCoordinatesAsync", ra, dec,
+            [this, ra, dec](util::OperationContext& ctx, uint64_t slew_epoch, const util::MotionClaim& claim) {
                 BodyScope scope(ctx);
                 StateLock lock(lock_gate_);
+                SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     // Stopped before it dispatched (a newer Park/FindHome/slew,
                     // AbortSlew, disconnect): drop the initiator's window with it,
@@ -2550,11 +2608,11 @@ public:
         const bool stop_ra = was_tracking || !manual_axis_slewing_[0];
         const bool stop_dec = !manual_axis_slewing_[1];
         if (stop_ra || stop_dec) {
-            const uint64_t gen = ++motion_generation_;
+            const util::MotionClaim claim = claim_both_axes_locked();
             // Both waits run (dispatch_goto_locked()'s rule): a short-circuit
             // would skip Dec.
-            const bool ra_stopped = !stop_ra || stop_axis_and_wait_locked(lock, kAxisRa, gen);
-            const bool dec_stopped = !stop_dec || stop_axis_and_wait_locked(lock, kAxisDec, gen);
+            const bool ra_stopped = !stop_ra || stop_axis_and_wait_locked(lock, kAxisRa, claim);
+            const bool dec_stopped = !stop_dec || stop_axis_and_wait_locked(lock, kAxisDec, claim);
             if (!ra_stopped || !dec_stopped) {
                 throw AlpacaException("Sync superseded by a concurrent motion command");
             }
@@ -2669,11 +2727,15 @@ public:
         }
         // Only THIS axis's pulse (open-astro#630): MoveAxis commands only its
         // own channel, so a pulse on the other axis runs on and ends itself
-        // (ASCOM allows the axes to move concurrently).
-        stop_pulse_op(axis == 0 ? kAxisRa : kAxisDec);
+        // (ASCOM allows the axes to move concurrently). A stop is a stop path
+        // and reaps it as before; a move supersedes it below, under mutex_,
+        // without a join (decision 0006 rule 3, #2263).
+        if (is_stop) {
+            stop_pulse_op(axis == 0 ? kAxisRa : kAxisDec);
+        }
         bool need_stop_task = false;
         bool started = false;
-        uint64_t stop_task_generation = 0;
+        util::MotionClaim stop_task_claim;
         int channel = kAxisRa;
         {
             StateLock lock(lock_gate_);
@@ -2689,6 +2751,7 @@ public:
             stop_generation_[axis].bump();
             const bool moving = std::abs(rate) > kStopEpsilon;
             if (moving) {
+                supersede_pulse_locked(axis);
                 parked_ = false;
                 at_home_ = false;
                 goto_in_progress_ = false;
@@ -2703,8 +2766,7 @@ public:
                 if (from_rest) {
                     seed_limit_guard_baseline_locked();
                 }
-                start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true,
-                                          /*axis_owner=*/true);
+                start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
             } else if (manual_axis_slewing_[axis]) {
@@ -2717,12 +2779,12 @@ public:
                 faulted_stop_locked([&] { wire().stop_motion(channel); });
                 advance_model_anchor_locked();  // keep the motion up to the stop
                 cmd_axis_rate_deg_s_[axis] = 0.0;
-                // The stop is a motion command: bump and capture the
-                // generation so the background restore-tracking task can tell
+                // The stop is a motion command: take a claim on this axis so
+                // the background restore-tracking task can tell
                 // whether a newer motion command took over while it polled
                 // (PR #216 round-5 finding — the restore otherwise re-starts
                 // tracking a concurrent SetTracking(false) just stopped).
-                stop_task_generation = bump_motion_generation_locked(channel);
+                stop_task_claim = claim_axis_locked(channel);
                 need_stop_task = true;
             }
             // MoveAxis(axis, 0) on an axis with no manual motion is a no-op:
@@ -2749,7 +2811,7 @@ public:
             // No BodyScope here: the helpers it feeds (body_stopped, body_sleep)
             // serve the goto/park/home waits; this body only polls the status
             // and checks ctx directly under mutex_, so it never reads body_ctx_.
-            stop_op(axis).start([this, channel, axis, stop_task_generation](util::OperationContext& ctx) {
+            stop_op(axis).start([this, channel, axis, stop_task_claim](util::OperationContext& ctx) {
                 const Wire protocol = wire();
                 auto deadline = clock_.now() + kAxisStopTimeout;
                 bool stopped = false;
@@ -2786,35 +2848,32 @@ public:
                 }
                 // ASCOM: MoveAxis(axis, 0) restores the previous tracking state —
                 // but only if no newer command took over THIS axis while the task
-                // polled. motion_generation_ is bumped by every motion command on
-                // EITHER axis (see its declaration), so a raw equality check here
-                // was a false positive: stopping the OTHER axis bumped the shared
-                // counter and silently skipped this restore, even though nothing
-                // touched this axis at all (found via a loopback regression test
-                // during EQM-35 Pro bring-up, 2026-09-06). `tracking_`/
+                // polled. The stop's claim is on this axis alone, so a command on
+                // the OTHER axis does not take it (a driver-wide counter once
+                // did, and silently skipped this restore: found via a loopback
+                // regression test during EQM-35 Pro bring-up, 2026-09-06). `tracking_`/
                 // `dec_rate_arcsec_per_sec_` below guard a COMPLETED
                 // SetTracking(false) -- that path publishes tracking_ = false
                 // under the SAME mutex_ this task also holds here. One still IN
-                // FLIGHT is invisible to them: set_tracking_locked(false) bumps
-                // motion_generation_, then releases mutex_ inside
+                // FLIGHT is invisible to them: set_tracking_locked(false) claims
+                // RA, then releases mutex_ inside
                 // stop_axis_and_wait_locked() and assigns tracking_ only after
                 // the wait returns. tracking_off_pending_ covers that window
                 // (tracking_effectively_on_locked()), so the restore yields to
                 // it instead of making the caller throw "Tracking change
                 // superseded" with the mount left tracking (issue #535).
-                // What the generation check still needs to catch
+                // What the claim check still needs to catch
                 // is a goto/park/home/pulse-guide that took over THIS axis, none
-                // of which necessarily touch tracking_/dec_rate_arcsec_per_sec_ --
-                // hence the same same_axis_owner idiom already used by the duty-
-                // cycle worker above (same rationale, same comment there: "the
-                // global generation cannot tell a same-axis supersession from an
-                // unrelated other-axis command"). manual_axis_slewing_[axis] is
+                // of which necessarily touch tracking_/dec_rate_arcsec_per_sec_;
+                // a lost claim with no such owner (a Tracking or rate write that
+                // re-commanded the axis) still restores -- the same_axis_owner
+                // idiom the duty-cycle worker uses. manual_axis_slewing_[axis] is
                 // NOT part of this check (unlike the duty-cycle worker's copy):
                 // it was just unconditionally cleared under this same lock a few
                 // lines above, so it can never be true here (PR #1 review).
                 const bool same_axis_owner =
                     goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_axis_active_[channel - 1];
-                const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
+                const bool generation_ok = !claim_lost_locked(stop_task_claim) || !same_axis_owner;
                 if (!link_faulted_locked() && channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
                     try {
                         set_tracking_locked(lock, true);
@@ -2886,11 +2945,11 @@ public:
         const bool restore_tracking = tracking_effectively_on_locked() &&
                                       (manual_axis_slewing_[0] || manual_axis_slewing_[1]) && !goto_in_progress_ &&
                                       !parking_ && !homing_;
-        // AbortSlew is itself a motion command: bump the generation so any
-        // stop-wait sleeping in an unlock window observes the supersession
-        // and its dispatch aborts BEFORE sending new motor commands (the
-        // cancel flag alone only catches it after the re-dispatch).
-        ++motion_generation_;
+        // AbortSlew is a stop: cancel both axes so any stop-wait sleeping in
+        // an unlock window loses its claim and its dispatch aborts BEFORE
+        // sending new motor commands (the cancel flag alone only catches it
+        // after the re-dispatch).
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
         cancel_rate_verify_locked();  // AbortSlew stops RA too: no resend into it
         const Wire protocol = wire();
         // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
@@ -3239,8 +3298,9 @@ private:
     void reset_runtime_state_locked() {
         // Invalidate every unlocked stop-wait from the previous connection.
         // `connected_` alone cannot distinguish a reconnect that completed
-        // while an older operation was sleeping outside mutex_.
-        ++motion_generation_;
+        // while an older operation was sleeping outside mutex_. It also ends
+        // any slew claim, so PulseGuide is accepted on the new connection.
+        claim_both_axes_locked();
         target_ra_set_ = false;
         target_dec_set_ = false;
         // open-astro#414: the client UTCDate offset and the discipline flag
@@ -3781,8 +3841,7 @@ private:
     // True while a goto/park/home/pulse/manual motion owns THIS axis.
     // Ownership is per axis: a goto/park/home/slew takes both, a pulse or a
     // manual MoveAxis takes only its own -- the same idiom the duty worker
-    // and the MoveAxis stop task already use ("the global generation cannot
-    // tell a same-axis supersession from an unrelated other-axis command").
+    // and the MoveAxis stop task already use.
     bool axis_busy_locked(int channel) const {
         return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[channel - 1] ||
                pulse_axis_active_[channel - 1];
@@ -4466,44 +4525,60 @@ private:
     // Stop one axis and poll until the controller reports it stationary,
     // RELEASING the mutex around every sleep (issue #212): the ramp-down can
     // take over a second, and holding mutex_ through it blocked every
-    // concurrent Alpaca GET. The motion generation guards the unlock windows:
+    // concurrent Alpaca GET. The motion claim guards the unlock windows:
     // if another command claims the axes while we slept, the wait is no
     // longer ours to finish.
-    // Returns true when the axis stopped and the caller's motion command is
-    // still the current one; false when the wait was superseded (a newer
-    // motion command bumped the generation — AbortSlew included — or the
-    // slew task was cancelled) — the caller MUST NOT issue further motor
-    // commands for its now-stale operation (PR #216 review: an AbortSlew
-    // landing in the unlock window otherwise saw its goto re-dispatched).
-    // open-astro#1706, #2067: a pulse's or a MoveAxis's dispatch owns only its own axis, so a command on the
-    // other axis alone (a start or a stop, bump_motion_generation_locked()) moves its generation along instead
-    // of superseding it. A command that owns both axes (goto, Park, sync, abort, home, reconnect) bumps
-    // motion_generation_ directly, leaves pulse_wait_gen_ behind and still supersedes. Only the
-    // owner's own wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
-    [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
-        const int i = channel - 1;
-        return motion_generation_ != gen && !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
+    //
+    // ── Motion claims (#2263, util::MotionOwner) ──────────────────────────────
+    //
+    // A command claims the axes it moves under mutex_ before it touches them; a claim is lost once a newer
+    // command claimed one of its axes or a stop cancelled one. Inside a slew, Park or FindHome (the slew body,
+    // or a synchronous SlewToCoordinates on its own thread: slew_claim_ is set) every claim is a both-axes
+    // claim that replaces the operation's own, because the operation owns both axes until it ends: its
+    // re-dispatches, AutoHome hunt and tracking restart keep slew_running() true, and its post-slew rate check
+    // compares against the operation's newest claim.
+
+    [[nodiscard]] bool claim_lost_locked(const util::MotionClaim& claim) const {
+        return motion_owner_.stop_reason(claim) != util::StopReason::None;
     }
 
-    // The bump for a command on `channel` (kAxisRa or kAxisDec) alone: a pulse or MoveAxis dispatch waiting on the
-    // other axis follows it. An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
-    uint64_t bump_motion_generation_locked(int channel) {
-        uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
-        const bool other_pulse_follows = other_pulse_wait == motion_generation_;
-        const uint64_t gen = ++motion_generation_;
-        if (other_pulse_follows) {
-            other_pulse_wait = gen;
+    // A command on `channel` (kAxisRa or kAxisDec) alone: a one-axis claim, which a command on the other axis
+    // alone does not take (#1706, #2067).
+    util::MotionClaim claim_axis_locked(int channel) {
+        if (slew_claim_) {
+            return claim_both_axes_locked();
         }
-        return gen;
+        return motion_owner_.claim(util::MotionCommand::MoveAxis, channel - 1);
     }
 
-    [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, uint64_t gen) {
-        // Never emit a stop for a STALE generation (PR #216 round-6): when a
+    // A command on both axes. Outside a slew operation (sync, reconnect) it ends at once, so it leaves a
+    // PulseGuide accepted after it.
+    util::MotionClaim claim_both_axes_locked() {
+        const util::MotionClaim claim = motion_owner_.claim(util::MotionCommand::Slew);
+        if (slew_claim_) {
+            *slew_claim_ = claim;
+        } else {
+            motion_owner_.finished(claim);
+        }
+        return claim;
+    }
+
+    // Returns true when the axis stopped and the caller's motion command is
+    // still the current one; false when the wait lost its claim (a newer
+    // motion command claimed one of its axes, or AbortSlew cancelled them) —
+    // the caller MUST NOT issue further motor commands for its now-stale
+    // operation (PR #216 review: an AbortSlew landing in the unlock window
+    // otherwise saw its goto re-dispatched). A one-axis claim (a pulse's or a
+    // MoveAxis's dispatch, #1706, #2067) is not lost to a command on the other
+    // axis alone; a claim on both axes (goto, Park, sync, home, reconnect)
+    // takes every one.
+    [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, const util::MotionClaim& claim) {
+        // Never emit a stop for a STALE claim (PR #216 round-6): when a
         // dispatch's first axis wait was superseded, a newer command may have
         // legitimately started motion on the second axis — a stale stop here
         // would silently kill it while its bookkeeping says it is running.
-        // The newer generation owns the axes now, whatever their state.
-        if (superseded_locked(channel, gen)) {
+        // The newer claim owns the axes now, whatever their state.
+        if (claim_lost_locked(claim)) {
             return false;
         }
         if (channel == kAxisRa) {
@@ -4516,10 +4591,10 @@ private:
         protocol.stop_motion(channel);
         auto deadline = clock_.now() + kAxisStopTimeout;
         while (clock_.now() < deadline) {
-            // Generation only: a slot cancellation must not poison unrelated
+            // The claim only: a slot cancellation must not poison unrelated
             // commands (ConformU: Tracking Write failed "Motion superseded").
-            // AbortSlew bumps the generation, which is the supersession signal.
-            if (superseded_locked(channel, gen)) {
+            // AbortSlew cancels both axes, which is the supersession signal.
+            if (claim_lost_locked(claim)) {
                 return false;
             }
             AxisStatus status = protocol.inquire_status(channel);
@@ -4539,31 +4614,15 @@ private:
     // which reads no position back) anchors the model before the stop drops
     // the old rate and again once the new one starts, so neither rate is
     // applied over the other's time.
-    void start_speed_motion_locked(StateLock& lock, int channel, double signed_rate_deg_per_sec,
-                                   bool anchor_model = false, bool axis_owner = false) {
+    // Returns the command's claim on `channel`.
+    util::MotionClaim start_speed_motion_locked(StateLock& lock, int channel, double signed_rate_deg_per_sec,
+                                                bool anchor_model = false) {
         const Wire protocol = wire();
-        const uint64_t gen = bump_motion_generation_locked(channel);
+        const util::MotionClaim claim = claim_axis_locked(channel);
         if (anchor_model) {
             advance_model_anchor_locked();
         }
-        // Clears this command's slot on every exit (a stop timeout included) with mutex_ held, as every exit of
-        // stop_axis_and_wait_locked() is. Only if it is still this command's: a newer same-axis MoveAxis may
-        // have taken the slot over (#2067).
-        struct PulseSlot {
-            uint64_t& owner;
-            uint64_t& wait;
-            uint64_t gen;
-            bool armed;
-            ~PulseSlot() {
-                if (armed && owner == gen) {
-                    owner = wait = 0;
-                }
-            }
-        } pulse_slot{pulse_owner_gen_[channel - 1], pulse_wait_gen_[channel - 1], gen, axis_owner};
-        if (axis_owner) {
-            pulse_owner_gen_[channel - 1] = pulse_wait_gen_[channel - 1] = gen;
-        }
-        const bool kept = stop_axis_and_wait_locked(lock, channel, gen);
+        const bool kept = stop_axis_and_wait_locked(lock, channel, claim);
         if (!kept) {
             throw AlpacaException("Motion superseded before dispatch");
         }
@@ -4586,6 +4645,7 @@ private:
             advance_model_anchor_locked();
         }
         cmd_axis_rate_deg_s_[channel - 1] = rate;
+        return claim;
     }
 
     // Stop-and-restart RA at the drive rate, re-deriving the rate after every
@@ -4673,8 +4733,8 @@ private:
         if (rate == 0.0) {
             dec_duty_rate_deg_s_ = 0.0;
             if (dec_offset_running_ && !defer_motion) {
-                const uint64_t gen = bump_motion_generation_locked(kAxisDec);
-                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+                const util::MotionClaim claim = claim_axis_locked(kAxisDec);
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, claim));
             }
             dec_offset_running_ = false;
             return;
@@ -4698,8 +4758,8 @@ private:
             start_speed_motion_locked(lock, kAxisDec, rate);
         } else {
             if (dec_offset_running_ && !defer_motion) {
-                const uint64_t gen = bump_motion_generation_locked(kAxisDec);
-                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+                const util::MotionClaim claim = claim_axis_locked(kAxisDec);
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, claim));
             }
             dec_duty_rate_deg_s_ = rate;
             if (defer_motion) {
@@ -4726,7 +4786,7 @@ private:
         constexpr auto kDutyPeriod = std::chrono::milliseconds(3000);
         struct AxisDuty {
             bool bursting = false;
-            uint64_t gen = 0;
+            util::MotionClaim claim;
             double rate = 0.0;  // the duty rate this burst was sized for
             std::chrono::steady_clock::time_point burst_end{};
             std::chrono::steady_clock::time_point next_start = std::chrono::steady_clock::time_point::min();
@@ -4749,27 +4809,26 @@ private:
                         }
                         // Ownership is judged PER AXIS: a goto/park/home owns
                         // both axes, a pulse or manual MoveAxis owns only its
-                        // own. The global generation cannot tell a same-axis
-                        // supersession from an unrelated other-axis command,
-                        // so a stale generation with no same-axis owner means
-                        // the burst still runs and must be stopped (with a
-                        // fresh generation) rather than left creeping at the
-                        // floor rate.
+                        // own. A lost claim with no same-axis owner (a Tracking
+                        // or rate write that re-commanded the axis) means the
+                        // burst still runs and must be stopped (with a fresh
+                        // claim) rather than left creeping at the floor rate.
                         bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
                                                manual_axis_slewing_[i] || pulse_axis_active_[i];
-                        if (rate == 0.0 || (motion_generation_ != ax[i].gen && same_axis_owner)) {
+                        const bool lost = claim_lost_locked(ax[i].claim);
+                        if (rate == 0.0 || (lost && same_axis_owner)) {
                             // Zeroed by its owner, or a same-axis command took
                             // the axis: nothing left for this burst to stop.
                             ax[i].bursting = false;
-                        } else if (motion_generation_ == ax[i].gen && same_axis_owner) {
+                        } else if (!lost && same_axis_owner) {
                             // Same-axis operation is dispatching this tick;
                             // it will supersede momentarily. Retry.
                         } else {
-                            uint64_t stop_gen = ax[i].gen;
-                            if (motion_generation_ != ax[i].gen) {
-                                stop_gen = bump_motion_generation_locked(channel);  // cross-axis bump: still ours
+                            util::MotionClaim stop_claim = ax[i].claim;
+                            if (lost) {
+                                stop_claim = claim_axis_locked(channel);  // lost to no same-axis owner: still ours
                             }
-                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, stop_gen));
+                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, stop_claim));
                             if (duty_rate_locked(channel) == ax[i].rate) {
                                 cmd_axis_rate_deg_s_[i] = ax[i].rate;  // still the average rate
                             }
@@ -4788,12 +4847,12 @@ private:
                         // stop lands.
                         // restoring_tracking_ is in this gate and NOT in
                         // axes_busy_locked() on purpose: a burst START here
-                        // would bump motion_generation_ under the post-slew
+                        // would claim RA under the post-slew
                         // rate check's supersession guard and make it skip,
                         // while a rate SETTER in the same window must go
                         // through. The burst END above is not gated: a burst
                         // already running when the restore began still stops
-                        // with a cross-axis bump, and the rate check then
+                        // with a fresh claim, and the rate check then
                         // logs a skip that names a newer motion command. It
                         // is visible in the log, not closed.
                         // ~140 ms stop-landing overrun measured on hardware;
@@ -4805,8 +4864,7 @@ private:
                         double floor_rate = slow_mode_floor_rate_locked(channel);
                         auto on_time = std::chrono::milliseconds(
                             std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
-                        start_speed_motion_locked(lock, channel, rate > 0.0 ? floor_rate : -floor_rate);
-                        ax[i].gen = motion_generation_;  // owned by THIS burst
+                        ax[i].claim = start_speed_motion_locked(lock, channel, rate > 0.0 ? floor_rate : -floor_rate);
                         ax[i].rate = rate;
                         ax[i].bursting = true;
                         ax[i].burst_end = clock_.now() + on_time;
@@ -4834,8 +4892,8 @@ private:
             StateLock lock(lock_gate_);
             for (int channel = 1; channel <= 2; ++channel) {
                 if (duty_rate_locked(channel) != 0.0 && connected_) {
-                    const uint64_t gen = bump_motion_generation_locked(channel);
-                    static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
+                    const util::MotionClaim claim = claim_axis_locked(channel);
+                    static_cast<void>(stop_axis_and_wait_locked(lock, channel, claim));
                 }
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch): best-effort exit stop
@@ -4864,8 +4922,8 @@ private:
             start_speed_motion_locked(lock, kAxisRa, eff);
             return;
         }
-        const uint64_t gen = bump_motion_generation_locked(kAxisRa);
-        static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, gen));
+        const util::MotionClaim claim = claim_axis_locked(kAxisRa);
+        static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, claim));
         ra_duty_rate_deg_s_ = eff;  // 0.0 = stay stopped; else the worker bursts
         cmd_axis_rate_deg_s_[0] = eff;
     }
@@ -4929,14 +4987,14 @@ private:
     // measured after that throw shows the RA axis stopped, the stop did land:
     // Tracking must not read true for a stopped axis. Served from the polled
     // frame, never the board (decision 0010). Only while that stop still owns
-    // RA: a newer motion command (generation bump) or a pulse, slew or
+    // RA: a newer motion command (its claim on RA) or a pulse, slew or
     // tracking restore holding RA stopped took the axis over, and settling
     // then would end the limit guard while a slew is set to restore tracking.
     void settle_unconfirmed_tracking_stop_locked() const {
         if (!tracking_stop_unconfirmed_ || !tracking_) {
             return;
         }
-        if (motion_generation_ != tracking_stop_unconfirmed_gen_ || axis_busy_locked(kAxisRa) || restoring_tracking_) {
+        if (claim_lost_locked(tracking_stop_unconfirmed_claim_) || axis_busy_locked(kAxisRa) || restoring_tracking_) {
             return;
         }
         const auto reading = snapshot_.read();
@@ -4961,7 +5019,7 @@ private:
             apply_ra_drive_locked(lock);
             apply_dec_rate_offset_locked(lock);
         } else {
-            const uint64_t gen = bump_motion_generation_locked(kAxisRa);
+            const util::MotionClaim claim = claim_axis_locked(kAxisRa);
             // Cleared on every exit (success, timeout, supersession).
             struct PendingOffGuard {
                 int& depth;
@@ -4970,7 +5028,7 @@ private:
             ++tracking_off_pending_;
             bool stopped = false;
             try {
-                stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
+                stopped = stop_axis_and_wait_locked(lock, kAxisRa, claim);
             } catch (...) {
                 // The ":K" went out and the commanded rate is already zero, but
                 // the stop was not confirmed: Tracking keeps reading true while
@@ -4978,7 +5036,7 @@ private:
                 // poll taken after this point sees RA stopped.
                 tracking_stop_unconfirmed_ = true;
                 tracking_stop_unconfirmed_since_ = clock_.now();
-                tracking_stop_unconfirmed_gen_ = gen;
+                tracking_stop_unconfirmed_claim_ = claim;
                 throw;
             }
             if (!stopped) {
@@ -4987,8 +5045,8 @@ private:
                 throw AlpacaException("Tracking change superseded by a concurrent motion command");
             }
             if (dec_offset_running_) {
-                const uint64_t dgen = bump_motion_generation_locked(kAxisDec);
-                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, dgen));
+                const util::MotionClaim dec_claim = claim_axis_locked(kAxisDec);
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, dec_claim));
                 dec_offset_running_ = false;
             }
             // Let the duty worker exit while tracking is off; re-enabling
@@ -5047,9 +5105,9 @@ private:
         return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
     }
 
-    // open-astro#437: the final leg a goto owes: its generation, axes and targets.
+    // open-astro#437: the final leg a goto owes: its motion claim, axes and targets.
     struct FinalApproach {
-        uint64_t generation = 0;
+        util::MotionClaim claim;
         bool owed[2]{};
         double target_deg[2]{};
     };
@@ -5058,18 +5116,18 @@ private:
     // goto stopped. The final leg goes out once each axis that owes one has
     // settled (the rule of every landing), and only while its goto is still the
     // current motion: a newer motion command (AbortSlew, MoveAxis, a pulse, a
-    // newer goto) bumps motion_generation_ and the leg is dropped unsent. True
+    // newer goto) takes the goto's claim and the leg is dropped unsent. True
     // when it went out. The position register is never written, so an
     // unfinished goto leaves nothing to undo.
     bool send_final_approach_locked(StateLock& lock) {
         const FinalApproach leg = final_approach_;
         final_approach_ = {};
         for (int i = 0; i < 2; ++i) {
-            if (leg.owed[i] && leg.generation == motion_generation_) {
+            if (leg.owed[i] && !claim_lost_locked(leg.claim)) {
                 wait_axis_stationary_locked(lock, i + 1);
             }
         }
-        if ((!leg.owed[0] && !leg.owed[1]) || leg.generation != motion_generation_ || body_stopped()) {
+        if ((!leg.owed[0] && !leg.owed[1]) || claim_lost_locked(leg.claim) || body_stopped()) {
             return false;
         }
         slewing_cached_ = true;  // as before every goto: a failed first poll of the leg must not land it
@@ -5080,7 +5138,7 @@ private:
     // `compensate_backlash` is false for the AutoHome hunt: its moves read the
     // home index against the count frame, and it waits for its own landings
     // (autohome_wait_axes_stopped), which never send a final leg. A final leg
-    // (open-astro#437) keeps its goto's generation and moves only the axes that
+    // (open-astro#437) keeps its goto's claim and moves only the axes that
     // owe one, in a slow GOTO (':G' mode '2', ':I' the step period) at the
     // derived speed.
     void dispatch_goto_locked(StateLock& lock, double target_ra_axis_deg, double target_dec_axis_deg,
@@ -5089,21 +5147,20 @@ private:
         // nothing, not even the leading stops (the goto forms are stopped earlier by their position read).
         throw_if_link_faulted_locked();
         const Wire protocol = wire();
-        const uint64_t gen = final_leg ? final_leg->generation : ++motion_generation_;
+        const util::MotionClaim claim = final_leg ? final_leg->claim : claim_both_axes_locked();
         const bool moves[2] = {!final_leg || final_leg->owed[0], !final_leg || final_leg->owed[1]};
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
-        // A single generation spans BOTH stop-waits and the goto commands
-        // below: if either wait is superseded (AbortSlew bumps the
-        // generation too), the whole dispatch aborts before any new motor
-        // command is sent.
+        // A single claim spans BOTH stop-waits and the goto commands
+        // below: if either wait loses it (AbortSlew cancels it too), the
+        // whole dispatch aborts before any new motor command is sent.
         // Evaluate BOTH waits unconditionally (round-4 finding: a short-
         // circuit skipped the second axis entirely) — while the stale-
-        // generation gate inside the wait ensures a superseded dispatch
+        // claim gate inside the wait ensures a superseded dispatch
         // never emits stops that could clobber the superseding command's
         // fresh motion (round-6 finding).
-        const bool ra_stopped = !moves[0] || stop_axis_and_wait_locked(lock, kAxisRa, gen);
-        const bool dec_stopped = !moves[1] || stop_axis_and_wait_locked(lock, kAxisDec, gen);
+        const bool ra_stopped = !moves[0] || stop_axis_and_wait_locked(lock, kAxisRa, claim);
+        const bool dec_stopped = !moves[1] || stop_axis_and_wait_locked(lock, kAxisDec, claim);
         if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
@@ -5118,7 +5175,7 @@ private:
             {kAxisRa, cached_ra_axis_deg_, target_ra_axis_deg},
             {kAxisDec, cached_dec_axis_deg_, target_dec_axis_deg},
         };
-        FinalApproach owes{gen, {false, false}, {target_ra_axis_deg, target_dec_axis_deg}};
+        FinalApproach owes{claim, {false, false}, {target_ra_axis_deg, target_dec_axis_deg}};
         for (const auto& plan : plans) {
             const auto i = static_cast<std::size_t>(plan.channel - 1);
             if (!moves[i]) {
@@ -5265,10 +5322,11 @@ private:
     // tracking off the stopped mount drifts against the sky from the moment
     // Slewing clears, whether or not the hold ran, so the subtracted latency
     // only shifts where that drift starts. Nothing measures or corrects it.
-    bool refine_goto_landing(StateLock& lock, double ra, double dec, uint64_t* expected_generation = nullptr) {
+    // `expected` is the synchronous slew's claim; each re-dispatch replaces it (claim_both_axes_locked()).
+    bool refine_goto_landing(StateLock& lock, double ra, double dec, const util::MotionClaim* expected = nullptr) {
         const double deadband_seconds = kLandingDeadbandDeg / (kHoursToDegrees * kLstHoursPerSecond);
         for (int iter = 0;; ++iter) {
-            if (expected_generation && motion_generation_ != *expected_generation) {
+            if (expected && claim_lost_locked(*expected)) {
                 return false;
             }
             if (body_stopped()) {
@@ -5281,7 +5339,7 @@ private:
             // close the lead, less the restart's own latency.
             const double hold_seconds = landing_lead_seconds_locked(ra, dec) - resume_latency_seconds_;
             if (dec_landed && hold_seconds >= -deadband_seconds && hold_seconds <= kMaxLandingHoldSeconds) {
-                if (hold_seconds > 0.0 && !hold_for_sky_locked(lock, hold_seconds, expected_generation)) {
+                if (hold_seconds > 0.0 && !hold_for_sky_locked(lock, hold_seconds, expected)) {
                     return false;
                 }
                 break;
@@ -5291,15 +5349,11 @@ private:
             }
             slewing_cached_ = true;
             dispatch_predicted_goto_locked(lock, ra, dec);
-            if (expected_generation) {
-                *expected_generation = motion_generation_;
-            }
-            if (!wait_for_slew_complete(
-                    lock, expected_generation ? std::optional<uint64_t>(*expected_generation) : std::nullopt)) {
+            if (!wait_for_slew_complete(lock, expected)) {
                 return false;
             }
         }
-        if (expected_generation && motion_generation_ != *expected_generation) {
+        if (expected && claim_lost_locked(*expected)) {
             return false;
         }
         if (body_stopped()) {
@@ -5317,7 +5371,7 @@ private:
     // body_stopped(). The landing time is stamped again at the end:
     // resume_latency_seconds_ measures landing to ":J", and the hold is not
     // part of that.
-    bool hold_for_sky_locked(StateLock& lock, double seconds, const uint64_t* expected_generation) const {
+    bool hold_for_sky_locked(StateLock& lock, double seconds, const util::MotionClaim* expected) const {
         constexpr auto kHoldStep = std::chrono::milliseconds(100);
         const auto hold = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(seconds));
         const auto until = clock_.now() + hold;
@@ -5327,7 +5381,7 @@ private:
             body_sleep(std::min<std::chrono::nanoseconds>(left, kHoldStep));
             lock.lock();
             check_connected();
-            if (expected_generation && motion_generation_ != *expected_generation) {
+            if (expected && claim_lost_locked(*expected)) {
                 return false;
             }
             if (body_stopped()) {
@@ -5461,21 +5515,26 @@ private:
         // delta == 0 measured against the old expected_cps, a bogus "running
         // at 0 counts/s" WARN, and then apply_ra_drive_locked() driving the
         // axis at sidereal while the Tracking property reported False.
-        // The generation is captured HERE, before the first unlock: taking it
-        // after the window (as ++motion_generation_ did) cannot detect a
+        // The claim is captured HERE, before the first unlock: taking it
+        // after the window (as a fresh claim would) cannot detect a
         // command that landed inside the window, which is the only thing it
-        // needed to detect.
+        // needed to detect. The check runs inside the slew operation, so its
+        // claim is the operation's newest (see "Motion claims").
         //
         // NOT const, and re-seeded after the attempt-0 recovery below: that
-        // recovery is itself a motion command (its own generation bump,
-        // and start_speed_motion_locked() bumps it again), so leaving the
+        // recovery is itself a motion command (its own claim, and
+        // start_speed_motion_locked() claims again), so leaving the
         // entry value in place made attempt 1's first sleep_unlocked() read
         // its OWN restart as somebody else's supersession and return. The
         // second sample was unreachable, "restart did not correct it" could
         // never be emitted, and a restart that also latched wrong ran at the
         // wrong rate for the rest of the session in silence -- the #432
         // symptom, from inside the check meant to catch it (round-1 review).
-        uint64_t entry_generation = motion_generation_;
+        if (!slew_claim_) {
+            ALPACA_LOG_INFO("SkyWatcher", "Post-slew tracking rate check skipped: not inside a slew operation");
+            return;
+        }
+        util::MotionClaim entry_claim = *slew_claim_;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
             body_sleep(d);
@@ -5486,7 +5545,8 @@ private:
                 return false;
             }
             // Superseded, or the client stopped tracking: not ours any more.
-            if (motion_generation_ != entry_generation || !tracking_ || ra_duty_rate_deg_s_ != 0.0) {
+            const bool lost = claim_lost_locked(entry_claim);
+            if (lost || !tracking_ || ra_duty_rate_deg_s_ != 0.0) {
                 // .github/instructions/skywatcher.instructions.md tells the reader to grep for "rate check skipped"
                 // when a slew was never verified (review note on #448). Every
                 // exit that does NOT complete a measurement says so -- this
@@ -5500,10 +5560,9 @@ private:
                 // grep is for slews that were never verified.
                 ALPACA_LOG_INFO("SkyWatcher",
                                 std::string("Post-slew tracking rate check skipped: ") +
-                                    (motion_generation_ != entry_generation
-                                         ? "a newer motion command took the RA axis"
-                                         : (!tracking_ ? "tracking was turned off"
-                                                       : "the RA drive moved to the duty-cycled regime")));
+                                    (lost ? "a newer motion command took the RA axis"
+                                          : (!tracking_ ? "tracking was turned off"
+                                                        : "the RA drive moved to the duty-cycled regime")));
                 return false;
             }
             return true;
@@ -5554,10 +5613,10 @@ private:
                                 " counts/s, expected " + std::to_string(expected_cps) +
                                 (attempt == 0 ? "; stopping and restarting tracking" : "; restart did not correct it"));
             if (attempt == 0) {
-                // Re-checked immediately above by sleep_unlocked(); bump the
-                // generation only now that we know the axis is still ours.
-                const uint64_t gen = bump_motion_generation_locked(kAxisRa);
-                if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+                // Re-checked immediately above by sleep_unlocked(); claim the
+                // axis only now that we know it is still ours.
+                const util::MotionClaim claim = claim_axis_locked(kAxisRa);
+                if (!stop_axis_and_wait_locked(lock, kAxisRa, claim)) {
                     // A supersession exit, and it has to say so: the check has
                     // already stopped the RA axis by this point, and .github/instructions/skywatcher.instructions.md
                     // tells an operator to grep for "rate check skipped" when a
@@ -5580,7 +5639,7 @@ private:
                     apply_ra_drive_locked(lock);
                     // Our own restart is the baseline for attempt 1's
                     // supersession test, not the value captured on entry.
-                    entry_generation = motion_generation_;
+                    entry_claim = *slew_claim_;
                 } catch (const std::exception& e) {
                     // This path has already stopped the axis. Leaving
                     // tracking_ true would report Tracking on a mount whose
@@ -5716,10 +5775,10 @@ private:
         // and step 5 degrees off so the edge is approached cleanly.
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 1: arming home indexers");
         {
-            const uint64_t gen = ++motion_generation_;
+            const util::MotionClaim claim = claim_both_axes_locked();
             // Both waits evaluated unconditionally (see dispatch_goto_locked).
-            const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
-            const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
+            const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, claim);
+            const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, claim);
             if (!ra_stopped || !dec_stopped) {
                 throw AlpacaException("AutoHome cancelled");
             }
@@ -5783,8 +5842,8 @@ private:
                     }
                     if (edge[i] && clock_.now() - edge_at[i] > std::chrono::seconds(3)) {
                         {
-                            const uint64_t gen = ++motion_generation_;
-                            if (!stop_axis_and_wait_locked(lock, axes[i], gen)) {
+                            const util::MotionClaim claim = claim_both_axes_locked();
+                            if (!stop_axis_and_wait_locked(lock, axes[i], claim)) {
                                 throw AlpacaException("AutoHome cancelled");
                             }
                         }
@@ -5818,8 +5877,8 @@ private:
                     home_idx[i] = v;
                     latched[i] = true;
                     {
-                        const uint64_t gen = ++motion_generation_;
-                        if (!stop_axis_and_wait_locked(lock, axes[i], gen)) {
+                        const util::MotionClaim claim = claim_both_axes_locked();
+                        if (!stop_axis_and_wait_locked(lock, axes[i], claim)) {
                             throw AlpacaException("AutoHome cancelled");
                         }
                     }
@@ -5882,7 +5941,8 @@ private:
                 " s after the controller reported it stopped");
     }
 
-    bool wait_for_slew_complete(StateLock& lock, std::optional<uint64_t> expected_generation = std::nullopt) {
+    // `expected` (the synchronous slew's claim, which has no body) ends the wait once lost.
+    bool wait_for_slew_complete(StateLock& lock, const util::MotionClaim* expected = nullptr) {
         const auto timeout = std::chrono::seconds(180);
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
@@ -5894,7 +5954,7 @@ private:
             check_connected();
         };
         while (true) {
-            if (expected_generation && motion_generation_ != *expected_generation) {
+            if (expected && claim_lost_locked(*expected)) {
                 return false;
             }
             if (body_stopped()) {
@@ -5929,7 +5989,7 @@ private:
         }
         wait_axis_stationary_locked(lock, kAxisRa);
         wait_axis_stationary_locked(lock, kAxisDec);
-        if (expected_generation && motion_generation_ != *expected_generation) {
+        if (expected && claim_lost_locked(*expected)) {
             return false;
         }
         if (body_stopped()) {
@@ -5958,7 +6018,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
-        return !expected_generation || motion_generation_ == *expected_generation;
+        return !expected || !claim_lost_locked(*expected);
     }
 
     // ── Live limit guard (open-astro#436) ───────────────────────────────────
@@ -6247,6 +6307,38 @@ private:
         ~BodyScope() { body_ctx_ = nullptr; }
     };
 
+    // #2263: the claim of the slew, Park or FindHome running on this thread (see "Motion claims"); null on
+    // every other thread. A SlewClaimScope sets it for the operation's life and ends the claim with
+    // MotionOwner::finished() when the operation ends, on every exit, a throw included, so a PulseGuide is
+    // accepted again. Declared after the operation's StateLock, so the end lands under the same lock hold that
+    // clears the operation's Slewing flags: a client that reads Slewing false is never refused.
+    // Invariant: each slew body runs on its own slot thread, and the synchronous slew clears it on exit
+    // (~SlewClaimScope), so no other command ever runs on a thread where it is set.
+    static inline thread_local util::MotionClaim* slew_claim_ = nullptr;
+
+    struct SlewClaimScope {
+        SlewClaimScope(SkyWatcherTelescopeDriver& owner, StateLock& held, const util::MotionClaim& first)
+            : driver(owner), lock(held), claim(first) {
+            slew_claim_ = &claim;
+        }
+        SlewClaimScope(const SlewClaimScope&) = delete;
+        SlewClaimScope& operator=(const SlewClaimScope&) = delete;
+        ~SlewClaimScope() {
+            slew_claim_ = nullptr;
+            try {
+                if (!lock.owns_lock()) {
+                    lock.lock();
+                }
+                driver.motion_owner_.finished(claim);
+            } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor; the next both-axes claim replaces it
+            }
+        }
+
+        SkyWatcherTelescopeDriver& driver;
+        StateLock& lock;
+        util::MotionClaim claim;  // the operation's newest claim
+    };
+
     // True when the body running on this thread has been cancelled or replaced.
     bool body_stopped() const { return body_ctx_ && body_ctx_->stop_reason() != util::StopReason::None; }
     bool body_cancelled() const { return body_ctx_ && body_ctx_->stop_reason() == util::StopReason::Cancelled; }
@@ -6271,11 +6363,12 @@ private:
     // The body being replaced is Superseded from here on, so it will not clear
     // its own phase flag; clear both here (the initiator sets its own after).
     // Returns whether a body was in flight (now superseded): only then is there
-    // a motion nobody will stop if the start is refused.
-    bool claim_slew_slot_locked() {
+    // a motion nobody will stop if the start is refused. `claim` is the new
+    // operation's claim on both axes, for its SlewClaimScope.
+    bool claim_slew_slot_locked(util::MotionClaim& claim) {
         const bool displaced = slew_.running();
         slew_generation_.bump();
-        ++motion_generation_;
+        claim = motion_owner_.claim(util::MotionCommand::Slew);
         parking_ = false;
         homing_ = false;
         // The replaced goto's 8 s Slewing window is not the new operation's
@@ -6292,11 +6385,12 @@ private:
     // replaced nothing cancels nothing (a tracking mount keeps tracking).
     template <typename Rollback>
     void start_slew_body(std::function<void(util::OperationContext&)> body, bool displaced,
-                         Rollback&& rollback_locked) {
+                         const util::MotionClaim& claim, Rollback&& rollback_locked) {
         try {
             slew_.start(std::move(body));
         } catch (...) {
             StateLock lock(lock_gate_);
+            motion_owner_.finished(claim);  // no body will end it
             rollback_locked();
             if (displaced) {
                 stop_axes_after_refused_start_locked();
@@ -6431,7 +6525,8 @@ private:
     //   Synchronous (`body` empty): gates, stops any body in flight, and
     //   returns with mutex_ held for the caller to run the goto itself.
     StateLock start_goto(const char* who, double ra, double dec,
-                         std::function<void(util::OperationContext&, uint64_t)> body) {
+                         std::function<void(util::OperationContext&, uint64_t, const util::MotionClaim&)> body,
+                         util::MotionClaim* claim_out = nullptr) {
         util::validate_ra_dec(ra, dec, who);  // #2257: the argument check runs first
         const auto check_request_locked = [&] {
             check_writable_locked();
@@ -6456,14 +6551,15 @@ private:
         stop_pulse_ops();
         StateLock lock(lock_gate_);
         check_request_locked();
+        util::MotionClaim claim;
         if (!body) {
             // Decision 0006 rule 3: supersede, never join. The claim bumps the
             // slot generation, so a running body sees Superseded under the lock
             // before it touches an axis.
-            claim_slew_slot_locked();
+            claim_slew_slot_locked(*claim_out);
             return lock;
         }
-        const bool displaced = claim_slew_slot_locked();
+        const bool displaced = claim_slew_slot_locked(claim);
         invalidate_position_cache_locked(false);
         slewing_cached_ = true;
         // open-astro#575: a fresh initiator is a clean start -- a client
@@ -6487,8 +6583,8 @@ private:
         at_home_ = false;
         lock.unlock();
         std::function<void(util::OperationContext&)> run =
-            [body = std::move(body), slew_epoch](util::OperationContext& ctx) { body(ctx, slew_epoch); };
-        start_slew_body(std::move(run), displaced, [this] {
+            [body = std::move(body), slew_epoch, claim](util::OperationContext& ctx) { body(ctx, slew_epoch, claim); };
+        start_slew_body(std::move(run), displaced, claim, [this] {
             set_slewing_cached_false_locked();
             slew_hold_.clear();
         });
@@ -6549,6 +6645,19 @@ private:
             return;  // pulse_guide() will reject this axis under the lock shortly.
         }
         pulse_ops_[axis - 1].cancel_all_and_join();
+    }
+
+    // #2263, decision 0006 rule 3: a MoveAxis supersedes the pulse on its own axis (`axis` 0 RA, 1 Dec) without
+    // a join. Under mutex_ it takes the pulse's published state (IsPulseGuiding, the hold window) and its
+    // sequence, so the old body owns nothing any more, and cancel()s the slot to wake it. The body checks its
+    // sequence under mutex_ before every exchange (pulse_superseded_locked()) and sends its axis nothing more;
+    // the MoveAxis's own claim makes a dispatch stop-wait it is parked in give up the same way.
+    void supersede_pulse_locked(int axis) {
+        ++pulse_seq_[axis];
+        pulse_axis_active_[axis] = false;
+        pulse_axis_in_motion_[axis] = false;
+        pulse_hold_[axis].clear();
+        pulse_ops_[axis].cancel();
     }
 
     // Both-axes wrapper for the reapers that stop or re-command BOTH axes
@@ -6702,7 +6811,7 @@ private:
     mutable bool tracking_ = false;
     mutable bool tracking_stop_unconfirmed_ = false;
     mutable std::chrono::steady_clock::time_point tracking_stop_unconfirmed_since_{};
-    uint64_t tracking_stop_unconfirmed_gen_ = 0;  // motion_generation_ of that stop
+    util::MotionClaim tracking_stop_unconfirmed_claim_;  // that stop's RA claim
     // Number of Tracking=false stop-waits in flight (under mutex_), while
     // tracking_ still reads true. A counter, not a flag: a second setter can
     // enter the wait while the first is in its unlocked poll, and the first
@@ -6792,9 +6901,9 @@ private:
     double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
     bool dec_offset_running_ = false;
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
-    uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
-    uint64_t pulse_owner_gen_[2] = {0, 0};  // the gen. a pulse's or MoveAxis's own stop-wait holds, 0 = none
-    uint64_t pulse_wait_gen_[2] = {0, 0};   // that stop-wait's current generation per axis, 0 = none (#1706, #2067)
+    // #2263: who owns each axis. Every motion command claims the axes it moves (claim_axis_locked(),
+    // claim_both_axes_locked()) and every unlocked stop-wait checks its claim (claim_lost_locked()).
+    util::MotionOwner motion_owner_;
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;
@@ -6838,15 +6947,16 @@ private:
     // Slew, goto, Park and FindHome share one slot and one generation; each
     // axis's MoveAxis stop-completion body has its own of both (see "Slew and
     // stop slots"). The same-axis refinement near the stop body's tail stays on
-    // motion_generation_. Declared after the limit guard, so they are destroyed
+    // the stop's motion claim. Declared after the limit guard, so they are destroyed
     // (and join) before it.
     util::OperationGeneration slew_generation_;
     util::AsyncOperation slew_{"SkyWatcher slew", slew_generation_, clock_};
     // Pulse guide, one slot per axis (open-astro#620) with a generation of its
     // own each: a pulse start must not supersede the slew body or the other
-    // axis's pulse (decision 0006). A slew, park, home, abort, sync, MoveAxis
-    // or disconnect ends a pulse by cancelling and joining its slot
-    // (stop_pulse_op[s]), not by a generation bump.
+    // axis's pulse (decision 0006). A slew, park, home, abort, sync,
+    // MoveAxis(axis, 0) or disconnect ends a pulse by cancelling and joining its
+    // slot (stop_pulse_op[s]); a moving MoveAxis supersedes it without a join
+    // (supersede_pulse_locked(), #2263).
     util::OperationGeneration pulse_generation_[2];
     util::AsyncOperation pulse_ops_[2] = {{"SkyWatcher pulse guide (RA)", pulse_generation_[0], clock_},
                                           {"SkyWatcher pulse guide (Dec)", pulse_generation_[1], clock_}};

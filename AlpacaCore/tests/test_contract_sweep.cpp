@@ -50,6 +50,7 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "contract_sweep.h"
 #include "fake_task_clock.h"
 
@@ -84,7 +85,10 @@
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -228,6 +232,8 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             // #2257: arguments invalid for every vendor; no probe depends on a vendor's own maximum.
             p.push_back({"pulse_guide(9, 100)", [&] { t.pulse_guide(9, 100); }});
             p.push_back({"pulse_guide(0, -1)", [&] { t.pulse_guide(0, -1); }});
+            // #2292: above every vendor's bound (the largest, the CGX's, is 600 s; with none, kDefaultMaxPulseGuideMs).
+            p.push_back({"pulse_guide(0, INT_MAX)", [&] { t.pulse_guide(0, std::numeric_limits<int>::max()); }});
             p.push_back({"move_axis(5, 0.1)", [&] { t.move_axis(5, 0.1); }});
             p.push_back({"move_axis(0, NaN)", [&] { t.move_axis(0, std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"slew_to_coordinates(25, 0)", [&] { t.slew_to_coordinates(25.0, 0.0); }});
@@ -629,8 +635,7 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
 // Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982). A known
 // row's probe must still not answer InvalidOperation, so a fix that lands without deleting its line fails the sweep. A
-// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned (QHY's second StartExposure
-// supersedes the held worker or times out joining it, #1736).
+// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned.
 struct ExposingRefusalExemption {
     const char* id;
     const char* probe;
@@ -648,9 +653,6 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
     {"gphoto_camera", "set_start_x(StartX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "set_start_y(StartY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "start_exposure(a valid duration)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    // QHY: a second StartExposure cancels and joins the running worker; whether the join ends inside its 2 s bound
-    // decides between a superseded exposure and InvalidOperation, so the probe is not run until #1736.
-    {"qhy_camera", "start_exposure(a valid duration)", "supersedes or times out by timing until #1736", true},
 };
 // clang-format on
 
@@ -1230,6 +1232,8 @@ using Clock = std::chrono::steady_clock;
 // Handshake hold for fakes that have the knob, and the part of it Connected is checked inside.
 constexpr std::chrono::milliseconds kHoldDelay{300};
 constexpr std::chrono::milliseconds kHoldWindow{100};
+// How long a held connect may take to reach its fake's hold (connect_hold_gate.h): far past any connect's set-up.
+constexpr std::chrono::seconds kGateEntryBound{10};
 // Per-row holds, each longer than kHoldWindow and shorter than that row's own reply timeout.
 constexpr std::chrono::milliseconds kSerialBoardHold{150};  // Sky-Watcher serial: response_timeout_ms is 300
 constexpr std::chrono::milliseconds kFlatPanelHold{300};    // Gemini flat panel: handshake read timeout is 2 s
@@ -1364,17 +1368,24 @@ Hosted connected_host(const Tier2Host& h) {
         REQUIRE(std::string(h.connecting_unobservable).size() > 0);
         return;
     }
+    // The row's hold lasts until this case releases it (connect_hold_gate.h), not for a fixed time: a timed hold
+    // could end in a scheduler pause before disconnect() ran, and Connecting then read false with a correct driver.
+    alpacacore::test::ConnectHoldGate gate;
     Hosted hosted = h.connectable(true);
     REQUIRE(hosted.driver != nullptr);
     AlpacaDriver& d = *hosted.driver;
     d.connect();
-    REQUIRE(d.get_connecting());  // inside the fake's hold
+    REQUIRE(d.get_connecting());
+    // The connect thread is inside the fake's hold, past the driver's cancel points, and stays there until
+    // gate.release(): a disconnect recorded earlier would drop the connect at once.
+    REQUIRE(gate.wait_entered(kGateEntryBound));
     const auto t0 = Clock::now();
     d.disconnect();
     const auto call = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0);
     const bool connecting_on_return = d.get_connecting();
+    gate.release();
     INFO("disconnect() took " << call.count() << " ms; Connecting on return: " << connecting_on_return);
-    // Every hold is longer than kHoldWindow, so a disconnect that waits for the connect cannot pass these.
+    // A disconnect that waits for the connect waits for the gate's ConnectHoldGate::kCap, so it cannot pass these.
     CHECK(call < kHoldWindow);
     CHECK(connecting_on_return);
     const auto deadline = Clock::now() + std::chrono::seconds(30);
@@ -1773,7 +1784,7 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
         auto fake = std::make_shared<MountServerHold>();
         auto held = [responder, first, silent = fake->silent](const std::string& chunk) {
             if (silent->load()) return std::string();
-            if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+            if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
             return responder(chunk);
         };
         fake->server = std::make_shared<alpacacore::test::FakeMountServer>(held);
@@ -1830,7 +1841,7 @@ Tier2Host tier2_host_zwo_camera() {
         auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
         if (hold) {
             sdk->before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
@@ -2058,6 +2069,245 @@ Tier2Host tier2_host_onstep_telescope() {
     Tier2Host h = mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
                                     on_default_clock<onstep_telescope_over>);
     h.at_park_unreachable = ":GU always answers 'nNp#' (not parked), so AtPark never reads true (idle_onstep above)";
+    return h;
+}
+
+// An OnStepX with focuser 1 (OnStepX Focuser.command.cpp, af1d26bf; the controller of test_onstep_focuser.cpp, cut
+// down): 0..50000 steps from a minimum of 100, at rest at 1100. `moving` makes :F1T# report a move that never ends
+// once :F1s is accepted (tier 3). `silent` answers nothing (the tier-3 fault and the snapshot rig's held frame).
+struct OnStepFocuserFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> moving = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> endless = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_focuser_responder(const OnStepFocuserFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":F1T#") {
+            const bool now = moving->load();
+            if (!endless->load()) moving->store(false);  // a move ends at the next status read
+            return std::string(now ? "M3#" : "S3#");
+        }
+        if (c == ":F1g#") return std::string("1100#");
+        if (c == ":F1i#") return std::string("100#");
+        if (c == ":F1m#") return std::string("50100#");
+        if (c == ":F1u#") return std::string("0.50000#");
+        if (c == ":F1t#") return std::string("21.5#");
+        if (c == ":F1c#" || c == ":F1c0#" || c == ":F1c1#") return std::string(c == ":F1c1#" ? "1" : "0");
+        if (c.rfind(":F1s", 0) == 0) {
+            moving->store(true);
+            return std::string("1");
+        }
+        if (c == ":F1Q#") {
+            moving->store(false);
+            return std::string();
+        }
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_focuser_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_focuser(0, info, 1, clock);
+}
+
+Hosted onstep_focuser_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepFocuserFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_focuser_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_focuser_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX focuser over FakeMountServer (test_onstep_focuser.cpp): the first reply held for kHold in the hold
+// case, and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_focuser() {
+    Tier2Host h{"onstep_focuser",
+                "onstep",
+                "focuser",
+                "fake_mount_server.h",
+                DeviceType::Focuser,
+                "onstep_focuser",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_focuser_hosted(hold, alpacacore::util::default_task_clock(),
+                                     std::make_shared<OnStepFocuserFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_focuser_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
+    return h;
+}
+
+// An OnStepX with a rotate-only rotator (OnStepX Rotator.command.cpp, af1d26bf; the controller of
+// test_onstep_rotator.cpp, cut down): travel -180..180, at rest at 30 degrees. `moving` makes :rT# report a move that
+// never ends once :rS is accepted (tier 3). `silent` answers nothing (the tier-3 fault and the snapshot rig's held
+// frame).
+struct OnStepRotatorFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> moving = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> endless = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_rotator_responder(const OnStepRotatorFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":GX98#") return std::string("R#");
+        if (c == ":rT#") {
+            const bool now = moving->load();
+            if (!endless->load()) moving->store(false);  // a move ends at the next status read
+            return std::string(now ? "M3#" : "S3#");
+        }
+        if (c == ":rG#") return std::string("+030*00#");
+        if (c == ":rI#") return std::string("-180#");
+        if (c == ":rM#") return std::string("180#");
+        if (c == ":rD#") return std::string("0.00500#");
+        if (c.rfind(":rS", 0) == 0) {
+            moving->store(true);
+            return std::string("1");
+        }
+        if (c == ":rQ#") {
+            moving->store(false);
+            return std::string();
+        }
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_rotator_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_rotator(0, info, clock);
+}
+
+Hosted onstep_rotator_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepRotatorFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_rotator_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_rotator_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX rotator over FakeMountServer (test_onstep_rotator.cpp): the first reply held for kHold in the hold
+// case, and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_rotator() {
+    Tier2Host h{"onstep_rotator",
+                "onstep",
+                "rotator",
+                "fake_mount_server.h",
+                DeviceType::Rotator,
+                "onstep_rotator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_rotator_hosted(hold, alpacacore::util::default_task_clock(),
+                                     std::make_shared<OnStepRotatorFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_rotator_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
+    return h;
+}
+
+// An OnStepX with two auxiliary features (OnStepX Features.command.cpp, af1d26bf; the controller of
+// test_onstep_switch.cpp, cut down): slot 1 a switch, off, slot 2 an analog output at 128. `silent` answers nothing
+// (the snapshot rig's held frame).
+struct OnStepSwitchFake {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+alpacacore::test::FakeMountServer::Responder onstep_switch_responder(const OnStepSwitchFake& fake, bool hold) {
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    return [first, silent = fake.silent](const std::string& c) {
+        if (silent->load()) return std::string();
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
+        if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
+        if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (c == ":GXY0#") return std::string("11000000#");
+        if (c == ":GXY1#") return std::string("Camera,1#");
+        if (c == ":GXY2#") return std::string("Flat,2#");
+        if (c == ":GXX1#") return std::string("0#");
+        if (c == ":GXX2#") return std::string("128#");
+        if (c.rfind(":SXX", 0) == 0) return std::string("1");
+        if (c.rfind(":GE", 0) == 0) return std::string("00#");
+        return std::string("0");
+    };
+}
+
+std::unique_ptr<AlpacaDriver> onstep_switch_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 300;
+    return ons::create_onstep_switch(0, info, clock);
+}
+
+Hosted onstep_switch_hosted(bool hold, alpacacore::util::TaskClock& clock, std::shared_ptr<OnStepSwitchFake> fake) {
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(onstep_switch_responder(*fake, hold));
+    REQUIRE(fake->server->ok());
+    Hosted hosted;
+    hosted.driver = onstep_switch_over(fake->server->port(), hold, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// The OnStepX switch over FakeMountServer (test_onstep_switch.cpp): the first reply held for kHold in the hold case,
+// and a held, never-listening port for the failed connect.
+Tier2Host tier2_host_onstep_switch() {
+    Tier2Host h{"onstep_switch",
+                "onstep",
+                "switch",
+                "fake_mount_server.h",
+                DeviceType::Switch,
+                "onstep_switch",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        return onstep_switch_hosted(hold, alpacacore::util::default_task_clock(), std::make_shared<OnStepSwitchFake>());
+    };
+    h.failing = []() {
+        return host_over_held_port(SOCK_STREAM, [](int port) {
+            return onstep_switch_over(port, false, alpacacore::util::default_task_clock());
+        });
+    };
     return h;
 }
 #endif
@@ -2440,7 +2690,7 @@ Tier2Host tier2_host_qhy_camera() {
         auto sdk_hold = std::make_shared<QhySdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kQhyOpenHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kQhyOpenHold);
             };
         }
         return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2535,7 +2785,7 @@ Tier2Host tier2_host_touptek_camera() {
         auto sdk_hold = std::make_shared<ToupTekSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera_by_id") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2571,7 +2821,7 @@ Tier2Host tier2_host_altair_camera() {
         auto sdk_hold = std::make_shared<ToupTekSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera_by_id") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2783,7 +3033,7 @@ Tier2Host tier2_host_gphoto_camera() {
         auto sdk_hold = std::make_shared<GPhotoSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](GPhotoSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2908,7 +3158,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS2_ONSTEP(X) X(onstep_telescope, TEL)
+#define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR) X(onstep_rotator, PRB) X(onstep_switch, PRB)
 #else
 #define CS2_ONSTEP(X)
 #endif
@@ -3614,6 +3864,35 @@ Tier3Recipe tier3_recipe_onstep_telescope() {
     };
     return tier3_mount_server_recipe("onstep_telescope", "onstep", started, responder, onstep_telescope_over);
 }
+
+// A focuser move that never ends (:F1T# keeps answering 'M'), then the controller goes silent with the socket open.
+// Falsified by: onstep_focuser_driver.cpp get_is_moving() answering from the frame while the poll's fault is latched.
+Tier3Recipe tier3_recipe_onstep_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto fake = std::make_shared<OnStepFocuserFake>();
+    fake->endless->store(true);
+    return t3_on_clock({[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+                        [](Hosted& hosted) { t3_fake<OnStepFocuserFake>(hosted).silent->store(true); },
+                        [](Hosted& hosted) { t3_fake<OnStepFocuserFake>(hosted).silent->store(false); },
+                        "FakeMountServer responder silent mid-move",
+                        [clock, fake](bool hold) { return onstep_focuser_hosted(hold, *clock, fake); }},
+                       DeviceType::Focuser, clock);
+}
+
+// A rotator move that never ends (:rT# keeps answering 'M'), then the controller goes silent with the socket open.
+// Falsified by: onstep_rotator_driver.cpp get_is_moving() answering from the frame while the poll's fault is latched.
+Tier3Recipe tier3_recipe_onstep_rotator() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto fake = std::make_shared<OnStepRotatorFake>();
+    fake->endless->store(true);
+    return t3_on_clock(
+        {[](Hosted& hosted) { dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver).move_absolute(90.0); },
+         [](Hosted& hosted) { t3_fake<OnStepRotatorFake>(hosted).silent->store(true); },
+         [](Hosted& hosted) { t3_fake<OnStepRotatorFake>(hosted).silent->store(false); },
+         "FakeMountServer responder silent mid-move",
+         [clock, fake](bool hold) { return onstep_rotator_hosted(hold, *clock, fake); }},
+        DeviceType::Rotator, clock);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
@@ -4014,7 +4293,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CT3_ONSTEP(X) X(onstep_telescope, OK)
+#define CT3_ONSTEP(X) X(onstep_telescope, OK) X(onstep_focuser, OK) X(onstep_rotator, OK)
 #else
 #define CT3_ONSTEP(X)
 #endif
@@ -4916,6 +5195,31 @@ constexpr double kSnapshotValueMargin = 0.01;
     return g;
 }
 
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_rotator_getters() {
+    using alpacacore::RotatorDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_ROT(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<RotatorDriver&>(d).call); }});
+    SNAP_ROT("Position", get_position())
+    SNAP_ROT("MechanicalPosition", get_mechanical_position())
+    SNAP_ROT("IsMoving", get_is_moving())
+#undef SNAP_ROT
+    return g;
+}
+
+// The first two switches of the fake (a switch and an analog output); MaxSwitch is served from the connect's slots.
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_switch_getters() {
+    using alpacacore::SwitchDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_SW(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<SwitchDriver&>(d).call); }});
+    SNAP_SW("GetSwitchValue0", get_switch_value(0))
+    SNAP_SW("GetSwitchValue1", get_switch_value(1))
+    SNAP_SW("GetSwitch1", get_switch(1))
+#undef SNAP_SW
+    return g;
+}
+
 bool snapshot_has_time_stamp(const AlpacaDriver& driver) {
     const auto state = driver.get_device_state();
     return std::any_of(state.begin(), state.end(), [](const auto& e) { return e.name == "TimeStamp"; });
@@ -5090,6 +5394,51 @@ std::unique_ptr<SnapshotRig> snapshot_rig_onstep_telescope() {
         ons::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
     };
     rig.tick = [driver] { ons::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    return rig_owner;
+}
+
+// The OnStepX focuser over the tier-2 fake (test_onstep_focuser.cpp): a silent controller holds the frame, and the
+// poll on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepFocuserFake>();
+    Hosted hosted = onstep_focuser_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
+    return rig_owner;
+}
+
+// The OnStepX switch over the tier-2 fake (test_onstep_switch.cpp): a silent controller holds the frame, and the poll
+// on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_switch() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepSwitchFake>();
+    Hosted hosted = onstep_switch_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
+    return rig_owner;
+}
+
+// The OnStepX rotator over the tier-2 fake (test_onstep_rotator.cpp): a silent controller holds the frame, and the
+// poll on the rig's clock runs on into the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_rotator() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<OnStepRotatorFake>();
+    Hosted hosted = onstep_rotator_hosted(false, *rig.clock, fake);
+    rig.fake = hosted.fake;
+    rig.driver = std::move(hosted.driver);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->silent->store(true); };
     return rig_owner;
 }
 #endif
@@ -5369,7 +5718,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true))
+#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters()) X(onstep_rotator, snapshot_rotator_getters()) X(onstep_switch, snapshot_switch_getters())
 #else
 #define CS3_ONSTEP(X)
 #endif

@@ -1145,8 +1145,8 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with two p
     REQUIRE(rig.fake().server.ok());
     REQUIRE(rig.connect());
     REQUIRE(driver->get_connected());
-    driver->pulse_guide(2, 600000);  // RA axis
-    driver->pulse_guide(0, 600000);  // Dec axis
+    driver->pulse_guide(2, 60000);  // RA axis
+    driver->pulse_guide(0, 60000);  // Dec axis
     rig.tick(3);
     st->latency_ms = 1200;
     const int before = st->transactions.load();

@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
@@ -141,6 +142,16 @@ PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
     if (!info.supported_formats.empty()) return info.supported_formats.front();
     return PlayerOneImageFormat::Raw16;
 }
+
+// The frame-request texts (#2261) in Player One's words.
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_invalid = "Exposure duration must be non-negative";
+    texts.duration_overflow = "Exposure duration must be non-negative";
+    texts.frame_start_off_sensor = "ROI extends beyond sensor bounds";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 }  // namespace
 
@@ -933,12 +944,16 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
+            // A StartExposure between its settings snapshot and Exposing: the session records the abort and that
+            // start stops the exposure once it runs (decision 0020 rule 9). Recorded before the state is read: a
+            // start that publishes Exposing in between makes record_abort() false and the read below sees that
+            // exposure, where a read first saw Idle and the abort was dropped.
+            if (session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             if (state != CameraState::Exposing && state != CameraState::Download) {
-                // A StartExposure between its settings snapshot and Exposing: the session records the abort and
-                // that start stops the exposure once it runs (decision 0020 rule 9). Otherwise nothing runs.
-                (void)session_.record_abort();
-                return;
+                return;  // nothing runs
             }
             if (state == CameraState::Download || (sdk_exposure_started_ && sdk_.image_ready(camera_info_.camera_id))) {
                 throw AlpacaException("AbortExposure is not possible while the image is being downloaded",
@@ -973,6 +988,10 @@ public:
         }
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
+        }
+        if (duration > kDefaultMaxPulseGuideMs) {  // #2292
+            throw AlpacaException("Pulse guide duration must be <= " + std::to_string(kDefaultMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
         }
         PlayerOneGuideDirection dir = PlayerOneGuideDirection::North;
         switch (direction) {
@@ -1068,15 +1087,12 @@ public:
         (void)light;  // Player One has no mechanical shutter; dark zero-duration frames use ExposureMin.
 
         // The session's start() turns a NaN, an infinite or a huge duration into an undefined duration_cast, so
-        // none of them may reach it. A finite duration below this bound is range-checked against ExposureMax. These
-        // are invalid whatever the camera is, so they precede the connection check (#2259).
-        if (!std::isfinite(duration) || duration < 0.0 ||
-            duration >= static_cast<double>(std::numeric_limits<long>::max()) / 1'000'000.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
-        }
+        // none of them may reach it: check_exposure_duration() refuses them (util/camera_frame_request.h). They are
+        // invalid whatever the camera is, so they precede the connection check (#2259).
+        const double requested_us = util::check_exposure_duration(duration, kRequestTexts);
         ensure_connected();
 
-        long exposure_us_long = static_cast<long>(std::lround(duration * 1'000'000.0));
+        long exposure_us_long = 0;
         int id = 0;
         int active_bin = 0;
         int active_start_x = 0;
@@ -1094,7 +1110,7 @@ public:
         util::CaptureReservation reservation;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            validate_exposure_request_locked(exposure_us_long);
+            exposure_us_long = validate_exposure_request_locked(requested_us);
             reservation = session_.reserve();
             // Retries the stop a failed earlier exposure left running.
             const std::string exposure_stop_error = stop_sdk_exposure_locked();
@@ -1393,7 +1409,9 @@ private:
         session_.ensure_settings_unlocked();
     }
 
-    void validate_exposure_request_locked(long& exposure_us) const {
+    // StartExposure's device stage (#2259 steps 3 and 4): the exposure range, then the frame against the sensor.
+    // Returns the microseconds the SDK gets.
+    long validate_exposure_request_locked(double requested_us) const {
         ensure_connected_locked();
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
@@ -1401,26 +1419,16 @@ private:
         if (!caps_.has_exposure) {
             throw AlpacaException("Exposure not supported", AlpacaError::NotImplemented);
         }
-        if (exposure_us < caps_.exposure_min_us) exposure_us = caps_.exposure_min_us;
-        if (exposure_us > caps_.exposure_max_us) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
+        const long exposure_us =
+            util::exposure_microseconds(requested_us, caps_.exposure_min_us, caps_.exposure_max_us, kRequestTexts);
 
         const int bin = bin_;
         if (bin <= 0 || camera_info_.max_width <= 0 || camera_info_.max_height <= 0) {
             throw AlpacaException("Camera returned invalid sensor geometry", AlpacaError::DriverException);
         }
-        const int max_w = camera_info_.max_width / bin;
-        const int max_h = camera_info_.max_height / bin;
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
-        }
-        if (num_x_ > max_w || num_y_ > max_h) {
-            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-        }
-        if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
-            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-        }
+        util::check_frame_on_sensor(util::CameraFrame{bin, bin, num_x_, num_y_, start_x_, start_y_},
+                                    camera_info_.max_width / bin, camera_info_.max_height / bin, kRequestTexts);
+        return exposure_us;
     }
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
@@ -1636,9 +1644,8 @@ private:
     // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
     // supported values, then the exposing check.
     void set_bin_common(int bin_x, int bin_y) {
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_bin(bin_x, kRequestTexts);
+        util::check_bin(bin_y, kRequestTexts);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -1648,10 +1655,7 @@ private:
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
-        if (std::find(camera_info_.supported_bins.begin(), camera_info_.supported_bins.end(), bin_x) ==
-            camera_info_.supported_bins.end()) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
+        util::check_bin_supported(bin_x, camera_info_.supported_bins, kRequestTexts);
         // Geometry write: rejected mid-exposure, checked under the same
         // mutex_ hold that start_exposure reserves its start under (M15; decision 0020 rule 9).
         ensure_not_exposing_locked();
@@ -1676,9 +1680,8 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_common(std::optional<int> width_opt, std::optional<int> height_opt) {
-        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        if (width_opt) util::check_frame_size(*width_opt, kRequestTexts);
+        if (height_opt) util::check_frame_size(*height_opt, kRequestTexts);
         ensure_connected();
         // ASCOM convention: setters are lenient, StartExposure does the
         // sensor-bounds validation. ConformU's "Reject Bad XSize/YSize" tests
@@ -1688,9 +1691,8 @@ private:
         ensure_connected_locked();
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width, kRequestTexts);
+        util::check_frame_size(height, kRequestTexts);
         ensure_not_exposing_locked();  // M15 — see set_bin_common
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
@@ -1700,18 +1702,16 @@ private:
     }
 
     void set_start_pos_common(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        if (sx_opt) util::check_frame_start(*sx_opt, kRequestTexts);
+        if (sy_opt) util::check_frame_start(*sy_opt, kRequestTexts);
         ensure_connected();
         // ASCOM convention: setters are lenient, StartExposure validates.
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
-        if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(sx, kRequestTexts);
+        util::check_frame_start(sy, kRequestTexts);
         ensure_not_exposing_locked();  // M15 — see set_bin_common
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;

@@ -4,7 +4,9 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 
 ### OnStep
 
-Devices: Telescope.
+Devices: Telescope, Focuser (OnStepX focusers 1-6, #2223), Rotator (OnStepX, #2221), Switch (OnStepX auxiliary
+features, #2222). Every device on one controller shares one link (see "Focuser and the shared link", "Rotator" and
+"Switch" below).
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
 ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
@@ -44,7 +46,7 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:GS#` | sidereal time | `HH:MM:SS#` | `#`-terminated |
 | `:Gt#` / `:Gg#` | latitude / longitude (west-positive on the wire) | `sDD*MM#` / `sDDD*MM#` | `#`-terminated |
 | `:GL#` / `:GC#` / `:GG#` | local time / date / UTC offset (`UTCDate` read) | `HH:MM:SS#` / `MM/DD/YY#` / `sHH:MM#` | `#`-terminated |
-| `:GE#` | last command error (after a refused `:hP#`/`:hC#`, #1430, or `:ST`/`:hQ#`/`:hR#`, #1379) | 2-digit code `#` | `#`-terminated; codes below |
+| `:GE#` | last command error (after a refused `:hP#`/`:hC#`, #1430, or `:ST`/`:hQ#`/`:hR#`, #1379, or a refused focuser `:F<n>s`/`:F<n>c0`/`:F<n>c1`, #2223) | 2-digit code `#` | `#`-terminated; codes below; read inside the link's sequence lock, right after its command (#2223) |
 | `:SrHH:MM:SS#` / `:SdsDD*MM:SS#` | GOTO target | `0`/`1` | bare digit, `1` accepted |
 | `:StsDD*MM#` / `:SgsDDD*MM#` | site latitude / longitude | `0`/`1` | bare digit |
 | `:SLHH:MM:SS#` / `:SCMM/DD/YY#` / `:SGsHH[:MM]#` | time sync (UTC as local, offset 0) | `0`/`1` | bare digit |
@@ -67,6 +69,26 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:hC#` | find home | none | blind; then `:GE#` for the reason |
 | `:hR#` | unpark | `0`/`1` | bare digit; `0` throws with the `:GE#` reason, except `11` (not parked), ASCOM's no-op |
 | `:hQ#` | set park position | `0`/`1` | bare digit; `0` throws with the `:GE#` reason |
+| `:F<n>T#` | focuser n (1-6) status: the connect's check, and every focuser poll (#2223) | `M` moving or `S` stopped, then the goto-rate digit, `#` | read without waiting for the `#`: a controller without focuser n answers the unknown-command `0`, a bare digit; anything but `M`/`S` and a digit fails Connect with "OnStepX reports no focuser n" |
+| `:F<n>g#` | focuser position in raw steps (poll) | `n#` (`%ld`, less the TCF offset) | `#`-terminated; `Position` is it less `:F<n>i#` |
+| `:F<n>i#` / `:F<n>m#` | focuser minimum / maximum position in raw steps (connect) | `n#` | `#`-terminated; `MaxStep` and `MaxIncrement` are maximum less minimum; either one that does not parse fails Connect |
+| `:F<n>u#` | focuser microns per step (`StepSize`, connect) | `n.nnnnn#` | `#`-terminated; a reply that is not a number above 0 makes `StepSize` `PropertyNotImplemented` |
+| `:F<n>t#` | focuser temperature in degrees C (connect, every fourth poll) | `n.n#`; `nan#` with no probe (the sensor reads NAN) | `#`-terminated; no number at connect makes `Temperature` `PropertyNotImplemented` and `TempCompAvailable` false |
+| `:F<n>c#` | focuser temperature compensation on/off (connect, every fourth poll) | `1`/`0` bare digit | `TempCompAvailable` needs it to answer and a temperature at connect |
+| `:F<n>c0#` / `:F<n>c1#` | `TempComp` write | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason |
+| `:F<n>s<steps>#` | focuser `Move`, absolute, raw steps (the client's position plus the minimum) | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason (`09`: the focuser is parked) |
+| `:F<n>Q#` | focuser `Halt` | none | blind |
+| `:GX98#` | rotator capability (the rotator's connect check, #2221) | `R#` rotate only, `D#` rotate and derotate, `N#` none; a firmware without it answers the unknown-command `0` | read without waiting for the `#`; anything but `R`/`D` fails Connect with "OnStepX reports no rotator" |
+| `:rT#` | rotator status (every rotator poll, and right before each move, #2221) | `M` moving, or `S` stopped then `D` (derotation on) and `R` (derotator reversed), then the goto-rate digit, `#` | read without waiting for the `#`; `D` refuses a move with `InvalidOperation` |
+| `:rG#` | rotator angle (every poll; Sync) | `sDDD*MM#`, signed, inside the travel | `#`-terminated; the sign and `*` are required; `MechanicalPosition` is it wrapped into 0-360 |
+| `:rI#` / `:rM#` | rotator travel minimum / maximum, whole degrees (connect) | `n#` | `#`-terminated; either one that does not parse, or a maximum not above the minimum, fails Connect |
+| `:rD#` | rotator degrees per step (`StepSize`, connect) | `n.nnnnn#` | `#`-terminated; a reply that is not a number above 0 makes `StepSize` `PropertyNotImplemented` |
+| `:rSsDDD*MM:SS#` | rotator move to an absolute angle inside the travel | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason (`09`: the rotator is parked) |
+| `:rQ#` | rotator `Halt` | none | blind |
+| `:GXY0#` | auxiliary feature slots (the switch's connect, #2222) | eight `0`/`1`, slot 1 first, `#`; a firmware without the features answers the unknown-command `0` | read without waiting for the `#`; a reply that is not `0`/`1` fails Connect |
+| `:GXY<n>#` | slot n's name and purpose (connect, for each slot the bitmap marks) | `name,purpose#` (name cut to 10 characters; a momentary or cover switch reports purpose 1); `0` for a slot that is off | read without waiting for the `#`; the purpose follows the last `,` |
+| `:GXX<n>#` | slot n's value (every switch poll) | `value#` for a switch or PWM output, `enabled,zero,span,deltaT#` for a dew heater, each with `;volts,amps,flags` appended in a power-monitor build | `#`-terminated; the first field before `,` or `;` is the value |
+| `:SXX<n>,V<v>#` | switch write | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason |
 
 `:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
 `E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
@@ -77,6 +99,129 @@ limits, `7` hardware fault, `8` already in motion, `9` unspecified.
 true are success; `22` in motion makes Park/FindHome wait for the mount to be still and retry for
 3 s; any other code is a refusal the driver keeps and reports with its number (#1430). The `:MS#`
 digits are these codes 15 to 23 less 14.
+
+#### Focuser and the shared link (#2223)
+
+The telescope and every OnStep focuser on one controller share ONE link, the iOptron iFR precedent
+([decision 0017](../../docs/decisions/0017-serial-port-ownership.md) adoption row).
+`OnStepProtocolWrapper::acquire(info)` returns the live link to the same controller, keyed by the serial
+port's canonical path or by `host:port`, or opens one (`util::SerialLink` under the owner name `OnStep`, or the
+TCP channel); the registry lock is held across the open, so two connects at once open it once. A joiner takes the
+link as the first device opened it (line settings and response timeout; a different baud is a WARN). Each driver
+holds a `shared_ptr` in an `std::atomic<std::shared_ptr>` (so `Connected` stays lock-free), and the link closes when
+the last holder lets go: a device's Disconnect only lets go, and the other device keeps the link and its poll.
+There is no process-wide wrapper any more (`instance()` is gone); a test that drives the wire directly builds a
+standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, and
+`detail::registered_link_for_testing(info)` returns the registered link, if any.
+
+- **Wire turns**: every exchange holds the link's wire lock for its command and reply, as before. A command whose
+  error code is read next with `:GE#` (the telescope's `:hP#`/`:hC#`, `:ST`/`:Te#`, `:hQ#`, `:hR#`, `:SXTR`/`:SXTD`;
+  the focuser's `:F<n>s` and `:F<n>c0`/`c1`; the rotator's `:rT#` check and `:rS`, #2221; the switch's `:SXX`, #2222) holds the link's sequence lock (`hold_sequence()`, a recursive mutex
+  above the wire lock) across both, because OnStep keeps one code per channel and a sibling's command in between
+  would replace it. The telescope takes it through `Wire::hold_sequence()`, with `mutex_` released. Nothing else
+  holds it, so the telescope's poll, MoveAxis re-send and pulse-guide timing keep their cadence; a focuser exchange
+  delays a telescope exchange by one reply at a time (`test_onstep_focuser.cpp`, the pulse-guide `[shared-link]` case).
+- **Link loss** (decision 0009): a loss found by any holder is the link's, so every device on it reads `Connected`
+  false at once and each relinks on its own Connect; `acquire()` replaces a lost link on the same key with a fresh
+  one (closing the lost one's port, keeping its loss reason for the holders that have not let go, rule 5). A
+  device's stale fault declares the link lost for all of them (`declare_link_lost()`), as the iFR does: one
+  controller, one link. The telescope's #521 stamps: the telescope sets the link's clock when it takes it and, when
+  it lets go (a Disconnect, a relink or a failed connect), moves the link's loss and last-alive stamps into its own
+  state before it releases the clock, so its next connect times the outage whichever link it then joins, as the
+  process-wide stamps did. A driver object rebuilt during an outage (an edited device) starts with no stamps.
+- **Focuser** (`onstep_focuser_driver.cpp`, OnStepX only): the config takes a focuser number 1-6 (default 1); the
+  API field's 1-6 range refuses any other (the catalog clamps a saved value into it). Connect reads `:GVP#` (an OnStep) and `:GVN#` (refused below
+  version 10: "The OnStep Focuser requires OnStepX firmware"), then `:F<n>T#` (else "OnStepX reports no focuser
+  n"), the travel, the step size, the temperature and the compensation flag. Only the addressed `:F<n>...#` forms
+  are sent: never `:FA<n>#` (the handset and the OnStepX web page use the active focuser) and never the bare rate
+  preset `:F<d>#`. Getters serve a `util::PolledState` frame (500 ms, three failed polls latch a fault, a fault or
+  frame standing past `util::kLinkStalenessBound` loses the link for every device; decisions 0009, 0010, 0016):
+  `:F<n>T#` and `:F<n>g#` every poll, `:F<n>t#` and `:F<n>c#` every fourth. A stale frame is served as it is
+  (decision 0010 rule 6): Position and IsMoving keep the last poll's value, TempComp the last `:F<n>c#` answer
+  and Temperature the last `:F<n>t#` reading; only a fault (DriverException) or a lost link (NotConnected)
+  refuses them. `Move` clamps to `0..MaxStep`
+  (the shared #2028 rule, not the `InvalidValue` #2214 first wrote) and sends `:F<n>s<p + min>#` on the caller's
+  thread: one exchange answered at once, so a refusal throws from `Move` itself, and the motion is followed by the
+  poll (whose slot is the `AsyncOperation`); IsMoving is written through. `Halt` sends `:F<n>Q#` and writes
+  not-moving through; it is not refused for a fault. `TempCompAvailable` needs a temperature at connect as well as
+  a `:F<n>c#` answer: OnStepX turns a compensation request into off while the sensor reads NAN
+  (`Focuser.cpp` `setTcfEnable()`, af1d26bf), so a probe-less focuser would accept `TempComp=true` and read false.
+  The name is `OnStep Focuser` (decision 0024: no model string), the description names the focuser number.
+  Auto-detect is the telescope's scan with the same `mountIndex`, at connect; a port a connected OnStep device
+  holds keeps its place without a probe, so the focuser lands on the telescope's link. Fake evidence only: no
+  OnStepX focuser on a rig; the ConformU Focuser check is tracked in the OnStep test plan, #2126. Tests:
+  `test_onstep_focuser.cpp` (`[shared-link]`), the `[onstep][focuser][stress]` cases in
+  `test_onstep_concurrency_stress.cpp` (over `onstep_controller.h`, whose controller model is `onstep_controller_model.h`, also the fake ConformU host of the focuser, #2078), the contract sweep entry `onstep_focuser`.
+
+#### Rotator (#2221)
+
+The OnStepX rotator joins the controller's link the way a focuser does (`acquire()`, the same connect, refusals,
+poll and loss rules, `onstep_rotator_driver.cpp`), and is OnStepX only. Commands are from OnStepX
+`Rotator.command.cpp` at `af1d26bf`.
+
+- **Connect** reads `:GVP#`, `:GVN#` (below version 10: "The OnStep Rotator requires OnStepX firmware"), `:GX98#`
+  (`R` or `D`, else "OnStepX reports no rotator"; `D` is a derotator build, which OnStepX reports on an alt-az mount),
+  the travel `:rI#`/`:rM#` and the step size `:rD#`, then loads the Sync offset ([decision 0008](../../docs/decisions/0008-rotator-sync-offset-persistence.md)).
+- **State poll** (`util::PolledState`, 500 ms): `:rT#` then `:rG#`, so an angle read after a stopped status is the end
+  of the move. `IsMoving`, `MechanicalPosition` and `Position` serve the frame, stale or not; a fault throws
+  `DriverException`, a lost link `NotConnected`, and a poll unanswered for `util::kLinkStalenessBound` declares the link
+  lost for every device on it.
+- **Angles**: `:rG#` is the firmware's coordinate, signed and inside the travel (whole arcminutes: `Convert::doubleToDms`
+  at `PM_LOW`). `MechanicalPosition` is it wrapped into 0-360, and `Position` is `MechanicalPosition` plus the Sync
+  offset. A move (`Move`, `MoveAbsolute`, `MoveMechanical`) turns its target into a mechanical angle, then into the
+  firmware coordinate inside `:rI#`..`:rM#` that reaches it nearest the current one
+  (`detail::rotator_angle_within_travel()`); none inside is `InvalidValue` with nothing sent, so a move never asks the
+  firmware to leave its travel or wrap a cable. Then, holding the link's sequence lock, it reads `:rT#`: `D`
+  (derotation on) is `InvalidOperation` ("turn derotation off on the controller"), since a goto there sets the axis
+  rate the derotator then fights; otherwise `:rS<sDDD*MM:SS>#` (an optional sign, then `Convert::dmsToDouble`'s
+  `DDD*MM:SS`), whose `0` reads `:GE#` in the same sequence. `IsMoving` is written through.
+- **Never sent**: `:r+#`, `:r-#` (derotation on and off), `:rP#` (to the parallactic angle), `:rR#` (derotator
+  reverse), the rate presets, the continuous moves and the zero or home commands. The derotator is the firmware's.
+- **`Reverse`** is the driver's own: IRotatorV4 says `CanReverse` "must always return True" and `Reverse` must be
+  implemented, and OnStepX has no reverse for a goto (`:rR#` reverses only the derotator). While it is set the driver
+  mirrors the firmware angle (`MechanicalPosition` is the negated angle wrapped into 0-360) and each move's target, so
+  `Position` still equals `MechanicalPosition` without a Sync. It changes nothing on the wire and lasts for the driver
+  object (a reconnect keeps it, a service restart or a device edit clears it). The issue asked for `CanReverse` false;
+  the interface does not allow it.
+- **`Sync`** reads `:rG#` live, sets the offset (Position - MechanicalPosition) and saves it through
+  `util::RotatorSyncOffsetStore` under the stored UniqueID; a save that fails throws `DriverException` and keeps the old
+  offset. `Halt` sends `:rQ#` and writes not-moving through, a lost link refusing it only.
+- Fake evidence only: no OnStepX rotator on a rig, and `:rG#` reads whole arcminutes, so ConformU's position checks,
+  which use `StepSize` as their tolerance, may need a rotator whose step is at least one arcminute. The ConformU Rotator
+  check is tracked in the OnStep test plan, #2126. Tests: `test_onstep_rotator.cpp`, the `[onstep][rotator][stress]`
+  cases in `test_onstep_concurrency_stress.cpp`, the contract sweep entry `onstep_rotator`.
+
+#### Switch (#2222)
+
+The OnStepX auxiliary features (up to eight slots: power switches, PWM outputs, dew heaters, intervalometers) are one
+Switch device on the controller's link, joined the way the focuser and the rotator join it
+(`onstep_switch_driver.cpp`), OnStepX only. Commands are from OnStepX `Features.command.cpp` and the purpose codes
+from `Constants.h`, at `af1d26bf`.
+
+- **Connect** reads `:GVP#`, `:GVN#` (below version 10: "The OnStep Switch requires OnStepX firmware"), then the slot
+  bitmap `:GXY0#` and `:GXY<n>#` for each slot it marks. The slot set is fixed until the next connect: switch ids
+  0..N-1 are the included slots in slot order, so a feature reconfigured in the firmware shows at the next Connect.
+- **Purposes** (`detail::aux_switch_kind()`): 1 (switch; also the momentary and cover switches, which `:GXY` reports as
+  1) a 0/1 switch, 2 (analog output) 0-255 (`:SXX<n>,V` takes 0-255 for 0-100 % power), 3 (dew heater) a 0/1 enable of
+  its regulation; all step 1. 4 (intervalometer) and 6 (hidden switch) are left out, and any other code is left out
+  with an INFO line naming the slot. A controller with none of the three is refused ("OnStepX reports no auxiliary
+  feature a Switch can drive").
+- **Values** come from a `util::PolledState` poll (1 s: one `:GXX<n>#` per included slot, the first field, so a dew
+  heater's zero, span and delta-T and any power telemetry are not read), served stale or not, so a change made in the
+  OnStepX web page, or a momentary switch turning itself off, shows at the next poll. `GetSwitch` is the value above 0.
+- **Writes**: an id outside 0-7 (OnStepX has eight slots) or a value that is not a finite number is `InvalidValue`
+  before the connection check; once connected, an id past `MaxSwitch` or a value outside the slot's range is
+  `InvalidValue` with nothing sent. The value is rounded to the step of 1, as the firmware's `lroundf` would, and
+  sent as `:SXX<n>,V<v>#` holding the link's sequence lock, with `:GE#` after a `0` (`InvalidOperation` with the
+  reason); the value is written through. `CanWrite` is true for every switch; `CanAsync` is false (the firmware applies
+  a write at once) and the async members throw `MethodNotImplemented`, as does `SetSwitchName` (the names are the
+  firmware's configuration). `MaxSwitch` and every per-id member answer `NotConnected` while disconnected, after the
+  0-7 id check, since the slots are read at connect.
+- **Descriptions** carry only what the connect read: "OnStepX auxiliary feature <n>: <purpose>". Power telemetry
+  (volts, amps, fault flags), dew heater zero and span and the intervalometer settings are out of scope (#2214).
+- Fake evidence only: no OnStepX with auxiliary features on a rig; the ConformU Switch check is tracked in the OnStep
+  test plan, #2126. Tests: `test_onstep_switch.cpp`, the `[onstep][switch][stress]` cases in
+  `test_onstep_concurrency_stress.cpp`, the contract sweep entry `onstep_switch`.
 
 #### OnStep 4.x and OnStepX
 
@@ -345,10 +490,11 @@ command channel. Nothing scans the network; the host is typed in.
     and the age of its frame, the slew grace and the pulse-guide end (`util::HoldWindow`s, decision 0022), the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
     connect and on disconnect), and the #521 relink outage:
-    the driver hands its clock to the process-wide wrapper at connect
+    the driver hands its clock to the link it takes at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
-    when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
-    clock. A change of clock forgets those stamps: one taken on another driver's clock is not timed
+    when the driver lets go of the link, #2223), so the link's loss and last-alive stamps and the
+    outage share one clock, and it keeps the stamps of the link it let go of for its next connect. A
+    change of clock forgets the link's stamps: one taken on another driver's clock is not timed
     as an outage (#1460; production keeps one clock). The re-send, tracking-restore, snapshot and
     relink-window tests inject a `FakeTaskClock` and `advance()` it (7 s per re-send tick, 1 s per
     poll tick, 250 ms steps through a synchronous slew, 2 s past the relink window, 60 s past a
@@ -445,7 +591,10 @@ command channel. Nothing scans the network; the host is typed in.
 - **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
   the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
   lost when that path is gone or points elsewhere, or when a read or write on the fd fails with
-  `EIO`/`ENXIO`/`ENODEV`/`EBADF`. Lost means `Connected` false, `NotConnected` instead of a
+  `EIO`/`ENXIO`/`ENODEV`/`EBADF` (the `util::SerialLink` verdict since #2262: the reads go through
+  `read_until(link_, ...)` and the writes through `link_.write_all()`, so the wrapper keeps no serial errno list of its
+  own; an `EBADF` logs one ERROR line, since our own fd is unusable; a successful connect and a Disconnect clear the
+  link's verdict with the wrapper's latch). Lost means `Connected` false, `NotConnected` instead of a
   generic "Failed to send command to mount" while `Connected` still read true (a reply cut off
   mid-read no longer waits out the response timeout either), the fd closed (so the replugged
   CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
@@ -704,8 +853,10 @@ command channel. Nothing scans the network; the host is typed in.
   `pulse_measurement_running_for_testing()`, `set_pulse_guide_gap_hook_for_testing()`. Tests: `test_onstep_telescope_snapshot.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1449, the shape of Sky-Watcher's #1530). Order: `transition_mutex_` (`set_connected()` against
-  `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> `mutex_` (the state lock, a
-  leaf) -> the protocol wrapper's own lock; the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
+  `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> the shared link's sequence
+  lock (#2223, taken with `mutex_` released, through `Wire`) -> `mutex_` (the state lock, a leaf, retaken
+  inside a held sequence after each exchange); the link's wire lock is taken under the sequence lock and never
+  under `mutex_`; the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
   Every command, and each poll tick, holds `io_mutex_` for the whole command through a `StateLock`
   (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places that let
   other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through `Wire`
@@ -722,7 +873,7 @@ command channel. Nothing scans the network; the host is typed in.
   (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's pre-stops, a refused re-send, the #521 relink) all go
   through `send_stops_locked()`. A getter changes state between a command's exchanges only from what it
   already holds (the `Slewing` read that finds a MoveAxis ended in the frame). A new command takes a
-  default `StateLock` and calls `wire()`, never `OnStepProtocolWrapper::instance()` for an exchange; a new
+  default `StateLock` and calls `wire()`, never the held link directly, for an exchange; a new
   getter takes `Mode::State`, and so does a setter that sends nothing (`TargetRightAscension`,
   `TargetDeclination`, `DoesRefraction`): a target written while a slew or sync runs, its checks' reads
   included, stands (each entry point notes the target writes before any check, and the command sets only

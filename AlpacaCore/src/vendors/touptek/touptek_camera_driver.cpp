@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
@@ -50,6 +51,15 @@ constexpr unsigned kFourCC_BGGR = 0x52474742; // 'B','G','G','R'
 constexpr unsigned kFourCC_GRBG = 0x47425247; // 'G','R','B','G'
 constexpr unsigned kFourCC_GBRG = 0x47524247; // 'G','B','R','G'
 constexpr unsigned kFourCC_YYYY = 0x59595959; // mono
+
+// The frame-request texts (#2261) in ToupTek's words (Altair rides them).
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_invalid = "Exposure duration must be non-negative";
+    texts.frame_start_off_sensor = "ROI extends beyond sensor bounds";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 ToupBayerPattern four_cc_to_bayer(unsigned four_cc) {
     switch (four_cc) {
@@ -782,7 +792,7 @@ public:
         // reconnect that changed the bit depth between the check and the write left
         // the accepted bound stale (spurious SDK DriverException). Holding both locks
         // also makes the exposure check atomic with the write (start_exposure
-        // sets exposure_starting_ under mutex_). Lock order mutex_ ->
+        // reserves its start under mutex_). Lock order mutex_ ->
         // readout_mutex_ -> SDK, so the bound is read from handle_ directly, not via
         // offset_max_value() (which would re-take mutex_).
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1013,6 +1023,10 @@ public:
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
         }
+        if (duration > kDefaultMaxPulseGuideMs) {  // #2292
+            throw AlpacaException("Pulse guide duration must be <= " + std::to_string(kDefaultMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
+        }
         ToupGuideDirection dir = ToupGuideDirection::North;
         switch (direction) {
         case 0: dir = ToupGuideDirection::North; break;
@@ -1128,14 +1142,9 @@ public:
     void start_exposure(double duration, bool light) override {
         (void)light;
 
-        // #2259 canonical order: a duration invalid whatever the camera is (non-finite, negative, or too large to
-        // convert to microseconds) precedes the connection check.
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
-        }
-        if (duration * 1'000'000.0 >= static_cast<double>(std::numeric_limits<long>::max())) {
-            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h): a duration invalid whatever the camera is
+        // (non-finite, negative, or too large to convert to microseconds) precedes the connection check.
+        const double requested_us = util::check_exposure_duration(duration, kRequestTexts);
         ensure_connected();
 
         auto& sdk = sdk_;
@@ -1144,12 +1153,13 @@ public:
         // (see below).
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
-        const double rounded_us = std::max(std::round(duration * 1'000'000.0), static_cast<double>(range.min_us));
-        if (rounded_us > range.max_us) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
-        const unsigned exposure_us = static_cast<unsigned>(rounded_us);
+        // The range fits unsigned, so the microseconds the module returns do too.
+        const auto exposure_us = static_cast<unsigned>(util::exposure_microseconds(
+            requested_us, static_cast<long>(range.min_us), static_cast<long>(range.max_us), kRequestTexts));
 
+        // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot below, so a register or geometry
+        // write cannot slip in before session_.start() has published Exposing; a second start is refused.
+        util::CaptureReservation reservation;
         int active_bin = 0;
         int active_start_x = 0;
         int active_start_y = 0;
@@ -1179,10 +1189,7 @@ public:
             }
             // Validate before refusing or stopping anything.
             validate_exposure_roi_locked();
-            const CameraState state = session_.camera_state();
-            if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-                throw AlpacaException("An exposure is already in progress", AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             // A body the watchdog failed can still be in an SDK call: stop its stream
             // now (decision 0020 rule 5), before the snapshot, because the stop
             // dirties the stream configuration.
@@ -1291,11 +1298,6 @@ public:
             saved_stream_clean = stream_clean_;
             stream_clean_ = false;
             generation = abort_generation_.load();
-            // Holds the settings (ensure_not_exposing) from this snapshot until
-            // session_.start() has published Exposing, so a register or geometry
-            // write cannot slip in between.
-            exposure_starting_ = true;
-            abort_pending_ = false;
         }
 
         auto body = [this, generation, exposure_us, active_bin, active_num_x, active_num_y, expected_w, expected_h,
@@ -1469,31 +1471,26 @@ public:
             ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + failure_text);
             std::rethrow_exception(failure);  // kept by the session until the next StartExposure
         };
-        try {
-            session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
-        } catch (...) {
-            // Refused (NotConnected, or the previous body still finishing): no body
-            // ran, so the stream and the settings still need what they needed.
+        // No body ran when the start is refused (NotConnected, or the previous body still finishing) or when an
+        // AbortExposure or StopExposure recorded during the reservation ended it as it published (issue #1996,
+        // decision 0020 rule 9): the stream and the settings still need what they needed.
+        const auto restore_unstarted = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_pending_ = false;  // nothing started, so there is nothing to abort
             // Not on a camera a disconnect has closed or is closing: its stop already
             // ended the stream, and handle_ stays set until after disconnect_and_join().
             if (handle_ && !closing_) stream_clean_ = saved_stream_clean;
             format_dirty_ = format_dirty_ || dirty_format;
             roi_dirty_ = roi_dirty_ || dirty_roi;
+        };
+        bool aborted = false;
+        try {
+            aborted =
+                session_.start(std::move(reservation), static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
+        } catch (...) {
+            restore_unstarted();
             throw;
         }
-        bool abort_now = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_now = std::exchange(abort_pending_, false);
-        }
-        // An AbortExposure or StopExposure that arrived while this start waited in session_.start() (behind a body
-        // the watchdog left in the SDK) was recorded, not dropped (issue #1996): act on it now that Exposing is
-        // published, with the same stop-then-join (or frame discard) as a direct call.
-        if (abort_now) stop_exposure();
+        if (aborted) restore_unstarted();
     }
 
     void stop_exposure() override {
@@ -1501,20 +1498,23 @@ public:
         bool exposing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // A StartExposure is between its settings snapshot and session_.start()
+            // publishing Exposing, which can take up to the start timeout behind a
+            // body the watchdog left in the SDK. The session records the abort and
+            // applies it as that start publishes, so no body runs and the exposure
+            // never runs to the end after the client was told it was aborted
+            // (issue #1996, decision 0020 rule 9). Recorded before the state is read:
+            // a start that publishes Exposing in between makes record_abort() false,
+            // and the read below then sees that exposure and stops it. Read first, the
+            // state was Idle, the record failed and the abort was dropped.
+            if (session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             exposing = state == CameraState::Exposing || state == CameraState::Download;
             if (exposing) {
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
-                // A StartExposure is between its settings snapshot and session_.start()
-                // publishing Exposing, which can take up to the start timeout behind a
-                // body the watchdog left in the SDK. Record the abort; that start runs
-                // it once Exposing is published, so the exposure never runs to the end
-                // after the client was told it was aborted (issue #1996).
-                if (exposure_starting_) {
-                    abort_pending_ = true;
-                    return;
-                }
                 // A completed exposure: drop its frame. A kept failure stays until the
                 // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();
@@ -1602,12 +1602,6 @@ private:
     // An idle camera does not imply a stopped body: a body the watchdog failed
     // can still be in an SDK call until it returns.
     bool stream_clean_;
-    // Guarded by mutex_. True from a StartExposure's settings snapshot until
-    // session_.start() has published Exposing (or refused).
-    bool exposure_starting_{false};
-    // Guarded by mutex_. An AbortExposure or StopExposure that arrived while exposure_starting_ was set; the start
-    // acts on it after session_.start() returns, and clears it when it starts or is refused (issue #1996).
-    bool abort_pending_{false};
     // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
     // a StartExposure in the gap before disconnect_and_join() closes the session
     // would otherwise run a body that triggers on a camera being closed (decision
@@ -1692,34 +1686,16 @@ private:
     // a frame is integrating: the exposure body waits for the frame event
     // holding no lock, so a mid-exposure register write would race the live
     // integration and yield a mixed-state or stalled frame with no error.
-    // Requires mutex_ held, the lock start_exposure sets exposure_starting_ under.
-    // A cancelled or failed body can still be in the SDK, so the settings stay
-    // locked while the session is busy, except once the frame is Ready.
-    void ensure_not_exposing() const {
-        const CameraState state = session_.camera_state();
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-        // Past the state check nothing is exposing, and none can start under mutex_,
-        // so the watchdog cannot fail it between failure() and image_ready(): the
-        // image_ready() below cannot raise. A kept failure is not a ready frame.
-        if (session_.busy() && (session_.failure() || !session_.image_ready())) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Requires mutex_ held, the lock start_exposure reserves its start under (decision
+    // 0020 rule 9): the session answers for the reservation, Exposing, Download and a
+    // failed or cancelled body still returning with no frame ready.
+    void ensure_not_exposing() const { session_.ensure_settings_unlocked(); }
 
+    // The sensor is bounded by its EVEN size (Toupcam_put_Roi needs an even sensor span; see start_exposure).
     void validate_exposure_roi_locked() const {
-        const int max_w = (camera_info_.max_width & ~1) / bin_;
-        const int max_h = (camera_info_.max_height & ~1) / bin_;
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
-        }
-        if (num_x_ > max_w || num_y_ > max_h) {
-            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-        }
-        if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
-            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-        }
+        util::check_frame_on_sensor(util::CameraFrame{bin_, bin_, num_x_, num_y_, start_x_, start_y_},
+                                    (camera_info_.max_width & ~1) / bin_, (camera_info_.max_height & ~1) / bin_,
+                                    kRequestTexts);
     }
 
     // CoolerOn and CoolerPower are "not implemented" on a camera without a cooler (ICameraV4).
@@ -1851,9 +1827,8 @@ private:
     // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
     // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_bin(bin_x, kRequestTexts);
+        util::check_bin(bin_y, kRequestTexts);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -1861,17 +1836,13 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         // Check the exposure state under mutex_ (with readout_mutex_, lock order
         // mutex_ -> readout_mutex_) so it is atomic with the geometry mutation below
-        // and with start_exposure setting exposure_starting_ — a bare pre-lock check
+        // and with start_exposure reserving its start (rule 9) — a bare pre-lock check
         // is a TOCTOU (matches set_gain / set_readout_mode).
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
-        if (std::find(camera_info_.supported_bins.begin(),
-                      camera_info_.supported_bins.end(),
-                      bin_x) == camera_info_.supported_bins.end()) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
+        util::check_bin_supported(bin_x, camera_info_.supported_bins, kRequestTexts);
         ensure_not_exposing();
         if (bin_ == bin_x) return;
         bin_ = bin_x;
@@ -1893,17 +1864,15 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        if (width_opt) util::check_frame_size(*width_opt, kRequestTexts);
+        if (height_opt) util::check_frame_size(*height_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width, kRequestTexts);
+        util::check_frame_size(height, kRequestTexts);
         ensure_not_exposing();
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
@@ -1923,18 +1892,15 @@ private:
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        if (sx_opt) util::check_frame_start(*sx_opt, kRequestTexts);
+        if (sy_opt) util::check_frame_start(*sy_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
-        if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(sx, kRequestTexts);
+        util::check_frame_start(sy, kRequestTexts);
         ensure_not_exposing();
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;

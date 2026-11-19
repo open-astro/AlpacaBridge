@@ -70,6 +70,9 @@ Symbol: `TaskClock`
 | WandererAstro cover | `AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp` | adopted | #730 | link-health timing |
 | WandererAstro filter wheel | `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp` | adopted | #730 | link-health timing |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | moved with its first slot (the MoveAxis re-send) |
+| OnStep focuser | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
+| OnStep rotator | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
+| OnStep switch | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | telemetry, GOTO, pulse and control deadlines; UTC/LST and protocol timeouts stay off the clock |
 | iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted | #1590 | status cache age |
 | iOptron iEFW filter wheel | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted | #1723 | status cache age and its fault stamp (the decision 0009 staleness bound) |

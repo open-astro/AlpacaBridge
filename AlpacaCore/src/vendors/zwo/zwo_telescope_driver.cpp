@@ -59,6 +59,7 @@ constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
+    limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: was a silent clamp to 60 s
     limits.move_axis_axes = 2;
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
@@ -67,7 +68,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.guide_rate_ra_min = 0.0;
     limits.guide_rate_dec_min = 0.0;
     limits.texts.pulse_direction = "PulseGuide direction must be 0..3";
-    limits.texts.pulse_duration = "PulseGuide duration must be >= 0";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
     limits.texts.move_axis_axis = "Axis must be 0 or 1";
     limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
     limits.texts.move_axis_rate_range = "Axis rate out of range";
@@ -1731,7 +1732,8 @@ public:
         const bool ra_axis = (direction == 2 || direction == 3);
         const bool dec_axis = (direction == 0 || direction == 1);
 
-        const int effective_duration = std::clamp(duration, 0, 60000);
+        // 0..kDefaultMaxPulseGuideMs: the gate refuses a longer pulse (#2292); it is no longer clamped.
+        const int effective_duration = duration;
         double guide_rate_deg_per_sec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);

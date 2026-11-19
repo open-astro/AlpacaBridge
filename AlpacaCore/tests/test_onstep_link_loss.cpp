@@ -18,9 +18,10 @@
 // an unplug removes. The network cases at the end (#2220) run it over the TCP
 // command channel against a loopback FakeMountServer, where a hangup is the
 // loss (decision 0009 rule 2a).
-// The write-side loss mapping (fail_write_locked) has no case of its own: on
-// a severed pty the removed-node check before every write fires first, so a
-// pty cannot make the write itself return EIO with the node still present.
+// The write-side loss mapping (fail_write_locked) is pinned by the EBADF case
+// (#2262): on a severed pty the removed-node check before every write fires
+// first, so a pty cannot make the write itself return EIO with the node still
+// present, but a read-only stand-in on the same tty makes it return EBADF.
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
@@ -278,22 +279,6 @@ ConnectionInfo serial_info(const PortLink& link) {
     return info;
 }
 
-// The wrapper is a process-wide singleton: leave it disconnected and with no
-// loss stamp, so the next case's first connect is a fresh one.
-// Reset on entry too, in case an earlier OnStep test left it connected.
-struct WrapperReset {
-    WrapperReset() { reset(); }
-    ~WrapperReset() { reset(); }
-    WrapperReset(const WrapperReset&) = delete;
-    WrapperReset& operator=(const WrapperReset&) = delete;
-    static void reset() {
-        auto& protocol = OnStepProtocolWrapper::instance();
-        protocol.disconnect();
-        (void)protocol.consume_link_lost_at();
-        (void)protocol.consume_last_alive_before_loss();
-    }
-};
-
 // Joins a thread on every way out of a scope, so a failed REQUIRE while it
 // runs fails the case instead of terminating the test binary.
 struct JoinOnExit {
@@ -345,7 +330,6 @@ struct LossHookReset {
 
 TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no client I/O",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
@@ -370,16 +354,19 @@ TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no
     CHECK(driver->get_link_fault().empty());
     // With no link at all the wrapper answers NotConnected too, not a
     // generic driver error.
-    require_alpaca_error([] { (void)OnStepProtocolWrapper::instance().send_command(":GVP#"); },
-                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error(
+        [] {
+            OnStepProtocolWrapper none;  // never connected
+            (void)none.send_command(":GVP#");
+        },
+        alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected before the timeout",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     auto info = serial_info(link);
     info.response_timeout_ms = 5000;
     REQUIRE(protocol.connect(info));
@@ -399,15 +386,69 @@ TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected b
     CHECK(protocol.consume_link_lost_at().has_value());
 }
 
+// Issue #2262: over serial the verdict is the shared util::SerialLink one. A hangup mid-reply is a lost link (the
+// read's own errno text), and only the next connect on the same wrapper clears the loss and its reason, here to a
+// replugged adapter behind the same path.
+TEST_CASE("OnStep link loss - a hangup mid-reply is a lost link until the next connect",
+          "[onstep][serial][connected][link-lost][issue2262]") {
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
+    const auto info = serial_info(link);
+    REQUIRE(protocol.connect(info));
+    mount.sever_on(":GRa#");
+    require_alpaca_error([&] { (void)protocol.send_command(":GRa#"); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().find("read failed") != std::string::npos);
+    require_alpaca_error([&] { (void)protocol.send_command(":GU#"); }, alpacacore::AlpacaError::NotConnected);
+
+    FakeOnStepSerialMount replugged;
+    link.repoint(replugged.slave_path());
+    REQUIRE(protocol.connect(info));
+    CHECK(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().empty());
+    CHECK_FALSE(protocol.send_command(":GRa#").empty());
+    protocol.disconnect();
+}
+
+// Issue #2262: EBADF on the controller's own fd is a lost link, on the command's write and on its reply read alike
+// (the util::SerialLink verdict; the wrapper's own errno list is gone), with the node still present, and a
+// Disconnect then a Connect clears it.
+TEST_CASE("OnStep link loss - EBADF on the controller's fd is a lost link until the next connect",
+          "[onstep][serial][connected][link-lost][issue2262]") {
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    OnStepProtocolWrapper protocol;
+    const auto info = serial_info(link);
+    const auto before = alpacacore::test::fds_open_on(mount.slave_path());
+    REQUIRE(protocol.connect(info));
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(mount.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE_FALSE(protocol.send_command(":GRa#").empty());
+
+    const bool on_write = GENERATE(true, false);
+    INFO((on_write ? "EBADF on the command's write" : "EBADF on the reply read"));
+    REQUIRE(alpacacore::test::replace_fd_on_tty(fd, mount.slave_path(), on_write ? O_RDONLY : O_WRONLY));
+    require_alpaca_error([&] { (void)protocol.send_command(":GRa#"); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(protocol.link_alive());
+    CHECK(protocol.link_lost_reason().find(on_write ? "write failed" : "read failed") != std::string::npos);
+
+    protocol.disconnect();
+    CHECK(protocol.link_lost_reason().empty());
+    REQUIRE(protocol.connect(info));
+    CHECK(protocol.link_alive());
+    CHECK_FALSE(protocol.send_command(":GRa#").empty());
+    protocol.disconnect();
+}
+
 // #1430: FindHome reads :GE# right after :hC#. A link lost in between must
 // fail that read (NotConnected), not read as "no code": FindHome would then
 // report success on a dead link.
 TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead of reading no code",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     REQUIRE(protocol.connect(serial_info(link)));
     REQUIRE(protocol.link_alive());
 
@@ -420,15 +461,13 @@ TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead 
 // #1430: on a link that is closed rather than lost, the :GE# read fails too,
 // instead of reading as "no code".
 TEST_CASE("OnStep link loss - the :GE# read fails NotConnected while disconnected", "[onstep][serial][connected]") {
-    WrapperReset reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     REQUIRE_FALSE(protocol.is_connected());
     require_alpaca_error([&] { (void)protocol.get_last_command_error(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead of short-circuiting",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
@@ -459,7 +498,6 @@ TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead o
 // connect. The relink drops it first, so the lost session's Connected cannot
 // show through the new link's warm-up while Connecting is still true.
 TEST_CASE("OnStep link loss - Connected stays false through the relink's warm-up", "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
@@ -496,9 +534,8 @@ TEST_CASE("OnStep link loss - Connected stays false through the relink's warm-up
 // that lands between the stat() and the record must not leave a loss behind,
 // or the next Connect sends the #521 stops to a mount nobody lost.
 TEST_CASE("OnStep link loss - a Disconnect during the node check records no loss", "[onstep][serial][connected]") {
-    WrapperReset reset;
     LossHookReset hook_reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
     REQUIRE(protocol.connect(serial_info(link)));
@@ -523,9 +560,8 @@ TEST_CASE("OnStep link loss - a Disconnect during the node check records no loss
 // down but not yet closed the port when link_alive() goes to record. The
 // snapshot link_alive() took before it must not match by then.
 TEST_CASE("OnStep link loss - a Disconnect still closing the port records no loss", "[onstep][serial][connected]") {
-    WrapperReset reset;
     LossHookReset hook_reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
     REQUIRE(protocol.connect(serial_info(link)));
@@ -568,9 +604,8 @@ TEST_CASE("OnStep link loss - a Disconnect still closing the port records no los
 // #1289 item 3, the relink half: a reconnect to the replugged adapter that
 // lands in the same window must not see its new link marked lost and closed.
 TEST_CASE("OnStep link loss - a reconnect during the node check keeps the new link", "[onstep][serial][connected]") {
-    WrapperReset reset;
     LossHookReset hook_reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
     REQUIRE(protocol.connect(serial_info(link)));
@@ -605,9 +640,8 @@ TEST_CASE("OnStep link loss - a reconnect during the node check keeps the new li
 // closes the port: the close must not take the fresh link down with it.
 TEST_CASE("OnStep link loss - a reconnect after the loss is recorded keeps the new link",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     LossHookReset hook_reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
     REQUIRE(protocol.connect(serial_info(link)));
@@ -638,7 +672,6 @@ TEST_CASE("OnStep link loss - a reconnect after the loss is recorded keeps the n
 }
 
 TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outage", "[onstep][serial][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     // The outage is timed on the driver's clock, which the wrapper's loss
     // stamps read too (decision 0005); declared before the driver.
@@ -714,13 +747,12 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
     driver->set_connected(false);
 }
 
-// #1460: the process-wide wrapper takes its loss stamps on the clock of the
-// driver that connected last. A stamp taken on one driver's clock means
-// nothing on the next driver's, so it goes with the clock instead of being
-// timed as an outage there.
+// #1460: a link takes its loss stamps on the clock of the telescope that holds
+// it, and the stamps stay with that driver when it lets go (#2223). A stamp
+// taken on one driver's clock means nothing on the next driver's, so it goes
+// with that driver instead of being timed as an outage there.
 TEST_CASE("OnStep link loss - a loss stamped on one driver's clock is not timed on the next driver's",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     alpacacore::test::FakeTaskClock first_clock;
     alpacacore::test::FakeTaskClock second_clock;
@@ -747,19 +779,10 @@ TEST_CASE("OnStep link loss - a loss stamped on one driver's clock is not timed 
 // #1460: setting another clock, or releasing the one in use, forgets the
 // loss and last-alive stamps taken on the old one.
 TEST_CASE("OnStep link loss - a change of clock forgets the wrapper's loss stamps", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock first_clock;
     alpacacore::test::FakeTaskClock second_clock;
-    auto& protocol = OnStepProtocolWrapper::instance();
-    struct ClockReset {
-        alpacacore::test::FakeTaskClock& a;
-        alpacacore::test::FakeTaskClock& b;
-        ~ClockReset() {
-            auto& wrapper = OnStepProtocolWrapper::instance();
-            wrapper.release_task_clock(a);
-            wrapper.release_task_clock(b);
-        }
-    } clock_reset{first_clock, second_clock};
+    // A link of its own, outside the registry (#2223), declared after the clocks so it goes first.
+    OnStepProtocolWrapper protocol;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
     protocol.set_task_clock(first_clock);
@@ -778,7 +801,6 @@ TEST_CASE("OnStep link loss - a change of clock forgets the wrapper's loss stamp
 // lost driver's own reconnect still times its outage.
 TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the loss stamps alone",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     alpacacore::test::FakeTaskClock fake_clock;
     alpacacore::test::FakeTaskClock other_clock;
@@ -808,11 +830,10 @@ TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the lo
 
 TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once the exchange ends",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount first;
     FakeOnStepSerialMount second;
     PortLink link(first.slave_path());
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     REQUIRE(protocol.connect(serial_info(link)));
 
     // An exchange holds the link while the path is re-pointed to another
@@ -853,7 +874,6 @@ TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once
 
 TEST_CASE("OnStep link loss - a reconnect that auto-detects a new port still stops motion after a long outage",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     FakeOnStepSerialMount first;
     PortLink old_port(first.slave_path());
@@ -884,10 +904,9 @@ TEST_CASE("OnStep link loss - a reconnect that auto-detects a new port still sto
 
 TEST_CASE("OnStep link loss - a command after an unnoticed unplug fails NotConnected at once",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     REQUIRE(protocol.connect(serial_info(link)));
 
     // Nothing has looked since the unplug; the path is still there (now
@@ -904,7 +923,6 @@ TEST_CASE("OnStep link loss - a command after an unnoticed unplug fails NotConne
 // with the fault text instead of serving the frame; the next good tick clears it.
 TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a reply clears it",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;  // the poll and the fault run on it (decision 0005)
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1023,7 +1041,6 @@ TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a
 // the status and position reads do, without asking the mount.
 TEST_CASE("OnStep link loss - a site the connect could not read throws the fault while faulted",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     mount.set_reply(":Gt#", "x#");  // the connect's site read fails
@@ -1072,7 +1089,6 @@ TEST_CASE("OnStep link loss - a site the connect could not read throws the fault
 // Sky-Watcher, and answer again once a reply clears the fault.
 TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fault while faulted",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1131,7 +1147,6 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
 // asking the mount, so it refuses a latched fault itself, as its pending-Park
 // answer does.
 TEST_CASE("OnStep link loss - Slewing within the slew grace throws the fault", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;  // not moved: the grace stays open
     FakeOnStepSerialMount mount;
     mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: the slew goes out
@@ -1158,7 +1173,6 @@ TEST_CASE("OnStep link loss - Slewing within the slew grace throws the fault", "
 // not a silent mount: it does not count toward the fault.
 TEST_CASE("OnStep link loss - a lost link during the failed reads is not latched as a fault",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1187,8 +1201,7 @@ TEST_CASE("OnStep link loss - a lost link during the failed reads is not latched
 // #1414: the wrapper records a loss only for a link it still holds.
 TEST_CASE("OnStep link loss - declaring a lost link while disconnected records nothing",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
-    auto& protocol = OnStepProtocolWrapper::instance();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
     REQUIRE_FALSE(protocol.is_connected());
     protocol.declare_link_lost("test");
     CHECK(protocol.link_lost_reason().empty());
@@ -1200,7 +1213,6 @@ TEST_CASE("OnStep link loss - declaring a lost link while disconnected records n
 // client's Connect relinks.
 TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses the link",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;  // the fault's age and the outage run on it (decision 0005)
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1250,7 +1262,6 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
 // every read (decision 0009 rule 1); one failed read alone still keeps
 // reporting the move.
 TEST_CASE("OnStep link loss - Slewing reports a latched fault during a MoveAxis", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1280,7 +1291,6 @@ TEST_CASE("OnStep link loss - Slewing reports a latched fault during a MoveAxis"
 // idle is not sent the tracking start (:ST60.164275#) at the next slew end
 // the driver sees.
 TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking later", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: a slew is refused while a GOTO runs (#1379)
@@ -1319,7 +1329,6 @@ TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking late
 // #1414: a client that only writes after the fault latched still sees the
 // link lost once the fault has stood past the bound, as a read would.
 TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the link", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1347,7 +1356,6 @@ TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the
 // too. A :GU# read tells them apart: a silent mount fails FindHome instead
 // of reporting it accepted.
 TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :hC#", "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     mount.set_reply(":GU#", "nNpEo190#");  // not at home
     PortLink link(mount.slave_path());
@@ -1387,7 +1395,6 @@ TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :h
 // retried in the background, so Park returned success to a silent mount.
 TEST_CASE("OnStep link loss - Park fails when the mount goes silent after its :hP# reply",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     mount.set_reply(":GU#", "nNpEo190#");  // not parked
     mount.set_reply(":hP#", "0");
@@ -1412,7 +1419,6 @@ TEST_CASE("OnStep link loss - Park fails when the mount goes silent after its :h
 // goes out used to be swallowed with every other failure, so AbortSlew reported success on a gone link; it is
 // NotConnected now, as for any command.
 TEST_CASE("OnStep link loss - AbortSlew reports a link lost at its tracking restore", "[onstep][serial][connected]") {
-    WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;  // not moved: the status poll never ticks
     FakeOnStepSerialMount mount;
     mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: the slew goes out and owes a restore
@@ -1424,9 +1430,9 @@ TEST_CASE("OnStep link loss - AbortSlew reports a link lost at its tracking rest
     mount.set_reply(":GU#", "nNpEo190#");  // the GOTO ended with tracking off: the abort restores it
     // The adapter goes after AbortSlew's :GU# read, before the restore (:ST60.164275#) is sent: the link
     // check another caller makes meanwhile (a Connected read) records the loss, so the restore's write finds it.
-    mount.run_once_on(":GU#", [&link] {
+    mount.run_once_on(":GU#", [&link, &driver] {
         link.remove();
-        (void)OnStepProtocolWrapper::instance().link_alive();
+        (void)driver->get_connected();
     });
     require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(mount.received(":Q#"));                  // the stops went out first
@@ -1437,7 +1443,6 @@ TEST_CASE("OnStep link loss - AbortSlew reports a link lost at its tracking rest
 // leave a connect that returned success while Connected read false. It fails the connect now.
 TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails the connect",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
@@ -1450,7 +1455,8 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails
     }
     CHECK(message.find("lost during the connect") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
-    CHECK_FALSE(OnStepProtocolWrapper::instance().is_connected());
+    // The failed connect let go of the link, its only holder, so the link closed (#2223).
+    CHECK(alpacacore::vendor::onstep::detail::registered_link_for_testing(serial_info(link)) == nullptr);
     require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 }
 
@@ -1458,7 +1464,6 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails
 // can no longer fail on the link. Falsified by: onstep_telescope_driver.cpp storing model_cache_ before the
 // link-lost check at the end of the connect.
 TEST_CASE("OnStep link loss - a connect that loses the link keeps the earlier name", "[onstep][serial][connected]") {
-    WrapperReset reset;
     FakeOnStepSerialMount mount;
     mount.set_reply(":GVN#", "10.24a#");  // a release that answers :GVC# (10.23a is not asked)
     mount.set_reply(":GVC#", "Example Mount 7#");
@@ -1475,7 +1480,6 @@ TEST_CASE("OnStep link loss - a connect that loses the link keeps the earlier na
 // Connect would not time the outage and would leave the motion that ran unattended.
 TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps its loss time for the next connect",
           "[onstep][serial][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount first;
@@ -1638,7 +1642,6 @@ alpacacore::catalog::DeviceCatalog onstep_catalog() {
 // node, so it was never lost and Connected stayed true on a closed connection)
 TEST_CASE("OnStep network - Connected drops when the controller hangs up with no client I/O",
           "[onstep][network][connected]") {
-    WrapperReset reset;
     NetworkOnStep mount;
     REQUIRE(mount.server.ok());
     // The fake clock is never advanced and the poll is paused, so no status tick runs: only link_alive() can see
@@ -1676,7 +1679,6 @@ TEST_CASE(
     "OnStep network - an unreachable controller fails Connect within the response timeout, naming the host "
     "and port",
     "[onstep][network][connected]") {
-    WrapperReset reset;
     SilentListener silent;
     REQUIRE(silent.ok());  // the accept queue filled: a connect to it gets no answer
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(silent.port(), 1000));
@@ -1693,7 +1695,6 @@ TEST_CASE(
 // (Connect failed with "Failed to connect to OnStep mount" alone)
 TEST_CASE("OnStep network - a refused connect fails at once, naming the host and port",
           "[onstep][network][connected]") {
-    WrapperReset reset;
     int port = 0;
     {
         alpacacore::test::FakeMountServer gone;  // its port, now closed
@@ -1717,7 +1718,6 @@ TEST_CASE("OnStep network - a refused connect fails at once, naming the host and
 // reconnect stops nothing)
 TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after a long outage, never while parking",
           "[onstep][network][connected]") {
-    WrapperReset reset;
     WindowReset window_reset;
     alpacacore::test::FakeTaskClock clock;
     auto first = std::make_unique<NetworkOnStep>();
@@ -1773,7 +1773,6 @@ TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after
 // response timeout on every tick)
 TEST_CASE("OnStep network - a reply that overruns the length bound fails at once and counts toward the link fault",
           "[onstep][network][connected]") {
-    WrapperReset reset;
     NetworkOnStep mount;
     REQUIRE(mount.server.ok());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(mount.port(), 3000));
@@ -1806,7 +1805,6 @@ TEST_CASE("OnStep network - a reply that overruns the length bound fails at once
 // onstep_catalog.cpp building a serial ConnectionInfo for it
 TEST_CASE("OnStep network - a network entry from the catalog connects to its host and port",
           "[onstep][network][connected][catalog]") {
-    WrapperReset reset;
     NetworkOnStep mount;
     REQUIRE(mount.server.ok());
     const auto catalog = onstep_catalog();
@@ -1830,7 +1828,6 @@ TEST_CASE(
     "OnStep network - a saved entry with no host or a port out of range stays registered and refuses to "
     "connect",
     "[onstep][network][connected][catalog]") {
-    WrapperReset reset;
     const auto catalog = onstep_catalog();
     struct Case {
         const char* what;

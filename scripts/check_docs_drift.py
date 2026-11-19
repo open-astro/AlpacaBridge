@@ -263,7 +263,9 @@ Checks:
      (vendor, deviceType) also has a roster row for another backend (the
      ToupTek thermal switch beside the StellaVita); a bare `-` there is a
      finding. A `pending` or `no-fake` record names the slice (2 to 6) that
-     runs it and no report. A `run` record names its committed report,
+     runs it, no report, and its reason (the fake's parity gap, the simulator
+     it needs, or that no fake exists; a row runs only when its fake can pass
+     ConformU on merit, never against a known-failures list). A `run` record names its committed report,
      AlpacaCore/conformu/<Vendor>/Fake/Fake-<deviceType>-<fakeStem>-Linux-arm64.txt
      (the Sky-Watcher UDP mount keeps Fake-Linux-arm64.txt), and the file
      exists. The roster is read as text, so a row compiled only under a build
@@ -1889,7 +1891,7 @@ def check_fake_roster_matches_disk(root=ROOT):
 # roster row, kept in step with the roster both ways.
 
 CONFORMU_RUNS_PATH = "scripts/conformu_fake_runs.tsv"
-CONFORMU_RUNS_HEADER = ["vendor", "deviceType", "fakeHeader", "status", "slice", "reportPath"]
+CONFORMU_RUNS_HEADER = ["vendor", "deviceType", "fakeHeader", "status", "slice", "reportPath", "reason"]
 CONFORMU_RUNS_STATUSES = ("run", "pending", "no-fake")
 # The one report that keeps its name from before the run list (#1621).
 CONFORMU_LEGACY_REPORT = ("skywatcher", "telescope", "fake_skywatcher_mount.h",
@@ -1918,7 +1920,7 @@ def _conformu_run_list_findings(header_text, tsv_text, report_exists=lambda path
         if len(cells) != len(CONFORMU_RUNS_HEADER):
             findings.append("%s has %d columns, not %d" % (where, len(cells), len(CONFORMU_RUNS_HEADER)))
             continue
-        vendor, dtype, fake, status, slice_, report = cells
+        vendor, dtype, fake, status, slice_, report, reason = cells
         key = (vendor, dtype, fake)
         if key in seen:
             findings.append("%s repeats the record {%s, %s, %s}" % (where, vendor, dtype, fake))
@@ -1957,6 +1959,9 @@ def _conformu_run_list_findings(header_text, tsv_text, report_exists=lambda path
             if report != "-":
                 findings.append("%s is %s but names a report %r: a record that does not run has reportPath -" %
                                 (where, status, report))
+            if reason.strip() in ("", "-"):
+                findings.append("%s is %s with no reason: say why it does not run (the fake's parity gap, the "
+                                "simulator it needs, or that no fake exists)" % (where, status))
     for vendor, dtype, fake in roster:
         if (vendor, dtype, fake) not in listed:
             findings.append("kFakeConnectableRoster row {%s, %s, %s} has no run or pending record in %s: add one "
@@ -3937,27 +3942,27 @@ def self_test():
                 "    {\"zwo\", \"camera\", \"fake_zwo_sdk.h\"},\n"
                 "    {\"touptek\", \"switch\", \"fake_touptek_powerbox_sdk.h\"},\n"
                 "};\n")
-    runs_head = "vendor\tdeviceType\tfakeHeader\tstatus\tslice\treportPath\n"
+    runs_head = "vendor\tdeviceType\tfakeHeader\tstatus\tslice\treportPath\treason\n"
     runs_rows = ("skywatcher\ttelescope\tfake_skywatcher_mount.h\trun\t1\t"
-                 "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt\n"
-                 "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n"
-                 "touptek\tswitch\tfake_touptek_powerbox_sdk.h\tpending\t6\t-\n")
+                 "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt\t-\n"
+                 "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tnot yet tried\n"
+                 "touptek\tswitch\tfake_touptek_powerbox_sdk.h\tpending\t6\t-\tnot yet tried\n")
     runs_ok = runs_head + runs_rows
     check("conformu runs: a run list that matches the roster produces no finding",
           _conformu_run_list_findings(runs_hdr, runs_ok) == [])
-    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n", ""))
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tnot yet tried\n", ""))
     check("conformu runs: a roster row with no run-list record is flagged by name",
           len(f) == 1 and "{zwo, camera, fake_zwo_sdk.h}" in f[0])
-    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tfocuser\tfake_zwo_eaf_sdk.h\tpending\t3\t-\n")
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tfocuser\tfake_zwo_eaf_sdk.h\tpending\t3\t-\tnot yet tried\n")
     check("conformu runs: a pending record with no roster row is flagged",
           len(f) == 1 and "fake_zwo_eaf_sdk.h" in f[0] and "no kFakeConnectableRoster row" in f[0])
-    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\t-\tno-fake\t6\t-\n")
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\t-\tno-fake\t6\t-\tno fake\n")
     check("conformu runs: a no-fake record with no roster row is not a finding", f == [])
-    f = _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-\tno-fake\t6\t-\n")
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-\tno-fake\t6\t-\tno fake\n")
     check("conformu runs: a bare no-fake record whose pair has a roster row is flagged",
           len(f) == 1 and "-<backend>" in f[0])
     check("conformu runs: a no-fake record naming its backend beside a roster row passes",
-          _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-thermal\tno-fake\t6\t-\n") == [])
+          _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-thermal\tno-fake\t6\t-\tno fake\n") == [])
     f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "run\t5\t"
                                     "AlpacaCore/conformu/ZWO/Fake/Fake-Linux-arm64.txt"))
     check("conformu runs: a run record whose report name breaks the naming rule is flagged",
@@ -3967,20 +3972,24 @@ def self_test():
           len(f) == 1 and "does not exist" in f[0])
     f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t\t-"))
     check("conformu runs: a pending record with no slice is flagged", len(f) == 1 and "slice" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-\tnot yet tried", "pending\t5\t-\t-"))
+    check("conformu runs: a pending record with no reason is flagged", len(f) == 1 and "no reason" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("\t-\tnot yet tried\n", "\t-\n", 1))
+    check("conformu runs: a record without the reason column is flagged", any("6 columns, not 7" in x for x in f))
     f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5", "skipped\t5"))
     check("conformu runs: an unknown status is flagged", any("status 'skipped'" in x for x in f))
     check("conformu runs: a run list with the wrong header is one finding",
           len(_conformu_run_list_findings(runs_hdr, runs_rows)) == 1)
     check("conformu runs: a missing roster array is a finding, not a silent pass",
           len(_conformu_run_list_findings("// nothing here\n", runs_ok)) == 1)
-    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n")
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tagain\n")
     check("conformu runs: a repeated record is flagged", len(f) == 1 and "repeats the record" in f[0])
     f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t5\tAlpacaCore/conformu/ZWO/Fake/x.txt"))
     check("conformu runs: a pending record that names a report is flagged",
           len(f) == 1 and "names a report" in f[0])
     f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\n")
-    check("conformu runs: a record with the wrong column count is flagged", len(f) == 1 and "5 columns, not 6" in f[0])
-    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\tfake_bisque_mount.h\tno-fake\t6\t-\n")
+    check("conformu runs: a record with the wrong column count is flagged", len(f) == 1 and "5 columns, not 7" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\tfake_bisque_mount.h\tno-fake\t6\t-\tno fake\n")
     check("conformu runs: a no-fake record that names a fake header is flagged",
           len(f) == 1 and "names a fake header" in f[0])
     f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("run\t1\t", "run\t\t"))

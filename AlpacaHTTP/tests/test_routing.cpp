@@ -5686,6 +5686,89 @@ int main() {
         EXPECT(cfg.value("mountIndex", -1) == 1);
         remove_device(router, "onstep", "telescope", 9622);
     }
+    {
+        // case: onstep focuser config round-trips
+        // #2223: the focuser shares the telescope's connection fields and adds focuserNumber; every field of a
+        // serial entry survives the sanitizer, the unused network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9629},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM0"},
+                                           {"baudRate", 19200},
+                                           {"host", "192.168.0.2"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 2500},
+                                           {"mountIndex", 1},
+                                           {"focuserNumber", 4}},
+                                          "Focuser", 9629);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("host", "") == "192.168.0.2");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 2500);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        EXPECT(cfg.value("focuserNumber", -1) == 4);
+        remove_device(router, "onstep", "focuser", 9629);
+    }
+    {
+        // case: onstep rotator config round-trips
+        // #2221: the rotator shares the telescope's connection fields; every field of a network entry survives the
+        // sanitizer, the unused serial ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9630},
+                                           {"connectionType", "network"},
+                                           {"portPath", "/dev/ttyACM1"},
+                                           {"baudRate", 38400},
+                                           {"host", "192.168.0.3"},
+                                           {"tcpPort", 9996},
+                                           {"responseTimeoutMs", 1500},
+                                           {"mountIndex", 2}},
+                                          "Rotator", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM1");
+        EXPECT(cfg.value("baudRate", -1) == 38400);
+        EXPECT(cfg.value("host", "") == "192.168.0.3");
+        EXPECT(cfg.value("tcpPort", -1) == 9996);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 1500);
+        EXPECT(cfg.value("mountIndex", -1) == 2);
+        remove_device(router, "onstep", "rotator", 9630);
+    }
+    {
+        // case: onstep switch config round-trips
+        // #2222: the switch shares the telescope's connection fields; every field of an auto entry survives the
+        // sanitizer, the unused serial and network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9631},
+                                           {"connectionType", "auto"},
+                                           {"portPath", "/dev/ttyUSB3"},
+                                           {"baudRate", 57600},
+                                           {"host", "192.168.0.4"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 3000},
+                                           {"mountIndex", 3}},
+                                          "Switch", 9631);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB3");
+        EXPECT(cfg.value("baudRate", -1) == 57600);
+        EXPECT(cfg.value("host", "") == "192.168.0.4");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 3000);
+        EXPECT(cfg.value("mountIndex", -1) == 3);
+        remove_device(router, "onstep", "switch", 9631);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -8957,7 +9040,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 44);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 47);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build

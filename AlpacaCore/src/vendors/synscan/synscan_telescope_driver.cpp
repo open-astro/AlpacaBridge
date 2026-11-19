@@ -99,6 +99,7 @@ constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.pulse_guide_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: the handset sets no bound of its own
     limits.move_axis_axes = 2;
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.move_axis_stop_epsilon = 1e-6;
@@ -108,7 +109,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.guide_rate_ra_max = kSiderealDegPerSec;
     limits.guide_rate_dec_min = 0.0;
     limits.guide_rate_dec_max = kSiderealDegPerSec;
-    limits.texts.pulse_duration = "PulseGuide duration must be >= 0";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
     return limits;

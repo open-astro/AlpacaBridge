@@ -1,5 +1,5 @@
 # OnStep vendor support
-# OnStep mounts use a serial LX200-derived protocol
+# OnStep controllers (the mount, its focusers, its rotator and its auxiliary features) use a serial or TCP LX200-derived protocol
 # No SDK required - uses standard platform serial/socket APIs
 
 if(ALPACACORE_ENABLE_ONSTEP)
@@ -8,6 +8,9 @@ if(ALPACACORE_ENABLE_ONSTEP)
     set(ONSTEP_SOURCES
         onstep_protocol_wrapper.cpp
         onstep_telescope_driver.cpp
+        onstep_focuser_driver.cpp
+        onstep_rotator_driver.cpp
+        onstep_switch_driver.cpp
         onstep_catalog.cpp
     )
 

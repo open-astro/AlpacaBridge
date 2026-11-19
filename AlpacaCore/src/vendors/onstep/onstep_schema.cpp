@@ -10,7 +10,9 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The OnStep telescope schema. No vendor header: compiles in every build
+// The OnStep telescope, focuser, rotator and switch schemas (the other three share the telescope's connection rules,
+// #2223, #2221, #2222). No vendor
+// header: compiles in every build
 // (including vendors-OFF). The display name's first word is the router's
 // vendor_label(), so it keeps "OnStep support not enabled ..." as the arm
 // spelled it.
@@ -84,6 +86,30 @@ void register_onstep_schema(DeviceCatalog& catalog) {
     schema.fields = onstep_telescope_fields();
     schema.normalize = normalize_onstep;
     catalog.add(std::move(schema));
+
+    Schema focuser;
+    focuser.key = DeviceKey{"onstep", DeviceType::Focuser};
+    focuser.display_name = "OnStep";
+    focuser.build_option = "ALPACACORE_ENABLE_ONSTEP";
+    focuser.fields = onstep_focuser_fields();
+    focuser.normalize = normalize_onstep;
+    catalog.add(std::move(focuser));
+
+    Schema rotator;
+    rotator.key = DeviceKey{"onstep", DeviceType::Rotator};
+    rotator.display_name = "OnStep";
+    rotator.build_option = "ALPACACORE_ENABLE_ONSTEP";
+    rotator.fields = onstep_rotator_fields();
+    rotator.normalize = normalize_onstep;
+    catalog.add(std::move(rotator));
+
+    Schema aux_switch;
+    aux_switch.key = DeviceKey{"onstep", DeviceType::Switch};
+    aux_switch.display_name = "OnStep";
+    aux_switch.build_option = "ALPACACORE_ENABLE_ONSTEP";
+    aux_switch.fields = onstep_switch_fields();
+    aux_switch.normalize = normalize_onstep;
+    catalog.add(std::move(aux_switch));
 }
 
 }  // namespace alpacacore::catalog
