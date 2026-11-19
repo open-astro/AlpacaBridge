@@ -43,9 +43,17 @@ Related decision: [LAN surface threat model](../../docs/decisions/0007-lan-surfa
 - `WifiManager`'s profile test seam
   (`AlpacaHTTP/include/alpacahttp/wifi_manager.h`, in `util::detail`) is
   borrowed, test-only injection for `save_profile()`'s connection lookup,
-  device-role lookup, add and update operations. The fake must outlive the
+  device-role lookup (which carries the adapter list and each permanent MAC,
+  issue #856), add and update operations, and for exactly two more operations:
+  `set_client_adapter()` with its re-pin of saved client profiles, and the
+  re-pin `connect_profile()` does before it activates (the activation itself
+  needs the real bus and refuses an injected backend). The fake must outlive the
   manager. Do not add production backends or route unrelated operations through
   it; injected instances refuse other operations before opening the system bus.
+- The client adapter preference is the adapter's permanent MAC
+  (`PermHwAddress`, a typed "s" property, accepted only as six hex pairs),
+  never an interface name (issue #856). An absent preferred adapter falls back
+  to the automatic pick and is logged at INFO once per change, not as an error.
 - The review bot login is `github-actions`; every push restarts a full
   review round — batch fixes. Test rig persisted-device state makes
   `test_routing` fail with "already registered". Since #274 each of the two

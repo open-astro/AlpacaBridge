@@ -2078,3 +2078,163 @@ TEST_CASE("Bisque park - AbortSlew during the last IsParked exchange leaves AtPa
     CHECK(rig.mount.parked.load());  // the mount did report parked
     CHECK_FALSE(rig.driver->get_at_park());
 }
+
+// ── #2263: the motion owner policy, mapped onto TheSkyX ─────────────────────────────────────────────────────────
+// Bisque runs no slew, park or home body of its own: TheSkyX does, behind one script socket that serialises every
+// exchange. The cases pin what the policy table means here.
+
+namespace {
+
+// Waits in real time for `done`: FindHome and DirectGuide are single TheSkyX exchanges the fake holds for real
+// milliseconds, not driver waits on the task clock.
+bool wait_real(const std::function<bool()>& done, std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return done();
+}
+
+}  // namespace
+
+TEST_CASE("Bisque motion owner - PulseGuide during a slew, a Park or a FindHome is refused and sends nothing (#2263)",
+          "[bisque][telescope][motion-owner]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    ClockedBisque rig;
+    const int leg = GENERATE(0, 1, 2, 3);  // async slew, sync slew, Park, FindHome
+    CAPTURE(leg);
+    std::future<void> motion;
+    if (leg == 0) {
+        rig.mount.slew_polls_needed = 100000;
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    } else if (leg == 1) {
+        rig.mount.slew_polls_needed = 100000;
+        motion = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+        REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the wait loop sleeps between its polls
+    } else if (leg == 2) {
+        rig.mount.park_polls_needed = 100000;
+        motion = std::async(std::launch::async, [&] { rig.driver->park(); });
+        REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+    } else {
+        rig.mount.find_home_ms = 1500;
+        motion = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+        REQUIRE(wait_real([&] { return rig.mount.find_home_commands.load() == 1; }));
+    }
+    // A failing check must not leave the motion running: its future would wait for it.
+    const struct EndMotion {
+        ClockedBisque& rig;
+        std::future<void>& motion;
+        ~EndMotion() {
+            rig.mount.slew_polls_needed = 0;
+            rig.mount.park_polls_needed = 0;
+            if (motion.valid()) {
+                advance_until(rig.clock, [&] { return ready(motion); });
+                motion.wait();
+            }
+        }
+    } end_motion{rig, motion};
+
+    // A Park keeps its earlier refusal and its text; a slew or a home is InvalidOperation.
+    require_alpaca_error([&] { rig.driver->pulse_guide(2, 100); },
+                         leg == 2 ? AlpacaError::InvalidWhileParked : AlpacaError::InvalidOperation);
+    if (leg != 2) {
+        CHECK_THROWS_WITH(rig.driver->pulse_guide(0, 100),
+                          "PulseGuide is not allowed while a slew, park or home is running");
+    }
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    if (leg == 3) {
+        REQUIRE(motion.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        REQUIRE_NOTHROW(motion.get());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->abort_slew());
+    }
+    CHECK(rig.mount.guide_commands.load() == 0);
+    // The refusal ends with the motion: AbortSlew ends the slew or the Park, and FindHome has returned.
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(2, 100));
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.mount.guide_commands.load() == 1);
+}
+
+// The refusal reads the driver's own Slewing and home state, so every way a slew or a home ends lets a PulseGuide
+// through again: TheSkyX refusing the SlewToRaDec, a landing seen by the SlewToCoordinates wait or by the status
+// poll, and a FindHome that throws.
+TEST_CASE("Bisque motion owner - a refused slew, a landing or a failed FindHome lets PulseGuide through (#2263)",
+          "[bisque][telescope][motion-owner]") {
+    ClockedBisque rig;
+    const int leg = GENERATE(0, 1, 2, 3);  // refused SlewToRaDec, sync landing, polled async landing, failed FindHome
+    CAPTURE(leg);
+    if (leg == 0) {
+        rig.mount.fail_slew_commands = 1;
+        CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(5.5, 20.0), alpacacore::AlpacaException);
+    } else if (leg == 1) {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // the first IsSlewComplete reports landed
+    } else if (leg == 2) {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        rig.clock.advance(std::chrono::seconds(9));  // past the 8 s hold, so the poll asks TheSkyX
+        REQUIRE(poll_now(*rig.driver));
+    } else {
+        rig.mount.fail_find_home = 1;
+        CHECK_THROWS_AS(rig.driver->find_home(), alpacacore::AlpacaException);
+        CHECK_FALSE(rig.driver->get_at_home());
+    }
+    CHECK_FALSE(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(2, 100));
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.mount.guide_commands.load() == 1);
+}
+
+// A MoveAxis or a Park claims an axis FindHome owns, and an AbortSlew or a MoveAxis stop cancels it, while TheSkyX
+// still runs the home loop. Both wait on the socket behind it; once FindHome's reply comes, the home is no longer this
+// call's to report, so AtHome stays false, as a Park retired the same way never sets AtPark (#2062).
+TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindHome leaves AtHome false (#2263)",
+          "[bisque][telescope][motion-owner]") {
+    ClockedBisque rig;
+    const int leg = GENERATE(0, 1, 2, 3);  // MoveAxis, Park, AbortSlew, MoveAxis stop
+    CAPTURE(leg);
+    // The second command must reach its claim inside this real-time window; it takes no wire turn before it.
+    rig.mount.find_home_ms = 1500;
+    auto homed = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+    REQUIRE(wait_real([&] { return rig.mount.find_home_commands.load() == 1; }));
+    auto second = std::async(std::launch::async, [&] {
+        if (leg == 0) {
+            rig.driver->move_axis(0, 0.5);
+        } else if (leg == 1) {
+            rig.driver->park();
+        } else if (leg == 2) {
+            rig.driver->abort_slew();
+        } else {
+            rig.driver->move_axis(0, 0.0);
+        }
+    });
+    REQUIRE(homed.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK_NOTHROW(homed.get());
+    CHECK(advance_until(rig.clock, [&] { return ready(second); }));
+    CHECK_NOTHROW(second.get());
+    CHECK_FALSE(rig.driver->get_at_home());
+    if (leg == 0) REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.0));
+}
+
+// A DirectGuide is one synchronous MoveTelescope on the only socket, so nothing can end it early: a MoveAxis on
+// either axis waits for its reply and the pulse ends there on its own, IsPulseGuiding true until then and no error
+// after. The table's "a MoveAxis on the pulse's axis supersedes it" has nothing to stop on Bisque.
+TEST_CASE("Bisque motion owner - a MoveAxis on either axis lets a pulse on either axis end on its own (#2263)",
+          "[bisque][telescope][motion-owner]") {
+    ClockedBisque rig;
+    const int direction = GENERATE(0, 2);  // North (Dec), East (RA)
+    const int axis = GENERATE(0, 1);
+    CAPTURE(direction, axis);
+    rig.mount.guide_ms = 2000;  // margin over the 150 ms real-time sleep below on a loaded runner
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(direction, 2500));
+    REQUIRE(wait_real([&] { return rig.mount.guide_commands.load() == 1; }));
+    auto moved = std::async(std::launch::async, [&] { rig.driver->move_axis(axis, 0.5); });
+    // Real time: the MoveAxis passes its gate and waits on the wrapper's lock behind the DirectGuide reply, and
+    // nothing observable marks that wait.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(rig.driver->get_is_pulse_guiding());
+    REQUIRE(moved.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE_NOTHROW(moved.get());
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+    CHECK(rig.mount.guide_commands.load() == 1);
+}

@@ -87,6 +87,10 @@ public:
     // built-in registration functions don't provide, use it.
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
     explicit Router(const CatalogExtension& extend_catalog);
+    // As above, knowing the HTTP port the server listens on before the saved
+    // devices load, so a proxied device configured on this server is refused
+    // there too (decision 0023 rule 4). The Server passes its configured port.
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port);
 
     // The catalog register_device_from_config() and sanitize_device_config()
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
@@ -212,6 +216,13 @@ public:
     // value a PUT saved. The description reports it and the web UI edits it;
     // the responder binds the saved port only at the next restart.
     void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
+    // Decision 0023 rule 4: the HTTP port this server listens on, on every
+    // address (the listener binds the wildcard). A proxied device's factory and
+    // its Connect read it through BindContext::listen_addresses to refuse an
+    // upstream that is this server. 0 means not known yet (no check). The
+    // Server sets the port it bound, which differs from the configured one when
+    // that was 0.
+    void set_listen_port(std::uint16_t port) { listen_port_->store(port, std::memory_order_release); }
 
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
@@ -295,6 +306,9 @@ private:
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
     std::atomic<std::uint16_t> discovery_port_{Config::kDefaultDiscoveryPort};
+    // Shared with the listen_addresses source a proxied device keeps, so the
+    // driver never reads a destroyed Router.
+    std::shared_ptr<std::atomic<std::uint16_t>> listen_port_ = std::make_shared<std::atomic<std::uint16_t>>(0);
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.

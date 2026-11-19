@@ -28,6 +28,14 @@ The one call a client needs for its WiFi UI state.
 {
   "Available": true,
   "Device": "wlan0",
+  "ApDevice": "ap0",
+  "DeviceCount": 3,
+  "Adapters": [
+    { "Interface": "wlan0", "Mac": "dc:a6:32:00:00:01", "IsAp": false },
+    { "Interface": "ap0", "Mac": "dc:a6:32:00:00:01", "IsAp": true },
+    { "Interface": "wlan1", "Mac": "9c:ef:d5:00:00:02", "IsAp": false }
+  ],
+  "PreferredMac": "",
   "WirelessEnabled": true,
   "State": "connected",
   "ConnectionId": "OpenAstro-AP",
@@ -60,6 +68,14 @@ The one call a client needs for its WiFi UI state.
 - `State`: `connected`, `disconnected`, `connecting`, `deactivating`,
   `unavailable`.
 - `Country`: ISO 3166-1 alpha-2, or `""` when never set.
+- `Device` is the client adapter: the one status, scan and join use. With a
+  `PreferredMac` set and that adapter present it is that adapter; otherwise
+  the automatic pick (the first Wi-Fi device that is not the hotspot's).
+- `Adapters` lists every Wi-Fi device NetworkManager reports, with its
+  permanent MAC (`""` when it reports none, as a virtual interface may; such
+  an adapter cannot be chosen) and `IsAp` for the dedicated hotspot interface.
+  `PreferredMac` is the stored client adapter choice, `""` when none is set
+  (issue #856).
 
 ### GET /management/v1/wifi/scan
 
@@ -159,6 +175,25 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
   SSID while changing other AP settings.
 - The web UI preserves the configured `SsidHex` when the displayed SSID text is
   unchanged. Change the text to set a new SSID.
+
+### PUT /management/v1/wifi/adapter
+
+`{ "Mac": "9c:ef:d5:00:00:02" }` — choose the client adapter by its permanent
+MAC (six hex pairs, either case; stored in lower case). `{ "Mac": "" }`
+clears the choice and returns to the automatic pick. The choice is stored with
+the Wi-Fi settings and survives a reboot and an interface rename; an interface
+name is never stored. Refused before anything changes: a malformed MAC, a MAC
+no listed adapter reports, and the hotspot's own interface on a board with a
+dedicated AP interface. On a board with more than one Wi-Fi device, every saved
+client profile is re-pinned (`connection.interface-name`) to the chosen
+adapter, and no other setting of the profile is touched; the hotspot profile is
+never changed. If the chosen adapter is later unplugged, the server logs it and
+uses the automatic pick. Returns `{"PreferredMac": "…", "Device": "…"}`.
+**Re-pinning can move a joined network** — see "Connection-drop pattern".
+
+Connecting a saved profile (`PUT …/connect`) on such a board also re-pins it
+when its interface name differs from the client adapter, as after a udev
+rename.
 
 ### PUT /management/v1/wifi/radio
 

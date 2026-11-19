@@ -1192,7 +1192,11 @@ void set_bad_request_text(Response& response, const std::string& message);
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
+Router::Router(const CatalogExtension& extend_catalog) : Router(extend_catalog, 0) {}
+
+Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port)
+    : machine_hostname_(read_machine_hostname()) {
+    listen_port_->store(listen_port, std::memory_order_release);
     learned_sink_->router = this;
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
@@ -5073,6 +5077,17 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
                 enabled = e->get<bool>();
             }
             ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
+        } else if (sub == "adapter" && is_put) {
+            // Issue #856: the client adapter preference, a permanent MAC or "" to
+            // clear. The manager validates the form before it touches the bus; the
+            // length cap bounds the string first (decision 0007 rule 4).
+            auto body = body_json();
+            const auto* mac = find_json_value(body, "Mac");
+            if (!mac || !mac->is_string()) throw util::WifiError("Mac (string) is required");
+            if (mac->get_ref<const std::string&>().size() > 17) {
+                throw util::WifiError("Mac must be six hex pairs separated by ':' (or empty to clear)");
+            }
+            ok.value = wifi.set_client_adapter(mac->get<std::string>());
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {
@@ -5412,6 +5427,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                      if (sink->router != nullptr) {
                          sink->router->store_learned_config(entry, catalog_json::json_from_config(learned), unique_id);
                      }
+                 },
+                 // Decision 0023 rule 4: the listener binds the wildcard of both families, so every local and
+                 // loopback address on this port is this server.
+                 [port = listen_port_]() -> std::vector<alpacacore::catalog::ListenAddress> {
+                     const int listening = port->load(std::memory_order_acquire);
+                     if (listening == 0) return {};
+                     return {{"0.0.0.0", listening}, {"::", listening}};
                  }});
             if (bound.rejection) {
                 error_message = *bound.rejection;

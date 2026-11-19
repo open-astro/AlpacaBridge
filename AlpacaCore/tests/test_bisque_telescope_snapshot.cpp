@@ -754,7 +754,7 @@ TEST_CASE("Bisque snapshot - AbortSlew during the SlewToCoordinatesAsync exchang
 }
 
 // Falsified by: bisque_telescope_driver.cpp, wait_for_slew_complete: clear slewing_cached_ without the
-// `epoch == slew_epoch_` check.
+// `owns_slewing_locked(claim)` check.
 TEST_CASE("Bisque snapshot - a SlewToCoordinates that completes does not clear the Slewing of a retarget",
           "[bisque][telescope][snapshot]") {
     Rig rig;
