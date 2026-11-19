@@ -120,9 +120,10 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
-// logging.max_file_size_mb: a negative or unparsable value is rejected so the
-// caller keeps its current value; it never turns the cap off (0 does).
-bool parse_log_max_file_size_mb(const std::string& value, int& result) {
+// logging.max_file_size_mb and logging.max_total_size_mb: a negative or
+// unparsable value is rejected so the caller keeps its current value; it never
+// turns the cap off (0 does).
+bool parse_log_size_mb(const std::string& value, int& result) {
     try {
         const int parsed = std::stoi(value);
         if (parsed < 0) {
@@ -261,8 +262,13 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 }
             } else if (key == "max_file_size_mb") {
                 int parsed = 0;
-                if (parse_log_max_file_size_mb(value, parsed)) {
+                if (parse_log_size_mb(value, parsed)) {
                     log_max_file_size_mb_ = parsed;
+                }
+            } else if (key == "max_total_size_mb") {
+                int parsed = 0;
+                if (parse_log_size_mb(value, parsed)) {
+                    log_max_total_size_mb_ = parsed;
                 }
             }
         } else if (current_section == "server") {
@@ -493,8 +499,16 @@ void Config::apply_environment_overrides() {
     const char* max_size_env = std::getenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB");
     if (max_size_env) {
         int parsed = 0;
-        if (parse_log_max_file_size_mb(max_size_env, parsed)) {
+        if (parse_log_size_mb(max_size_env, parsed)) {
             log_max_file_size_mb_ = parsed;
+        }
+    }
+
+    const char* max_total_env = std::getenv("ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB");
+    if (max_total_env) {
+        int parsed = 0;
+        if (parse_log_size_mb(max_total_env, parsed)) {
+            log_max_total_size_mb_ = parsed;
         }
     }
 }

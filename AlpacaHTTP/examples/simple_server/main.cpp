@@ -62,7 +62,8 @@ void print_usage(std::ostream& out) {
            "  ALPACAHTTP_LOG_DIRECTORY\n"
            "  ALPACAHTTP_FILE_LOGGING\n"
            "  ALPACAHTTP_LOG_RETENTION_DAYS\n"
-           "  ALPACAHTTP_LOG_MAX_FILE_SIZE_MB\n";
+           "  ALPACAHTTP_LOG_MAX_FILE_SIZE_MB\n"
+           "  ALPACAHTTP_LOG_MAX_TOTAL_SIZE_MB\n";
 }
 
 // Handles the arguments that must not start a server. Returns the exit status to

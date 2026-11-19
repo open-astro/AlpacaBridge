@@ -49,10 +49,20 @@ namespace {
     int g_log_retention_days = 0;  // 0 = forever
     std::uintmax_t g_log_max_file_bytes = 0;  // 0 = unlimited
     std::uintmax_t g_log_file_bytes = 0;      // size of the open file: at open plus bytes written
+    std::uintmax_t g_log_max_total_bytes = 0;  // all log files together; 0 = unlimited
 
     // A day's file, or one of its rotated parts (.1 newest .. .kMaxRotatedLogFiles).
-    static_assert(kMaxRotatedLogFiles >= 1 && kMaxRotatedLogFiles <= 99, "part numbers are one or two digits");
-    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})(\.[1-9]\d?)?\.log$)");
+    static_assert(kMaxRotatedLogFiles >= 1 && kMaxRotatedLogFiles <= 999, "part numbers are one to three digits");
+    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})(\.[1-9]\d{0,2})?\.log$)");
+
+    // The part number of a valid log file name: 0 for a day's current file
+    // (alpacabridge-YYYY-MM-DD.log), N for its part alpacabridge-YYYY-MM-DD.N.log.
+    int log_part_number(const std::string& name) {
+        return name.size() > 27 ? std::stoi(name.substr(24, name.size() - 28)) : 0;
+    }
+
+    // The YYYY-MM-DD a valid log file name carries.
+    std::string log_file_date(const std::string& name) { return name.substr(13, 10); }
 
     const char* level_to_string(alpacacore::logging::LogLevel level) {
         switch (level) {
@@ -210,10 +220,82 @@ namespace {
         return removed;
     }
 
+    // Delete the oldest log files until all of them together fit
+    // g_log_max_total_bytes (#2422). Oldest first: the oldest date first and,
+    // within a date, its highest part first and its current file (part 0) last,
+    // the reverse of list_log_files() while the day being written is the newest
+    // date (see below). Retention by total size rather than per
+    // day keeps a night that crosses midnight whole: the evening's parts are
+    // only deleted once everything older is gone. The open file is counted
+    // through g_log_file_bytes and never deleted, even when it alone is over
+    // the cap. Returns the number of files removed; no-op when the cap is 0.
+    //
+    // Ordering is by the date in the name, as for retention, except that the
+    // day being written (g_log_file_date) always goes last: whatever dates the
+    // other files carry, the lines being written now are the newest. A file
+    // dated after today (the clock jumped ahead once, then came back) or a boot
+    // with a clock behind the files on disk would otherwise make every rotation
+    // delete the session's own part .1 while the other-dated files stayed for
+    // good. mtime would come from the same wrong clock, so it would not help.
+    //
+    // Caller holds g_file_mutex; nothing here logs (the deadlock note in
+    // configure_log_directory), and only error_code overloads are used: this
+    // runs inside the log sink, where an exception would reach every caller.
+    std::size_t prune_to_total_size_locked() {
+        if (g_log_directory.empty() || g_log_max_total_bytes == 0) {
+            return 0;
+        }
+        struct Candidate {
+            std::string date;
+            int part = 0;
+            std::uintmax_t size = 0;
+            std::filesystem::path path;
+        };
+        std::vector<Candidate> files;
+        std::uintmax_t total = g_log_file_name.empty() ? 0 : g_log_file_bytes;
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(g_log_directory, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto& entry = *it;
+            std::error_code type_ec;
+            if (!entry.is_regular_file(type_ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (!std::regex_match(name, kLogFilenameRegex)) continue;
+            if (name == g_log_file_name) continue;  // counted through g_log_file_bytes
+            std::error_code size_ec;
+            const auto size = entry.file_size(size_ec);
+            if (size_ec) continue;
+            files.push_back({log_file_date(name), log_part_number(name), size, entry.path()});
+            total += size;
+        }
+        if (total <= g_log_max_total_bytes) {
+            return 0;
+        }
+        const std::string& writing = g_log_file_date;  // empty when no file is open
+        std::sort(files.begin(), files.end(), [&writing](const Candidate& a, const Candidate& b) {
+            const bool a_writing = a.date == writing;
+            const bool b_writing = b.date == writing;
+            if (a_writing != b_writing) return b_writing;
+            return a.date != b.date ? a.date < b.date : a.part > b.part;
+        });
+        std::size_t removed = 0;
+        for (const auto& file : files) {
+            if (total <= g_log_max_total_bytes) break;
+            std::error_code rm_ec;
+            if (std::filesystem::remove(file.path, rm_ec)) {
+                total -= file.size;
+                ++removed;
+            }
+        }
+        return removed;
+    }
+
     // The full file becomes part .1, older parts shift up one and the part past
-    // kMaxRotatedLogFiles is deleted; a fresh file is opened. A failed rename
-    // leaves the file in place and logging carries on in it (never dropped).
-    // Caller holds g_file_mutex with the file open.
+    // kMaxRotatedLogFiles is deleted; a fresh file is opened, then the total
+    // size cap is applied. Only the parts up to the first missing number move,
+    // so a rotation renames as many files as the day has, never into an
+    // existing part, and a gap (a part deleted from the web viewer) absorbs
+    // the shift. A failed rename leaves the file in place and logging carries
+    // on in it (never dropped). Caller holds g_file_mutex with the file open.
     void rotate_log_file_locked() {
         const auto part = [](int n) {
             return g_log_directory / ("alpacabridge-" + g_log_file_date + "." + std::to_string(n) + ".log");
@@ -221,8 +303,15 @@ namespace {
         const auto path = g_log_directory / g_log_file_name;
         g_log_file.close();
         std::error_code ec;
-        std::filesystem::remove(part(kMaxRotatedLogFiles), ec);
-        for (int n = kMaxRotatedLogFiles - 1; n >= 1; --n) {
+        int top = 0;  // parts .1 .. .top all exist
+        while (top < kMaxRotatedLogFiles && std::filesystem::exists(part(top + 1), ec)) {
+            ++top;
+        }
+        if (top == kMaxRotatedLogFiles) {
+            std::filesystem::remove(part(kMaxRotatedLogFiles), ec);
+            --top;
+        }
+        for (int n = top; n >= 1; --n) {
             std::filesystem::rename(part(n), part(n + 1), ec);
         }
         std::filesystem::rename(path, part(1), ec);
@@ -230,6 +319,7 @@ namespace {
         std::error_code size_ec;
         const auto size = std::filesystem::file_size(path, size_ec);
         g_log_file_bytes = size_ec ? 0 : size;
+        prune_to_total_size_locked();
     }
 
     void write_to_file(const std::string& line) {
@@ -242,8 +332,9 @@ namespace {
         if (!g_log_file.is_open() || day_changed) {
             open_log_file_for_today_locked();
             if (day_changed) {
-                // Take the opportunity to retire files past retention.
+                // Take the opportunity to retire files past retention or over the total cap.
                 prune_old_files_locked();
+                prune_to_total_size_locked();
             }
         }
         if (!g_log_file.is_open()) {
@@ -400,13 +491,11 @@ std::vector<LogFileInfo> list_log_files() {
 
     // Newest first: by date, then the day's current file before its parts .1, .2, ...
     // in number order (a plain name sort would put .9 before .1 and .10 before .2).
-    const auto part = [](const std::string& name) {
-        return name.size() > 27 ? std::stoi(name.substr(24, name.size() - 28)) : 0;  // "alpacabridge-YYYY-MM-DD.N.log"
-    };
-    std::sort(result.begin(), result.end(), [&part](const LogFileInfo& a, const LogFileInfo& b) {
-        const auto a_date = a.name.substr(13, 10);
-        const auto b_date = b.name.substr(13, 10);
-        return a_date != b_date ? a_date > b_date : part(a.name) < part(b.name);
+    // prune_to_total_size_locked() deletes in the reverse order (the day being written always last).
+    std::sort(result.begin(), result.end(), [](const LogFileInfo& a, const LogFileInfo& b) {
+        const auto a_date = log_file_date(a.name);
+        const auto b_date = log_file_date(b.name);
+        return a_date != b_date ? a_date > b_date : log_part_number(a.name) < log_part_number(b.name);
     });
     return result;
 }
@@ -488,14 +577,21 @@ void init_logging(const Config& config) {
     alpacacore::logging::set_log_sink(log_sink);
     set_log_retention_days(config.log_retention_days());
     set_log_max_file_bytes(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * 1024 * 1024);
+    set_log_max_total_bytes(static_cast<std::uintmax_t>(config.log_max_total_size_mb()) * 1024 * 1024);
     const std::string selected =
         configure_log_directory(config.log_directory(), config.file_logging_enabled());
     if (config.file_logging_enabled() && !selected.empty()) {
         log_info("File logging active in " + selected);
+        if (config.log_max_total_size_mb() > 0 && config.log_max_total_size_mb() < config.log_max_file_size_mb()) {
+            log_warning("logging.max_total_size_mb (" + std::to_string(config.log_max_total_size_mb()) +
+                        " MiB) is smaller than logging.max_file_size_mb (" +
+                        std::to_string(config.log_max_file_size_mb()) +
+                        " MiB): each rotation deletes every older log file");
+        }
         const std::size_t removed = prune_old_log_files();
         if (removed > 0) {
             log_info("Removed " + std::to_string(removed) +
-                     " log file(s) older than retention");
+                     " log file(s) older than retention or over the total size cap");
         }
     }
     // A user-chosen level (set via /management/v1/loglevel) overrides the
@@ -554,9 +650,15 @@ void set_log_max_file_bytes(std::uintmax_t bytes) {
     g_log_max_file_bytes = bytes;
 }
 
+void set_log_max_total_bytes(std::uintmax_t bytes) {
+    std::lock_guard<std::mutex> lock(g_file_mutex);
+    g_log_max_total_bytes = bytes;
+}
+
 std::size_t prune_old_log_files() {
     std::lock_guard<std::mutex> lock(g_file_mutex);
-    return prune_old_files_locked();
+    const std::size_t by_age = prune_old_files_locked();
+    return by_age + prune_to_total_size_locked();
 }
 
 namespace {
