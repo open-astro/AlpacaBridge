@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **Gemini PDH staleness case waits for the fake to record the third poll** (Gemini PDH tests, issue #2402): "A fault that stands past the staleness bound drops Connected" counted the fake's `>G#` commands the moment the driver latched its fault, but the driver latches right after it writes the third poll and the fake records it only once its reader has read it from the pty, so a loaded runner counted one short. The case now waits, for less than one poll period, until the fake has recorded three polls after the mute, which also pins the three-poll threshold again: the `>= 3` count it replaces passed with a two-poll latch.
