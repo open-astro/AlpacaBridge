@@ -65,7 +65,9 @@ inline bool wait_exposure_end(const CameraDriver& camera, FakeTaskClock& clock,
             clock.advance(step);
             static_cast<void>(clock.wait_for_woken_settled(std::chrono::milliseconds(100)));
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // The body is between clock waits, in an SDK call or the frame download, which run in real time. Wait
+            // for it to park on the clock again, for 1 ms at most so the end check above runs again.
+            static_cast<void>(clock.wait_for_waiters(1, std::chrono::milliseconds(1)));
         }
     }
     return true;
