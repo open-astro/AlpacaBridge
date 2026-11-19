@@ -1619,25 +1619,37 @@ public:
             // moment the command can reach the mount. The cross-axis holds above read the other axis's window only.
             pulse_hold_[axis_index].arm(now, pulse_length + kPulseGuideCompletionDelay);
         }
-        // The guide write goes out through the send gate with mutex_ free: a chunk of the older pulse already on the
-        // wire lands first, and the initiator lock keeps any other initiator out meanwhile.
-        try {
-            send_motion_locked(
-                lock, [this, &claim] { return connected_ && !lost_locked(claim); },
-                [&] { protocol.pulse_guide_axis(axis, velocity, first_chunk_cs); });
-        } catch (...) {
-            // The pulse never started as far as the driver knows: every window it armed closes before the error
-            // reaches the client (decision 0022 rule 2), so the next pulse on the other axis takes its cross-axis
-            // hold as before, and RA and Dec serve neither a correction nor a hold for a pulse that never ran. The
-            // hold on this axis goes back to the other axis's pulse that armed it, unless a disconnect cleared it.
-            // The gate holds mutex_ again here.
+        // The pulse never started as far as the driver knows: every window it armed closes before the error
+        // reaches the client (decision 0022 rule 2), so the next pulse on the other axis takes its cross-axis hold as
+        // before, and RA and Dec serve neither a correction nor a hold for a pulse that never ran. The hold on this
+        // axis goes back to the other axis's pulse that armed it, unless a disconnect cleared it. Call with mutex_.
+        const auto disarm_locked = [&] {
             pulse_hold_[axis_index].clear();
             pg_correction_[axis_index].clear();
             pg_hold_[other_index].clear();
             if (connected_) {
                 pg_hold_[axis_index] = prev_axis_position_hold;
             }
+        };
+        // The guide write goes out through the send gate with mutex_ free: a chunk of the older pulse already on the
+        // wire lands first, and the initiator lock keeps any other initiator out meanwhile.
+        bool sent = false;
+        try {
+            sent = send_motion_locked(
+                lock, [this, &claim] { return connected_ && !lost_locked(claim); },
+                [&] { protocol.pulse_guide_axis(axis, velocity, first_chunk_cs); });
+        } catch (...) {
+            disarm_locked();  // the gate holds mutex_ again here
             throw;
+        }
+        if (!sent) {
+            // The gate refused (disconnected, or the claim lost): no guide write went out, so no window stays armed
+            // and no chain starts. initiator_mutex_ keeps every claimer and the disconnect out today, so this is a
+            // guard, not a path a client reaches.
+            disarm_locked();
+            check_connected();
+            throw AlpacaException("PulseGuide superseded by a concurrent motion command",
+                                  AlpacaError::InvalidOperation);
         }
         drop_poll_in_flight_locked();
         lock.unlock();
