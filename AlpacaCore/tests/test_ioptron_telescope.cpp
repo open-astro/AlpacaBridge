@@ -2434,10 +2434,19 @@ TEST_CASE("iOptron zero search - the bound stops a search that no client polls",
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
     pass_connect_cache(clock);
+    // The watchdog's thread, from the slot's spawn seam: start() spawns it on this thread, inside find_home().
+    std::thread::id watchdog_thread;
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [&watchdog_thread](std::function<void()> body) {
+        std::thread thread(std::move(body));
+        watchdog_thread = thread.get_id();
+        return thread;
+    });
 
     driver->find_home();
     REQUIRE(mount.count(":MSH#") == 1);
     mount.set_system_status(2);  // still searching, and nobody reads it
+    // The body reads the clock, then registers its wait: an advance before that would move its wake past the bound.
+    REQUIRE(clock.wait_for_waiter_thread(watchdog_thread, std::chrono::seconds(5)));
     clock.advance(std::chrono::seconds(119));
     CHECK(mount.count(":Q#") == 0);
 
