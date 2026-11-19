@@ -2098,7 +2098,9 @@ void iOptronProtocolWrapper::go_to_home() {
 }
 
 void iOptronProtocolWrapper::find_home() {
-    send_command(":MSH");
+    // Issue #2420: the firmware acks :MSH# with a bare '1' and no '#' (possibly only once the search ends), so a
+    // reply read would time out whatever the search does. Sent blind like :MH#; the driver polls :GLS# for status 7.
+    send_command_blind(":MSH#");
 }
 
 // Pulse guiding commands
