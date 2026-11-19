@@ -101,7 +101,9 @@ void set_log_max_file_bytes(std::uintmax_t bytes);
 // Cap the bytes all log files in the log directory may hold together, across
 // days (0 = unlimited; #2422). Over the cap, the oldest files go first: the
 // oldest date first and, within a date, its highest part first and its
-// current file last. The file being written is counted but never deleted.
+// current file last; the day being written goes after every other date, even
+// one named later (a clock that jumped ahead and came back). The file being
+// written is counted but never deleted.
 // Enforced after every rotation, at day rollover and by prune_old_log_files()
 // (at start-up); with no per-file cap there is no rotation, so only the last
 // two apply. init_logging applies logging.max_total_size_mb here.

@@ -270,6 +270,25 @@ int main() {
     }
 
     {
+        // case: the day being written is the newest, whatever dates other files carry
+        // A file dated after today (the clock jumped ahead once, then came back) sorts after today by name. The
+        // session being written is still the newest, so the total cap deletes the future-dated file before today's
+        // parts; by name order alone every rotation would delete today's part .1 and keep the future file forever.
+        const fs::path dir = make_dir();
+        const fs::path older = dated(dir, local_date_days_ago(2));
+        const fs::path future = dated(dir, local_date_days_ago(-400));
+        write_file(older, 1000);
+        write_file(future, 6000);
+        const fs::path file = start(dir, 4096, 8000);
+        for (int i = 0; i < 1000 && !fs::exists(dir / part_name(1)); ++i) write_lines(1);
+        EXPECT(fs::exists(dir / part_name(1)));
+        EXPECT(!fs::exists(older));
+        EXPECT(!fs::exists(future));
+        EXPECT(fs::exists(file));
+        fs::remove_all(dir);
+    }
+
+    {
         // case: the file being written counts toward the total cap
         // Yesterday's 1000 bytes alone fit 3000; with today's open file (about 2600 bytes) they do not.
         const fs::path dir = make_dir();
