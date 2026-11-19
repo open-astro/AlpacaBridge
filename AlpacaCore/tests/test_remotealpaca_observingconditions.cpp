@@ -28,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "alpaca_upstream_script.h"
@@ -429,6 +430,28 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - Refresh is forwarded and m
     rig.poll();
     rig.poll();
     CHECK(rig.http.calls() == calls);
+}
+
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded AveragePeriod write leaves the newer one served",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    // The first write reaches the upstream, then its reply waits until the second write has returned.
+    alpacacore::test::Latch first_reply;
+    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+        auto reply = rig.upstream.answer(request);
+        if (request.method == "PUT" && request.form_body.find("AveragePeriod=5") != std::string::npos) {
+            first_reply.block();
+        }
+        return reply;
+    });
+    std::thread first([&] { rig.driver->set_average_period(5.0); });
+    REQUIRE(first_reply.wait_entered());
+    rig.driver->set_average_period(0.0);  // supersedes the first body; the upstream now holds 0
+    first_reply.release();
+    first.join();
+    // Decision 0006 rule 6: the superseded body writes nothing, so the read matches the upstream before any poll.
+    CHECK(rig.driver->get_average_period() == 0.0);
 }
 
 TEST_CASE("Remote Alpaca ObservingConditions Driver - Connect refuses an upstream that is this server",
