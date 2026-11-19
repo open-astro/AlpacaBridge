@@ -1565,25 +1565,17 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
 
 #ifndef _WIN32
 
-// Decision 0022 rule 2 (#1836), a cancel clears the window: a pulse cut short by a replacement, MoveAxis, Park or
+// Decision 0022 rule 2 (#1836), a cancel clears the window: a pulse cut short by MoveAxis(axis, 0), a slew, Park or
 // AbortSlew keeps its window only while that canceller runs, as the RA guard against reading the `t` 0 its blind stop
 // left. A canceller that fails or is refused clears it on its way out, so IsPulseGuiding does not stay true over a
 // stopped axis for the rest of the cut-short pulse. Each first pulse is 3 s on a fake clock that never advances, and
 // the getters answer after each failure (over TCP a failed exchange does not lose the link).
-namespace {
 
-// The last of the four commands an axis stop sends on `device` (16 RA, 17 Dec): the fixed-rate stop, direction 37. A
-// hangup on it leaves the stop landed (a blind command ignores its drain) and fails every send after it.
-std::string last_stop_command_prefix(int device) { return std::string{'P', '\x02', static_cast<char>(device), '\x25'}; }
-
-}  // namespace
-
-// The review scenario: an RA pulse is cut short by a replacement whose own rate command fails. The handset hangs up on
-// the last command of the cut-short pulse's blind stop, so the stop lands and the replacement's rate command is the
-// first send that fails. The window used to be put back for the rest of the first pulse (IsPulseGuiding true over a
-// stopped RA motor until about 4 s); the restore the blind stop owes stays, as Tracking false.
-TEST_CASE("SynScan hold window - a replacement whose rate command fails clears the pulse it cut short",
-          "[synscan][telescope][hold-window][pulseguiding]") {
+// #2263: a replacement no longer cuts the older pulse short; it supersedes it only once its own rate command has
+// landed. The link is reset before the replacement, so its rate command fails: the older RA pulse was not
+// superseded and gets no stop, its window is put back (IsPulseGuiding true) and its own end still stops the axis.
+TEST_CASE("SynScan hold window - a replacement whose rate command fails leaves the older pulse running",
+          "[synscan][telescope][hold-window][pulseguiding][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
     alpacacore::test::FakeMountServer server(st->responder());
@@ -1592,44 +1584,27 @@ TEST_CASE("SynScan hold window - a replacement whose rate command fails clears t
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_tracking(true);
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
-    REQUIRE(driver->get_tracking());
 
     driver->pulse_guide(3, 3000);  // West: RA
     REQUIRE(driver->get_is_pulse_guiding());
     const int rate_commands = st->command_count('P');
-    server.hang_up_on(last_stop_command_prefix(16));
-    // Its join cuts the first short (the stop's first three commands land); its own rate command fails.
-    REQUIRE_THROWS(driver->pulse_guide(2, 500));
-    REQUIRE(st->command_count('P') == rate_commands + 3);
-    CHECK_FALSE(driver->get_is_pulse_guiding());
-    CHECK_FALSE(driver->get_tracking());  // the stop turned handset tracking off; the restore is still owed
+    // The handset hangs up on a status read, so the replacement's rate command is the first send that fails.
+    server.hang_up_on("L");
+    alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
+    // The rate command's own failure, not a slewing refusal: the older pulse was never stopped, so no failed stop of
+    // it marked the axis as moving.
+    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::DriverException);
+    CHECK(st->command_count('P') == rate_commands);  // no stop of the older pulse reached the handset
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
-// The same exit, reached through the slewing gate: the link is reset, so the cut-short pulse's blind stop fails, the
-// axis is marked as possibly moving and the replacement is refused. Slewing reports the axis; IsPulseGuiding does not.
-TEST_CASE("SynScan hold window - a replacement pulse refused after its join leaves IsPulseGuiding false",
-          "[synscan][telescope][hold-window][pulseguiding]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto st = make_handset(clock);
-    alpacacore::test::FakeMountServer server(st->responder());
-    REQUIRE(server.ok());
-    auto driver = make_driver(server.port(), clock, 300);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    driver->set_tracking(true);
-    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
-
-    driver->pulse_guide(3, 3000);  // West: RA
-    REQUIRE(driver->get_is_pulse_guiding());
-    REQUIRE(server.drop_connections());
-    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::InvalidOperation);
-    CHECK_FALSE(driver->get_is_pulse_guiding());
-    CHECK(driver->get_slewing());
-    driver->set_connected(false);
-}
-
-TEST_CASE("SynScan hold window - a MoveAxis whose send fails after cutting a pulse short leaves IsPulseGuiding false",
-          "[synscan][telescope][hold-window][pulseguiding][moveaxis]") {
+// #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Its send fails here
+// (the link is reset just before it), so the Dec pulse got no stop and still owns its window; the MoveAxis left the
+// axis reported as possibly moving, as a failed MoveAxis send always has.
+TEST_CASE("SynScan hold window - a MoveAxis whose send fails leaves the pulse on its axis running",
+          "[synscan][telescope][hold-window][pulseguiding][moveaxis][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
     alpacacore::test::FakeMountServer server(st->responder());
@@ -1641,10 +1616,12 @@ TEST_CASE("SynScan hold window - a MoveAxis whose send fails after cutting a pul
     driver->pulse_guide(0, 3000);  // North: Dec
     REQUIRE(driver->get_is_pulse_guiding());
     const int rate_commands = st->command_count('P');
-    server.hang_up_on(last_stop_command_prefix(17));
-    REQUIRE_THROWS(driver->move_axis(1, 0.5));  // its join cuts the pulse short; its own rate command fails
-    REQUIRE(st->command_count('P') == rate_commands + 3);
-    CHECK_FALSE(driver->get_is_pulse_guiding());
+    // The handset hangs up on a status read, so the MoveAxis's rate command is the first send that fails.
+    server.hang_up_on("L");
+    alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
+    REQUIRE_THROWS(driver->move_axis(1, 0.5));
+    CHECK(st->command_count('P') == rate_commands);  // no stop of the pulse reached the handset
+    CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
 
@@ -1720,6 +1697,381 @@ TEST_CASE("SynScan hold window - an AbortSlew whose stop fails clears the window
     require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// #2263, decision 0006 rule 3: a new motion command supersedes the pulse on its own axis and never joins it. The old
+// pulse body then sends that axis nothing (no blind stop, no end-of-pulse stop or restore) and touches no driver
+// state; the newer command owns the axis. A pulse on the other axis keeps running. Every first pulse below runs on a
+// fake clock that a case steps itself, with the status poll paused so the handset's log holds only the motion.
+namespace {
+
+struct ParkedPulse {
+    std::thread::id body;
+    std::shared_future<void> ended;  // ready once the body has returned
+};
+
+// Starts a pulse whose body signals when it returns, and waits until that body is parked on the clock. Later pulses
+// on the same driver run through the hook unsignalled.
+ParkedPulse start_pulse_parked(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                               int direction, int duration_ms) {
+    auto ended = std::make_shared<std::promise<void>>();
+    auto started = std::make_shared<std::promise<std::thread::id>>();
+    auto first = std::make_shared<std::atomic<bool>>(false);
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(driver,
+                                                             [ended, started, first](std::function<void()> body) {
+                                                                 if (first->exchange(true)) {
+                                                                     return std::thread(std::move(body));
+                                                                 }
+                                                                 std::thread thread([body = std::move(body), ended] {
+                                                                     body();
+                                                                     ended->set_value();
+                                                                 });
+                                                                 started->set_value(thread.get_id());
+                                                                 return thread;
+                                                             });
+    ParkedPulse pulse;
+    pulse.ended = ended->get_future().share();
+    driver.pulse_guide(direction, duration_ms);
+    auto body = started->get_future();
+    REQUIRE(body.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    pulse.body = body.get();
+    REQUIRE(clock.wait_for_waiter_thread(pulse.body, std::chrono::milliseconds(5000)));
+    return pulse;
+}
+
+bool returned(const ParkedPulse& pulse) {
+    return pulse.ended.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+}
+
+// Names the next pulse body the driver spawns. A pulse started after start_pulse_parked() runs through that call's
+// hook unnamed, so a case that steps such a pulse to its end installs this hook first.
+std::shared_future<std::thread::id> name_next_pulse_body(alpacacore::TelescopeDriver& driver) {
+    auto id = std::make_shared<std::promise<std::thread::id>>();
+    auto named = std::make_shared<std::atomic<bool>>(false);
+    auto body = id->get_future().share();
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(driver, [id, named](std::function<void()> fn) {
+        std::thread thread(std::move(fn));
+        if (!named->exchange(true)) {
+            id->set_value(thread.get_id());
+        }
+        return thread;
+    });
+    return body;
+}
+
+// Steps a pulse named by name_next_pulse_body() to its end: waits until its body is parked on the clock, steps until
+// its window closes (the body's wait, due before that, has run out), then waits in real time for `ended`, the body's
+// own end command on the wire. Stepping until `ended` instead let a loaded runner spend every step of advance_until()
+// before the woken body got to send its command.
+bool step_pulse_to_end(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                       const std::shared_future<std::thread::id>& body, const std::function<bool()>& ended) {
+    if (body.wait_for(std::chrono::seconds(5)) != std::future_status::ready ||
+        !clock.wait_for_waiter_thread(body.get(), std::chrono::milliseconds(5000))) {
+        return false;
+    }
+    return advance_until(clock, [&] { return !driver.get_is_pulse_guiding(); }) && wait_until(ended, 5000);
+}
+
+// Zero-rate variable-rate commands on `device` (16 RA, 17 Dec): two per axis stop.
+int zero_rate_commands(FakeSynScanHandset& st, int device) {
+    const auto commands = st.command_snapshot();
+    return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& command) {
+        return is_variable_rate_command(command, device) && is_zero_rate_command(command);
+    }));
+}
+
+// The last variable-rate command on `device` is a non-zero rate: the axis is still moving.
+bool last_rate_moves(FakeSynScanHandset& st, int device) {
+    const auto commands = st.command_snapshot();
+    for (auto it = commands.rbegin(); it != commands.rend(); ++it) {
+        if (is_variable_rate_command(*it, device)) {
+            return !is_zero_rate_command(*it);
+        }
+    }
+    return false;
+}
+
+struct PulseAxis {
+    const char* name;
+    int direction;  // the PulseGuide direction: 0 North (Dec), 3 West (RA)
+    int axis;       // the MoveAxis axis
+    int device;     // the motor: 16 RA, 17 Dec
+};
+constexpr PulseAxis kPulseAxes[] = {{"Dec", 0, 1, 17}, {"RA", 3, 0, 16}};
+
+std::unique_ptr<alpacacore::TelescopeDriver> make_tracking_driver(alpacacore::test::FakeTaskClock& clock, int port,
+                                                                  int timeout_ms = 1000) {
+    auto driver = make_driver(port, clock, timeout_ms);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+    return driver;
+}
+
+}  // namespace
+
+TEST_CASE("SynScan PulseGuide - a second pulse on an axis supersedes the first without a join or a stop (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    for (const auto& a : kPulseAxes) {
+        INFO(a.name);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+
+        const ParkedPulse first = start_pulse_parked(clock, *driver, a.direction, 3000);
+        const int stops = zero_rate_commands(*st, a.device);
+        const int tracking_writes = st->command_count('T');
+        driver->pulse_guide(a.direction, 3000);
+        REQUIRE(returned(first));                           // woken by the supersede; a join would also have ended it
+        CHECK(zero_rate_commands(*st, a.device) == stops);  // the old body sent no stop: the replacement owns the axis
+        CHECK(st->command_count('T') == tracking_writes);
+        CHECK(last_rate_moves(*st, a.device));
+        CHECK(driver->get_is_pulse_guiding());
+
+        // The replacement's own end still stops the axis (Dec) or hands it back to tracking (RA).
+        REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        if (a.device == 17) {
+            CHECK(zero_rate_commands(*st, a.device) > stops);
+        } else {
+            CHECK(st->command_count('T') > tracking_writes);
+        }
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan MoveAxis - a MoveAxis on the axis of a running pulse supersedes it without a join or a stop (#2263)",
+          "[synscan][telescope][pulseguiding][moveaxis][motion-owner]") {
+    for (const auto& a : kPulseAxes) {
+        INFO(a.name);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+
+        const ParkedPulse pulse = start_pulse_parked(clock, *driver, a.direction, 3000);
+        const int stops = zero_rate_commands(*st, a.device);
+        const int tracking_writes = st->command_count('T');
+        driver->move_axis(a.axis, 0.5);
+        REQUIRE(returned(pulse));
+        CHECK(zero_rate_commands(*st, a.device) == stops);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+
+        // Past the end the pulse would have had: its body is gone, so nothing stops the jog or restores tracking.
+        clock.advance(std::chrono::seconds(5));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        CHECK(zero_rate_commands(*st, a.device) == stops);
+        CHECK(st->command_count('T') == tracking_writes);
+        CHECK(last_rate_moves(*st, a.device));
+
+        driver->move_axis(a.axis, 0.0);
+        CHECK(zero_rate_commands(*st, a.device) > stops);
+        CHECK_FALSE(driver->get_slewing());
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan MoveAxis - a MoveAxis on one axis leaves the pulse on the other axis running (#2263)",
+          "[synscan][telescope][pulseguiding][moveaxis][motion-owner]") {
+    for (const auto& a : kPulseAxes) {
+        INFO(a.name);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+
+        const ParkedPulse pulse = start_pulse_parked(clock, *driver, a.direction, 2000);
+        const int stops = zero_rate_commands(*st, a.device);
+        const int tracking_writes = st->command_count('T');
+        const int other_axis = 1 - a.axis;
+        driver->move_axis(other_axis, 0.5);
+        CHECK(driver->get_is_pulse_guiding());
+        CHECK(zero_rate_commands(*st, a.device) == stops);
+        CHECK(last_rate_moves(*st, a.device));
+        CHECK(pulse.ended.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+
+        // The pulse runs to its own end and stops its axis (Dec) or hands it back to tracking (RA).
+        REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        REQUIRE(returned(pulse));
+        if (a.device == 17) {
+            CHECK(zero_rate_commands(*st, a.device) > stops);
+        } else {
+            CHECK(st->command_count('T') > tracking_writes);
+        }
+        driver->move_axis(other_axis, 0.0);
+        driver->set_connected(false);
+    }
+}
+
+// SynScan already refused a pulse during a slew or a park (open-astro#775); pinned here for the policy table: the
+// refusal claims nothing, so the slew or park keeps running and the axes get no command. A Park in flight keeps its
+// earlier refusal, InvalidWhileParked from the command gate. FindHome is not supported.
+TEST_CASE("SynScan PulseGuide - refused while a slew or a park runs, which keeps running (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    struct Case {
+        const char* name;
+        std::function<void(alpacacore::TelescopeDriver&)> start;
+        int refusal;
+    };
+    const Case cases[] = {
+        {"SlewToCoordinatesAsync", [](alpacacore::TelescopeDriver& d) { d.slew_to_coordinates_async(5.0, 20.0); },
+         alpacacore::AlpacaError::InvalidOperation},
+        {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }, alpacacore::AlpacaError::InvalidWhileParked},
+    };
+    for (const auto& c : cases) {
+        INFO(c.name);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        st->goto_never_ends.store(true);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+
+        c.start(*driver);
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+        const int rate_commands = st->command_count('P');
+        const int cancels = st->command_count('M');
+        for (const int direction : {0, 3}) {
+            require_alpaca_error([&] { driver->pulse_guide(direction, 500); }, c.refusal);
+        }
+        CHECK(st->command_count('P') == rate_commands);
+        CHECK(st->command_count('M') == cancels);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+        CHECK(st->goto_seen.load());
+        driver->set_connected(false);
+    }
+}
+
+// The older pulse's own end can queue behind the replacement's turn: the replacement holds its turn across its Dec
+// pointing-state read (held in the handset here) while the first pulse's wait runs out. At its turn the old body
+// finds it was superseded and sends nothing, so its stop never lands after the replacement's rate.
+TEST_CASE("SynScan PulseGuide - an older pulse whose end waits behind the replacement's turn sends nothing (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    auto answer = st->responder();
+    auto hold_pointing = std::make_shared<std::atomic<bool>>(false);
+    auto pointing = std::make_shared<alpacacore::test::Latch>();
+    alpacacore::test::FakeMountServer server([answer, hold_pointing, pointing](const std::string& chunk) {
+        if (!chunk.empty() && chunk[0] == 'p' && hold_pointing->exchange(false)) {
+            pointing->block();
+        }
+        return answer(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_tracking_driver(clock, server.port(), 5000);
+
+    const ParkedPulse first = start_pulse_parked(clock, *driver, 0, 200);  // North: Dec
+    const int stops = zero_rate_commands(*st, 17);
+    auto turn_waits = std::make_shared<std::atomic<int>>(0);
+    alpacacore::vendor::synscan::set_wire_turn_wait_hook_for_testing(*driver, [turn_waits] { ++*turn_waits; });
+    hold_pointing->store(true);
+    auto second = std::async(std::launch::async, [&] { driver->pulse_guide(0, 3000); });
+    REQUIRE(pointing->wait_entered());              // the replacement holds its turn inside its `p` read
+    clock.advance(std::chrono::milliseconds(250));  // the first pulse's wait ends; its stop queues for the turn
+    REQUIRE(wait_until(
+        [&] {
+            return turn_waits->load() >= 2 ||
+                   first.ended.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+        },
+        5000));
+    pointing->release();
+    second.get();
+    REQUIRE(returned(first));
+    alpacacore::vendor::synscan::set_wire_turn_wait_hook_for_testing(*driver, {});
+    CHECK(zero_rate_commands(*st, 17) == stops);
+    CHECK(last_rate_moves(*st, 17));
+    CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// An older RA pulse whose end-of-pulse tracking restore failed waits on the clock before it retries. A replacement
+// in that wait takes the axis over (its rate replaces the older one, and its own end restores tracking); the older
+// body then gives up without touching the replacement's window or marking the axis as possibly moving.
+TEST_CASE("SynScan PulseGuide - a replacement takes over from an older pulse whose stop is retrying (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_tracking_driver(clock, server.port(), 300);
+
+    const ParkedPulse first = start_pulse_parked(clock, *driver, 3, 200);  // West: RA
+    const int tracking_writes = st->command_count('T');
+    st->reject_tracking.store(true);  // the pulse end's `T` times out
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(wait_until([&] { return st->command_count('T') > tracking_writes; }, 5000));
+    REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));  // parked before its retry
+    st->reject_tracking.store(false);
+
+    const auto replacement = name_next_pulse_body(*driver);
+    driver->pulse_guide(3, 3000);
+    REQUIRE(returned(first));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(st->command_count('T') == tracking_writes + 1);  // the older body sent no retry
+    // The replacement's end restores tracking (its `T`).
+    REQUIRE(
+        step_pulse_to_end(clock, *driver, replacement, [&] { return st->command_count('T') > tracking_writes + 1; }));
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// The older pulse fails all its stop attempts and sits in the wait after the last one. A replacement arms its window
+// and releases mutex_ for its rate command; the old wait runs out right then (the handset steps the clock when the
+// rate arrives). The old body's failure tail must wait for the turn and find itself superseded: run under mutex_
+// alone it cleared the replacement's window (IsPulseGuiding false while the axis moves, decision 0022 rule 2) and
+// marked the axis as a runaway (Slewing true after the replacement's clean end). RA, because only its stop (the
+// tracking `T`) can fail on the fake: a Dec stop is blind.
+TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the replacement's window alone (#2263)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    auto answer = st->responder();
+    auto wake_on_rate = std::make_shared<std::atomic<bool>>(false);
+    auto rate = std::make_shared<alpacacore::test::Latch>();
+    alpacacore::test::FakeTaskClock* const virtual_clock = &clock;
+    alpacacore::test::FakeMountServer server([answer, wake_on_rate, rate, virtual_clock](const std::string& chunk) {
+        if (is_variable_rate_command(chunk, 16) && !is_zero_rate_command(chunk) && wake_on_rate->exchange(false)) {
+            virtual_clock->advance(std::chrono::milliseconds(100));  // the old body's last retry wait runs out
+            rate->block();
+        }
+        return answer(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_tracking_driver(clock, server.port(), 300);
+
+    const ParkedPulse first = start_pulse_parked(clock, *driver, 3, 200);  // West: RA
+    st->reject_tracking.store(true);                                       // every stop attempt's `T` times out
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const int before = st->command_count('T');
+        clock.advance(std::chrono::milliseconds(attempt == 0 ? 250 : 100));
+        REQUIRE(wait_until([&] { return st->command_count('T') > before; }, 5000));
+        REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));
+    }
+    st->reject_tracking.store(false);
+
+    wake_on_rate->store(true);
+    const auto replacement = name_next_pulse_body(*driver);
+    auto second = std::async(std::launch::async, [&] { driver->pulse_guide(3, 3000); });
+    REQUIRE(rate->wait_entered());
+    REQUIRE(returned(first));
+    rate->release();
+    second.get();
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+
+    const int tracking_writes = st->command_count('T');
+    // The replacement's end restores tracking (its `T`), whatever the old body did to the window.
+    REQUIRE(step_pulse_to_end(clock, *driver, replacement, [&] { return st->command_count('T') > tracking_writes; }));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking());
     driver->set_connected(false);
 }
 
