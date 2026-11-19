@@ -729,12 +729,13 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
 }
 
 void CelestronCgxTelescopeDriver::log_superseded_failure(const char* body, const std::exception_ptr& failure) {
-    std::string reason = "unknown exception";
+    std::string reason;
     try {
         std::rethrow_exception(failure);
     } catch (const std::exception& error) {
         reason = error.what();
     } catch (...) {
+        reason = "unknown exception";
     }
     ALPACA_LOG_INFO("Celestron CGX", std::string(body) + " ended after a newer command took its axes: " + reason);
 }
