@@ -105,10 +105,9 @@ public:
     // register's length has passed on it since the start, as a camera does, then Success. Unset, a start reports
     // Success at once, which the driver refuses as a frame that began before the start (and restarts) for an exposure
     // longer than its early-frame tolerance (20 ms plus 0.1 %). So that a case that forgot the clock does not chase a
-    // stale-frame failure, such a start makes the next status read throw a message naming the misuse, unless
-    // instant_long_exposures is set (a case that wants the instant Success).
+    // stale-frame failure, such a start makes the next status read throw a message naming the misuse. A scripted
+    // status (script_exposure_status) is served as scripted.
     const util::TaskClock* exposure_clock{nullptr};
-    bool instant_long_exposures{false};
     // The driver's early-frame tolerance (ZWOCameraDriver::early_frame_tolerance()): 20 ms plus 0.1 % of the exposure.
     static constexpr long kEarlyFrameToleranceUs{20'000};
     static constexpr long kEarlyFrameToleranceDivisor{1000};
@@ -416,14 +415,14 @@ public:
                 status_ = ExposureStatus::Failed;
             }
         }
-        if (status_ == ExposureStatus::Success && !instant_long_exposures && status_script_.empty()) {
+        if (status_ == ExposureStatus::Success && status_script_.empty()) {
             const auto exposure = controls_.find(ControlType::Exposure);
             if (exposure != controls_.end() &&
                 exposure->second > kEarlyFrameToleranceUs + exposure->second / kEarlyFrameToleranceDivisor) {
                 exposure_status_error_ =
                     "FakeZWOSDK misuse: a " + std::to_string(exposure->second) +
                     " us exposure completed at once with no exposure_clock; the driver refuses such a frame as stale "
-                    "(#2414). Set exposure_clock, or instant_long_exposures to want the instant Success";
+                    "(#2414). Set exposure_clock";
             }
         }
     }
