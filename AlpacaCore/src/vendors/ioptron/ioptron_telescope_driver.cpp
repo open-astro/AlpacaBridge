@@ -3346,9 +3346,12 @@ private:
             connect_pass_done = clock_sync_connect_pass_done_;
         }
         // A re-sync that superseded the connect's own pass before that pass finished (a host clock change in the
-        // first second after Connect) runs as the connect pass: it must still send the site, and may not stop at
-        // a mount clock that already agrees (#2419).
-        const bool resync = !resync_why.empty() && connect_pass_done;
+        // first second after Connect), or that follows a connect pass that threw before it published, runs as the
+        // connect pass: it must still send the site, and may not stop at a mount clock that already agrees (#2419).
+        // It is still a host clock re-sync (`host_clock_resync`), so the motion wait and the write check below
+        // apply to it too (#2432).
+        const bool host_clock_resync = !resync_why.empty();
+        const bool resync = host_clock_resync && connect_pass_done;
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
@@ -3376,13 +3379,14 @@ private:
         // FindHome or MoveAxis can start right after it, so each write checks again inside its own exchange: under
         // the operation lock, which every motion command takes, no motion can start between that check and the
         // write. A write that finds motion waits for it to end and checks again; a stop or a disconnect during that
-        // wait sends nothing (fail closed). The connect's own pass writes as before.
+        // wait sends nothing (fail closed). Any host clock re-sync checks, one that runs as the connect pass
+        // included; the connect's own pass writes as before.
         auto gated_write = [&](auto&& send) {
             while (true) {
                 {
                     StateLock lock(lock_gate_);
                     if (!connected_ || ctx.stop_reason() != util::StopReason::None) return;
-                    if (!resync || !driver_motion_active_locked()) {
+                    if (!host_clock_resync || !driver_motion_active_locked()) {
                         send();
                         return;
                     }
@@ -3402,9 +3406,11 @@ private:
         };
 
         std::optional<std::chrono::system_clock::time_point> old_mount_utc;
-        if (resync) {
+        if (host_clock_resync) {
             if (!wait_for_driver_motion_to_end(ctx)) return;
             if (clock_sync_resync_hook_) clock_sync_resync_hook_();  // test seam: no driver lock held
+        }
+        if (resync) {
             old_mount_utc = read_mount_utc();
             if (old_mount_utc) {
                 const auto diff =
