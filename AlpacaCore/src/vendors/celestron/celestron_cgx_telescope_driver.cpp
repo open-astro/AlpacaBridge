@@ -737,6 +737,8 @@ void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& 
         ~PendingEnd() { pending.store(false); }
     } const pending_end{guide_end_pending_};
     const auto bound = kGuidePacketMax + kGuideEndMargin;
+    // One deadline for both axes, on purpose: both packets started before the supersede, so neither outlives the
+    // longest packet plus the margin from now; a per-axis deadline would let two packets wait twice as long.
     const auto deadline = clock_.now() + bound;
     for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
         if (!axes[pulse_index(axis)]) continue;
