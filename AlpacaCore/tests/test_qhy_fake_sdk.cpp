@@ -218,8 +218,8 @@ TEST_CASE("FakeQHYSDK - frame length follows the configured ROI and bit depth", 
 }
 
 TEST_CASE("FakeQHYSDK - get_single_frame fills the buffer and returns immediately", "[qhy][fake][unit]") {
-    // "Immediately" is the contract that keeps the driver's DETACHABLE
-    // exposure worker from outliving the fake -- see rule 1 on FakeQHYSDK.
+    // "Immediately" is the contract that keeps the driver's join of its
+    // exposure body from hanging -- see rule 1 on FakeQHYSDK.
     auto fake = make_fake();
     fake.open_camera("fake-qhy-0");
     fake.set_resolution("fake-qhy-0", 0, 0, 4, 2);
@@ -707,9 +707,9 @@ TEST_CASE("FakeQHYSDK - get_single_frame never writes past what get_mem_length p
 
 TEST_CASE("FakeQHYSDK - open_camera refuses while a zombie exposure worker is live", "[qhy][fake][unit]") {
     // open-astro#324. QHYSDKWrapper::open_camera() refuses a fresh open while
-    // a previously registered exposure worker's flag is still true: that
-    // worker may have timed out its join and been DETACHED, leaving it blocked
-    // inside GetQHYCCDSingleFrame on the old handle (the PR #201 finding).
+    // a previously registered exposure flag is still true: an exposure call may
+    // still be in flight inside GetQHYCCDSingleFrame on the old handle (the PR
+    // #201 finding).
     //
     // exposure_workers_ was written and never read, so the fake could not fail
     // a reconnect storm here -- and a reconnect storm is the single most likely
@@ -787,9 +787,8 @@ TEST_CASE("FakeQHYSDK - move_cfw enforces the single-digit protocol ceiling", "[
 
 TEST_CASE("LockedQHYSDK - records the slowest forward so a blocking fake is nameable", "[qhy][fake][unit]") {
     // open-astro#339. "No QHY fake method may block" was prose in two headers,
-    // and two things depend on it: the camera driver's detachable workers (a
-    // blocking fake turns a timed-out join into a detached thread still
-    // calling into a fake the test body has destroyed) and cancel_exposure's
+    // and two things depend on it: the camera driver's joined bodies (a
+    // blocking fake hangs its disconnect or teardown) and cancel_exposure's
     // exemption below. A future fake method gaining a reasonable-looking
     // sleep_for broke both, and the symptom was a HUNG [stress] run -- no
     // assertion to fail, nothing pointing at the offending method.
@@ -902,11 +901,11 @@ TEST_CASE("LockedQHYSDK - cancel_exposure forwards without taking the decorator'
 
 TEST_CASE("QHYSeamFixture - owns the FakeQHYSDK, decorator and driver in destruction order", "[qhy][fake][unit]") {
     // open-astro#338. Every QHY seam test must outlive the driver with the
-    // fake: the driver holds a QHYSDK& and its detachable workers capture a
-    // raw QHYSDK*. A case that declares them the other way round, or stashes
-    // the driver anywhere outliving the fake, compiles cleanly and is
-    // undefined behaviour -- most likely a use-after-free inside a detached
-    // worker, the failure mode hardest to attribute when it surfaces.
+    // fake: the driver and the bodies it joins hold a QHYSDK&. A case that
+    // declares them the other way round, or stashes the driver anywhere
+    // outliving the fake, compiles cleanly and is undefined behaviour -- a
+    // use-after-free of the fake, the failure mode hardest to attribute when it
+    // surfaces.
     //
     // The rule was stated in three places and enforced by nothing. This
     // fixture makes it unwritable: member order gives the destruction order

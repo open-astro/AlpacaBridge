@@ -591,7 +591,10 @@ command channel. Nothing scans the network; the host is typed in.
 - **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
   the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
   lost when that path is gone or points elsewhere, or when a read or write on the fd fails with
-  `EIO`/`ENXIO`/`ENODEV`/`EBADF`. Lost means `Connected` false, `NotConnected` instead of a
+  `EIO`/`ENXIO`/`ENODEV`/`EBADF` (the `util::SerialLink` verdict since #2262: the reads go through
+  `read_until(link_, ...)` and the writes through `link_.write_all()`, so the wrapper keeps no serial errno list of its
+  own; an `EBADF` logs one ERROR line, since our own fd is unusable; a successful connect and a Disconnect clear the
+  link's verdict with the wrapper's latch). Lost means `Connected` false, `NotConnected` instead of a
   generic "Failed to send command to mount" while `Connected` still read true (a reply cut off
   mid-read no longer waits out the response timeout either), the fd closed (so the replugged
   CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`

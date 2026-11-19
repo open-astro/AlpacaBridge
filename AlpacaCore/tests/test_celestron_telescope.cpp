@@ -690,6 +690,30 @@ TEST_CASE("Celestron Telescope Driver - non-finite guide rate is rejected", "[ce
     driver->set_connected(false);
 }
 
+// #2379: disconnected, a NaN or infinite rate is InvalidValue on the per-axis setters as on set_guide_rate(); they
+// used to read GuideRate first and answer NotConnected. A negative rate keeps NotConnected (#2257 decision: the
+// autoguider port is known only once connected). Falsified by: dropping the finite check from either per-axis
+// override, or calling the base setter before it.
+TEST_CASE("Celestron Telescope Driver - per-axis guide-rate setters refuse a non-finite rate before the connection",
+          "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    for (const double bad : {nan, inf, -inf}) {
+        require_alpaca_error([&]() { driver->set_guide_rate({bad, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(-1.0); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 // #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
 // both false for NaN, so a NaN coordinate went through slew and sync to the
 // mount. Both check the connection before validating, so this needs a

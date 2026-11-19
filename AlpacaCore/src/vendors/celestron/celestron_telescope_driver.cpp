@@ -673,6 +673,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
     }
+    // #2379: the base setters read GuideRate first, which answers NotConnected before the finite check.
+    void set_guide_rate_right_ascension(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
+        TelescopeDriver::set_guide_rate_right_ascension(value);
+    }
+    void set_guide_rate_declination(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
+        TelescopeDriver::set_guide_rate_declination(value);
+    }
 
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);

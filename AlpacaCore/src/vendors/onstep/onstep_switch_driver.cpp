@@ -343,6 +343,9 @@ private:
                 code = link->get_last_command_error().value_or(-1);
             }
         }
+        // A '0' whose :GE# then reads 00 (CE_NONE) or 25 (CE_1, explicit success) is taken as accepted, as the focuser,
+        // the rotator and the telescope's :hP# take it: when the reply digit and the error code disagree, the code
+        // decides. The next poll shows the value the controller holds either way.
         if (!accepted && code != 0 && code != 25) {
             throw AlpacaException("Switch " + std::to_string(id) + " write refused by the controller (" +
                                       describe_feature_error(code) + ")",
