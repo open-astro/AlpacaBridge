@@ -100,7 +100,8 @@ TEST_CASE("ZWO USB Limit defaults clamp and only real connects write", "[zwo][ca
 // the 17.20 MB/s USB Limit 40 allows; written under 100 ms the clock recovers (Fclk 41) and the pacing stays safe
 // when the exposure later goes long. The SDK reloads the last exposure from ASIconfig.xml at every open, and a
 // Bin or ROI change follows a long exposure, so every format write must see a short register.
-TEST_CASE("ZWO frame-format writes run with a sub-100 ms exposure register", "[zwo][camera][unit][usb-bandwidth]") {
+TEST_CASE("ZWO frame-format and USB Limit writes run with a sub-100 ms exposure register",
+          "[zwo][camera][unit][usb-bandwidth]") {
     FakeZWOSDK sdk;
     constexpr long kSavedExposureUs = 1'000'000;  // what ASIconfig.xml held after a guiding session
     constexpr long kSlowClockAboveUs = 100'000;
@@ -129,6 +130,12 @@ TEST_CASE("ZWO frame-format writes run with a sub-100 ms exposure register", "[z
     REQUIRE_FALSE(register_at_format_write.empty());
     for (const long us : register_at_format_write) {
         CHECK(us >= 0);
+        CHECK(us < kSlowClockAboveUs);
+    }
+    // The connect's USB Limit write is paced from the clock too, so it also sees the short register.
+    const auto at_bandwidth = sdk.exposure_at_bandwidth_writes();
+    REQUIRE_FALSE(at_bandwidth.empty());
+    for (const long us : at_bandwidth) {
         CHECK(us < kSlowClockAboveUs);
     }
 }
