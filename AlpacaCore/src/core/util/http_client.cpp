@@ -15,6 +15,7 @@
 #include <alpacacore/util/http_client.h>
 #include <curl/curl.h>
 
+#include <cerrno>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -92,7 +93,14 @@ private:
         if (result != CURLE_OK) {
             std::string message = "HTTP request failed: ";
             message += curl_easy_strerror(result);
+            // CURLE_COULDNT_CONNECT also covers an unreachable host or network, which a Wi-Fi drop restores; only
+            // the connect's own ECONNREFUSED says nothing listens there (decision 0009 point 2(a)).
+            long os_errno = 0;
+            curl_easy_getinfo(curl, CURLINFO_OS_ERRNO, &os_errno);
             curl_easy_cleanup(curl);
+            if (result == CURLE_COULDNT_CONNECT && os_errno == ECONNREFUSED) {
+                throw HttpConnectRefused(message + " (connection refused)");
+            }
             throw AlpacaException(message, AlpacaError::DriverException);
         }
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);

@@ -4003,6 +4003,27 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: remotealpaca observingconditions config round-trips every field (#1753)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "observingconditions"},
+                                           {"deviceNumber", 9630},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32324},
+                                           {"upstreamDeviceNumber", 2},
+                                           {"pollPeriodSeconds", 7}},
+                                          "ObservingConditions", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32324);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 2);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 7);
+        remove_device(router, "remotealpaca", "observingconditions", 9630);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_IOPTRON
     {
         // ioptron / telescope — asserts mountIndex survival: it is read by the
@@ -9039,7 +9060,7 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Altair, Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek, WandererAstro, WeeWX and ZWO descriptors plus the "zzz" test descriptor, schema only, so
+    // ToupTek, WandererAstro, WeeWX, remotealpaca and ZWO descriptors plus the "zzz" test descriptor, schema only, so
     // its `available` is false.
     {
         alpacahttp::Router router;
@@ -9050,7 +9071,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 46);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 47);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -9198,6 +9219,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "weewx") {
 #ifdef ALPACACORE_ENABLE_WEEWX
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "remotealpaca") {
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -10919,6 +10947,30 @@ int main() {
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: configuredevice refuses a remotealpaca upstream that is this server (decision 0023 rule 4)
+        // The router knows the port the server listens on (here 6800) and that it binds every address, so a proxied
+        // device whose upstream is 127.0.0.1:6800 would call itself: refused when configured, and not registered.
+        // Another port of the same host is another server.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "observingconditions"},
+                                     {"deviceNumber", 9631},
+                                     {"upstreamHost", "127.0.0.1"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "ObservingConditions");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "ObservingConditions", 9631).is_null());
+
+        nlohmann::json other = loop;
+        other["upstreamPort"] = 6801;
+        EXPECT(api_attempt(router, other, "ObservingConditions").ok);
+        remove_device(router, "remotealpaca", "observingconditions", 9631);
     }
 #endif
 

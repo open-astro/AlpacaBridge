@@ -64,7 +64,7 @@ Scan: `AlpacaCore/tests/locked_*.h`
 | Astroasis focuser (HID) | `AstroasisHidTransport` | `AlpacaCore/tests/locked_astroasis_hid_transport.h` | adopted | #1398 | owned per-device transport |
 | iOptron iGuider camera (V4L2) | `IGuiderV4L2` | `AlpacaCore/tests/locked_iguider_v4l2.h` | adopted | | kernel V4L2 API, not a vendor SDK; handle-based like the SDK seams |
 | WeeWX observing conditions (HTTP) | `HttpClient` | `AlpacaCore/tests/locked_http_client.h` | adopted | #1753 | the first HTTP seam; real client `util::make_curl_http_client()`, fake `FakeHttpClient` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
-| remotealpaca (HTTP) | `HttpClient` | — | planned | #1753 | built on the seam ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
+| remotealpaca (HTTP) | `HttpClient` | `AlpacaCore/tests/locked_http_client.h` | adopted | #1753 | built on the seam ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); fake `FakeHttpClient` answering from the scripted upstream `AlpacaUpstreamScript` |
 
 Serial and socket drivers have no SDK and are tested through pty fakes and fake servers instead ([decision 0013](0013-designs-to-avoid.md), section 7).
 

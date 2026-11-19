@@ -22,6 +22,9 @@
 // at kHttpMaxResponseBytes, only http and https are allowed on the request and on every redirect, and
 // each call has its own timeout.
 
+#include <alpacacore/alpaca_errors.h>
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstddef>
 #include <memory>
@@ -38,13 +41,23 @@ struct HttpResponse {
     std::string body;  // at most kHttpMaxResponseBytes
 };
 
+// Nothing listens at the host and port: the connect was refused (ECONNREFUSED). A DriverException like any other
+// call with no response, so a caller that does not care catches AlpacaException; a caller that treats a refused
+// connection as positive evidence the server is gone (decision 0009 point 2(a), issue #1753) catches this type. An
+// unreachable host or network, a timeout and a dropped connection are not this type.
+class HttpConnectRefused : public AlpacaException {
+public:
+    explicit HttpConnectRefused(const std::string& message) : AlpacaException(message, AlpacaError::DriverException) {}
+};
+
 class HttpClient {
 public:
     virtual ~HttpClient() = default;
 
     // GET `url`. Throws AlpacaException(DriverException) when no response arrives: a transport error, the
-    // timeout, a body over the cap, or a scheme other than http and https on the request or a redirect.
-    // An HTTP error status is not thrown; the caller reads HttpResponse::status.
+    // timeout, a body over the cap, or a scheme other than http and https on the request or a redirect; a
+    // refused connection throws HttpConnectRefused, the same code. An HTTP error status is not thrown; the
+    // caller reads HttpResponse::status.
     virtual HttpResponse get(const std::string& url, std::chrono::milliseconds timeout) = 0;
 
     // PUT `form_body` (application/x-www-form-urlencoded, already encoded) to `url`. Same bounds and

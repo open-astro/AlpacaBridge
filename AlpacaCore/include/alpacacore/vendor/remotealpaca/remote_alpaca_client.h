@@ -24,7 +24,9 @@
 //      upstream's ErrorMessage prefixed with "<host>:<port>: " (decision 0023 rule 5).
 //   3. No usable reply throws RemoteTransportError (DriverException): the HTTP call failed or timed out, the
 //      status was not 200, the body is not an Alpaca JSON object, or Value is missing or of the wrong type.
-//      The driver decides whether that is a lost link (NotConnected) or one failed call.
+//      The driver decides whether that is a lost link (NotConnected) or one failed call. A refused connection
+//      (nothing listens at the host and port) is the subclass RemoteConnectRefused, which a driver takes as a lost
+//      link at once (decision 0023).
 //   4. One call at a time per client: calls are serialized on the client's own mutex.
 //   5. The reply's JSON is parsed inside the wrapper; no JSON type appears in this header
 //      (decision 0013 section 4).
@@ -59,6 +61,13 @@ class RemoteTransportError : public AlpacaException {
 public:
     explicit RemoteTransportError(const std::string& message)
         : AlpacaException(message, AlpacaError::DriverException) {}
+};
+
+// The upstream refused the connection (util::HttpConnectRefused): nothing listens at its host and port. Positive
+// evidence the upstream is gone (decision 0009 point 2(a)); still a DriverException.
+class RemoteConnectRefused : public RemoteTransportError {
+public:
+    explicit RemoteConnectRefused(const std::string& message) : RemoteTransportError(message) {}
 };
 
 // Name and value pairs, in the order they are sent. Names in canonical Alpaca casing.

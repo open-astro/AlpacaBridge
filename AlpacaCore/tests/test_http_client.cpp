@@ -17,6 +17,10 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -58,7 +62,63 @@ std::string driver_error_of(Fn&& fn) {
     return "";
 }
 
+// A 127.0.0.1 TCP port that is bound but not listening, so a connect to it is refused at once (RST). The socket is
+// held until destruction, so no other process can take the port meanwhile.
+class ClosedLoopbackPort {
+public:
+    ClosedLoopbackPort() {
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(fd_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        REQUIRE(::bind(fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        socklen_t length = sizeof(address);
+        REQUIRE(::getsockname(fd_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+        port_ = ntohs(address.sin_port);
+    }
+    ~ClosedLoopbackPort() { ::close(fd_); }
+    ClosedLoopbackPort(const ClosedLoopbackPort&) = delete;
+    ClosedLoopbackPort& operator=(const ClosedLoopbackPort&) = delete;
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/"; }
+
+private:
+    int fd_ = -1;
+    int port_ = 0;
+};
+
+// What a call threw: refused (HttpConnectRefused), another failure (AlpacaException) or nothing.
+enum class Failure { None, Refused, Other };
+
+template <typename Fn>
+Failure failure_of(Fn&& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::util::HttpConnectRefused& e) {
+        CHECK(e.error_code() == AlpacaError::DriverException);
+        return Failure::Refused;
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == AlpacaError::DriverException);
+        return Failure::Other;
+    }
+    return Failure::None;
+}
+
 }  // namespace
+
+TEST_CASE("HttpClient - a refused connection is HttpConnectRefused, a stall is not", "[util][http-client]") {
+    ClosedLoopbackPort closed;
+    CHECK(failure_of([&] { (void)client()->get(closed.url(), kTimeout); }) == Failure::Refused);
+    CHECK(failure_of([&] { (void)client()->put_form(closed.url(), "A=1", kTimeout); }) == Failure::Refused);
+
+    LoopbackHttpServer stalled;
+    stalled.set_mode(LoopbackHttpServer::Mode::Stall);
+    CHECK(failure_of([&] { (void)client()->get(stalled.url(), std::chrono::milliseconds(200)); }) == Failure::Other);
+    LoopbackHttpServer dropped;
+    dropped.set_mode(LoopbackHttpServer::Mode::DropAfterAccept);
+    CHECK(failure_of([&] { (void)client()->get(dropped.url(), kTimeout); }) == Failure::Other);
+}
 
 TEST_CASE("HttpClient - GET returns the status and the body", "[util][http-client]") {
     LoopbackHttpServer server;
