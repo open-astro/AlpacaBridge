@@ -3761,4 +3761,72 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a body whose stop finds it super
         CHECK(driver->get_at_home());
     }
 }
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew refused inside its guide drain leaves the running slew's stage alone "
+    "(#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1);  // a flip slew's rebase stage, a slew's arrival stage
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::Latch latch;  // before the driver: it outlives the initiator thread blocked on it
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // Slew A: a flip slew homing (a BeyondPole target), or a slew whose GOTO is in flight (a Normal target).
+    mount.set_auto_complete_motions(false);
+    const double ra_a = leg == 0 ? std::fmod(driver->get_sidereal_time() + 1.0, 24.0)
+                                 : std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    driver->slew_to_coordinates_async(ra_a, 25.0);
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const int gotos = mount.count_command(0x10, 0x02);
+
+    // Slew B opens its motion transition and blocks in the guide drain, before any claim.
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, [&] { latch.block(); });
+    auto second = std::async(std::launch::async, [&] {
+        return call_result(
+            [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    });
+    REQUIRE(latch.wait_entered());
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, {});
+
+    // A's poll sees its home or GOTO done and runs its next stage meanwhile: the rebase and GOTO, or the arrival
+    // check and the tracking restore.
+    if (leg == 0) {
+        mount.complete_axis_home(0x10);
+        mount.complete_axis_home(0x11);
+    } else {
+        mount.complete_axis_slew(0x10);
+        mount.complete_axis_slew(0x11);
+    }
+    const bool staged = wait_until([&] {
+        clock.advance(20ms);
+        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos : driver->get_tracking();
+    });
+
+    // B's position read then fails, so B is refused without claiming anything.
+    mount.ack_next_with_payload(0x10, 0x01, {0x00});
+    latch.release();
+    const auto refused = second.get();
+
+    INFO("slew B: " << refused.text);
+    CHECK(staged);
+    CHECK(refused.code == alpacacore::AlpacaError::DriverException);
+    // A still owns the axes and lands: Slewing goes false and Tracking is restored.
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_slew(0x10);
+    mount.complete_axis_slew(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    CHECK(driver->get_tracking());
+    CHECK(driver->get_target_right_ascension() == ra_a);
+}
 #endif

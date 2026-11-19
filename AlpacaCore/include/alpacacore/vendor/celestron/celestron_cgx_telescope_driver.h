@@ -53,5 +53,9 @@ std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testi
 /// motion-start lock; a case blocks there to land a newer command between a body's two supersede checks. Pass an
 /// empty function to clear it.
 void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the initiator's thread inside every motion transition's guide drain, while the motion-start lock is
+/// released and before the new command claims; a case blocks there to let a running body reach a stage. Pass an
+/// empty function to clear it.
+void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::celestron

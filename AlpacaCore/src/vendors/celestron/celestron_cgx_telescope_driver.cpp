@@ -338,6 +338,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         stop_worker_hook_for_testing_ = std::move(hook);
     }
+    void set_drain_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        drain_hook_for_testing_ = std::move(hook);
+    }
 
 protected:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010 rule 5).
@@ -364,12 +368,14 @@ private:
     };
 
     // Runs a body's wire stage under motion_start_mutex_, the lock every claim is made under, so a body that a newer
-    // command superseded or a stop cancelled sends nothing once the stage starts (decision 0006 rule 6).
+    // command superseded or a stop cancelled sends nothing once the stage starts (decision 0006 rule 6). An open
+    // motion_transition_ does not stop it: a slew, Park or FindHome opens one while this body still owns the axes and
+    // releases the lock for the guide drain before its claim, and may then be refused without claiming (#2263). Every
+    // other transition refuses while a body runs, cancels it, or sets disconnecting_.
     template <typename Operation>
     bool run_motion_stage(util::OperationContext& context, const util::MotionClaim& claim, Operation&& operation) {
         std::lock_guard<std::mutex> lock(motion_start_mutex_);
-        if (motion_stop_reason(context, claim) != util::StopReason::None || motion_transition_ || disconnecting_ ||
-            !connected_.load()) {
+        if (motion_stop_reason(context, claim) != util::StopReason::None || disconnecting_ || !connected_.load()) {
             return false;
         }
         std::forward<Operation>(operation)();
@@ -562,6 +568,17 @@ private:
     // Test seam (set_stop_worker_hook_for_testing): runs at the top of stop_motion_worker_checked(), before it takes
     // motion_start_mutex_. Guarded by mutex_.
     std::function<void()> stop_worker_hook_for_testing_;
+    // Test seam (set_drain_hook_for_testing): runs in MotionTransition's guide drain, with motion_start_mutex_
+    // released. Guarded by mutex_.
+    std::function<void()> drain_hook_for_testing_;
+    void run_drain_hook_for_testing() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hook = drain_hook_for_testing_;
+        }
+        if (hook) hook();
+    }
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> disconnected_checkpoint_;
@@ -632,6 +649,7 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
     for (auto& slot : driver_.pulse_slots_) slot.cancel();
     lock_.unlock();
     try {
+        driver_.run_drain_hook_for_testing();
         for (auto& slot : driver_.pulse_slots_) slot.cancel_all_and_join();
     } catch (...) {
         lock_.lock();
@@ -920,6 +938,8 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             disconnecting_ = false;
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        // Disconnect joined every pulse body, so no packet is still unresolved on either axis.
+        pulse_start_ambiguous_ = {};
         bool retained = reference_valid_locked() && disconnected_checkpoint_ && reference_firmware_ == firmware;
         if (retained) {
             const auto saved_checkpoint = *disconnected_checkpoint_;
@@ -2581,6 +2601,12 @@ std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testi
 void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
         cgx->set_stop_worker_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_drain_hook_for_testing(std::move(hook));
     }
 }
 
