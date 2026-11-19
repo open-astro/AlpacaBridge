@@ -2607,9 +2607,10 @@ private:
 
     // A slew, Park or FindHome: claims the slew slot and both axes (#2263), which supersedes both pulses as well.
     // Their bodies are woken, never joined (decision 0006 rule 3); each checks its claim under mutex_ before a chunk.
-    // The pulse windows close in this same locked step, never before a check that can still refuse the command: a
-    // refused command changes nothing, as a refused start() does (decision 0006 rule 2), so its pulse keeps running
-    // and IsPulseGuiding stays true.
+    // The pulse windows close in this same locked step, not before the initiator's own checks: a command those checks
+    // refuse changes nothing, as a refused start() does (decision 0006 rule 2), so its pulse keeps running and
+    // IsPulseGuiding stays true. A check after the claim (the blocking slew's compute_flip(), the Park body's pier
+    // read) still ends the pulse when it throws, as it did before #2263.
     bool claim_slew_locked() {
         const bool displaced = claim_slew_slot_locked();
         slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
