@@ -444,6 +444,7 @@ public:
             iOptronTelescopeDriver& self;
             ~PendingResync() { self.start_pending_resync_transition_locked(); }
         } pending_resync{*this};
+        if (set_connected_entry_hook_) set_connected_entry_hook_();  // test seam: transition_mutex_ held
         const Wire protocol = wire();
         if (!connected || (connected_ && link_lost())) {
             // A disconnect, or a connect over a lost link (decision 0009 rule 4), ends the session's bodies
@@ -3300,6 +3301,7 @@ private:
         std::optional<std::chrono::system_clock::time_point> old_mount_utc;
         if (resync) {
             if (!wait_for_driver_motion_to_end(ctx)) return;
+            if (clock_sync_resync_hook_) clock_sync_resync_hook_();  // test seam: no driver lock held
             old_mount_utc = read_mount_utc();
             if (old_mount_utc) {
                 const auto diff =
@@ -3491,6 +3493,12 @@ public:
     void start_clock_sync_for_testing() { start_clock_sync(); }
     void set_host_utc_source_for_testing(std::function<std::chrono::system_clock::time_point()> source) {
         host_utc_source_ = std::move(source);
+    }
+    void set_clock_sync_resync_hook_for_testing(std::function<void()> hook) {
+        clock_sync_resync_hook_ = std::move(hook);
+    }
+    void set_connected_entry_hook_for_testing(std::function<void()> hook) {
+        set_connected_entry_hook_ = std::move(hook);
     }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
@@ -3770,6 +3778,10 @@ private:
     std::function<void(bool)> clock_sync_utc_hook_;
     // Test seam, set before connect: the host UTC the clock sync writes and set_utc_date() compares (#2419).
     std::function<std::chrono::system_clock::time_point()> host_utc_source_;
+    // Test seams (issue #2432), set before the call they hook: run on a re-sync's body once its motion wait found
+    // the mount still, and at the start of set_connected() with transition_mutex_ held.
+    std::function<void()> clock_sync_resync_hook_;
+    std::function<void()> set_connected_entry_hook_;
     // Issue #2419: a host clock change on_host_clock_changed() saw while set_connected() held transition_mutex_.
     std::atomic<bool> resync_pending_{false};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
@@ -3992,6 +4004,18 @@ void set_host_utc_source_for_testing(TelescopeDriver& driver,
                                      std::function<std::chrono::system_clock::time_point()> source) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_host_utc_source_for_testing(std::move(source));
+    }
+}
+
+void set_clock_sync_resync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_resync_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_connected_entry_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_connected_entry_hook_for_testing(std::move(hook));
     }
 }
 

@@ -2422,6 +2422,72 @@ TEST_CASE("iOptron zero search - a parked HAE29C refuses FindHome and sends no s
     driver->set_connected(false);
 }
 
+// Issue #2432: the bound does not wait for a client to read the status. A client that sends FindHome and never
+// polls (or a client that has gone away) still gets the :Q# at 120 s, and Slewing keeps the failure.
+TEST_CASE("iOptron zero search - the bound stops a search that no client polls",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    mount.set_system_status(2);  // still searching, and nobody reads it
+    clock.advance(std::chrono::seconds(119));
+    CHECK(mount.count(":Q#") == 0);
+
+    clock.advance(std::chrono::seconds(2));
+    // The stop goes out on the driver's own thread, so the case waits for the fake to record it.
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing did not raise the zero search timeout");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("zero sensor search") != std::string::npos);
+    }
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2432: a FindHome while an earlier search is past its bound. The FindHome's own status read (or the
+// bound's stop, when it got there first) stops the old search, then the new :MSH# goes out, and the old failure
+// does not outlive the new command.
+TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it and starts a new one",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(121));  // past the bound, with no status read
+
+    REQUIRE_NOTHROW(driver->find_home());
+    CHECK(mount.count(":Q#") == 1);
+    REQUIRE(mount.count(":MSH#") == 2);
+    const auto commands = mount.commands();
+    const auto stop = std::find(commands.begin(), commands.end(), ":Q#");
+    const auto second_search = std::find(std::next(std::find(commands.begin(), commands.end(), ":MSH#")),
+                                         commands.end(), ":MSH#");
+    CHECK(stop < second_search);
+
+    // The new search runs, with no failure kept from the old one, and has a bound of its own.
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+    clock.advance(std::chrono::seconds(119));
+    CHECK(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
 // The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 1.6 s at the
 // default guide rate, so true at 2.0 s and false at 2.2 s.
 TEST_CASE("iOptron hold window - the GOTO trim holds Slewing for its pulse",
