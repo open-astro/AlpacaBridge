@@ -190,7 +190,7 @@ public:
                           std::to_string(config_.upstream_device_number)),
           snapshot_(clock, 2 * config_.poll_period),
           name_("Remote Alpaca ObservingConditions"),
-          description_("ObservingConditions of the upstream Alpaca server " + upstream_label_),
+          description_(default_description()),
           poll_op_("remotealpaca poll", poll_generation_, clock),
           command_op_("remotealpaca command", command_generation_, clock) {}
 
@@ -373,6 +373,10 @@ private:
         return config;
     }
 
+    std::string default_description() const {
+        return "ObservingConditions of the upstream Alpaca server " + upstream_label_;
+    }
+
     // NotConnected before any other answer (ASCOM contract precedence); after a loss the text says why.
     void require_connected() const {
         if (!connected_.load()) {
@@ -503,7 +507,8 @@ private:
                 // Description.
                 const std::string branded = name_from_upstream(name);
                 if (!branded.empty()) name_ = branded;
-                if (!description.empty()) description_ = std::move(description);
+                // Rebuilt on each Connect, so a reconnect does not append the upstream Name again.
+                description_ = description.empty() ? default_description() : std::move(description);
                 if (!name.empty() && branded != util::branded_name(kBrand, name)) {
                     description_ += " (upstream Name: " + name + ")";
                 }

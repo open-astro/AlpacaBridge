@@ -472,6 +472,29 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded Refresh sends
     CHECK(rig.http.calls() == calls);
 }
 
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a reconnect rebuilds the Description, not appends to it",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.upstream.set("description", "\"\"");  // the upstream has no Description: the default stays
+    rig.upstream.set("name", "\"Simulator (ObservingConditions, port 2)\"");
+    const std::string expected = "ObservingConditions of the upstream Alpaca server 127.0.0.1:11111 device 0 "
+                                 "(upstream Name: Simulator (ObservingConditions, port 2))";
+    rig.connect();
+    CHECK(rig.driver->get_description() == expected);
+    rig.driver->set_connected(false);
+    rig.connect();
+    CHECK(rig.driver->get_description() == expected);
+
+    // An upstream that drops its Description between two Connects leaves the default, not the old text.
+    rig.driver->set_connected(false);
+    rig.upstream.set("description", "\"Old station text\"");
+    rig.connect();
+    rig.driver->set_connected(false);
+    rig.upstream.set("description", "\"\"");
+    rig.connect();
+    CHECK(rig.driver->get_description() == expected);
+}
+
 TEST_CASE("Remote Alpaca ObservingConditions Driver - Connect refuses an upstream that is this server",
           "[remotealpaca][observingconditions][unit]") {
     // This server listens on every address (a wildcard bind) on the upstream's port: 127.0.0.1 is one of its own.

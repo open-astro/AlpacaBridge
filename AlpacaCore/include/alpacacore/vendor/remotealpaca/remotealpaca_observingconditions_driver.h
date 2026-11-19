@@ -63,8 +63,8 @@ std::unique_ptr<ObservingConditionsDriver> create_remotealpaca_observingconditio
 // (the contract sweep's stale-frame case). No effect on a driver of another type.
 void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused);
 
-// Runs `hook` inside each AveragePeriod body, after its PUT and before its write-through, so a test can hold a body
-// there. Set it while no command runs.
+// Runs `hook` inside each AveragePeriod and Refresh body, after its PUT and before the body touches driver state, so a
+// test can hold a body there. Set it while no command runs.
 void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::remotealpaca
