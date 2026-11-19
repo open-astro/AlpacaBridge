@@ -617,6 +617,70 @@ TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis 
     CHECK(rig.mount.count(":SUT") == 1);
 }
 
+// Issue #2432: the motion wait is a check, and a MoveAxis (or a GOTO, Park or FindHome) can start right after it.
+// The re-sync's writes check again inside their own exchange, under the operation lock every motion command takes,
+// so the clock and the site are not written under that motion: the writes wait for it to end.
+TEST_CASE("iOptron Telescope Driver - a MoveAxis that starts after the re-sync's motion wait gets no clock write",
+          "[ioptron][telescope][unit][utcdate][taskclock]") {
+    alpacacore::test::HostClockTrustGuard untrusted(false);
+    IoptronLog log;
+    UntrustedConnect rig;
+    rig.connect();
+    const auto sla = rig.mount.count(":SLA");
+    std::atomic<bool> moved{false};
+    // The race window: the mount was still when the re-sync looked, and a client's MoveAxis lands before its writes.
+    ioptron::set_clock_sync_resync_hook_for_testing(*rig.driver, [&] {
+        if (!moved.exchange(true)) rig.driver->move_axis(0, rig.driver->get_axis_rate_range(0).first);
+    });
+
+    rig.set_host(kRealHost);
+    alpacacore::util::HostClockTrust::mark_set("test step");
+    rig.host_clock_changed(kStepped);
+    REQUIRE(eventually([&] { return log.contains("waits for the motion to end") || rig.passes.load() == 2; }));
+    CHECK(moved.load());
+    CHECK(rig.mount.count(":SUT") == 0);
+    CHECK(rig.mount.count(":SG") == 0);
+    CHECK(rig.mount.count(":SLA") == sla);
+
+    // The axis stops: the re-sync goes on and writes the clock.
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.driver->move_axis(0, 0.0);
+    rig.clock.advance(std::chrono::seconds(1));
+    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    rig.driver->set_connected(false);
+    CHECK(rig.mount.count(":SUT") == 1);
+    CHECK(rig.mount.count(":SLA") == sla + 1);
+}
+
+// Issue #2432: a host clock change while set_connected() holds transition_mutex_ (here a redundant Connected=true,
+// as ConformU sends) is not lost. The hook leaves it pending, and set_connected() starts the re-sync as it returns.
+TEST_CASE("iOptron Telescope Driver - a host clock change during a held set_connected() re-syncs as that call returns",
+          "[ioptron][telescope][unit][utcdate][taskclock]") {
+    alpacacore::test::HostClockTrustGuard untrusted(false);
+    IoptronLog log;
+    UntrustedConnect rig;
+    rig.connect();
+    alpacacore::test::Latch held;
+    ioptron::set_connected_entry_hook_for_testing(*rig.driver, [&] { held.block(); });
+    std::thread client([&] { rig.driver->set_connected(true); });
+    REQUIRE(held.wait_entered());
+
+    rig.set_host(kRealHost);
+    alpacacore::util::HostClockTrust::mark_set("test step");
+    rig.driver->on_host_clock_changed(kStepped);  // returns at once: transition_mutex_ is held
+    CHECK_FALSE(rig.clock.wait_for_waiters(1, std::chrono::milliseconds(300)));  // nothing started yet
+    CHECK(rig.mount.count(":SUT") == 0);
+
+    held.release();
+    client.join();
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    CHECK(log.contains("Host clock changed during a connect or disconnect; mount UTC 2017-01-01T12:00:42Z -> "));
+    rig.driver->set_connected(false);
+    CHECK(rig.mount.count(":SUT") == 1);
+}
+
 TEST_CASE("iOptron Telescope Driver - a host clock change starts nothing while disconnected or with clock sync off",
           "[ioptron][telescope][unit][utcdate][taskclock]") {
     alpacacore::test::HostClockTrustGuard trusted(true);

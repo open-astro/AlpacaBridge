@@ -117,6 +117,16 @@ void start_clock_sync_for_testing(TelescopeDriver& driver);
 void set_host_utc_source_for_testing(TelescopeDriver& driver,
                                      std::function<std::chrono::system_clock::time_point()> source);
 
+/// Test seam (issue #2432): `hook` runs on a host clock re-sync's body once its wait found no driver motion,
+/// before the body reads the mount clock, with no driver lock held. Set it before the re-sync starts. A driver
+/// not from the factories is ignored.
+void set_clock_sync_resync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam (issue #2432): `hook` runs at the start of every set_connected(), with transition_mutex_ held and no
+/// other driver lock, so a case can hold that call (it may block). Set it while no set_connected() runs. A driver
+/// not from the factories is ignored.
+void set_connected_entry_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Test seam: the kept failure of the clock-sync slot, until its next start.
 std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver);
 

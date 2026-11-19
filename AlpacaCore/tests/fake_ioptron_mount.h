@@ -257,6 +257,12 @@ private:
             if (goto_tracks_off_.load()) system_status_.store(2);
             return "1";
         }
+        if (cmd == ":MSH#") {
+            // Issue #2420, HAE29C firmware: the zero sensor search is acked with a bare '1' and no '#', so a driver
+            // that reads a '#'-terminated reply waits out its timeout. Its own branch, so a change to the generic
+            // ":M" ack below cannot hand the search a '#' (issue #2432).
+            return "1";
+        }
         if (goto_tracks_off_.load() && (cmd == ":Q#" || cmd == ":ST1#" || cmd == ":ST0#")) {
             if (cmd == ":ST1#") {
                 system_status_.store(1);
