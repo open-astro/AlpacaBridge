@@ -186,9 +186,7 @@ public:
 
     bool get_connected() const override { return connected_.load(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
@@ -264,26 +262,6 @@ public:
             std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_camera(close_id);
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("CommandBlind not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("CommandBool not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
     int get_max_switch() const override {

@@ -21,6 +21,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/zwo/zwo_mount_identity.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -52,6 +53,29 @@ namespace {
 constexpr double kSiderealRateDegPerSec = 360.0 / 86164.0905;
 
 constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
+// The ZWO AM limits for the command gate (#2258): the connected check reads the fault, so it runs before parked; a
+// MoveAxis stop (move_axis() keeps its own |rate| < 1e-9 test) skips it. set_guide_rate() keeps the "0 or 0.10-0.90
+// x" check, which is on the larger axis.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
+    limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: was a silent clamp to 60 s
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
+    limits.stop_checks_fault = false;
+    limits.slew_order = util::ParkedFaultOrder::FaultFirst;
+    limits.guide_rate_ra_min = 0.0;
+    limits.guide_rate_dec_min = 0.0;
+    limits.texts.pulse_direction = "PulseGuide direction must be 0..3";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
+    limits.texts.move_axis_axis = "Axis must be 0 or 1";
+    limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
+    limits.texts.move_axis_rate_range = "Axis rate out of range";
+    limits.texts.guide_rate_not_finite = "GuideRate values must be finite";
+    limits.texts.guide_rate_range = "GuideRate must not be negative";
+    return limits;
+}();
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
 constexpr double kMaxSiteElevationMeters = 10000.0;
@@ -284,15 +308,7 @@ public:
         return link_fault_locked();
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Base gates BEFORE the idempotency check: a sync disconnect during an
@@ -675,15 +691,17 @@ public:
                     }
                 }
                 if (!guide_rate_set) {
-                    const double fallback_multiple = 1.00;
-                    const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
-                    ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
-                    guide_rate = {fallback_deg_per_sec, fallback_deg_per_sec};
+                    ALPACA_LOG_WARN("ZWO",
+                                    "Unable to read guide rate; GuideRate is unavailable until a reconnect reads it or "
+                                    "a write sets it");
                 }
                 {
+                    // #2314: no reading means no rate. The getters raise until a write sets one; guide_rate_ keeps
+                    // its last value only for the pulse-guide estimate.
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (guide_rate_writes_ == guide_rate_writes_seen) {
-                        guide_rate_ = guide_rate;
+                        if (guide_rate_set) guide_rate_ = guide_rate;
+                        guide_rate_known_ = guide_rate_set;
                     }
                 }
 
@@ -733,16 +751,6 @@ public:
                 throw;
             }
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override {
-        return false;
     }
 
     std::string command_blind(std::string_view command, bool) override {
@@ -976,19 +984,18 @@ public:
         update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected_locked();
+        if (!guide_rate_known_) {
+            throw AlpacaException("GuideRate is unknown: the mount did not answer the guide-rate read at connect",
+                                  AlpacaError::DriverException);
+        }
         return guide_rate_;
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate values must be finite", AlpacaError::InvalidValue);
-        }
-
         // #2257: a negative rate, or a non-zero rate outside the mount's 0.10-0.90 x sidereal, is refused before
         // any other check and never clamped. 0 keeps its old meaning (stored, not sent).
-        if (rate.ra < 0.0 || rate.dec < 0.0) {
-            throw AlpacaException("GuideRate must not be negative", AlpacaError::InvalidValue);
-        }
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         const double effective = std::max(rate.ra, rate.dec);
         constexpr double kEps = 1e-9;
         const double raw_multiple = effective / kSiderealRateDegPerSec;
@@ -1006,12 +1013,14 @@ public:
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
             std::lock_guard<std::mutex> lock(mutex_);
             guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+            guide_rate_known_ = true;
             ++guide_rate_writes_;
             return;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = {effective, effective};
+        guide_rate_known_ = true;
         ++guide_rate_writes_;
     }
 
@@ -1268,14 +1277,9 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(rate) || std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
-        }
-        check_connected(std::abs(rate) < 1e-9);
-        ensure_not_parked("MoveAxis");
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
+        const bool stop = std::abs(rate) < 1e-9;  // ZWO's own stop test: strictly under, not the gate's <=
+        util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
 
         // open-astro#720: a pending GOTO setup must not send ":MS" after the
         // stop or the jog below. One fence covers both branches. open-astro#2073:
@@ -1290,7 +1294,7 @@ public:
 
         auto& protocol = protocol_;
 
-        if (std::abs(rate) < 1e-9) {
+        if (stop) {
             // open-astro#775: ":Q" stops every axis, but MoveAxis(axis, 0) must not
             // affect the other axis. Send only this axis's directional stops (the
             // active direction is not tracked, so both are sent; a stop for a
@@ -1719,14 +1723,7 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        if (duration < 0) {
-            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-        }
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("PulseGuide direction must be 0..3", AlpacaError::InvalidValue);
-        }
-        check_connected();
-        ensure_not_parked("PulseGuide");
+        util::check_pulse_guide(kCommandLimits, direction, duration, GateChecks{*this, "PulseGuide"});
         if (!get_tracking()) {
             throw AlpacaException(
                 "PulseGuide requires Tracking to be enabled",
@@ -1735,7 +1732,8 @@ public:
         const bool ra_axis = (direction == 2 || direction == 3);
         const bool dec_axis = (direction == 0 || direction == 1);
 
-        const int effective_duration = std::clamp(duration, 0, 60000);
+        // 0..kDefaultMaxPulseGuideMs: the gate refuses a longer pulse (#2292); it is no longer clamped.
+        const int effective_duration = duration;
         double guide_rate_deg_per_sec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1859,8 +1857,8 @@ public:
         // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
         // reset_position_offsets; avoid redundant mount queries here. The Tracking
         // gate runs first, though: the target setters below write to the mount.
-        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
-        check_equatorial_slew_allowed("SlewToCoordinates");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinates",
+                                    GateChecks{*this, "SlewToCoordinates"});
         set_target_right_ascension(ra);
         set_target_declination(dec);
         slew_to_target();
@@ -1871,8 +1869,8 @@ public:
         // checks. The parked and Tracking gate runs here too, before the target
         // is replaced: both read cached state, and Tracking reads the mount (":GAT")
         // only when its 2 s cache has aged out.
-        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-        check_equatorial_slew_allowed("SlewToCoordinatesAsync");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinatesAsync",
+                                    GateChecks{*this, "SlewToCoordinatesAsync"});
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_ra_hours_ = ra;
@@ -2526,13 +2524,17 @@ private:
     // rejected GOTO (last_slew_error_) is not in flight.
     bool own_goto_in_flight_locked() const { return goto_active_ && last_slew_error_.empty(); }
 
-    // The gate the coordinate forms run before they touch the target: they
-    // write it to the mount, which a refused slew must not.
-    void check_equatorial_slew_allowed(const char* who) const {
-        check_connected();
-        ensure_not_parked(who);
-        require_tracking_for_slew(who);
-    }
+    // The command gate's state checks in ZWO's words (#2258), called without mutex_. A slew runs them before it
+    // writes the target to the mount, which a refused slew must not.
+    struct GateChecks {
+        const ZWOTelescopeDriver& driver;
+        const char* who = nullptr;
+
+        void check_connected() const { driver.check_connected(/*skip_fault=*/true); }
+        void check_not_parked(bool /*stop*/) const { driver.ensure_not_parked(who); }
+        void check_no_fault() const { driver.check_connected(); }
+        void check_tracking() const { driver.require_tracking_for_slew(who); }
+    };
 
     // Returns slew_error_epoch_ as read in its section (sync_to_pair(), #2093).
     uint64_t reset_position_offsets() {
@@ -3343,6 +3345,8 @@ private:
     mutable GuideRate guide_rate_;
     // Bumped under mutex_ by every set_guide_rate(); the connect publishes its reading only when unchanged.
     std::uint64_t guide_rate_writes_{0};
+    // False after a connect that could not read the rate and saw no write meanwhile (#2314); guarded by mutex_.
+    bool guide_rate_known_{true};
     mutable int tracking_rate_cached_;
     mutable bool tracking_rate_valid_;
     mutable bool tracking_state_cached_;

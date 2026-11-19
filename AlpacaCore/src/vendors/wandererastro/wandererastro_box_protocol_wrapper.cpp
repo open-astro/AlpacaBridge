@@ -77,9 +77,9 @@ double magnus_dew_point(double temp_c, double humidity_pct) {
 }
 
 #ifndef _WIN32
-// The errnos a tty returns once its device is gone (decision 0009 point 2(a)).
-// EBADF is not one: the wrapper only meets it on an fd it closed itself.
-bool is_hangup_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV; }
+// A read error that ends the connected link's read loop: the one serial rule (util::SerialLink, #2262: EIO, ENXIO,
+// ENODEV, EBADF). The connected paths feed it to serial_link_.note_error(), which keeps the verdict on the link.
+bool is_hangup_errno(int err) { return util::is_serial_loss_errno(err); }
 
 // 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
 // adapter asserts DTR on open, which pulses the controller's MCU reset line;
@@ -282,7 +282,7 @@ bool probe_box_port(const std::string& port_path, BoxPortInfo& info) {
 bool raw_port_looks_like_box_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wandererbox_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -571,9 +571,9 @@ private:
         ensure_connected_locked();
         const std::string payload = code + "\n";
         ALPACA_LOG_TRACE("WandererAstro", "Box command: " + code);
-        if (!util::tty_write_all(serial_link_.fd(), payload)) {
+        if (!serial_link_.write_all(payload)) {
             const int err = errno;
-            if (is_hangup_errno(err)) {
+            if (serial_link_.lost()) {  // the link's verdict (#2262)
                 const std::string reason = "Serial link lost (errno " + std::to_string(err) + ")";
                 lose_link_locked(reason);
                 throw AlpacaException("WandererBox " + reason, AlpacaError::NotConnected);
@@ -620,7 +620,8 @@ private:
             }
             int read_errno = 0;
             auto token = read_token(fd, 600, carry, &read_errno);
-            if (is_hangup_errno(read_errno)) {
+            if (is_hangup_errno(read_errno) &&
+                serial_link_.note_error(read_errno)) {  // the link's verdict (#2262); not after our own close
                 // The device is gone (decision 0009 point 2(a)): a lost link
                 // at once, not a silence to wait out.
                 end_link_from_reader("Serial link lost (errno " + std::to_string(read_errno) + ")");
@@ -793,5 +794,10 @@ void WandererBoxProtocolWrapper::set_dc8_9(bool on) { impl_->set_dc8_9(on); }
 void WandererBoxProtocolWrapper::set_dc10_11(bool on) { impl_->set_dc10_11(on); }
 
 void WandererBoxProtocolWrapper::set_usb(int group, bool on) { impl_->set_usb(group, on); }
+
+const std::vector<std::string>& wandererbox_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::wandererastro

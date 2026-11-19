@@ -33,6 +33,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -213,7 +214,7 @@ private:
         }
         const auto delay = delay_for(cmd);
         if (delay.count() > 0) {
-            std::this_thread::sleep_for(delay);
+            alpacacore::test::connect_hold(delay);  // connect_hold_gate.h: a ConnectHoldGate holds it until released
         }
         // The cover reaches its end stop when the ack goes out (as on hardware,
         // where the ack arrives only once travel has finished).

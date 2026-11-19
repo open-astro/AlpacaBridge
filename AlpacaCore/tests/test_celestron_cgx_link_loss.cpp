@@ -20,9 +20,11 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -36,6 +38,7 @@
 #include "cgx_clock_cleanup.h"
 #include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -383,6 +386,26 @@ TEST_CASE("Celestron CGX link loss - a cable pulled during a command loses the l
     CHECK(rig.driver->get_link_fault().empty());
     CHECK_FALSE(rig.driver->get_at_home());
     require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
+}
+
+// Issue #2262: EBADF on the AUX link's own fd is a lost link, as on every serial vendor. The wrapper keeps its own
+// poll()-bounded write loop and feeds the errno to the shared util::SerialLink verdict. Before #2262 its own list was
+// EIO/ENXIO/ENODEV: the write failed with DriverException, the port was closed and Connected kept reading true.
+TEST_CASE("Celestron CGX link loss - EBADF on a command write loses the link at once and Disconnect clears the reason",
+          "[celestron][cgx][unit][link-loss][link-lost][issue2262]") {
+    HangupRig rig;
+    const auto before = alpacacore::test::fds_open_on(rig.node);
+    rig.connect_and_home();
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(rig.node));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { rig.driver->set_tracking(true); }, AlpacaError::NotConnected);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(write: " + alpacacore::util::errno_string(EBADF) + ")") !=
+          std::string::npos);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 
 TEST_CASE("Celestron CGX link loss - a cable pulled during the state poll ends the poll in that tick",

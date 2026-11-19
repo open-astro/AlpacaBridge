@@ -23,6 +23,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted iMate GPIO side: line levels in memory, no GPIO chip. A line's level
@@ -44,7 +46,7 @@ public:
     std::chrono::milliseconds request_delay{0};
 
     std::vector<int> request(const std::string& chip_path, const std::vector<unsigned int>& offsets) override {
-        if (request_delay.count() > 0) std::this_thread::sleep_for(request_delay);
+        alpacacore::test::connect_hold(request_delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(m_);
         if (fail_request) {
             throw AlpacaException("FakeIoptronGpio: scripted request failure", AlpacaError::NotConnected);

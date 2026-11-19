@@ -243,6 +243,35 @@ TEST_CASE("ZWO Mount Telescope Driver - Telescope Properties", "[zwo][telescope]
     require_alpaca_error([&]() { driver->set_slew_settle_time(1); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// #2258: with two bad arguments the command gate names the direction before the duration. Falsified by:
+// util::check_pulse_guide_arguments checking the duration first, or a ZWO pulse_direction/pulse_duration text change.
+TEST_CASE("ZWO Mount Telescope Driver - PulseGuide with a bad direction and duration names the direction",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->pulse_guide(5, -1); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("PulseGuide direction must be 0..3") != std::string::npos);
+    CHECK(text.find("duration") == std::string::npos);
+}
+
+// #2258: with a negative RA and a NaN Dec the gate checks RA in full first, so the answer is the range text.
+// Falsified by: set_guide_rate() checking Dec before RA, or checking both values for finiteness before either range.
+TEST_CASE("ZWO Mount Telescope Driver - GuideRate with a negative RA and a NaN Dec names the RA range",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->set_guide_rate({-1.0, nan}); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("GuideRate must not be negative") != std::string::npos);
+    CHECK(text.find("finite") == std::string::npos);
+}
+
 TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
@@ -928,10 +957,39 @@ TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site rea
     driver->set_connected(false);
 }
 
+// #2314: a connect that cannot read the guide rate reports no rate, not a guess, until a client write sets one.
+// Falsified by: zwo_telescope_driver.cpp get_guide_rate() without its guide_rate_known_ check (the getter answers
+// the unread rate instead of raising DriverException).
+TEST_CASE("ZWO Mount Telescope Driver - an unreadable guide rate raises until a write sets it",
+          "[zwo][telescope][unit]") {
+    using namespace alpacacore::test;
+    FakeTaskClock clock;
+    FakeZwoMount mount(clock, "AM5");
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(mount), clock);
+    mount.override_reply(":Ggr", "x");  // a non-number on every attempt
+    driver->connect();
+    REQUIRE(mount.wait_for_count(":Ggr", 1, std::chrono::seconds(2)));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect is in its 150 ms retry pause
+    clock.advance(std::chrono::milliseconds(150));
+    REQUIRE(wait_until_connected(*driver));
+    mount.override_reply(":Ggr", "", 0);
+
+    // GuideRateRightAscension and GuideRateDeclination both read get_guide_rate().
+    require_alpaca_error([&]() { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::DriverException);
+
+    const double sidereal_deg_per_sec = 360.0 / 86164.0905;
+    driver->set_guide_rate_right_ascension(0.50 * sidereal_deg_per_sec);
+    const auto rate = driver->get_guide_rate();
+    CHECK(rate.ra / sidereal_deg_per_sec == Catch::Approx(0.50).margin(0.02));
+    CHECK(rate.dec / sidereal_deg_per_sec == Catch::Approx(0.50).margin(0.02));
+    driver->set_connected(false);
+}
+
 // A GuideRate write that lands while the connect retries its unreadable guide-rate read (150 ms pause, no lock held)
-// is newer than the 1.00x the connect then assumes.
+// is newer than the connect's failed read.
 // Falsified by: zwo_telescope_driver.cpp set_connected(true) publishing guide_rate_ without the guide_rate_writes_
-// check (the connect stores the assumed 1.00x over the 0.30x the client wrote during the retry pause).
+// check (the connect marks the rate unknown over the 0.30x the client wrote during the retry pause).
 TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect read-back is kept",
           "[zwo][telescope][unit][getter-stall]") {
     using namespace alpacacore::test;
@@ -939,7 +997,7 @@ TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect re
     FakeZwoMount mount(clock, "AM5");
     REQUIRE(mount.ok());
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(mount), clock);
-    mount.override_reply(":Ggr", "x");  // a non-number, so the connect falls back to 1.00x after its retry
+    mount.override_reply(":Ggr", "x");  // a non-number, so the connect has no reading after its retry
     driver->connect();
     REQUIRE(mount.wait_for_count(":Ggr", 1, std::chrono::seconds(2)));
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect is in its 150 ms retry pause

@@ -29,6 +29,7 @@ option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 option(ALPACACORE_ENABLE_SKYWATCHER "Enable SkyWatcher motor controller vendor support" OFF)
 option(ALPACACORE_ENABLE_ONSTEP "Enable OnStep vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
+option(ALPACACORE_ENABLE_REMOTEALPACA "Enable the remotealpaca upstream Alpaca client (decision 0023)" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini vendor support (focuser, flat panel)" OFF)
 option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
@@ -58,6 +59,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_SKYWATCHER ON)
     set(ALPACACORE_ENABLE_ONSTEP ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
+    set(ALPACACORE_ENABLE_REMOTEALPACA ON)
     set(ALPACACORE_ENABLE_GEMINI ON)
     set(ALPACACORE_ENABLE_SVBONY ON)
     set(ALPACACORE_ENABLE_CELESTRON ON)
@@ -94,6 +96,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
+    src/catalog/attached_devices.cpp
 )
 
 # Management sources
@@ -114,6 +117,16 @@ target_include_directories(alpacacore PUBLIC
 
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
+
+# The libcurl implementation of util::HttpClient, the one outbound HTTP seam a
+# vendor uses (decision 0023, issue #1753). Its own library so alpacacore keeps
+# no curl dependency: only a vendor that speaks HTTP (WeeWX) links it. Built
+# whenever libcurl is found; a vendor that needs it requires it.
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    add_library(alpacacore_http_client STATIC src/core/util/http_client.cpp)
+    target_link_libraries(alpacacore_http_client PUBLIC alpacacore PRIVATE CURL::libcurl)
+endif()
 
 # Built-in descriptor composition (open-astro#710): which vendor descriptors this
 # build registers. Kept out of alpacacore so the core links no vendor library and
@@ -216,6 +229,13 @@ if(ALPACACORE_ENABLE_WEEWX)
         # registration compiles empty even though alpacacore_weewx links fine.
         target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WEEWX)
     endif()
+endif()
+
+# The upstream Alpaca client library (issue #1753 slice 2). No catalog
+# registration yet, so alpacacore_builtins does not link it; the proxied device
+# slices add that with their factories.
+if(ALPACACORE_ENABLE_REMOTEALPACA)
+    add_subdirectory(src/vendors/remotealpaca)
 endif()
 
 if(ALPACACORE_ENABLE_GEMINI)
@@ -361,6 +381,15 @@ install(TARGETS alpacacore_builtins
     RUNTIME DESTINATION bin
 )
 
+if(TARGET alpacacore_http_client)
+    install(TARGETS alpacacore_http_client
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
 # Install vendor libraries if they exist
 if(ALPACACORE_ENABLE_ZWO AND TARGET alpacacore_zwo)
     install(TARGETS alpacacore_zwo
@@ -418,6 +447,15 @@ endif()
 
 if(ALPACACORE_ENABLE_WEEWX AND TARGET alpacacore_weewx)
     install(TARGETS alpacacore_weewx
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_REMOTEALPACA AND TARGET alpacacore_remotealpaca)
+    install(TARGETS alpacacore_remotealpaca
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

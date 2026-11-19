@@ -39,6 +39,7 @@
 #include <thread>
 #include <utility>
 
+#include "connect_hold_gate.h"
 #include "fake_skywatcher_board.h"
 
 namespace alpacacore::test {
@@ -143,7 +144,7 @@ private:
             }
             std::string reply = handle(frame) + "\r";
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
             if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
             std::function<void()> hook;

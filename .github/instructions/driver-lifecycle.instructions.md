@@ -39,8 +39,10 @@ vendor-agnostic; do them in the driver from the start.
   `connection_thread_` / `connecting_` in a driver.** The driver obligations
   (each one line, all contractual — see the header comment): destructor calls
   `shutdown_connection()` FIRST; `connect()`/`disconnect()` forward to
-  `start_connection_task(true/false)`; `get_connecting()` returns
-  `connection_task_active()`; `set_connected` gates with
+  `start_connection_task(true/false)` and `get_connecting()` returns
+  `connection_task_active()`, all three written as `ALPACA_ASYNC_CONNECT_FORWARDERS()`
+  in a public section, never by hand (issue #1757; `scripts/check_connect_error_hook.py`
+  fails a driver without it); `set_connected` gates with
   `record_disconnect_if_connect_in_flight(...)` / `consume_pending_disconnect()`
   after taking the driver mutex, before the idempotency early-return. A driver
   with an extra sync-connect window the base can't see (e.g. the AFW's
@@ -68,14 +70,14 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO and SVBONY are; decision 0020)
-  and the GPIO soft-PWM workers; the list is a sample, not a roster.
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO, SVBONY, ToupTek and QHY are;
+  decision 0020) and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
     freed memory (UB). Make it a joinable member thread with a cancel flag +
-    `std::condition_variable`, and cancel + join it in the destructor. The QHY camera's
-    exposure worker is the last bounded detach-on-timeout thread (its CaptureSession slice
-    of #1736 removes it); add no new one. The 2026-07
+    `std::condition_variable`, and cancel + join it in the destructor. No driver detaches a
+    thread any more (the QHY camera's exposure worker was the last, removed by #1736); add
+    no new one. The 2026-07
     full-codebase audit found this rule held on every connect/disconnect *lifecycle*
     path but violated on a dozen *operational* paths; apply it to every thread a driver
     spawns, not just the connection machinery.
@@ -195,15 +197,25 @@ vendor-agnostic; do them in the driver from the start.
   `CloseQHYCCD`-on-last-reference deleter in the wrapper) so the disconnect's
   `close_camera()` defers the physical close until every in-flight call
   finishes. Same shape applies to any vendor SDK with a long, uncancellable,
-  no-timeout call.
+  no-timeout call. The QHY exposure body is the exception (#1736): it runs in a
+  `util::CaptureSession`, and a disconnect calls `cancel_exposure()` first, then
+  `disconnect_and_join()`, which joins with no bound. When the cancel does not
+  interrupt `GetQHYCCDSingleFrame`, the disconnect waits for that one call, as
+  ZWO's waits for `ASIGetDataAfterExp` (decision 0020, the QHY row).
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
   an exposure-in-progress state, checked **under the same lock that publishes it**.
   GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
-  under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
-  sets `exposure_starting_` under `mutex_` until `session_.start()` (which runs without the lock)
-  publishes Exposing, and the setters' `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
+  under the same lock. A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
+  under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
+  lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
+  or a failed body still returning), and an AbortExposure that finds only a reservation calls
+  `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
+  exposure starts
+  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260): ZWO, SVBONY,
+  Player One and ToupTek do (ZWO for its geometry setters only); Player One adds its own SDK term. Checking the
+  state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).
@@ -378,9 +390,15 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
   `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
   even before the node lookup reflects it: a tty returns those only when its device is gone or
-  the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
+  the fd is unusable. Silence with the node still present keeps the rules above. On a serial link
+  `util::SerialLink` owns that verdict (#2262): its `read()`, `write_all()` and `read_until(SerialLink&, ...)` classify
+  every failure with `util::is_serial_loss_errno()`, set a lock-free `lost()` once and keep the text that set it
+  (`fault()`, "Serial link lost (errno N)") across the wrapper's port-release `close()` until a new link is moved in or
+  the wrapper calls `clear_loss()` on Disconnect; the wrapper still closes the port under its own I/O lock. Adopted by
+  the Gemini focuser and the QHY Q-Focuser; the other serial wrappers move to it one vendor per PR (#2262), so until
+  then their own latch and classifier stand. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
+  lock-free latch the getter reads (the link's `lost()` since #2262); since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`), and over its TCP network link
   since #2220, where a hangup of the connection is the evidence (`OnStep network -` cases in the same file). The ZWO EAF follows it since #1500 for its

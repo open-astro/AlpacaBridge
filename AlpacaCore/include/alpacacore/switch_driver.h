@@ -14,8 +14,11 @@
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
-#include <vector>
+
+#include <chrono>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace alpacacore {
 
@@ -49,6 +52,9 @@ public:
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the
+        // TimeStamp names when it was measured (decision 0010).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
         int count = 0;
         try {
@@ -77,7 +83,11 @@ public:
             }
         }
         if (!state.empty()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
         }
         return state;
     }
@@ -198,6 +208,12 @@ public:
      * @param id Switch ID (0-based)
      */
     virtual double get_switch_step(int id) const = 0;
+
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves
+    /// it from a snapshot (decision 0010): the TimeStamp is then the time the
+    /// state was measured. nullopt (the default) stamps the request time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
 };
 
 } // namespace alpacacore

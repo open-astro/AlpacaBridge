@@ -164,7 +164,7 @@ override_dh_auto_install:
 	# Issue #2290: the vendor rules grant MODE="0666" on whole vendor IDs.
 	# Rewrite every installed rule that lets all users open a device to
 	# GROUP="plugdev", MODE="0660" (postinst puts the service user in plugdev).
-	# Runs after the last rule install; check_docs_drift.py check 29 holds it.
+	# Runs after the last rule install; check_docs_drift.py check 31 holds it.
 	bash $(CURDIR)/scripts/tighten_udev_rules.sh $(STAGING)/usr/lib/udev/rules.d/*.rules
 
 	# --- Polkit rule: WiFi management via NetworkManager ---

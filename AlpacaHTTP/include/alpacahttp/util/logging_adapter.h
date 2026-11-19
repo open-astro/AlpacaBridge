@@ -96,8 +96,12 @@ inline constexpr int kMaxRotatedLogFiles = 19;
 void set_log_max_file_bytes(std::uintmax_t bytes);
 
 // Delete daily log files whose embedded date is older than retention_days
-// before today. Safe to call repeatedly; no-op when retention is disabled.
-// Returns the number of files removed.
+// before today, unless two logged days are further apart than the retention
+// (a clock jump, or a rig left off that long): then the days logged since the
+// gap count as if they had followed the last day logged before it, so the
+// earlier files stay until that many days of newer logs exist (#2292). Safe to
+// call repeatedly; no-op when retention is disabled. Returns the number of
+// files removed.
 std::size_t prune_old_log_files();
 
 // The one table of log-level spellings (config file, env var, API, runtime

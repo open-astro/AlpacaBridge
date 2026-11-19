@@ -134,20 +134,7 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        // Disconnect synchronously -- closing the port is trivial and ASCOM
-        // clients expect Connected to be false immediately after.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Gemini", "Flat panel disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
@@ -246,26 +233,6 @@ public:
             teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- CoverCalibrator interface: calibrator ---
@@ -539,19 +506,11 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    // Async, not synchronous like the Lite driver's disconnect(): this
-    // model's protocol_.disconnect() takes the same port mutex that
-    // open_cover()/close_cover() (and now calibrator_on()/off()) can hold for
-    // up to kCoverMoveTimeoutS while a wire command is in flight, so a
-    // synchronous call here could block the HTTP handler for up to 30s.
-    // Routing through start_connection_task() (as ZWOTelescopeDriver does)
-    // runs set_connected(false) on the base class's background thread
-    // instead -- run_connection_task() already catches and logs exceptions.
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    // disconnect() is asynchronous: this model's protocol_.disconnect() takes the port mutex that
+    // open_cover()/close_cover() and calibrator_on()/off() can hold for up to kCoverMoveTimeoutS while a
+    // wire command is in flight, so a synchronous call could block the HTTP handler for up to 30 s. The
+    // base runs set_connected(false) on its background thread instead, and catches and logs a throw.
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
@@ -655,26 +614,6 @@ public:
             teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- CoverCalibrator interface: calibrator ---

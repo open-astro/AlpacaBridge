@@ -18,7 +18,7 @@
 #
 # The vendor files under AlpacaCore/external are regenerated on every SDK bump, so they are never
 # edited: debian/rules runs this over the staged rules directory, and scripts/host_setup.sh runs it on
-# a copy before installing. scripts/check_docs_drift.py check 29 runs it over every rule debian/rules
+# a copy before installing. scripts/check_docs_drift.py check 31 runs it over every rule debian/rules
 # installs and fails if one is still world-accessible.
 #
 # Usage: scripts/tighten_udev_rules.sh RULES_FILE...

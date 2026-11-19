@@ -20,6 +20,7 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/poll_settle.h>
 #include <alpacacore/util/polled_state.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
@@ -42,7 +43,18 @@ namespace alpacacore::vendor::celestron {
 namespace {
 
 constexpr double kSiderealDegreesPerSecond = 15.0411 / 3600.0;
-constexpr int kMaxPulseGuideDurationMs = 600000;
+// The CGX's argument limits for the command gate (#2258). The state checks (interleaved with site, motor-model and
+// motion checks) and MoveAxis (rate ignored, not implemented) stay the driver's own.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 600000;
+    limits.texts.pulse_direction = limits.texts.pulse_duration = "PulseGuide direction or duration is out of range";
+    limits.guide_rate_ra_min = limits.guide_rate_dec_min = kSiderealDegreesPerSecond * 0.1;
+    limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegreesPerSecond;
+    limits.texts.guide_rate_not_finite = limits.texts.guide_rate_range =
+        "Guide rates must be between 10% and 100% of sidereal";
+    return limits;
+}();
 constexpr std::uint32_t kRaHomeEncoder = kCgxEncoderStepsPerRevolution / 4;
 constexpr std::uint32_t kDecHomeEncoder = kCgxEncoderStepsPerRevolution / 2;
 constexpr double kSlewArrivalToleranceDegrees = 3.0 / 3600.0;
@@ -171,12 +183,9 @@ public:
         return polled_.link_lost() ? "no answer to the state poll" : std::string();
     }
     void set_connected(bool connected) override;
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
+
     std::string action(std::string_view, std::string_view) override;
-    bool can_action(std::string_view) const override { return false; }
     std::string command_blind(std::string_view, bool) override;
     bool command_bool(std::string_view, bool) override;
     std::string command_string(std::string_view, bool) override;
@@ -429,7 +438,6 @@ private:
     std::chrono::system_clock::time_point utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
     void require_site_locked() const;
-    void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
     void run_home_operation(util::OperationContext& context, bool park_after);
     void start_slew_operation(double ra, double dec);
@@ -650,10 +658,6 @@ void CelestronCgxTelescopeDriver::require_site_locked() const {
 }
 
 CgxHemisphere CelestronCgxTelescopeDriver::hemisphere_locked() const { return mechanical_hemisphere_; }
-
-void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec, const char* operation) const {
-    util::validate_ra_dec(ra, dec, operation);
-}
 
 void CelestronCgxTelescopeDriver::require_readable_locked() const {
     require_connected();
@@ -1110,17 +1114,11 @@ GuideRate CelestronCgxTelescopeDriver::get_guide_rate() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return guide_rate_;
 }
-// One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
-// disconnected (open-astro#1786).
-static void validate_cgx_guide_rate(double deg_per_sec) {
-    if (!std::isfinite(deg_per_sec) || deg_per_sec < kSiderealDegreesPerSecond * 0.1 ||
-        deg_per_sec > kSiderealDegreesPerSecond) {
-        throw AlpacaException("Guide rates must be between 10% and 100% of sidereal", AlpacaError::InvalidValue);
-    }
-}
+// Each axis is checked before the connection, so a bad value is InvalidValue even while disconnected
+// (open-astro#1786).
 void CelestronCgxTelescopeDriver::set_guide_rate(const GuideRate& rate) {
-    validate_cgx_guide_rate(rate.ra);
-    validate_cgx_guide_rate(rate.dec);
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     guide_rate_ = rate;
@@ -1128,13 +1126,13 @@ void CelestronCgxTelescopeDriver::set_guide_rate(const GuideRate& rate) {
 // One axis under one lock: the base default reads the pair through the connection-checking getter first, so an
 // out-of-range write on a disconnected mount answered NotConnected (open-astro#1786).
 void CelestronCgxTelescopeDriver::set_guide_rate_right_ascension(double value) {
-    validate_cgx_guide_rate(value);
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     guide_rate_.ra = value;
 }
 void CelestronCgxTelescopeDriver::set_guide_rate_declination(double value) {
-    validate_cgx_guide_rate(value);
+    util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     guide_rate_.dec = value;
@@ -1172,7 +1170,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    validate_site_and_coordinates(ra, dec, "DestinationSideOfPier");
+    util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     require_site_locked();
@@ -1528,9 +1526,7 @@ int CelestronCgxTelescopeDriver::get_tracking_rate() const {
 void CelestronCgxTelescopeDriver::find_home() { start_home_operation(false); }
 void CelestronCgxTelescopeDriver::park() { start_home_operation(true); }
 void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
-    if (direction < 0 || direction > 3 || duration_ms < 0 || duration_ms > kMaxPulseGuideDurationMs) {
-        throw AlpacaException("PulseGuide direction or duration is out of range", AlpacaError::InvalidValue);
-    }
+    util::check_pulse_guide_arguments(kCommandLimits, direction, duration_ms);
     require_connected();
     require_known_motor_model();
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
@@ -1623,7 +1619,7 @@ void CelestronCgxTelescopeDriver::slew_to_target_async() {
     start_slew_operation(ra, dec);
 }
 void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec, "SyncToCoordinates");
+    util::validate_ra_dec(ra, dec, "SyncToCoordinates");
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2056,7 +2052,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 }
 
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
+    util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
     require_connected();
     require_known_motor_model();
     {

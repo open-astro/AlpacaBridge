@@ -1,0 +1,137 @@
+FAKE REPORT: ConformU against FakeZWOEFWSDK (simulated EFW SDK, in process), not hardware. Not hardware validation.
+11:07:09.573 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 08:09:42          
+11:07:09.573                                              
+11:07:09.573 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+11:07:09.573                                              
+11:07:09.573 Alpaca device: QHY CFW3 (127.0.0.1:11125 FilterWheel/0)          
+11:07:09.573                                              
+11:07:09.573 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11125, Alpaca device number: 0
+11:07:09.576 CreateDevice                        INFO     Successfully created driver
+11:07:10.610 CreateDevice                        OK       Found a valid interface version: 3
+11:07:10.610 CreateDevice                        OK       Driver instance created successfully
+11:07:10.610                                              
+11:07:10.610 Connect to device                            
+11:07:10.675 Connected                           OK       Connected to device successfully using Connected = True
+11:07:11.229 Connected                           OK       Disconnected from device successfully using Connected = False
+11:07:11.231 Connect                             OK       Connected to device successfully using Connect()
+11:07:11.231                                              
+11:07:11.231 Common Driver Methods                        
+11:07:11.231 InterfaceVersion                    OK       3
+11:07:11.231 Connected                           OK       True
+11:07:11.232 Description                         OK       ZWO EFW Filter Wheel Driver
+11:07:11.233 DriverInfo                          OK       AlpacaCore ZWO EFW Filter Wheel Driver
+11:07:11.233 DriverVersion                       OK       5.0.2
+11:07:11.234 Name                                OK       ZWO EFW
+11:07:11.234                                              
+11:07:11.236 SupportedActions                    OK       Driver returned an empty action list
+11:07:11.236 Action                              INFO     Conform cannot test the Action method
+11:07:11.236                                              
+11:07:11.238 DeviceState                         OK       Received 2 operational state properties.
+11:07:11.238 DeviceState                         OK         Position = 0
+11:07:11.238 DeviceState                         OK         TimeStamp = 11/18/2026 6:07:11 PM
+11:07:11.239 DeviceState                         OK       Found all expected operational properties
+11:07:11.239                                              
+11:07:11.239 Pre-run Checks                               
+11:07:12.749 Pre-run Check                       OK       Filter wheel is stationary, ready to start tests
+11:07:12.749                                              
+11:07:12.749 Properties                                   
+11:07:12.754 FocusOffsets Get                    OK       Found 7 filter offset values
+11:07:12.754 FocusOffsets Get                    INFO     Filter 0 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 1 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 2 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 3 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 4 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 5 Offset: 0
+11:07:12.754 FocusOffsets Get                    INFO     Filter 6 Offset: 0
+11:07:12.755 Names Get                           OK       Found 7 filter names
+11:07:12.755 Names Get                           INFO     Filter 0 Name: Filter 1
+11:07:12.755 Names Get                           INFO     Filter 1 Name: Filter 2
+11:07:12.755 Names Get                           INFO     Filter 2 Name: Filter 3
+11:07:12.755 Names Get                           INFO     Filter 3 Name: Filter 4
+11:07:12.755 Names Get                           INFO     Filter 4 Name: Filter 5
+11:07:12.755 Names Get                           INFO     Filter 5 Name: Filter 6
+11:07:12.755 Names Get                           INFO     Filter 6 Name: Filter 7
+11:07:12.755 Names Get                           OK       Number of filter offsets and number of names are the same: 7
+11:07:12.756 Position Get                        OK       Currently at position: 0
+11:07:12.756                                              
+11:07:12.756 Testing ascending sequential movement          
+11:07:12.960 Position Set 0                      OK       Reached position: 0 in: 0.2 seconds
+11:07:14.164 Position Set 1                      OK       Reached position: 1 in: 0.2 seconds
+11:07:15.370 Position Set 2                      OK       Reached position: 2 in: 0.2 seconds
+11:07:16.574 Position Set 3                      OK       Reached position: 3 in: 0.2 seconds
+11:07:17.779 Position Set 4                      OK       Reached position: 4 in: 0.2 seconds
+11:07:18.985 Position Set 5                      OK       Reached position: 5 in: 0.2 seconds
+11:07:20.188 Position Set 6                      OK       Reached position: 6 in: 0.2 seconds
+11:07:21.188                                              
+11:07:21.188 Testing descending sequential movement          
+11:07:21.392 Position Set 6                      OK       Reached position: 6 in: 0.2 seconds
+11:07:22.597 Position Set 5                      OK       Reached position: 5 in: 0.2 seconds
+11:07:23.801 Position Set 4                      OK       Reached position: 4 in: 0.2 seconds
+11:07:25.004 Position Set 3                      OK       Reached position: 3 in: 0.2 seconds
+11:07:26.209 Position Set 2                      OK       Reached position: 2 in: 0.2 seconds
+11:07:27.412 Position Set 1                      OK       Reached position: 1 in: 0.2 seconds
+11:07:28.617 Position Set 0                      OK       Reached position: 0 in: 0.2 seconds
+11:07:29.617                                              
+11:07:29.617 Testing potentially long distance moves          
+11:07:29.821 Position Set 0                      OK       Reached position: 0 in: 0.2 seconds
+11:07:31.024 Position Set 6                      OK       Reached position: 6 in: 0.2 seconds
+11:07:32.229 Position Set 5                      OK       Reached position: 5 in: 0.2 seconds
+11:07:33.443 Position Set 0                      OK       Reached position: 0 in: 0.2 seconds
+11:07:34.653 Position Set 3                      OK       Reached position: 3 in: 0.2 seconds
+11:07:35.858 Position Set 0                      OK       Reached position: 0 in: 0.2 seconds
+11:07:36.858                                              
+11:07:36.858 Testing error conditions                     
+11:07:36.874 Position Set                        OK       Correctly rejected bad position: -1
+11:07:36.875 Position Set                        OK       Correctly rejected bad position: 7
+11:07:36.875                                              
+11:07:36.875 Directionality assessment                    
+11:07:36.875 Directionality                      INFO     The filter wheel is bi-directional.
+11:07:36.875                                              
+11:07:36.875 Disconnect from device                       
+11:07:36.878 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+11:07:36.878                                              
+11:07:36.878 Conformance test has finished                
+11:07:36.878                                              
+11:07:36.878 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+11:07:36.878                                     
+11:07:36.878 Timing Summary                               See Help for further information.
+11:07:36.878 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+11:07:36.878 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+11:07:36.878 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+11:07:36.878 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+11:07:36.878                                              
+11:07:36.878 Connect                                      At 11:07:11.230 Connect                  0.000 seconds. ✓ (STANDARD)
+11:07:36.878 InterfaceVersion                             At 11:07:11.231 InterfaceVersion         0.000 seconds. ✓ (FAST)
+11:07:36.878 Connected                                    At 11:07:11.231 Connected                0.000 seconds. ✓ (FAST)
+11:07:36.878 Description                                  At 11:07:11.232 Description              0.001 seconds. ✓ (FAST)
+11:07:36.878 DriverInfo                                   At 11:07:11.233 DriverInfo               0.000 seconds. ✓ (FAST)
+11:07:36.878 DriverVersion                                At 11:07:11.233 DriverVersion            0.001 seconds. ✓ (FAST)
+11:07:36.878 Name                                         At 11:07:11.234 Name                     0.001 seconds. ✓ (FAST)
+11:07:36.878 SupportedActions                             At 11:07:11.236 SupportedActions         0.002 seconds. ✓ (FAST)
+11:07:36.878 DeviceState                                  At 11:07:11.238 DeviceState              0.002 seconds. ✓ (FAST)
+11:07:36.878 FocusOffsets                                 At 11:07:12.754 FocusOffsets             0.005 seconds. ✓ (FAST)
+11:07:36.878 Names                                        At 11:07:12.755 Names                    0.001 seconds. ✓ (FAST)
+11:07:36.878 Position                                     At 11:07:12.756 Position                 0.000 seconds. ✓ (FAST)
+11:07:36.878 Move to position 0                           At 11:07:12.756 Move to position 0       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 1                           At 11:07:13.962 Move to position 1       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 2                           At 11:07:15.167 Move to position 2       0.002 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 3                           At 11:07:16.372 Move to position 3       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 4                           At 11:07:17.576 Move to position 4       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 5                           At 11:07:18.780 Move to position 5       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 6                           At 11:07:19.986 Move to position 6       0.000 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 6                           At 11:07:21.188 Move to position 6       0.000 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 5                           At 11:07:22.394 Move to position 5       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 4                           At 11:07:23.599 Move to position 4       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 3                           At 11:07:24.802 Move to position 3       0.000 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 2                           At 11:07:26.005 Move to position 2       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 1                           At 11:07:27.210 Move to position 1       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 0                           At 11:07:28.413 Move to position 0       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 0                           At 11:07:29.618 Move to position 0       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 6                           At 11:07:30.822 Move to position 6       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 5                           At 11:07:32.026 Move to position 5       0.001 seconds. ✓ (STANDARD)
+11:07:36.878 Move to position 0                           At 11:07:33.231 Move to position 0       0.001 seconds. ✓ (STANDARD)
+11:07:36.882 Move to position 3                           At 11:07:34.445 Move to position 3       0.001 seconds. ✓ (STANDARD)
+11:07:36.882 Move to position 0                           At 11:07:35.654 Move to position 0       0.001 seconds. ✓ (STANDARD)
+11:07:36.882 Disconnect                                   At 11:07:36.877 Disconnect               0.001 seconds. ✓ (STANDARD)
+11:07:36.882                                              
+11:07:36.882 Congratulations, all members returned within their target response times!!          

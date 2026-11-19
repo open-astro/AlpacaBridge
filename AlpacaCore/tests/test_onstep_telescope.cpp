@@ -1574,10 +1574,9 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    alpacacore::vendor::onstep::OnStepProtocolWrapper wrapper;  // a link of its own, outside the registry (#2223)
     REQUIRE(wrapper.connect(conn));
-    // The wrapper is process-wide: disconnect on every exit, so a throw here
-    // cannot leave it connected and fail every later OnStep test.
+    // Disconnect on every exit, so a throw here leaves no port open.
     struct DisconnectOnExit {
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
         ~DisconnectOnExit() { w.disconnect(); }
@@ -1628,7 +1627,7 @@ TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[ons
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    alpacacore::vendor::onstep::OnStepProtocolWrapper wrapper;  // a link of its own, outside the registry (#2223)
     REQUIRE(wrapper.connect(conn));
     struct DisconnectOnExit {
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
@@ -1680,7 +1679,7 @@ TEST_CASE("OnStep protocol wrapper - :GU# general error is the last code charact
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    alpacacore::vendor::onstep::OnStepProtocolWrapper wrapper;  // a link of its own, outside the registry (#2223)
     REQUIRE(wrapper.connect(conn));
     struct DisconnectOnExit {
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
@@ -1727,7 +1726,7 @@ TEST_CASE("OnStep protocol wrapper - the pier-side settings parse strictly", "[o
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    alpacacore::vendor::onstep::OnStepProtocolWrapper wrapper;  // a link of its own, outside the registry (#2223)
     REQUIRE(wrapper.connect(conn));
     struct DisconnectOnExit {
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
@@ -1798,7 +1797,7 @@ TEST_CASE("OnStep protocol wrapper - a long reply costs no time per character", 
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 2000;
-    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    alpacacore::vendor::onstep::OnStepProtocolWrapper wrapper;  // a link of its own, outside the registry (#2223)
     REQUIRE(wrapper.connect(conn));
     struct DisconnectOnExit {
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;

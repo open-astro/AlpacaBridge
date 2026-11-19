@@ -26,6 +26,7 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
@@ -106,6 +107,23 @@ constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 constexpr int kCeNone = 0;
 // The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
 constexpr int kMaxPulseGuideMs = 9999;
+// OnStep's limits, orders and argument texts for the telescope command gate (#2258). PulseGuide checks the fault
+// before the parked state; MoveAxis and the slews check it after. The :Mg[nsew]#### duration field is 4 digits, so a
+// longer pulse is refused instead of pulsing for less than asked (#1478). MoveAxis moves axes 0 and 1; a rate at or
+// under 1e-6 is a stop, and a stop is sent on a faulted link (the driver checks the fault once it is sent, #1414).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = kMaxPulseGuideMs;
+    static_assert(kMaxPulseGuideMs == 9999, "the PulseGuide duration text names the maximum");
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 9999 ms";
+    limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
+    limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.move_axis_stop_epsilon = 1e-6;
+    limits.stop_checks_fault = false;
+    return limits;
+}();
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
 constexpr int kCeNotParked = 11;
@@ -154,12 +172,15 @@ std::string describe_onstepx_error(int code) {
 // tick costs one response timeout, so a silent mount latches in about three poll
 // periods plus three timeouts.
 constexpr int kLinkFaultThreshold = 3;
-// OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with
-// "10.23a"); legacy OnStep is 4.x and older. Only OnStepX knows :GXEE#.
-bool is_onstepx_version(const std::string& version) {
-    std::size_t digits = 0;
-    while (digits < version.size() && std::isdigit(static_cast<unsigned char>(version[digits]))) ++digits;
-    return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
+// OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with "10.23a"); legacy OnStep is 4.x and older. Only
+// OnStepX knows :GXEE#. is_onstepx_version() is in the wrapper, which the focuser shares (#2223).
+
+// What a telescope with no link exchanges through: never connected, so every exchange throws NotConnected ("Not
+// connected to mount"), link_alive() is false and no loss is recorded, as the process-wide wrapper answered while
+// disconnected before #2223. Never connected, so never closed; never destroyed (exit order).
+OnStepProtocolWrapper& no_link() {
+    static auto* none = new OnStepProtocolWrapper;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed
+    return *none;
 }
 
 // Whether the connect asks :GVC# (the product description, decision 0024). A firmware without it sends nothing back
@@ -443,36 +464,51 @@ public:
     using StateLock = util::StateLock;
 
 private:
-    // Every exchange with the mount goes through this gate (the process-wide protocol wrapper behind it). The
+    // Every exchange with the mount goes through this gate (the controller's shared link behind it, #2223). The
     // caller holds the operation lock; it gives up the state lock for the call, if it holds it, and takes it
     // back after (also when the call throws). A caller without the operation lock is a defect: it throws
-    // DriverException instead of reaching the wire.
+    // DriverException instead of reaching the wire. With no link held the exchange meets no_link(), which throws
+    // NotConnected.
     class Wire {
     public:
         explicit Wire(const OnStepTelescopeDriver& driver) : driver_(driver) {}
 
         template <typename F>
         decltype(auto) call(F&& f) const {
-            auto& protocol = OnStepProtocolWrapper::instance();
             const util::LockGate& gate = driver_.lock_gate_;
             if (!gate.holds_io()) {
                 throw AlpacaException("OnStep: a mount exchange without the operation lock",
                                       AlpacaError::DriverException);
             }
-            return gate.exchange([&]() -> decltype(auto) { return f(protocol); });
+            return gate.exchange([&]() -> decltype(auto) {
+                const auto link = driver_.link_.load();  // held for the call: a Disconnect cannot close it under us
+                return f(link ? *link : no_link());
+            });
         }
 
         // No I/O, no wrapper lock held across a wait: called directly.
-        bool link_alive() const { return OnStepProtocolWrapper::instance().link_alive(); }
+        bool link_alive() const { return driver_.link_alive(); }
 
-        bool connect(const ConnectionInfo& info) const {
-            return call([&](auto& p) { return p.connect(info); });
+        // A command and the :GE# that reads its code, back to back on the shared link (#2223): a sibling device's
+        // exchange between them would replace the code. Taken with the state lock released.
+        struct Sequence {
+            std::shared_ptr<OnStepProtocolWrapper> link;  // first: outlives the lock below
+            OnStepProtocolWrapper::Sequence lock;
+        };
+        Sequence hold_sequence() const {
+            return call([this](auto&) {
+                Sequence sequence{driver_.link_.load(), {}};
+                if (sequence.link) {
+                    sequence.lock = sequence.link->hold_sequence();
+                }
+                return sequence;
+            });
         }
-        std::string last_connect_error() const {
-            return call([](auto& p) { return p.last_connect_error(); });
-        }
-        void disconnect() const {
-            call([](auto& p) { p.disconnect(); });
+
+        // Lets go of the link (Disconnect, a relink, a failed connect), with the state lock released: the last holder
+        // closes the port. Its loss stamps stay with this driver for the next connect (#521).
+        void release_link() const {
+            call([this](auto&) { driver_.release_link(); });
         }
         void declare_link_lost(const std::string& reason) const {
             call([&](auto& p) { p.declare_link_lost(reason); });
@@ -685,9 +721,9 @@ public:
                 // Best-effort teardown during destruction.
             }
         }
-        // Last: the process-wide wrapper must not keep a clock that may die
-        // with this driver (a test's FakeTaskClock).
-        OnStepProtocolWrapper::instance().release_task_clock(clock_);
+        // Last: a link a sibling device still holds must not keep a clock that may die with this driver (a test's
+        // FakeTaskClock).
+        release_link();
     }
 
     int get_device_number() const override { return device_number_; }
@@ -741,7 +777,36 @@ public:
     // (#130); the blocking-driver list lives in async_connectable.h.
     bool get_connected() const override {
         // A removed or re-enumerated adapter reads as not connected (#1241).
-        return published_connected_.load() && OnStepProtocolWrapper::instance().link_alive();
+        return published_connected_.load() && link_alive();
+    }
+
+    // The held link is there and not lost (no I/O; decision 0009). Lock-free: the link pointer is atomic.
+    bool link_alive() const {
+        const auto link = link_.load();
+        return link && link->link_alive();
+    }
+
+    // Why the held link was lost, or "" (no I/O).
+    std::string link_lost_reason() const {
+        const auto link = link_.load();
+        return link ? link->link_lost_reason() : std::string();
+    }
+
+    // Drops this driver's hold on the link. Its loss stamps move into the driver first, so the next connect times
+    // the #521 outage whichever link it then takes (a re-scan to another port included), as the process-wide
+    // wrapper's stamps did before #2223; then its clock is handed back, since a sibling may hold the link on.
+    // Under the operation lock, or in the destructor; never under mutex_ (the last holder closes the port).
+    void release_link() const {
+        std::shared_ptr<OnStepProtocolWrapper> link = link_.exchange(nullptr);
+        if (!link) {
+            return;
+        }
+        if (const auto lost_at = link->consume_link_lost_at()) {
+            carried_lost_at_ = lost_at;
+            carried_alive_at_ = link->consume_last_alive_before_loss();
+        }
+        link->release_task_clock(clock_);
+        link.reset();
     }
 
     // NotConnected exactly when Connected reads false, without mutex_.
@@ -770,9 +835,8 @@ public:
     // or else the latched fault of a silent mount (decision 0009). The wrapper's
     // reason and link_fault_text_ under its own narrow mutex: never waits on mutex_.
     std::string get_link_fault() const override {
-        auto& protocol = OnStepProtocolWrapper::instance();
-        (void)protocol.link_alive();  // notice an unplug the listing would otherwise miss
-        const std::string reason = protocol.link_lost_reason();
+        (void)link_alive();  // notice an unplug the listing would otherwise miss
+        const std::string reason = link_lost_reason();
         if (!reason.empty()) {
             return "Link to the mount lost (" + reason + "); reconnect";
         }
@@ -781,11 +845,7 @@ public:
         return link_fault_text_.empty() ? std::string{} : "Mount not answering (" + link_fault_text_ + ")";
     }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         const Wire protocol = wire();
@@ -810,7 +870,7 @@ public:
             ALPACA_LOG_WARN("OnStep", "Connect requested on a lost link; reconnecting");
             published_connected_ = false;
             connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
-            protocol.disconnect();
+            protocol.release_link();
             relink_watch = watched_motion_;
             reset_session_state_locked();
         }
@@ -829,20 +889,24 @@ public:
         }
 
         if (connected) {
-            // The wrapper's loss stamps read this driver's clock (decision 0005).
-            OnStepProtocolWrapper::instance().set_task_clock(clock_);
             // An auto-detected mount resolves its port here, not in the factory (#659). The scan and the
             // open go through Wire like every exchange: the state lock is released for them and taken back
             // before the outcome or its exception leaves. The connection members the scan writes are read
-            // only under transition_mutex_, which this call holds; io_mutex_ stays held.
+            // only under transition_mutex_, which this call holds; io_mutex_ stays held. The link is the
+            // controller's shared one (#2223): a sibling device's open link is joined, not opened again.
             protocol.call([&](auto&) {
                 util::connect_resolved(
                     connection_info_, connection_resolved_, connection_resolver_,
-                    [&protocol](const ConnectionInfo& info) {
-                        if (!protocol.connect(info)) {
+                    [this](const ConnectionInfo& info) {
+                        std::string reason;
+                        auto link = OnStepProtocolWrapper::acquire(info, &reason);
+                        if (link) {
+                            // The link's loss stamps read this driver's clock (decision 0005).
+                            link->set_task_clock(clock_);
+                            link_.store(std::move(link));
+                        } else {
                             // The wrapper's reason (a port another device holds, #1202)
                             // goes to the operator.
-                            const std::string reason = protocol.last_connect_error();
                             const std::string message = reason.empty() ? "Failed to connect to OnStep mount"
                                                                        : "Failed to connect to OnStep mount: " + reason;
                             // Refused TCP connect, vanished serial node, or a port another connected
@@ -1028,7 +1092,7 @@ public:
             // The seed takes each failed read as a silent mount's, so a link lost during the connect (decision
             // 0009) shows only here: Connect fails instead of returning while Connected reads false (#1895).
             if (!protocol.link_alive()) {
-                const std::string lost = OnStepProtocolWrapper::instance().link_lost_reason();
+                const std::string lost = link_lost_reason();
                 fail_connect_locked("the link was lost during the connect" +
                                     (lost.empty() ? std::string() : " (" + lost + ")"));
             }
@@ -1060,23 +1124,11 @@ public:
             published_connected_ = false;
             connected_ = false;
             reset_session_state_locked();
-            protocol.call([this](auto& p) {
+            protocol.call([this](auto&) {
                 run_disconnect_before_close_hook();
-                p.disconnect();
+                release_link();
             });
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
@@ -1268,6 +1320,8 @@ public:
         // The reply is read, not drained: OnStep 4.x refuses :ST while slewing
         // (#1379); the internal tracking restores stay blind.
         // OnStepX starts tracking with :Te#, which keeps the selected rate; :ST would set it back to sidereal.
+        // The reply, then :GE# for its code, with no sibling device's exchange between them (#2223).
+        const auto sequence = wire().hold_sequence();
         if (!wire().set_tracking_checked(tracking, onstepx_)) {
             // With no :GE# code, refusal_code_locked() has just re-read :GU#: a
             // mount that now tracks as asked took it (#1379 review).
@@ -1360,6 +1414,8 @@ public:
         // #2241: the model runs on under the old offset up to the write, which the mount applies as it takes it; a
         // refused write leaves the offsets, and the model with them, as they were.
         reanchor_offset_model_locked();
+        // The reply, then :GE# for its code, with no sibling device's exchange between them (#2223).
+        const auto sequence = protocol.hold_sequence();
         if (!(ra ? protocol.set_rate_offset_ra(offset) : protocol.set_rate_offset_dec(offset))) {
             if (const auto code = refusal_code_locked(who)) {
                 throw mount_refused(who, *code);
@@ -1685,6 +1741,7 @@ public:
             const Wire protocol = wire();
             for (const bool ra : {true, false}) {
                 reanchor_offset_model_locked();  // #2241: the position holds where the old offsets took it
+                const auto sequence = protocol.hold_sequence();  // the reply and its :GE# together (#2223)
                 if (!(ra ? protocol.set_rate_offset_ra(0.0) : protocol.set_rate_offset_dec(0.0))) {
                     if (const auto code = refusal_code_locked("TrackingRate")) {
                         throw mount_refused("TrackingRate", *code);
@@ -1807,21 +1864,10 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        // Arguments before the connected, fault and parked checks (#1478).
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
-        // The wire command's duration field is 4 digits (:Mgn####), so a
-        // longer pulse cannot be sent: refuse it instead of pulsing for less
-        // than asked (#1478).
-        if (duration < 0 || duration > kMaxPulseGuideMs) {
-            throw AlpacaException("PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
-                                  AlpacaError::InvalidValue);
-        }
+        // Arguments before the connected, fault and parked checks (#1478), and before the state lock.
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
-        check_connected();
-        refuse_while_faulted_locked("PulseGuide");
-        check_not_parked_locked("PulseGuide");
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here:
@@ -1871,6 +1917,8 @@ public:
         refuse_while_faulted_locked("SetPark");
         // OnStepX refuses :hQ# while parked, during a GOTO or a guide move, or on a
         // motor fault (Park.cpp set()); a refusal used to read as success (#1379).
+        // The reply, then :GE# for its code, with no sibling device's exchange between them (#2223).
+        const auto sequence = wire().hold_sequence();
         if (!wire().set_park()) {
             // Unlike Unpark and Tracking, no :GU# letter shows the park position,
             // so a 0 with no :GE# code cannot be confirmed and stays a refusal.
@@ -1883,7 +1931,8 @@ public:
     void slew_to_coordinates(double ra, double dec) override {
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinates",
+                                    GateChecks{*this, "SlewToCoordinates"});
         start_slew_locked(ra, dec, "SlewToCoordinates", targets);
         wait_for_slew_complete_locked(lock);
     }
@@ -1891,7 +1940,8 @@ public:
     void slew_to_coordinates_async(double ra, double dec) override {
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinatesAsync",
+                                    GateChecks{*this, "SlewToCoordinatesAsync"});
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync", targets);
     }
 
@@ -1900,7 +1950,7 @@ public:
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
-        check_equatorial_slew_locked(ra, dec, "SlewToTarget");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToTarget", GateChecks{*this, "SlewToTarget"});
         start_slew_locked(ra, dec, "SlewToTarget", targets);
         wait_for_slew_complete_locked(lock);
     }
@@ -1909,7 +1959,8 @@ public:
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
-        check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToTargetAsync",
+                                    GateChecks{*this, "SlewToTargetAsync"});
         start_slew_locked(ra, dec, "SlewToTargetAsync", targets);
     }
 
@@ -1978,6 +2029,8 @@ public:
         // A refusal used to read as success (#1379): OnStepX refuses :hR# before the
         // date and time are set or on a motor fault (Park.cpp restore()). "Not
         // parked" (11) is ASCOM's no-op, not a refusal.
+        // The reply, then :GE# for its code, with no sibling device's exchange between them (#2223).
+        const auto sequence = wire().hold_sequence();
         if (!wire().unpark()) {
             // 11 (not parked) is ASCOM's no-op; with no :GE# code, the :GU# that
             // refusal_code_locked() has just re-read decides (#1379 review).
@@ -1998,25 +2051,13 @@ public:
 
     void move_axis(int axis, double rate) override {
         // #2257: the argument checks run first, before the connected and parked checks.
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (std::isnan(rate) || std::isinf(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-        }
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         StateLock lock(lock_gate_);
-        check_connected();
-        // Only a rate at or under the epsilon is a stop, which an unread status does not hold up (#1895).
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = !(std::abs(rate) <= kStopEpsilon);
-        check_not_parked_locked("MoveAxis", /*stop=*/!moving);
-
-        if (moving) {
-            refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
-        }
+        // Only a rate at or under the epsilon is a stop, which an unread status does not hold up (#1895) and a faulted
+        // link does not refuse before it is sent (#1414). A move checks the fault before it ends a waiting Park or
+        // FindHome.
+        const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
+        util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         const Wire protocol = wire();
 
@@ -2415,9 +2456,8 @@ private:
         }
         // A removed or re-enumerated adapter is NotConnected, not a generic
         // send failure while Connected still reads true (#1241).
-        auto& link = OnStepProtocolWrapper::instance();  // link_alive() does no I/O
-        if (!link.link_alive()) {
-            const std::string reason = link.link_lost_reason();
+        if (!link_alive()) {  // no I/O
+            const std::string reason = link_lost_reason();
             throw AlpacaException("OnStep link lost" + (reason.empty() ? std::string{} : " (" + reason + ")") +
                                       "; set Connected true to reconnect",
                                   AlpacaError::NotConnected);
@@ -2739,6 +2779,8 @@ private:
     enum class ParkHomeTry : std::uint8_t { Taken, AlreadyParked, Retry };
     ParkHomeTry try_park_or_home_locked(const char* who, bool home, int& code) {
         const Wire protocol = wire();
+        // :hP# or :hC#, then :GE#, with no sibling device's exchange between them: it would replace the code (#2223).
+        const auto sequence = protocol.hold_sequence();
         if (home) {
             protocol.find_home();
             code = last_command_error_locked(who).value_or(kCeNone);
@@ -3380,9 +3422,9 @@ private:
     // auto-detect re-scan counts): rounds toward stopping. Tracking is kept.
     // True when it sent the stops; false when it left the motion running (no loss, a short outage, a park).
     bool stop_motion_after_long_outage_locked() {
-        auto& link = OnStepProtocolWrapper::instance();  // the loss stamps: no I/O
-        const auto lost_at = link.consume_link_lost_at();
-        const auto alive_at = link.consume_last_alive_before_loss();
+        // The loss stamps of the link this driver last let go of (release_link()), read and cleared: no I/O.
+        const auto lost_at = std::exchange(carried_lost_at_, std::nullopt);
+        const auto alive_at = std::exchange(carried_alive_at_, std::nullopt);
         if (!lost_at) {
             return false;
         }
@@ -3420,23 +3462,30 @@ private:
         return true;
     }
 
-    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Runs after the parked check and argument validation and
-    // before any target or GOTO command is sent, and reads Tracking as the
-    // getter does, from the polled frame (a control-path :GU# read only while
-    // the frame has no status), so a Tracking=false just written counts as off.
-    void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
-        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
-        check_connected();
-        check_not_parked_locked(who);
-        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
-        if (!tracking_as_served_locked()) {
-            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
-        }
-    }
+    // The command gate's state checks in OnStep's words (#2258): util/telescope_command_gate.h decides the order
+    // (connected; parked; the fault, named, #1414; Tracking), and these answer each step with the driver's own texts
+    // and reads. One per call, built under the state lock.
+    struct GateChecks {
+        const OnStepTelescopeDriver& driver;
+        const char* who;
 
-    // (#1377). Same order as the equatorial check: arguments, connected, parked,
-    // fault, then Tracking read as the getter reads it, before anything is sent.
+        void check_connected() const { driver.check_connected(); }
+        // A non-stop first needs a status read since the connect; a stop refuses only a status that reads parked.
+        void check_not_parked(bool stop) const { driver.check_not_parked_locked(who, stop); }
+        void check_no_fault() const { driver.refuse_while_faulted_locked(who); }
+        // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation (open-astro#1274). Read as the
+        // getter does, from the polled frame (a control-path :GU# read only while the frame has no status), so a
+        // Tracking=false just written counts as off; before any target or GOTO command is sent.
+        void check_tracking() const {
+            if (!driver.tracking_as_served_locked()) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+    };
+
+    // (#1377). Same order as the equatorial slews' util::check_equatorial_slew_state(): arguments, connected,
+    // parked, fault, then Tracking read as the getter reads it, before anything is sent.
     void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
                                   const char* who) const {
         resolve_alt_az_locked(altitude, azimuth, ra_out, dec_out, who);
@@ -4434,8 +4483,7 @@ private:
         PolledFrame frame;
         {
             StateLock lock(lock_gate_);
-            if (!connected_.load() || !published_connected_.load() || stopped() ||
-                !OnStepProtocolWrapper::instance().link_alive()) {
+            if (!connected_.load() || !published_connected_.load() || stopped() || !link_alive()) {
                 return false;
             }
             const auto previous = snapshot_.read();
@@ -4598,12 +4646,13 @@ private:
     // A connect that cannot finish (#1895) is undone as a Disconnect is: Connected false and the session state
     // cleared under mutex_ before the close, which goes through Wire with mutex_ released (decision 0016 item 4).
     // The caller holds the driver locks and no poll body runs (they were joined with no lock held, decision 0006
-    // rule 4). The wrapper keeps a loss stamp, so the next Connect still times the outage (#521).
+    // rule 4). The link's loss stamp stays with the driver (release_link()), so the next Connect still times
+    // the outage (#521).
     [[noreturn]] void fail_connect_locked(const std::string& reason) {
         published_connected_ = false;
         connected_ = false;
         reset_session_state_locked();
-        wire().disconnect();
+        wire().release_link();
         throw AlpacaException("Failed to connect to OnStep mount: " + reason);
     }
 
@@ -4751,6 +4800,14 @@ private:
     mutable std::mutex mutex_;
     // Which of the two this thread holds, and the exchanges that drop mutex_ (#1729).
     util::LockGate lock_gate_{io_mutex_, mutex_, "OnStep"};
+    // The controller's shared link (#2223), taken at connect and let go at a Disconnect, a relink or a failed
+    // connect; a lost one is kept until then, with its reason (decision 0009 rule 5). Atomic, so Connected and the
+    // getters read it lock-free; replaced only under transition_mutex_ and io_mutex_.
+    mutable std::atomic<std::shared_ptr<OnStepProtocolWrapper>> link_;
+    // The loss and last-alive stamps of the link last let go of, on clock_ (#521, #1241): the next connect's outage
+    // check reads and clears them. Under io_mutex_ (the connect paths), or the destructor.
+    mutable std::optional<std::chrono::steady_clock::time_point> carried_lost_at_;
+    mutable std::optional<std::chrono::steady_clock::time_point> carried_alive_at_;
     // Read lock-free by check_connected(); written under io_mutex_ and mutex_.
     std::atomic<bool> connected_;
     // What get_connected() reports, read lock-free (#910). Raised only once a

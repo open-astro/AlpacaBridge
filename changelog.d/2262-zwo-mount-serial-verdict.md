@@ -1,0 +1,3 @@
+### Changed
+
+- **The ZWO AM mount judges a lost serial link with the shared `util::SerialLink` verdict** (issue #2262 PR 8, decision 0009 point 2a). Over USB serial its reads go through `link_.read()` and `util::read_until(link_, ...)`, its writes through `link_.write_all()`, and the serial half of its own errno list is gone: `EIO`, `ENXIO`, `ENODEV` and `EBADF` on the port's fd stay a lost link at once (`Connected` false, operations `NotConnected`, the loss stamped once, only the client's Connect relinks). The mount already counted `EBADF`; an `EBADF` now also logs one ERROR line naming the port, since it means a driver bug. The auto-detect probe reads and writes through its link too. Over Wi-Fi (TCP) nothing changes, and every other link-loss behaviour is unchanged.

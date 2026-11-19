@@ -87,6 +87,11 @@ struct FilterWheelStatus {
  */
 std::vector<FilterWheelPortInfo> enumerate_wanderer_filterwheel_ports();
 
+/// The USB descriptor tokens of a Wanderer filter wheel adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& wanderer_filterwheel_usb_tokens();
+
 /**
  * @brief Protocol wrapper for the Wanderer filter wheels (SFW50 / SFW50S / SFW36S).
  *

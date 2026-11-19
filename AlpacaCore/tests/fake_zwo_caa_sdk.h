@@ -26,6 +26,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted ZWO CAA SDK: one rotator (id 7), shared by the rotator unit tests, the
@@ -323,7 +325,7 @@ private:
         InFlight(FakeZWOCAASDK& fake, std::chrono::milliseconds delay, std::atomic<bool>& entered) : fake_(fake) {
             ++fake_.busy;
             entered = true;
-            if (delay.count() > 0) std::this_thread::sleep_for(delay);
+            alpacacore::test::connect_hold(delay);  // connect_hold_gate.h
         }
         ~InFlight() { --fake_.busy; }
         InFlight(const InFlight&) = delete;

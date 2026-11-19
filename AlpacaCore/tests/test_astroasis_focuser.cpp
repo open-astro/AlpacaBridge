@@ -24,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_astroasis_hid.h"
 #include "fake_task_clock.h"
@@ -707,4 +709,54 @@ TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once 
     rig.tick();
     CHECK_FALSE(rig.driver().get_connected());
     require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1757 slice 2a: the tier-2 contract sweep cannot hold this driver's connect open (FakeHidTransport answers
+// in-process with no delay), so the sweep's "Disconnect during a connect returns at once" case runs here over the
+// fake's gate instead: the connect's first status exchange (0x32) is held. Before, disconnect() joined the connect
+// thread and tore down before it returned (commit 3ded11bd), so it waited for the held exchange.
+// Falsified by: astroasis_focuser_driver.cpp disconnect() going back to stop_connection_thread() plus
+// set_connected(false).
+TEST_CASE("Astroasis Focuser Driver - a Disconnect during a connect returns at once (#1757)",
+          "[astroasis][focuser][unit][issue1757]") {
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0x32;
+        state->gate_entered = false;
+    }
+    rig.driver().connect();
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    REQUIRE(rig.driver().get_connecting());
+    // The test opens the gate once it has read Connecting, not after a fixed time: a timed opener could fire in a
+    // scheduler pause before disconnect() ran, and Connecting then read false with a correct driver. A disconnect
+    // that waits for the connect never lets the test get there, so the opener also fires on its own after
+    // ConnectHoldGate::kCap (connect_hold_gate.h): that disconnect returns late and fails the timing check.
+    std::promise<void> checked;
+    std::thread opener([&state, done = checked.get_future()] {
+        (void)done.wait_for(alpacacore::test::ConnectHoldGate::kCap);
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->gate_cmd = 0;
+        }
+        state->cv.notify_all();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver().disconnect();
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = rig.driver().get_connecting();
+    checked.set_value();
+    opener.join();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver().get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(rig.driver().get_connecting());
+    CHECK_FALSE(rig.driver().get_connected());
 }

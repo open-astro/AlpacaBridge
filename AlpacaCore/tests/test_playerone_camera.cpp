@@ -1133,6 +1133,26 @@ std::unique_ptr<alpacacore::CameraDriver> make_clocked_driver(alpacacore::test::
 
 }  // namespace
 
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("Player One Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[playerone][camera][unit][issue2292]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+    int code = 0;
+    try {
+        driver->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(sdk.pulse_off_count() == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - pulse guide timer waits on the task clock",
           "[playerone][camera][unit][taskclock]") {
     alpacacore::test::FakePlayerOneSDK sdk;
@@ -1881,6 +1901,56 @@ TEST_CASE("Player One Camera Driver - settings stay locked while a cancelled bod
         }
     }));
     CHECK(driver->get_start_x() == client_start_x + 1);
+    driver->set_connected(false);
+}
+
+// Issue #2260 (decision 0020 rule 9): an AbortExposure that arrives while a StartExposure is reserved, waiting in
+// session_.start() behind a body the watchdog left in setup, is recorded and stops that exposure once Exposing is
+// published. The driver dropped it: abort_exposure() returned when the state was not Exposing, and the new exposure
+// ran to its end and served a frame.
+TEST_CASE("Player One Camera Driver - an AbortExposure during a StartExposure still in flight is not dropped",
+          "[playerone][camera][unit][capture-session][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock, 80ms);
+    driver->set_num_x(12);  // makes the ROI dirty so the body reads the start position back
+    sdk.set_hold_start_readback(true);
+    driver->start_exposure(0.020, true);
+    REQUIRE(eventually([&] { return sdk.start_readback_started(); }));
+    clock.advance(500ms);  // past the 20 ms + 80 ms deadline: the watchdog fails it, its body stays in setup
+    REQUIRE(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+
+    // The second StartExposure reserves its start and waits in session_.start() for the held body.
+    std::atomic<int> start_error{-1};
+    std::thread starter([&] {
+        try {
+            driver->start_exposure(0.020, true);
+            start_error = 0;
+        } catch (const alpacacore::AlpacaException& e) {
+            start_error = e.error_code();
+        }
+    });
+    const bool start_waiting = clock.wait_for_waiter_thread(starter.get_id(), 5s);
+    std::atomic<bool> abort_returned{false};
+    if (start_waiting) {
+        driver->abort_exposure();  // the start window: nothing is Exposing yet
+        abort_returned = true;
+    }
+    sdk.set_hold_start_readback(false);  // the first body returns; the waiting start goes on
+    starter.join();
+    REQUIRE(start_waiting);
+    CHECK(abort_returned);
+    CHECK(start_error.load() == 0);
+    // The session applied the recorded abort as the start published the exposure, so its body never ran: the camera is
+    // Idle with no frame at once, with no clock step and no real-time wait (#2337 flaked on a 5 ms sleep loop here).
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    bool frame = false;
+    try {
+        frame = driver->get_image_ready();
+    } catch (const alpacacore::AlpacaException&) {
+        frame = false;
+    }
+    CHECK_FALSE(frame);
     driver->set_connected(false);
 }
 

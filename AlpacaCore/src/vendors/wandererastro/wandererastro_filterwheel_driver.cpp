@@ -109,20 +109,7 @@ public:
         return fault ? *fault : std::string{};
     }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        // Disconnect synchronously — closing the port + stopping the reader is
-        // trivial and ASCOM clients expect Connected to be false immediately.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("WandererAstro", "Filter wheel disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize the whole connect/disconnect transition (see the cover
@@ -210,26 +197,6 @@ public:
             teardown();
             ALPACA_LOG_INFO("WandererAstro", "Filter wheel disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- FilterWheel interface ---

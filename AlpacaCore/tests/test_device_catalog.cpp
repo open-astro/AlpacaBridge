@@ -755,3 +755,51 @@ TEST_CASE("Describe reports forget_dropped_selectors from the schema", "[catalog
     catalog.add(std::move(schema));
     CHECK(catalog.describe()[0].forget_dropped_selectors);
 }
+
+TEST_CASE("A host over 253 bytes or a port path over 4095 bytes is refused from the API and kept when saved (#2292)",
+          "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+
+    DeviceConfig at_limits = valid_config();
+    at_limits.set("host", std::string(kMaxHostBytes, 'h'));
+    at_limits.set("portPath", "/dev/" + std::string(kMaxPortPathBytes - 5, 'p'));
+    CHECK_FALSE(catalog.normalize(kStubKey, at_limits, Source::Api).rejection.has_value());
+
+    struct Row {
+        const char* key;
+        std::string value;
+        std::string message;
+    };
+    const std::vector<Row> rows = {
+        {"host", std::string(kMaxHostBytes + 1, 'h'), "host is 254 bytes; the limit is 253"},
+        {"portPath", "/dev/" + std::string(kMaxPortPathBytes - 4, 'p'), "portPath is 4096 bytes; the limit is 4095"},
+    };
+    for (const Row& row : rows) {
+        INFO(row.key);
+        DeviceConfig config = valid_config();
+        config.set(row.key, row.value);
+        const auto api = catalog.normalize(kStubKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == row.message);
+        const auto persisted = catalog.normalize(kStubKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == row.message);
+        const auto* kept = persisted.config.find_value(row.key);  // kept: the connect refuses it
+        REQUIRE(kept != nullptr);
+        CHECK(std::get<std::string>(*kept) == row.value);
+    }
+}
+
+TEST_CASE("A network port reads as itself from 1 to 65535 and as 0 outside it (#2292)", "[catalog]") {
+    CHECK(network_port_or_zero(1) == 1);
+    CHECK(network_port_or_zero(4030) == 4030);
+    CHECK(network_port_or_zero(65535) == 65535);
+    for (const std::int64_t port : {std::int64_t{0}, std::int64_t{-1}, std::int64_t{65536}, std::int64_t{4294971326}}) {
+        INFO("port " << port);
+        CHECK(network_port_or_zero(port) == 0);
+        CHECK(network_port_fault("tcpPort", port) == "tcpPort is out of range (min 1) (max 65535)");
+    }
+    CHECK(network_port_fault("udpPort", 11880).empty());
+}

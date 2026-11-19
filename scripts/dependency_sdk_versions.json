@@ -69,6 +69,7 @@
     "onstep": {"tracked": ["indi-onstep", "onstepx-command-reference"]},
     "playerone": {"tracked": ["playerone-camera-sdk", "playerone-filterwheel-sdk"]},
     "qhy": {"tracked": ["qhy-sdk"]},
+    "remotealpaca": {"tracked": ["ascom-alpaca-device-api", "ascom-alpaca-api-reference"]},
     "skywatcher": {"tracked": ["skywatcher-motor-controller-command-set"]},
     "svbony": {"tracked": ["svbony-camera-sdk"]},
     "synscan": {"tracked": ["synscan-serial-protocol", "synscan-serial-protocol-version"]},

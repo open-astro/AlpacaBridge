@@ -92,7 +92,9 @@ and assert only that the slew threw. An Alt/Az slew test in a driver that refuse
 
 ### Telescope refusal order (all mount drivers)
 
-A telescope member refuses in this order: argument (`InvalidValue`), connected, parked, link fault, tracking (#2257). Out of range always throws `InvalidValue`; no mount driver clamps a client argument (drivers that still drift are listed in `kProbeExemptions` until their fix lands). The parked-against-fault order is per driver (Sky-Watcher checks the fault first). The contract sweep probes PulseGuide, MoveAxis, SlewToCoordinates(Async), the guide-rate setters (#2257) and SideOfPier, TrackingRate, the target setters, SlewToAltAz(Async), SyncToCoordinates, SyncToAltAz, the rate-offset setters and DestinationSideOfPier (#2287) disconnected, connected and parked; `kProbeExemptions` in `test_contract_sweep.cpp` lists each known failure (deleted by the fix) and each member a driver does not implement.
+A telescope member refuses in this order: argument (`InvalidValue`), connected, parked, link fault, tracking (#2257). Out of range always throws `InvalidValue`; no mount driver clamps a client argument (drivers that still drift are listed in `kProbeExemptions` until their fix lands). The parked-against-fault order is per driver (Sky-Watcher checks the fault first). The contract sweep probes PulseGuide, MoveAxis, SlewToCoordinates(Async), the guide-rate setters (#2257) and SideOfPier, TrackingRate, the target setters, SlewToAltAz(Async), SyncToCoordinates, SyncToAltAz, the rate-offset setters and DestinationSideOfPier (#2287) disconnected, connected and parked; `kProbeExemptions` in `test_contract_sweep.cpp` lists each known failure (deleted by the fix) and each member a driver does not implement. A PulseGuide `Duration` above the driver's bound is `InvalidValue`, on a camera too; a driver whose hardware sets no bound of its own uses `kDefaultMaxPulseGuideMs` (60 s, `alpaca_defs.h`, #2292), and none clamps it.
+
+The order lives in one module, `util/telescope_command_gate.h` (#2258): `check_pulse_guide`, `check_move_axis`, `check_equatorial_slew` and `check_guide_rate`, each also as an `_arguments` half and a `_state` half. The argument half takes the driver's `TelescopeCommandLimits` only: the protocol limits and the InvalidValue texts (each driver keeps its own words) are data, so a driver replaces its argument helpers with a limits value. The state half calls the driver's own connected, parked, fault and Tracking checks in order, through a checks object of the driver's, because those checks read the mount or its link (OnStep's `:GU#` read for an unread status, a fault check that closes a stale link); the parked-against-fault order per member family, the MoveAxis stop epsilon and whether a stop skips the fault check are limits too. The gate does no I/O and takes no lock. All eight mount drivers call it: OnStep, Sky-Watcher, NexStar, SynScan, iOptron, ZWO AM, Bisque and Celestron CGX. Sync, Alt/Az slews, rate offsets, targets, TrackingRate and DestinationSideOfPier are not in it yet; each driver still checks them itself.
 
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
@@ -176,6 +178,14 @@ focuser (`same_action`), the iOptron and Celestron mounts' `gps_status`
 focusers' `SetZero` (`util::same_action_name`, `alpacacore/util/action_name.h`).
 A new driver with actions does the same.
 
+### The not-implemented answers are `AlpacaDriver`'s defaults (all drivers)
+
+`AlpacaDriver` (`alpacadriver.h`) defines `get_supported_actions()` (empty), `can_action()` (false),
+`action()` (`ActionNotImplemented` naming the action) and the three `command_*` (`MethodNotImplemented`,
+0x400) inline, issue #1757. A driver overrides one of them only to give it real behaviour (a vendor action, a
+`Command*` pass-through to its protocol), never to restate the default: a copied override was how the
+message and the error spelling drifted across 40 files.
+
 ### Camera ROI alignment (all camera vendors)
 
 Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
@@ -185,6 +195,38 @@ geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / hei
 after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
+
+### Camera argument order (all camera vendors)
+
+A camera member refuses in one order on every brand (#2259), so a client writes one error handler:
+
+- **`StartExposure(duration, light)`**: (1) a NaN, negative or infinite duration, or one too large to convert to
+  microseconds, is `InvalidValue` (a static cap such as GPhoto's 3600 s belongs here too); (2) `NotConnected`; (3) a
+  duration below `ExposureMin`, 0 included, runs at `ExposureMin`, and one above `ExposureMax` is `InvalidValue`; (4) a
+  frame (NumX, NumY, StartX, StartY, bin) that does not fit the sensor is `InvalidValue`; (5) an exposure running or
+  starting is `InvalidOperation`.
+- **`BinX`, `BinY`, `NumX`, `NumY`, `StartX`, `StartY` setters**: (1) a bin, NumX or NumY of 0 or less, or a StartX or
+  StartY below 0, is `InvalidValue`; (2) `NotConnected`; (3) a bin the camera does not support is `InvalidValue`; (4) an
+  exposure running or starting is `InvalidOperation`. The setters do not check the sensor size: StartExposure does
+  (ConformU sets a NumX beyond the sensor and expects StartExposure to refuse it).
+
+The contract sweep probes these disconnected, connected and while an exposure runs (started through each camera's
+tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camera that still drifts, and
+`kExposingRefusalExemptions` each camera that takes a good write or a second StartExposure while exposing; the fix
+deletes its rows.
+
+The value checks of that order live in one module, `util/camera_frame_request.h` (#2261): `check_exposure_duration`
+(StartExposure step 1), `exposure_microseconds` (step 3), `check_frame_on_sensor` (step 4; `frame_sensor_misfit` is
+the same check as a value, for a driver that answers one text or only skips an SDK write, as ZWO does), and for the
+setters `check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3). A camera
+driver calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the
+device lookups (ExposureMin and ExposureMax, the supported bins, the sensor size at the current bin) and its own
+InvalidValue texts (`CameraRequestTexts`; the codes are the same on every camera). Only the SDK alignment above and
+vendor limits (GPhoto's 3600 s cap and nearest shutter speed, the iGuider exposure steps) stay in the driver. Every
+camera driver calls it: ZWO, SVBONY, Player One (with iCAM), ToupTek (with Altair), QHY, GPhoto and the iGuider. Three
+keep a check for a vendor reason, named at the call: QHY and GPhoto their ExposureMax check in seconds (QHY's range
+may be unreported, GPhoto maps a duration to a shutter speed) and QHY its per-bin SDK query; the iGuider its subframe
+value checks, whose text names the value.
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 

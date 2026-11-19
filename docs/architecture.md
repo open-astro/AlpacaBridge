@@ -97,7 +97,7 @@ Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY
 
 - Concrete driver implementation
 - Uses wrapper layer, never touches raw SDK directly
-- Implements all pure virtual methods from Layer 1
+- Implements all pure virtual methods from Layer 1; the six ASCOM common members (`SupportedActions`, `Action`, `CanAction` and the three `Command*`) default to their not-implemented answer in `AlpacaDriver`, so a driver overrides them only to give them real behaviour (issue #1757)
 
 See the [Development Guide](development.md) for step-by-step implementation.
 
@@ -115,7 +115,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, EQ-class boards e.g. EQM-35 Pro, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX), Focuser (focus motor on its own USB port) | Protocol wrapper | Production (CGX-L direct USB untested) |
-| OnStep | Telescope (generic DIY/retrofit mounts) | Protocol wrapper | Production |
+| OnStep | Telescope (generic DIY/retrofit mounts), Focuser (OnStepX focusers 1-6), Rotator (OnStepX), Switch (OnStepX auxiliary features), each sharing the controller's one link with the telescope | Protocol wrapper | Production (focuser, rotator and switch fake-tested) |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3), Switch (Power & Data Hubs Advanced 3) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
@@ -146,7 +146,7 @@ AlpacaHTTP is the HTTP server layer. It translates Alpaca REST/JSON requests int
 ### Components
 
 - **Server** (`src/http/server.cpp`) — POSIX socket server, thread-per-connection model, listens on port 6800
-- **Router** (`src/http/router.cpp`) — maps HTTP routes to AlpacaCore driver method calls for all device types
+- **Router** (`src/http/router.cpp`) — maps HTTP routes to AlpacaCore driver method calls; the common `dispatch_device_method` stays there, and each device type's method dispatch is in its own `src/http/routes/<type>_routes.cpp` (issue #2081), sharing the router's helpers through `src/http/router_helpers.h`
 - **Config** (`src/core/config.cpp`) — JSON-based device configuration, persisted to disk
 - **Discovery** (`src/discovery/discovery.cpp`) — Alpaca UDP discovery responder (UDP port `discovery.port`, default 32227, configurable; applied on restart)
 - **Web UI** (`web/`) — browser-based management interface for device configuration
@@ -259,6 +259,7 @@ AlpacaBridge/
 |   +- src/
 |   |   +- core/                     # Config, request/response, JSON
 |   |   +- http/                     # Server, router
+|   |   |   +- routes/               # Per-device-type method dispatch
 |   |   +- discovery/                # Alpaca UDP discovery
 |   |   +- util/                     # Logging, error mapping
 |   +- web/                          # Management UI (HTML/JS/CSS)
@@ -285,7 +286,7 @@ Use these names in issues, PRs and records. Domain terms are defined in
 | Module | What it owns | State |
 |--------|--------------|-------|
 | Device Catalog | One descriptor per (vendor, device) declaring its config fields, roles and construction; AlpacaHTTP bridges JSON once and serves the schema | In place: every vendor has a descriptor and the router includes no vendor header (layering gate at zero); [decision 0004](decisions/0004-device-catalog.md) |
-| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
+| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Done: each of the ten types' dispatch is in `src/http/routes/<type>_routes.cpp`; the helpers they share with the router are declared once in `src/http/router_helpers.h` ([#2081](https://github.com/open-astro/AlpacaBridge/issues/2081)) |
 | Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); the drivers on it are the Adoption table of [decision 0005](decisions/0005-task-clock.md) |
 | Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); on `main` only (not `stable/5.0`); the drivers on it are the Adoption table of [decision 0006](decisions/0006-async-operation-ownership.md) |
 | State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Utility landed (#998); the drivers served from it are the Adoption table of [decision 0010](decisions/0010-snapshot-served-state.md) |

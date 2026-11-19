@@ -117,6 +117,11 @@ struct BoxState {
  */
 std::vector<BoxPortInfo> enumerate_wandererbox_ports();
 
+/// The USB descriptor tokens of a WandererBox adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& wandererbox_usb_tokens();
+
 /**
  * @brief Protocol wrapper for the WandererBox Pro V3 power box.
  *

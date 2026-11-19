@@ -37,9 +37,7 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <set>
-#include <sstream>
 #include <thread>
 
 #ifndef _WIN32
@@ -84,8 +82,9 @@ std::string probe_nexstar_port(const std::string& port_path) {
     const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
-    // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#"
-    if (!util::tty_write_all(fd, std::string{'K', 0x42})) {
+    // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#". The probe reads and writes
+    // through its link (util::SerialLink, #2262); it judges only the bytes it got, as before.
+    if (!link.write_all(std::string{'K', 0x42})) {
         return "";
     }
 
@@ -96,7 +95,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
     spec.terminators = "#";
     spec.skip.clear();
     spec.max_len = 2;
-    const auto echo = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const auto echo = util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     if (echo.bytes.size() < 2 || echo.bytes[0] != 0x42 || echo.bytes[1] != '#') {
         return "";
@@ -104,12 +103,12 @@ std::string probe_nexstar_port(const std::string& port_path) {
 
     // Echo confirmed — now query firmware version with "V" command
     tcflush(fd, TCIOFLUSH);
-    if (!util::tty_write_all(fd, std::string("V"))) {
+    if (!link.write_all(std::string("V"))) {
         return "";
     }
 
     spec.max_len = 3;
-    const auto ver = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const auto ver = util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     link.close();
 
@@ -136,8 +135,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
 bool raw_port_looks_like_celestron_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, celestron_usb_tokens());
 }
 
 // Issue #1202: whether the scan may probe @p resolved. A port another
@@ -248,49 +246,9 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
 
 namespace {
 
-int parse_mode_byte(const std::string& response) {
-    if (response.empty()) {
-        return 0;
-    }
-    unsigned char ch = static_cast<unsigned char>(response[0]);
-    if (ch >= static_cast<unsigned char>('0') && ch <= static_cast<unsigned char>('9')) {
-        return static_cast<int>(ch - static_cast<unsigned char>('0'));
-    }
-    return static_cast<int>(ch);
-}
-
 using util::build_hex;
-using util::leading_hex;
-using util::trailing_hex;
-
-std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std::string& response,
-                                                                       bool precise) {
-    const std::size_t expected_digits = precise ? 6 : 4;
-    auto comma = response.find(',');
-    if (comma == std::string::npos) {
-        return std::nullopt;
-    }
-
-    std::string left = trailing_hex(response.substr(0, comma));
-    std::string right = leading_hex(response.substr(comma + 1));
-    if (left.size() < expected_digits || right.size() < expected_digits) {
-        return std::nullopt;
-    }
-
-    left.resize(expected_digits);
-    right.resize(expected_digits);
-
-    uint32_t first_raw = 0;
-    uint32_t second_raw = 0;
-    std::istringstream first_iss(left);
-    std::istringstream second_iss(right);
-    first_iss >> std::hex >> first_raw;
-    second_iss >> std::hex >> second_raw;
-    if (first_iss.fail() || second_iss.fail()) {
-        return std::nullopt;
-    }
-    return std::make_pair(first_raw, second_raw);
-}
+using util::parse_axis_pair_response;
+using util::parse_mode_byte;
 
 // NexStar model ID to human-readable name mapping, or empty for an id not in the table
 std::string model_id_to_name(int model_id) {
@@ -328,10 +286,7 @@ std::string model_id_to_name(int model_id) {
 
 class CelestronProtocolWrapper::Impl {
 public:
-    Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
-        serial_fd_ = -1;
-        socket_fd_ = -1;
-    }
+    Impl() : connected_(false), connection_type_(ConnectionType::Serial) { socket_fd_ = -1; }
 
     ~Impl() {
         disconnect();
@@ -363,6 +318,8 @@ public:
         last_connect_error_.clear();
         link_lost_.store(false);
         set_fault("");
+        // A connect starts with a clear verdict on the link too; a new port opened below brings its own clear one.
+        link_.clear_loss();
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
@@ -378,6 +335,9 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        // An explicit Disconnect forgets the link's verdict (decision 0009 rule 5); fail_link_locked(), the port
+        // release after a loss, keeps it.
+        link_.clear_loss();
     }
 
     // Tear down the connection. Caller MUST already hold mutex_ (so connect()
@@ -1344,34 +1304,8 @@ public:
     }
 
     void set_location(const LocationInfo& info) {
-        // NexStar "W" (uppercase) to set location
-        double lat = info.latitude_degrees;
-        double lon = info.longitude_degrees;
-
-        int lat_sign = lat < 0.0 ? 1 : 0;
-        int lon_sign = lon < 0.0 ? 1 : 0;
-        lat = std::abs(lat);
-        lon = std::abs(lon);
-
-        int lat_deg = static_cast<int>(lat);
-        int lat_min = static_cast<int>((lat - lat_deg) * 60.0);
-        int lat_sec = static_cast<int>((lat - lat_deg - lat_min / 60.0) * 3600.0);
-        int lon_deg = static_cast<int>(lon);
-        int lon_min = static_cast<int>((lon - lon_deg) * 60.0);
-        int lon_sec = static_cast<int>((lon - lon_deg - lon_min / 60.0) * 3600.0);
-
-        std::string cmd;
-        cmd.reserve(1 + 8);
-        cmd.push_back('W');
-        cmd.push_back(static_cast<char>(lat_deg));
-        cmd.push_back(static_cast<char>(lat_min));
-        cmd.push_back(static_cast<char>(lat_sec));
-        cmd.push_back(static_cast<char>(lat_sign));
-        cmd.push_back(static_cast<char>(lon_deg));
-        cmd.push_back(static_cast<char>(lon_min));
-        cmd.push_back(static_cast<char>(lon_sec));
-        cmd.push_back(static_cast<char>(lon_sign));
-        (void)send_command(cmd, true, 0);
+        // NexStar "W" (uppercase) sets the location: util::location_command() (nexstar_frame.h).
+        (void)send_command(util::location_command(info.latitude_degrees, info.longitude_degrees), true, 0);
     }
 
     TimeInfo get_time() {
@@ -1446,7 +1380,6 @@ private:
             ALPACA_LOG_ERROR("Celestron", last_connect_error_);
             return false;
         }
-        serial_fd_ = link_.fd();
         return true;
     }
 
@@ -1512,10 +1445,7 @@ private:
         return true;
     }
 
-    void disconnect_serial() {
-        serial_fd_ = -1;
-        link_.close();
-    }
+    void disconnect_serial() { link_.close(); }
 
     void disconnect_network() {
         if (socket_fd_ >= 0) {
@@ -1531,7 +1461,8 @@ private:
         return write_network(data);
     }
 
-    bool write_serial(const std::string& data) { return util::tty_write_all(serial_fd_, data); }
+    // The util::SerialLink verdict judges a failed write (#2262); errno is kept.
+    bool write_serial(const std::string& data) { return link_.write_all(data); }
 
     bool write_network(const std::string& data) {
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
@@ -1539,12 +1470,12 @@ private:
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
-    // One reply read for both transports: util::read_until on the tty or
-    // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
-    // old 10 ms pacing sleep is gone.
+    // One reply read for both transports: util::read_until on the serial link
+    // (which judges a LinkDead read, #2262) or util::read_until_socket on the TCP
+    // fd. The wait is poll()-bounded, so the old 10 ms pacing sleep is gone.
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(serial_fd_, spec, deadline);
+            return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
     }
@@ -1559,11 +1490,11 @@ private:
         throw AlpacaException(reason);
     }
 
-    // A failed write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the serial port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
-    // a socket errno instead, so the network link keeps its fault latch.
+    // A failed write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the util::SerialLink
+    // verdict, #2262) is the serial port gone: the link is lost at once. A write timeout is not. Serial only: a TCP
+    // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
-        if (err == EIO || err == ENXIO || err == ENODEV) {
+        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
             fail_link_locked("Celestron serial link lost (write): " + util::errno_string(err));
         }
     }
@@ -1683,8 +1614,10 @@ private:
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
+    // The serial port, and the errno verdict on it (util::SerialLink, #2262); this wrapper keeps no serial errno
+    // list. It still publishes its own link_lost_ and fault text, which the driver reads: the vendor text ("Celestron
+    // serial link lost (write): ...") and a latch that only fail_link_locked() sets, with the port released.
     util::SerialLink link_;
-    int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
     std::string last_connect_error_;
 };
@@ -1895,6 +1828,12 @@ TimeInfo CelestronProtocolWrapper::get_time() {
 
 void CelestronProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+const std::vector<std::string>& celestron_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",      "FTDI",
+                                                 "CP210",    "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::celestron

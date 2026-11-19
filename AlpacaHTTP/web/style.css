@@ -26,6 +26,14 @@
     --ok: #43c878;
     --warn: #e8b84a;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    /* Issue #1764 item 3: the touch target and the type scale. Tabs, buttons,
+       info buttons and toggles are at least --tap high (or have a --tap hit
+       area); body and hint text is at least --fs-small. Only the monospace
+       badges in tests/web/touch_type.test.js stay smaller, never under 11px. */
+    --tap: 44px;
+    --fs-small: 13px;
+    --fs-body: 14px;
+    --fs-large: 17px;
 }
 
 * {
@@ -37,7 +45,7 @@
 body {
     background: var(--bg);
     color: var(--text);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: var(--fs-body)/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     min-height: 100vh;
 }
 
@@ -64,7 +72,7 @@ header {
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    font-size: 17px;
+    font-size: var(--fs-large);
     font-weight: 600;
     letter-spacing: 0.2px;
 }
@@ -108,7 +116,7 @@ header {
     border-radius: 999px;
     background: var(--panel-2);
     border: 1px solid var(--line);
-    font-size: 12px;
+    font-size: var(--fs-small);
     font-weight: 400;
     color: var(--dim);
 }
@@ -140,6 +148,7 @@ header {
     border-bottom: 2px solid transparent;
     color: var(--dim);
     font: inherit;
+    min-height: var(--tap);
     padding: 10px 16px;
     cursor: pointer;
 }
@@ -165,7 +174,7 @@ header {
 h2 {
     margin-bottom: 14px;
     color: var(--text);
-    font-size: 17px;
+    font-size: var(--fs-large);
     font-weight: 600;
 }
 
@@ -209,7 +218,7 @@ h2 {
 
 .calibration-hint {
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .calibration-hint:empty {
@@ -234,7 +243,7 @@ h2 {
     display: flex;
     align-items: center;
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-body);
     font-weight: 600;
 }
 
@@ -324,7 +333,7 @@ h2 {
     color: var(--dim);
     padding: 3px 12px;
     border-radius: 999px;
-    font-size: 12.5px;
+    font-size: var(--fs-small);
     cursor: pointer;
     transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
@@ -370,7 +379,7 @@ h2 {
 }
 
 .device-settings h4 {
-    font-size: 13px;
+    font-size: var(--fs-small);
     color: var(--dim);
     font-weight: 600;
     margin-bottom: 8px;
@@ -390,7 +399,7 @@ h2 {
 
 .setting-label,
 .info-label {
-    font-size: 11px;
+    font-size: var(--fs-small);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--dim);
@@ -401,7 +410,7 @@ h2 {
 .info-value {
     color: var(--text);
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: var(--fs-small);
 }
 
 /* A connect-failure reason is a sentence, not a field value: it spans the
@@ -434,6 +443,7 @@ h2 {
     background: var(--panel-2);
     border: 1px solid var(--line);
     border-radius: 7px;
+    min-height: var(--tap);
     padding: 7px 14px;
     cursor: pointer;
     transition: background 0.12s, border-color 0.12s;
@@ -451,7 +461,7 @@ h2 {
 
 .btn-small {
     padding: 5px 11px;
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .btn-primary {
@@ -492,12 +502,27 @@ h2 {
     margin-top: 14px;
 }
 
-/* Always-visible action bar below the tab content, on every tab. */
+/* Always-visible action bar below the tab content, on every tab. Side padding
+   matches the tab content, so its button never touches the screen edge (#1764). */
 .global-actions {
     margin-top: 18px;
-    padding-top: 14px;
+    padding: 14px 18px 0;
     border-top: 1px solid var(--line);
     flex-wrap: wrap;
+}
+
+/* The Server Actions card on Server Info (#1764 item 1). Shutdown gets its own
+   row below a rule, apart from Restart, so a gloved tap cannot reach it by a
+   near miss. */
+.server-actions-card {
+    margin-top: 0;
+    flex-wrap: wrap;
+}
+
+.server-actions-danger {
+    margin-top: 22px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--line);
 }
 
 /* ---- forms ---- */
@@ -544,7 +569,7 @@ h2 {
     display: block;
     margin-top: 4px;
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 input[type="checkbox"] {
@@ -646,14 +671,14 @@ input[type="range"] {
 .vendor-config h3 {
     margin-bottom: 12px;
     color: var(--accent-2);
-    font-size: 14px;
+    font-size: var(--fs-body);
     font-weight: 600;
 }
 
 .vendor-config h4 {
     margin: 14px 0 8px;
     color: var(--dim);
-    font-size: 13px;
+    font-size: var(--fs-small);
     font-weight: 600;
 }
 
@@ -675,7 +700,7 @@ input[type="range"] {
     border: 1px solid var(--line);
     border-left: 3px solid var(--accent);
     background: var(--panel-2);
-    font-size: 13px;
+    font-size: var(--fs-small);
 }
 
 .message.success {
@@ -724,7 +749,7 @@ input[type="range"] {
 
 .section-card-header h3 {
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-body);
     font-weight: 600;
 }
 
@@ -769,7 +794,7 @@ input[type="range"] {
 .server-status {
     margin: 4px 0 14px;
     color: var(--dim);
-    font-size: 13px;
+    font-size: var(--fs-small);
 }
 
 .server-status.error {
@@ -780,7 +805,7 @@ input[type="range"] {
     margin-left: auto;
     margin-right: 12px;
     color: var(--dim);
-    font-size: 13px;
+    font-size: var(--fs-small);
     font-variant-numeric: tabular-nums;
 }
 
@@ -803,7 +828,7 @@ header > .server-clock {
 
 .server-helper {
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 /* ---- logging ---- */
@@ -818,13 +843,13 @@ header > .server-clock {
 .log-control-header h3 {
     margin-bottom: 4px;
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-body);
     font-weight: 600;
 }
 
 .log-control-header p {
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .switch {
@@ -883,7 +908,7 @@ header > .server-clock {
 .log-status {
     margin-top: 10px;
     color: var(--dim);
-    font-size: 13px;
+    font-size: var(--fs-small);
 }
 
 .log-levels {
@@ -895,14 +920,14 @@ header > .server-clock {
 .log-levels-header h4 {
     margin-bottom: 4px;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-small);
     font-weight: 600;
 }
 
 .log-levels-header p {
     margin-bottom: 10px;
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .log-levels-grid {
@@ -927,7 +952,7 @@ header > .server-clock {
     border-radius: 7px;
     background: var(--panel-2);
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .log-level-toggle input {
@@ -952,18 +977,18 @@ header > .server-clock {
 .log-files-header h4 {
     margin-bottom: 4px;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-small);
     font-weight: 600;
 }
 
 .log-files-header p {
     color: var(--dim);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 .log-files-directory {
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: var(--fs-small);
     color: var(--dim);
     margin-top: 4px !important;
 }
@@ -998,14 +1023,14 @@ header > .server-clock {
 .log-file-name {
     font-family: var(--mono);
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-small);
     color: var(--text);
     word-break: break-all;
 }
 
 .log-file-meta {
     color: var(--dim);
-    font-size: 12px;
+    font-size: var(--fs-small);
 }
 
 .log-file-actions {
@@ -1040,7 +1065,7 @@ header > .server-clock {
 .log-file-viewer-title {
     font-family: var(--mono);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-small);
     word-break: break-all;
 }
 
@@ -1052,7 +1077,7 @@ header > .server-clock {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: var(--fs-small);
     line-height: 1.4;
     color: var(--text);
 }
@@ -1064,10 +1089,71 @@ header > .server-clock {
     border-radius: 8px;
     overflow-x: auto;
     font-family: var(--mono);
-    font-size: 12.5px;
+    font-size: var(--fs-small);
 }
 
 /* ---- states ---- */
+/* Issue #1764: the stale-data banner, shown while the bridge does not answer
+   the device status poll. Text, not colour, carries the message. */
+.link-banner {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: var(--fs-small);
+}
+
+.link-banner[hidden] {
+    display: none;
+}
+
+/* A dot whose state is from the last good poll: hollow, so the marker is a
+   shape and not colour alone; its label starts "Stale". */
+.status-dot.stale {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--status-dot-color);
+}
+
+.status-dot.stale::before {
+    display: none;
+}
+
+/* Issue #1764: the device list's loading state, a skeleton row. */
+.device-card.skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+}
+
+.skeleton-line {
+    display: block;
+    height: 12px;
+    width: 60%;
+    border-radius: 4px;
+    background: var(--line);
+}
+
+.skeleton-line.skeleton-title {
+    width: 35%;
+    height: 16px;
+}
+
+/* Text for screen readers only. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .loading {
     text-align: center;
     color: var(--dim);
@@ -1110,13 +1196,13 @@ header > .server-clock {
 
 .ui-dialog-title {
     margin-bottom: 8px;
-    font-size: 17px;
+    font-size: var(--fs-large);
     font-weight: 600;
 }
 
 .ui-dialog-body {
     color: var(--dim);
-    font-size: 14px;
+    font-size: var(--fs-body);
     white-space: pre-line;
 }
 
@@ -1129,7 +1215,7 @@ header > .server-clock {
     flex-direction: column;
     gap: 6px;
     margin-top: 12px;
-    font-size: 14px;
+    font-size: var(--fs-body);
 }
 
 .ui-dialog-field[hidden] {
@@ -1181,7 +1267,7 @@ header > .server-clock {
     border: 1px solid var(--line);
     border-left: 3px solid var(--ok);
     border-radius: 8px;
-    font-size: 14px;
+    font-size: var(--fs-body);
     pointer-events: auto;
 }
 
@@ -1192,8 +1278,8 @@ header > .server-clock {
 
 .toast-close {
     flex: none;
-    min-width: 44px;
-    min-height: 44px;
+    min-width: var(--tap);
+    min-height: var(--tap);
     color: var(--dim);
     background: none;
     border: none;
@@ -1204,7 +1290,7 @@ header > .server-clock {
 .field-error {
     margin-top: 4px;
     color: #f08a7a;
-    font-size: 13px;
+    font-size: var(--fs-small);
 }
 
 [aria-invalid="true"] {
@@ -1235,13 +1321,38 @@ header > .server-clock {
     border-radius: 50%;
     background: transparent;
     color: var(--dim);
-    font-size: 11px;
+    font-size: var(--fs-small);
     font-weight: 600;
     font-style: normal;
     font-family: inherit;
     line-height: 1;
     cursor: pointer;
     vertical-align: middle;
+}
+
+/* Issue #1764 item 3: a --tap hit area around the small controls whose look
+   stays small (the info "i", the switches, the Details pills). The box is
+   centred on the control and invisible; the control itself is unchanged. */
+.info-btn,
+.device-toggle,
+.section-toggle,
+.switch,
+.oa-switch {
+    position: relative;
+}
+
+.info-btn::after,
+.device-toggle::after,
+.section-toggle::after,
+.switch::after,
+.oa-switch::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--tap));
+    height: max(100%, var(--tap));
+    transform: translate(-50%, -50%);
 }
 .info-btn:hover {
     border-color: var(--accent-2);
@@ -1295,6 +1406,8 @@ header > .server-clock {
     color: var(--dim);
     font-size: 18px;
     cursor: pointer;
+    min-width: var(--tap);
+    min-height: var(--tap);
     padding: 2px 6px;
 }
 .info-sheet-close:hover { color: var(--text); }
@@ -1344,12 +1457,12 @@ header > .server-clock {
 .wifi-row-first { padding-top: 4px; }
 .wifi-row-label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .wifi-row-label small { color: var(--dim); }
-.wifi-substatus { color: var(--dim); font-size: 12.5px; margin: 8px 2px; }
-.wifi-hint { color: var(--dim); font-size: 12px; margin: 6px 2px 0; }
+.wifi-substatus { color: var(--dim); font-size: var(--fs-small); margin: 8px 2px; }
+.wifi-hint { color: var(--dim); font-size: var(--fs-small); margin: 6px 2px 0; }
 
 .wifi-group-title {
     margin: 20px 2px 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-small);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1398,8 +1511,8 @@ header > .server-clock {
 .wifi-net-check { width: 16px; color: var(--accent); font-weight: 700; flex: none; }
 .wifi-net-name { flex: 1; }
 .wifi-net-name small { color: var(--dim); margin-left: 6px; }
-.wifi-net-meta { color: var(--dim); font-size: 12px; white-space: nowrap; }
-.wifi-signal { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; }
+.wifi-net-meta { color: var(--dim); font-size: var(--fs-small); white-space: nowrap; }
+.wifi-signal { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; }
 .wifi-actions-right { display: flex; justify-content: flex-end; margin: 6px 0 0; }
 
 /* Hotspot config fields */
@@ -1442,13 +1555,13 @@ header > .server-clock {
 .update-notes.hidden { display: none; }
 .update-notes-header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
 .update-notes-header h4 { margin: 0; }
-.update-notes-header a { font-size: 12.5px; }
-.update-notes-body { max-height: 320px; overflow: auto; font-size: 13.5px; line-height: 1.45; }
+.update-notes-header a { font-size: var(--fs-small); }
+.update-notes-body { max-height: 320px; overflow: auto; font-size: var(--fs-body); line-height: 1.45; }
 .update-notes-body h4, .update-notes-body h5 { margin: 12px 0 4px; }
 .update-notes-body p { margin: 6px 0; }
 .update-notes-body ul { margin: 4px 0 8px 18px; padding: 0; }
 .update-notes-body li { margin: 4px 0; }
-.update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: rgba(0, 0, 0, 0.25); font-size: 12px; }
+.update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: rgba(0, 0, 0, 0.25); font-size: var(--fs-small); }
 #update-status-line.update-available { color: var(--accent); font-weight: 600; }
 #update-message.error, #update-installer-line.error, #update-channel-line.error { color: #f08a7a; }
 
@@ -1456,6 +1569,6 @@ header > .server-clock {
 .info-note {
     display: block;
     margin-top: 4px;
-    font-size: 0.85em;
+    font-size: var(--fs-small);
     opacity: 0.75;
 }

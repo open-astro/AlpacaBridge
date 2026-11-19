@@ -63,6 +63,7 @@
 #include <tuple>
 #include <vector>
 
+#include "fake_usb_serial_tree.h"
 #include "route_table_stubs.h"
 #include "test_assert.h"
 #include "test_catalog_descriptor.h"
@@ -647,6 +648,47 @@ public:
 private:
     int number_;
     bool connected_ = false;
+};
+
+// open-astro#2292: counts the Action and Command* calls that reach the driver,
+// so a test can show a refused field never did.
+class CommandRecordingStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    explicit CommandRecordingStubDriver(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Command Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string fallback_unique_id() const override { return "command-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override {
+        ++calls;
+        return "";
+    }
+    bool can_action(std::string_view) const override { return true; }
+    std::string command_blind(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+    bool command_bool(std::string_view, bool) override {
+        ++calls;
+        return false;
+    }
+    std::string command_string(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+
+    int calls = 0;
+
+private:
+    int number_;
 };
 
 // Mirrors the shape the blocking-driver list in async_connectable.h guards
@@ -5623,6 +5665,89 @@ int main() {
         EXPECT(cfg.value("mountIndex", -1) == 1);
         remove_device(router, "onstep", "telescope", 9622);
     }
+    {
+        // case: onstep focuser config round-trips
+        // #2223: the focuser shares the telescope's connection fields and adds focuserNumber; every field of a
+        // serial entry survives the sanitizer, the unused network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9629},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM0"},
+                                           {"baudRate", 19200},
+                                           {"host", "192.168.0.2"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 2500},
+                                           {"mountIndex", 1},
+                                           {"focuserNumber", 4}},
+                                          "Focuser", 9629);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("host", "") == "192.168.0.2");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 2500);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        EXPECT(cfg.value("focuserNumber", -1) == 4);
+        remove_device(router, "onstep", "focuser", 9629);
+    }
+    {
+        // case: onstep rotator config round-trips
+        // #2221: the rotator shares the telescope's connection fields; every field of a network entry survives the
+        // sanitizer, the unused serial ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9630},
+                                           {"connectionType", "network"},
+                                           {"portPath", "/dev/ttyACM1"},
+                                           {"baudRate", 38400},
+                                           {"host", "192.168.0.3"},
+                                           {"tcpPort", 9996},
+                                           {"responseTimeoutMs", 1500},
+                                           {"mountIndex", 2}},
+                                          "Rotator", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM1");
+        EXPECT(cfg.value("baudRate", -1) == 38400);
+        EXPECT(cfg.value("host", "") == "192.168.0.3");
+        EXPECT(cfg.value("tcpPort", -1) == 9996);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 1500);
+        EXPECT(cfg.value("mountIndex", -1) == 2);
+        remove_device(router, "onstep", "rotator", 9630);
+    }
+    {
+        // case: onstep switch config round-trips
+        // #2222: the switch shares the telescope's connection fields; every field of an auto entry survives the
+        // sanitizer, the unused serial and network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9631},
+                                           {"connectionType", "auto"},
+                                           {"portPath", "/dev/ttyUSB3"},
+                                           {"baudRate", 57600},
+                                           {"host", "192.168.0.4"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 3000},
+                                           {"mountIndex", 3}},
+                                          "Switch", 9631);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB3");
+        EXPECT(cfg.value("baudRate", -1) == 57600);
+        EXPECT(cfg.value("host", "") == "192.168.0.4");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 3000);
+        EXPECT(cfg.value("mountIndex", -1) == 3);
+        remove_device(router, "onstep", "switch", 9631);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -8894,7 +9019,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 43);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 46);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -9201,6 +9326,152 @@ int main() {
             route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz").body(), nullptr, false);
         EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) != 0);
         EXPECT(thrown.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
+    // GET /management/v1/attacheddevices (#2312): every detected serial, HID and
+    // camera device with the catalog entries it could be, over a fake tree.
+    {
+        // case: attacheddevices lists a fake port with its candidates, the configured marker and a lister error
+        using alpacacore::catalog::FieldRef;
+        using alpacacore::catalog::Role;
+        static const std::vector<FieldRef> serial_fields = [] {
+            FieldRef connection;
+            connection.key = "connectionType";
+            connection.role = Role::Discriminator;
+            connection.default_value = std::string("auto");
+            FieldRef port;
+            port.key = "portPath";
+            port.role = Role::PortPath;
+            port.applies_when = alpacacore::catalog::AppliesWhen{"connectionType", "serial"};
+            port.default_value = std::string();
+            return std::vector<FieldRef>{connection, port};
+        }();
+        static const std::vector<FieldRef> camera_fields = [] {
+            FieldRef index;
+            index.key = "cameraIndex";
+            index.kind = FieldRef::Kind::Int;
+            index.role = Role::EnumerationIndex;
+            index.default_value = std::int64_t{0};
+            return std::vector<FieldRef>{index};
+        }();
+        const auto schema = [](alpacacore::catalog::DeviceKey key, const std::vector<FieldRef>& fields) {
+            alpacacore::catalog::Schema s;
+            s.key = std::move(key);
+            s.display_name = "Attached";
+            s.build_option = "ALPACACORE_ENABLE_ATTACHED";
+            s.fields = fields;
+            return s;
+        };
+        const alpacacore::catalog::DeviceKey focuser{"yyy", alpacacore::DeviceType::Focuser};
+        const alpacacore::catalog::DeviceKey mount{"xxx", alpacacore::DeviceType::Telescope};
+
+        alpacacore::test::FakeUsbSerialTree tree;
+        const std::string node = tree.add_port("ttyUSB0", "1a86", "", "USB Serial", "usb-1a86_USB_Serial-if00-port0");
+        const std::string by_id = (tree.by_id() / "usb-1a86_USB_Serial-if00-port0").string();
+        const std::string node_canonical = std::filesystem::canonical(node).string();
+
+        // A saved yyy focuser on the raw node. yyy has no factory, so it fails
+        // to load and stays a saved entry, which is what the marker reads.
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        std::ofstream("config/registered_devices.json") << nlohmann::json::array({{{"vendor", "yyy"},
+                                                                                   {"deviceType", "focuser"},
+                                                                                   {"deviceNumber", 9491},
+                                                                                   {"connectionType", "serial"},
+                                                                                   {"portPath", node}}})
+                                                               .dump();
+        alpacahttp::Router router([&](alpacacore::catalog::DeviceCatalog& c) {
+            c.add(schema(focuser, serial_fields));
+            c.add(schema(mount, serial_fields));
+            c.add(schema({"yyy", alpacacore::DeviceType::Camera}, camera_fields));
+            c.add_usb_serial_identity({focuser, {"1a86", "CH340"}, {}});
+            c.add_usb_serial_identity({mount, {"CH340", "USB_Serial"}, {}});
+            c.add_camera_lister(
+                "yyy", [] { return std::vector<alpacacore::catalog::AttachedCamera>{{0, "ZWO ASI432MM", "1a2b"}}; });
+            c.add_hid_lister({"yyy", alpacacore::DeviceType::Focuser},
+                             []() -> std::vector<alpacacore::catalog::AttachedHidDevice> {
+                                 throw std::runtime_error("hid_init failed");
+                             });
+        });
+        router.set_attached_device_roots(tree.roots());
+
+        const auto response = route_request(router, "GET", "/management/v1/attacheddevices?ClientTransactionID=33");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 33);
+        // An all-vendors build registers the built-in serial identities and listers too: a built-in vendor that
+        // ships a CH340 adds its own candidates to the same port, and a built-in lister may add a device or an
+        // error. The test reads only the entries of its own vendors (yyy, xxx), in the order they were registered.
+        const auto own = [](const nlohmann::json& list, const char* key) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const auto& item : list) {
+                const std::string name = item.value(key, std::string());
+                if (name == "yyy" || name == "xxx" || name.rfind("yyy ", 0) == 0) kept.push_back(item);
+            }
+            return kept;
+        };
+        const nlohmann::json devices = json["Value"].value("Devices", nlohmann::json::array());
+        const nlohmann::json* port = nullptr;
+        const nlohmann::json* camera = nullptr;
+        for (const auto& device : devices) {
+            if (device.value("Port", "") == by_id) port = &device;
+            const auto candidates = device.value("Candidates", nlohmann::json::array());
+            if (device.value("Kind", "") == "camera" && !candidates.empty() &&
+                candidates[0].value("Vendor", "") == "yyy") {
+                camera = &device;
+            }
+        }
+        EXPECT(port != nullptr && camera != nullptr);
+        if (port != nullptr && camera != nullptr) {
+            EXPECT(port->value("Kind", "") == "serial");
+            EXPECT(port->value("Node", "") == node_canonical);
+            EXPECT(port->value("Name", "") == "usb-1a86_USB_Serial-if00-port0");
+            EXPECT(own((*port)["Candidates"], "Vendor") == nlohmann::json::array({{{"Vendor", "yyy"},
+                                                                                   {"DeviceType", "Focuser"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "yyy"},
+                                                                                     {"deviceType", "focuser"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}},
+                                                                                  {{"Vendor", "xxx"},
+                                                                                   {"DeviceType", "Telescope"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "xxx"},
+                                                                                     {"deviceType", "telescope"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}}}));
+            EXPECT(port->value("Configured", false));
+            EXPECT((*port)["ConfiguredAs"] ==
+                   nlohmann::json::array({{{"DeviceType", "Focuser"}, {"DeviceNumber", 9491}}}));
+            EXPECT(camera->value("Index", -1) == 0);
+            EXPECT(camera->value("SerialNumber", "") == "1a2b");
+            EXPECT(!camera->value("Configured", true));
+            EXPECT((*camera)["Candidates"] ==
+                   nlohmann::json::array(
+                       {{{"Vendor", "yyy"},
+                         {"DeviceType", "Camera"},
+                         {"Config", {{"vendor", "yyy"}, {"deviceType", "camera"}, {"cameraIndex", 0}}}}}));
+        }
+        EXPECT(own(json["Value"]["Errors"], "Source") ==
+               nlohmann::json::array({{{"Source", "yyy HID lister"}, {"Message", "hid_init failed"}}}));
+
+        // The unversioned alias answers the same; any verb but GET is 405.
+        const auto alias =
+            nlohmann::json::parse(route_request(router, "GET", "/management/attacheddevices").body(), nullptr, false);
+        EXPECT(!alias.is_discarded() && alias["Value"]["Devices"] == json["Value"]["Devices"]);
+        const auto put = route_request(router, "PUT", "/management/v1/attacheddevices", "");
+        EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
+        const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
+
+        // attachedcameras keeps its own shape over the same lister.
+        const auto cameras = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/attachedcameras?vendor=yyy").body(), nullptr, false);
+        EXPECT(!cameras.is_discarded() &&
+               cameras["Value"] ==
+                   nlohmann::json::array({{{"Index", 0}, {"Name", "ZWO ASI432MM"}, {"Serial", "1a2b"}}}));
     }
 
     {
@@ -11286,6 +11557,163 @@ int main() {
 
         put_connected(router, base, "", false, peer);
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9765);
+    }
+
+    {
+        // case: an over-long Command, Action or Parameters is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<CommandRecordingStubDriver>(9292);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        const std::string base = "/api/v1/covercalibrator/9292";
+        const auto error_of = [](const alpacahttp::Response& response) {
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (const char* method : {"commandblind", "commandbool", "commandstring"}) {
+            const int before = stub->calls;
+            const auto [code, message] =
+                error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1025, 'c')));
+            EXPECT(code == 0x401);
+            EXPECT(message == "Command is 1025 bytes; the limit is 1024");
+            EXPECT(stub->calls == before);
+            EXPECT(error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1024, 'c')))
+                       .first == 0);
+            EXPECT(stub->calls == before + 1);
+        }
+        const int before = stub->calls;
+        const auto [name_code, name_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=" + std::string(257, 'a')));
+        EXPECT(name_code == 0x401);
+        EXPECT(name_message == "Action is 257 bytes; the limit is 256");
+        const auto [params_code, params_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=x&Parameters=" + std::string(8193, 'p')));
+        EXPECT(params_code == 0x401);
+        EXPECT(params_message == "Parameters is 8193 bytes; the limit is 8192");
+        EXPECT(stub->calls == before);
+        EXPECT(error_of(route_request(router, "PUT", base + "/action",
+                                      "Action=" + std::string(256, 'a') + "&Parameters=" + std::string(8192, 'p')))
+                   .first == 0);
+        EXPECT(stub->calls == before + 1);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9292);
+    }
+
+    {
+        // case: an over-long switch name or filter name is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::SwitchStub>(9294)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(9294)));
+        alpacahttp::Router router;
+        const auto error_of = [&router](const std::string& path, const std::string& body) {
+            const auto response = route_request(router, "PUT", path, body);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        const std::string switch_path = "/api/v1/switch/9294/setswitchname";
+        const auto [switch_code, switch_message] = error_of(switch_path, "Id=0&Name=" + std::string(257, 'n'));
+        EXPECT(switch_code == 0x401);
+        EXPECT(switch_message == "Name is 257 bytes; the limit is 256");
+        EXPECT(error_of(switch_path, "Id=0&Name=" + std::string(256, 'n')).first == 0);
+        const std::string names_path = "/api/v1/filterwheel/9294/names";
+        const auto [names_code, names_message] =
+            error_of(names_path, nlohmann::json{{"Names", {"L", std::string(257, 'f')}}}.dump());
+        EXPECT(names_code == 0x401);
+        EXPECT(names_message == "A filter name is 257 bytes; the limit is 256");
+        EXPECT(error_of(names_path, nlohmann::json{{"Names", {"L", std::string(256, 'f')}}}.dump()).first == 0);
+        registry.unregister_device(alpacacore::DeviceType::Switch, 9294);
+        registry.unregister_device(alpacacore::DeviceType::FilterWheel, 9294);
+    }
+
+    {
+        // case: a Location or ProfileName over 256 bytes is refused with 400 and not applied (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const std::string path = "/management/v1/description";
+        const auto described = [&] {
+            const auto json = nlohmann::json::parse(route_request(router, "GET", path).body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return json.value("Value", nlohmann::json::object());
+        };
+        for (const char* field : {"Location", "ProfileName"}) {
+            const nlohmann::json before = described();
+            const auto response =
+                route_request(router, "PUT", path, nlohmann::json{{field, std::string(257, 'l')}}.dump());
+            EXPECT(response.status_code() == 400);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", std::string()) == std::string(field) + " is 257 bytes; the limit is 256");
+            EXPECT(described() == before);
+            const std::string at_limit(256, 'l');
+            EXPECT(route_request(router, "PUT", path, nlohmann::json{{field, at_limit}}.dump()).status_code() == 200);
+            EXPECT(described().value(field, std::string()) == at_limit);
+        }
+    }
+
+    {
+        // case: a device holds at most 256 client registrations and refuses a new client past them (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9293);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        auto now = std::chrono::steady_clock::now();
+        router.set_client_clock_for_test([&now] { return now; });
+        const std::string base = "/api/v1/covercalibrator/9293";
+        for (int id = 1; id <= 256; ++id) {
+            put_connected(router, base, std::to_string(id), true);
+        }
+        const auto refused = route_request(router, "PUT", base + "/connected", "Connected=true&ClientID=257");
+        const auto json = nlohmann::json::parse(refused.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The Platform 7 connect registers the same way and is refused the same way.
+        const auto refused_connect = route_request(router, "PUT", base + "/connect", "ClientID=257");
+        const auto connect_json = nlohmann::json::parse(refused_connect.body(), nullptr, false);
+        EXPECT(!connect_json.is_discarded() && connect_json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The refusal leaves the driver as the 256 clients left it.
+        EXPECT(stub->get_connected());
+        put_connected(router, base, "1", true);  // a registered client still refreshes
+        put_connected(router, base, "1", false);
+        put_connected(router, base, "257", true);  // a slot left, so the newcomer gets it
+        EXPECT(get_connected_value(router, base, "257"));
+        // Registrations past the stale window no longer count.
+        now += std::chrono::minutes(11);
+        put_connected(router, base, "258", true);
+        EXPECT(get_connected_value(router, base, "258"));
+        put_connected(router, base, "258", false);
+        EXPECT(!stub->get_connected());
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9293);
+    }
+
+    {
+        // case: configuredevice keeps at most 128 entries and a removal frees a place (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
+        const auto configure = [&](int number) {
+            const nlohmann::json body = {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", number}};
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (int number = 12000; number < 12128; ++number) {
+            EXPECT(configure(number).first == 0);
+        }
+        const auto [code, message] = configure(12128);
+        EXPECT(code == 0x40B);
+        EXPECT(message ==
+               "The server holds 128 configured devices, the most it keeps; remove one before adding another");
+        EXPECT(listed_entry(router, "Focuser", 12128).is_null());
+        remove_device(router, "zzz", "focuser", 12000);
+        EXPECT(configure(12128).first == 0);
+        for (int number = 12001; number <= 12128; ++number) {
+            remove_device(router, "zzz", "focuser", number);
+        }
     }
 
     std::cout << "All routing tests passed!\n";

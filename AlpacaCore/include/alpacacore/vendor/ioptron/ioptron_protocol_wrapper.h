@@ -34,6 +34,11 @@ struct iOptronNetworkHostInfo {
 
 std::vector<iOptronPortInfo> enumerate_ioptron_ports();
 
+/// The USB descriptor tokens of a iOptron mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ioptron_mount_usb_tokens();
+
 /// The auto-detect probe of one serial port: :MountInfo# under a serial-port
 /// probe claim (waits out another scan's probe of the same port). Returns the
 /// 4-digit model code, or empty when no mount answers.
@@ -188,7 +193,7 @@ public:
 
     /**
      * @brief False once an exchange over serial has seen the port gone (a hangup on a read, a blind command's ack
-     *        drain included, or EIO/ENXIO/ENODEV on a write), or lose_link() was called; the port is then already
+     *        drain included, or EIO/ENXIO/ENODEV/EBADF on a write), or lose_link() was called; the port is then already
      *        released and the exchange threw NotConnected (decision 0009 rule 2). Over TCP a hangup stays a
      *        DriverException. Cleared by the next successful connect(). Lock-free.
      */

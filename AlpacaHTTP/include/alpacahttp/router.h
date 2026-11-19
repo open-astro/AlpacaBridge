@@ -14,6 +14,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/catalog/attached_devices.h>
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/device_registry.h>
@@ -91,6 +92,13 @@ public:
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
     // directly via alpacahttp::test_catalog helpers.
     alpacacore::catalog::DeviceCatalog& catalog() { return catalog_; }
+
+    // Where GET /management/v1/attacheddevices reads serial ports (#2312): the
+    // real /dev and /sys unless a test points it at a fake tree. Set before
+    // the router serves requests; it is not locked.
+    void set_attached_device_roots(alpacacore::catalog::AttachedDeviceRoots roots) {
+        attached_device_roots_ = std::move(roots);
+    }
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
@@ -256,6 +264,7 @@ public:
 private:
     // open-astro#664: populated in the constructor, before load_persisted_devices().
     alpacacore::catalog::DeviceCatalog catalog_;
+    alpacacore::catalog::AttachedDeviceRoots attached_device_roots_;
 
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
     // Set and copied under callback_mutex_: a setter may run while a handler reads.
@@ -336,6 +345,9 @@ private:
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#2312: GET /management/v1/attacheddevices, every detected serial,
+    // HID and camera device with the catalog entries it could be; opens no serial port.
+    Response handle_attached_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     // open-astro#2057: in-place telescope optics update (apertureDiameter, focalLength), no re-registration.
     Response handle_update_device(const Request& request, std::uint32_t server_tx_id);
@@ -434,7 +446,8 @@ private:
     // disconnects. Keyed by driver instance; the inner map records each
     // ClientID's last-seen time so registrations from vanished clients can
     // expire instead of pinning the device connected forever.
-    std::size_t register_client_connection(const void* device, const std::string& client_key);
+    // nullopt when the device already holds kMaxClientsPerDevice other clients (#2292).
+    std::optional<std::size_t> register_client_connection(const void* device, const std::string& client_key);
     std::size_t unregister_client_connection(const void* device, const std::string& client_key);
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
@@ -513,6 +526,10 @@ private:
     // so two concurrent calls sending one ID cannot both keep it. Guarded by
     // persisted_devices_mutex_.
     std::set<std::string> reserved_unique_ids_;
+    // open-astro#2292: configuredevice calls that add an entry and have not
+    // stored it yet, counted against the entry cap. Guarded by
+    // persisted_devices_mutex_.
+    std::size_t pending_new_entries_ = 0;
 
     // #1969: what the bind hook said about a device that did register (a ZWO
     // camera that learned no identity), keyed by type and number, shown as

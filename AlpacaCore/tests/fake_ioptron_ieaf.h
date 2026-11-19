@@ -49,6 +49,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -157,7 +158,7 @@ private:
         if (silent_.load()) return;
         char reply[40] = {};
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
         if (prefix_hold_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(prefix_hold_ms));
         if (cmd == ":DeviceInfo#") {
             std::snprintf(reply, sizeof(reply), "%+06d%02d%04d#", position_.load(), model_.load(), 100);

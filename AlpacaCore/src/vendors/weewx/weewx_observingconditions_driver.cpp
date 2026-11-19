@@ -14,11 +14,11 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/http_client.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/version.h>
-#include <curl/curl.h>
 
 #include <algorithm>
 #include <atomic>
@@ -248,85 +248,25 @@ SensorSnapshot parse_snapshot(std::string_view payload) {
     return snapshot;
 }
 
-// A current-conditions payload is a few KiB; a larger body is refused unparsed
-// so a misbehaving endpoint cannot grow the buffer without bound.
-constexpr std::size_t kMaxResponseBytes = std::size_t{1024} * 1024;
-
-size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    if (!userdata) {
-        return 0;
-    }
-    auto* buffer = static_cast<std::string*>(userdata);
-    if (size * nmemb > kMaxResponseBytes - buffer->size()) {
-        return 0;  // short count: curl aborts with CURLE_WRITE_ERROR
-    }
-    buffer->append(ptr, size * nmemb);
-    return size * nmemb;
-}
-
-void ensure_curl_global_init() {
-    static std::once_flag init_flag;
-    std::call_once(init_flag, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
-
-std::string http_get(const std::string& url, std::chrono::milliseconds timeout) {
-    ensure_curl_global_init();
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        throw AlpacaException("Unable to initialize HTTP client", AlpacaError::DriverException);
-    }
-
-    std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    // The URL is user-set: only http and https, also after a redirect, never file://, ldap:// etc.
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout.count()));
-    // Refuses a declared Content-Length over the cap before the body arrives.
-    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxResponseBytes));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "AlpacaBridge-WeeWX/1.0");
-
-    CURLcode result = curl_easy_perform(curl);
-    if (result != CURLE_OK) {
-        std::string message = "HTTP request failed: ";
-        message += curl_easy_strerror(result);
-        curl_easy_cleanup(curl);
-        throw AlpacaException(message, AlpacaError::DriverException);
-    }
-
-    long status_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status_code);
-    curl_easy_cleanup(curl);
-
-    if (status_code >= 400) {
-        throw AlpacaException("HTTP request returned status " + std::to_string(status_code), AlpacaError::DriverException);
-    }
-
-    return response;
-}
-
 class WeeWxObservingConditionsDriver final : public ObservingConditionsDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, WeeWxFetcher fetcher,
+    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, std::shared_ptr<util::HttpClient> http,
                                    util::TaskClock& clock)
         : AsyncConnectable(kDriverComponent),
           device_number_(device_number),
           config_(std::move(config)),
-          fetcher_(std::move(fetcher)),
+          http_(std::move(http)),
           clock_(clock),
           connected_(false),
           poll_op_("WeeWX poll", poll_generation_, clock) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
         }
-        if (!fetcher_) {
-            throw AlpacaException("WeeWX fetcher is required", AlpacaError::InvalidValue);
+        if (!http_) {
+            throw AlpacaException("WeeWX HTTP client is required", AlpacaError::InvalidValue);
         }
     }
 
@@ -367,15 +307,7 @@ public:
         return connected_.load();
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // Decision 0009 rule 5: the one fault text. The latched fault while the feed is faulted, kept after a loss until
     // the next Connect or Disconnect; empty once a fetch has answered.
@@ -432,30 +364,6 @@ public:
             std::lock_guard<std::mutex> lock(data_mutex_);
             link_health_.reset();  // rule 5: the kept fault text ends at the next Disconnect
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
-
-    std::string action(std::string_view, std::string_view) override {
-        throw AlpacaException("Action not supported", AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override {
-        return false;
-    }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
     }
 
     // WeeWX serves instantaneous readings, so the only valid AveragePeriod is 0.
@@ -678,9 +586,15 @@ private:
         update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
     }
 
+    // The feed through the HTTP seam (decision 0023). It bounds the body, the schemes and the call time; an
+    // HTTP error status is a failed fetch here.
     SensorSnapshot fetch_snapshot() const {
-        std::string payload = fetcher_(config_.url, config_.timeout);
-        return parse_snapshot(payload);
+        const util::HttpResponse response = http_->get(config_.url, config_.timeout);
+        if (response.status >= 400) {
+            throw AlpacaException("HTTP request returned status " + std::to_string(response.status),
+                                  AlpacaError::DriverException);
+        }
+        return parse_snapshot(response.body);
     }
 
     // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under
@@ -780,7 +694,7 @@ private:
 
     int device_number_;
     WeeWxHttpConfig config_;
-    WeeWxFetcher fetcher_;
+    std::shared_ptr<util::HttpClient> http_;
     // The fault stamp and the loss bound (decision 0005); the poll waits on it through poll_op_.
     util::TaskClock& clock_;
 
@@ -822,20 +736,21 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload) 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
                                                                             util::TaskClock& clock) {
-    return create_weewx_observingconditions(device_number, config, http_get, clock);
+    return create_weewx_observingconditions(device_number, config,
+                                            util::make_curl_http_client("AlpacaBridge-WeeWX/1.0"), clock);
 }
 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
-                                                                            WeeWxFetcher fetcher) {
-    return create_weewx_observingconditions(device_number, config, std::move(fetcher), util::default_task_clock());
+                                                                            std::shared_ptr<util::HttpClient> http) {
+    return create_weewx_observingconditions(device_number, config, std::move(http), util::default_task_clock());
 }
 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
-                                                                            WeeWxFetcher fetcher,
+                                                                            std::shared_ptr<util::HttpClient> http,
                                                                             util::TaskClock& clock) {
-    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(fetcher), clock);
+    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(http), clock);
 }
 
 } // namespace alpacacore::vendor::weewx

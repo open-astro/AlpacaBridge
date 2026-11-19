@@ -727,3 +727,38 @@ TEST_CASE("QHY CFW3 protocol - link loss is stamped on the task clock (#2065)",
     REQUIRE(lost.has_value());
     CHECK(*lost == clock.now());
 }
+
+// Issue #2262: the CFW3's errno verdict is now the shared util::SerialLink one. EBADF on the wheel's own fd stays a
+// lost link (this wrapper already counted it in its own list, now gone), with the vendor text, the stamp and the
+// port release it had, and a disconnect() clears the loss, the link's verdict included.
+TEST_CASE("QHY CFW3 protocol - EBADF on a command write is a lost link (#2262)",
+          "[qhy][filterwheel][cfw3][unit][link-lost][issue2262]") {
+    FakeQhyCfw3 fake(7);
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::vendor::qhy::Cfw3ProtocolWrapper wrapper(clock);
+    alpacacore::vendor::qhy::Cfw3ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    config.boot_timeout_ms = fast_settings().boot_timeout_ms;
+    config.reply_timeout_ms = fast_settings().reply_timeout_ms;
+    config.move_timeout_ms = fast_settings().move_timeout_ms;
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    (void)wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(wrapper.link_alive());
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));  // the NOW write meets EBADF
+
+    require_alpaca_error([&]() { (void)wrapper.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK_FALSE(wrapper.is_connected());
+    CHECK(wrapper.link_fault() == "QHYCFW3 link lost on " + fake.slave_path());
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released at the loss
+    const auto lost = wrapper.consume_link_lost_at();
+    REQUIRE(lost.has_value());
+    CHECK(*lost == clock.now());
+    require_alpaca_error([&]() { (void)wrapper.get_position(); }, alpacacore::AlpacaError::NotConnected);
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+    CHECK(wrapper.link_fault().empty());
+}

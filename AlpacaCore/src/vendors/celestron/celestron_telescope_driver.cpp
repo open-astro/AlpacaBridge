@@ -26,6 +26,7 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -100,6 +101,21 @@ constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr int kMaxPulseGuideMs = 25500;
+// NexStar's limits for the telescope command gate (#2258); the motion commands run no latched-fault check.
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = kMaxPulseGuideMs;
+    limits.pulse_guide_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.move_axis_stop_epsilon = 1e-6;
+    limits.move_axis_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.slew_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.texts.pulse_direction = "PulseGuide direction must be 0-3 and duration 0-25500 ms";
+    limits.texts.pulse_duration = limits.texts.pulse_direction;
+    limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
+    return limits;
+}();
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -275,15 +291,7 @@ public:
         return link_fault_text_;
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake runs under it and the
@@ -643,9 +651,8 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, rate.ra);
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, rate.dec);
         std::lock_guard<std::mutex> transition(transition_mutex_);
         check_connected();
         if (!has_autoguider_port_) {
@@ -662,6 +669,15 @@ public:
         protocol.set_autoguide_rate(1, dec_percent);
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
+    }
+    // #2379: the base setters read GuideRate first, which answers NotConnected before the finite check.
+    void set_guide_rate_right_ascension(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::RightAscension, value);
+        TelescopeDriver::set_guide_rate_right_ascension(value);
+    }
+    void set_guide_rate_declination(double value) override {
+        util::check_guide_rate_arguments(kCommandLimits, util::GuideRateAxis::Declination, value);
+        TelescopeDriver::set_guide_rate_declination(value);
     }
 
     double get_right_ascension() const override {
@@ -1504,10 +1520,7 @@ public:
 
     void pulse_guide(int direction, int duration) override {
         // The MC_AUX_GUIDE duration byte counts 10 ms steps, 255 per command, chained up to 25.5 s.
-        if (direction < 0 || direction > 3 || duration < 0 || duration > kMaxPulseGuideMs) {
-            throw AlpacaException("PulseGuide direction must be 0-3 and duration 0-25500 ms",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         auto& protocol = CelestronProtocolWrapper::instance();
 
@@ -1517,36 +1530,16 @@ public:
         // Validation only. The pier read, the join and the start below run with mutex_ free (decision 0006).
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            if (!has_autoguider_port_) {
-                throw AlpacaException("PulseGuide not supported — no autoguider port detected",
-                                      AlpacaError::MethodNotImplemented);
-            }
-            check_not_parked_locked("PulseGuide");
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", nullptr, true});
 
-            switch (direction) {
-                case 0:  // North → DEC axis, positive velocity
-                    axis = 1;
-                    velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 1:  // South → DEC axis, negative velocity
-                    axis = 1;
-                    velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 2:  // East → RA axis, negative velocity (slow tracking = RA increases on sky)
-                    axis = 0;
-                    velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                    break;
-                case 3:  // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
-                    axis = 0;
-                    velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                    break;
-                default:
-                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-            }
-
+            // 0 North and 1 South move Dec (axis 1), 2 East and 3 West move RA (axis 0). North and West are positive
+            // (East slows tracking, so RA increases on the sky); a rate that rounds to 0 still moves one step.
+            axis = direction <= 1 ? 1 : 0;
+            const int sign = (direction == 0 || direction == 3) ? 1 : -1;
+            const double rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
+            velocity = sign * static_cast<int>(std::round((rate / kSiderealDegPerSec) * 100.0));
             if (velocity == 0) {
-                velocity = (direction == 1 || direction == 2) ? -1 : 1;
+                velocity = sign;
             }
 
             read_pier = axis == 1 && hc_available_;
@@ -1576,8 +1569,7 @@ public:
         util::HoldWindow prev_axis_position_hold;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("PulseGuide");
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
             prev_axis_position_hold = pg_hold_[axis_index];
 
             // Taken after the join: it can last a full transaction timeout, which would leave these stale.
@@ -1710,7 +1702,7 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinates");  // #2257: the argument check runs first
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");  // #2257: the argument check runs first
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1742,15 +1734,13 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");  // #2257: the argument check runs first
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");  // #2257: arguments first
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE claiming: claiming the slew slot would end a park in
             // flight (clearing parking_) and let this slew clobber it.
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("SlewToCoordinatesAsync");
-            check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -1772,7 +1762,6 @@ public:
             check_connected();
             clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_slew_safety(lock, "SlewToCoordinatesAsync");
 
             use_passthrough = !hc_available_;
@@ -2046,13 +2035,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         // An initiator like the motion commands: its write and its publish stay one step to them (the sync used
         // to hold mutex_ across the write, which kept them out).
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {
@@ -2155,30 +2144,19 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-        }
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
+        const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_parked_locked("MoveAxis");
+            util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         }
         pulse_ops_[axis].cancel_all_and_join();
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("MoveAxis");
+        util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
         const std::uint64_t mine = motion_generation_;
 
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = std::abs(rate) > kStopEpsilon;
         set_slewing_locked(false);
         slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -3505,6 +3483,25 @@ private:
         return "FindHome completion polling failed after " + std::to_string(failures) +
                " consecutive failures: " + *probe.error;
     }
+
+    // The gate's state checks in NexStar's words (#2258). `guide_port`: PulseGuide's port check after the connection.
+    struct GateChecks {
+        const CelestronTelescopeDriver& driver;
+        const char* who = nullptr;
+        std::unique_lock<std::mutex>* lock = nullptr;
+        bool guide_port = false;
+
+        void check_connected() const {
+            driver.check_connected();
+            if (guide_port && !driver.has_autoguider_port_) {
+                throw AlpacaException("PulseGuide not supported — no autoguider port detected",
+                                      AlpacaError::MethodNotImplemented);
+            }
+        }
+        void check_not_parked(bool /*stop*/) const { driver.check_not_parked_locked(who); }
+        void check_no_fault() const { driver.throw_if_link_faulted(); }
+        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
     // (open-astro#1274). Read as the Tracking getter reads it, except that the control path asks the mount once

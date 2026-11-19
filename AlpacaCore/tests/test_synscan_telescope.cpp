@@ -369,6 +369,24 @@ TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnecte
     require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// #2258: the command gate checks the PulseGuide direction before the duration, so a call with both wrong names the
+// direction (before the gate, SynScan named the duration). The code is InvalidValue either way.
+TEST_CASE("SynScan Telescope Driver - a PulseGuide with a bad direction and a negative duration names the direction",
+          "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    try {
+        driver->pulse_guide(5, -1);
+        FAIL("a bad direction and a negative duration must be refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+        CHECK(std::string(e.what()) == "Invalid PulseGuide direction");
+    }
+}
+
 // open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
 // after the connection check, so a disconnected mount answered an out-of-range
 // GuideRateRightAscension or GuideRateDeclination write with NotConnected.
