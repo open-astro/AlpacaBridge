@@ -957,6 +957,8 @@ private:
                     // up to kExposureRetries times before the failure is kept. Found by ConformU 4.4 on an ASI2600MM
                     // Pro. The retries are paced so a transient USB condition has a chance to clear. An early frame
                     // (#2414) is retaken the same way: the retry's stop drops it in the SDK, so it is never read.
+                    // TODO(#2414): confirm on an ASI120MM Mini rig that ASIStopExposure after Success drops the stale
+                    // frame and that the next ASIStartExposure gives a fresh frame (no repeated early Success).
                     const std::string what = early ? "camera delivered a frame that began before the exposure started"
                                                    : "camera exposure failed";
                     const auto failed_at = clock_.now();
