@@ -605,6 +605,26 @@ TEST_CASE("ZWO fake SDK - a camera that keeps delivering early frames fails the 
     CHECK(rig.sdk.call_count("start_exposure") == 4);
 }
 
+// Issue #2414 with #2187: a retake is a retry, so it starts only when it can end within 10 s of the exposure's own
+// end. A frame ready 15 s into a 20 s exposure is refused, and its retake would end at ~35 s, past 20 + 10 s: the
+// failure is kept at once, and the stale frame is neither retaken nor read.
+TEST_CASE("ZWO fake SDK - an early frame with no time left for a retake fails the exposure at once",
+          "[zwo][camera][unit][capture-session][stale-frame][retry-budget]") {
+    TimedExposureRig rig;
+    rig.sdk.script_frame_ready_after({std::chrono::seconds(15)});
+    rig.camera->start_exposure(20.0, true);
+
+    CHECK_FALSE(step_until_image_ready(rig, std::chrono::milliseconds(500)).has_value());
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
+    CHECK(rig.sdk.call_count("start_exposure") == 1);
+    CHECK(rig.sdk.call_count("get_data_after_exposure") == 0);
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    const std::string message = kept_failure(*rig.camera);
+    CHECK(message.find("began before the exposure started; a retry would run past the client's exposure wait") !=
+          std::string::npos);
+    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
+}
+
 TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "[zwo][camera][unit][last-exposure]") {
     FakeZWOSDK sdk;
     alpacacore::test::FakeTaskClock clock;
