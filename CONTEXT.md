@@ -38,8 +38,9 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - **Superseded**: a newer operation now owns the same axes or device. The old body
   touches neither hardware nor driver state, except to stop a move it started in a
   wire turn it still holds; the newer one is responsible for both.
-  SkyWatcher tells the two apart by hand today through its driver-wide motion
-  generation counter.
+  `util::MotionOwner` tells the two apart per axis; Celestron CGX uses it. Sky-Watcher,
+  Celestron NexStar and SynScan still keep a driver-wide motion generation counter by hand
+  until they adopt it (#2263).
 - Avoid: "aborted" or "stopped" for both. Treating a superseded body as cancelled
   would send a stop to axes the newer operation owns.
 
