@@ -533,6 +533,7 @@ public:
             status_cache_valid_ = false;
             guide_rate_valid_ = false;
             utc_offset_.clear();
+            clock_sync_connect_pass_done_ = false;
             client_disagreement_warned_ = false;
             device_faulted_ = false;
             device_fault_count_ = 0;
@@ -3176,11 +3177,10 @@ private:
         if (clock_sync_test_hook_) {
             clock_sync_test_hook_();
         }
-        const bool resync = !resync_why.empty();
-
         std::optional<double> lat, lon;
         std::optional<int> elev;
         bool do_clock_sync = false;
+        bool connect_pass_done = false;
         std::optional<std::chrono::system_clock::time_point> mount_utc;
         // Client write generations seen with our own write (start snapshot, then the successful send).
         uint64_t lat_generation = 0, lon_generation = 0, elev_generation = 0;
@@ -3197,7 +3197,12 @@ private:
             lon_generation = site_longitude_write_generation_;
             elev_generation = site_elevation_write_generation_;
             mount_utc = utc_offset_.current(clock_.now());
+            connect_pass_done = clock_sync_connect_pass_done_;
         }
+        // A re-sync that superseded the connect's own pass before that pass finished (a host clock change in the
+        // first second after Connect) runs as the connect pass: it must still send the site, and may not stop at
+        // a mount clock that already agrees (#2419).
+        const bool resync = !resync_why.empty() && connect_pass_done;
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
@@ -3336,6 +3341,7 @@ private:
                 // A client UTCDate write after our :SUT is later on the wire, so it keeps the anchor.
                 if (synced_time.valid() && synced_generation == utc_write_generation_) utc_offset_ = synced_time;
             }
+            clock_sync_connect_pass_done_ = true;
         }
     }
 
@@ -3698,6 +3704,9 @@ private:
     std::function<std::chrono::system_clock::time_point()> host_utc_source_;
     // Issue #2419: a host clock change on_host_clock_changed() saw while set_connected() held transition_mutex_.
     std::atomic<bool> resync_pending_{false};
+    // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
+    // re-sync that superseded the connect's pass runs that pass in its place.
+    bool clock_sync_connect_pass_done_ = false;
     // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication.
     uint64_t utc_write_generation_ = 0;
     // Bumped by each client site write (under mutex_), compared like utc_write_generation_; one per field.

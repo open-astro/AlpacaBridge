@@ -561,6 +561,36 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     CHECK(rig.mount.count(":SUT") == 0);
 }
 
+TEST_CASE("iOptron Telescope Driver - a re-sync that supersedes the connect's pass still sends the site",
+          "[ioptron][telescope][unit][utcdate][taskclock]") {
+    // The host clock changes in the first second after Connect, while the connect's body is still in its start
+    // delay: the re-sync supersedes it, so it must do the connect's work, even on a mount whose clock agrees.
+    alpacacore::test::HostClockTrustGuard trusted(true);
+    IoptronLog log;
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    mount.set_utc_reply(gut_reply_for(kRealHost));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    ioptron::set_host_utc_source_for_testing(*driver, [] { return kRealHost; });
+    std::atomic<int> passes{0};
+    ioptron::set_clock_sync_utc_hook_for_testing(*driver, [&](bool after_send) {
+        if (after_send) ++passes;
+    });
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect's body, parked in its delay
+    driver->on_host_clock_changed(kStepped);
+    REQUIRE(clock.drain_until([&] { return passes.load() == 1 || log.contains("already agrees"); },
+                              std::chrono::milliseconds(250), std::chrono::seconds(10)));
+    driver->set_connected(false);
+    CHECK_FALSE(log.contains("already agrees"));
+    CHECK(passes.load() == 1);
+    CHECK(mount.count(":SLA") == 1);
+    CHECK(mount.count(":SLO") == 1);
+    CHECK(mount.count(":SUT") == 1);
+}
+
 TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis to end",
           "[ioptron][telescope][unit][utcdate][taskclock]") {
     alpacacore::test::HostClockTrustGuard untrusted(false);
