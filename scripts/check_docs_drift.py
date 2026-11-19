@@ -270,6 +270,16 @@ Checks:
      (the Sky-Watcher UDP mount keeps Fake-Linux-arm64.txt), and the file
      exists. The roster is read as text, so a row compiled only under a build
      option still needs a record.
+ 31. No udev rule the .deb installs lets every local user open a device
+     (issue #2290). The vendor rules under AlpacaCore/external carry
+     MODE="0666" and are regenerated on SDK bumps, so they are never edited:
+     debian/rules runs scripts/tighten_udev_rules.sh over the staged rules
+     directory after the last rule is installed, and that script rewrites a
+     world-accessible MODE to GROUP="plugdev", MODE="0660". The check copies
+     every rule debian/rules installs from the tree, runs the script on the
+     copies, and fails on any MODE whose last digit grants access to others.
+     A missing script, a debian/rules with no call (or a call before a rule is
+     installed), and finding no installed rule at all are findings too.
 """
 
 import glob
@@ -3374,6 +3384,87 @@ def check_usb_identity_single_source(root=ROOT):
     return _usb_identity_findings(wrappers, catalogs)
 
 
+# --- check 31: installed udev rules give every user no access (issue #2290) --
+
+UDEV_TIGHTEN_SCRIPT = "scripts/tighten_udev_rules.sh"
+# A rule source debian/rules installs from the tree: $(CURDIR)/... or $(QHY_SDK_DIR)/....
+_UDEV_RULE_SRC_RE = re.compile(r"\$\((CURDIR|QHY_SDK_DIR)\)(/[^\s\\]+?\.rules)(?=\s)")
+_UDEV_TIGHTEN_CALL_RE = re.compile(
+    r"scripts/tighten_udev_rules\.sh\s+\$\(STAGING\)/usr/lib/udev/rules\.d/\*\.rules")
+# Any install into the staged rules directory, whatever its source ($(GPHOTO_STAGE), debian/ files too).
+_UDEV_RULE_DEST_RE = re.compile(r"\$\(STAGING\)/usr/lib/udev/rules\.d/")
+# A MODE whose last octal digit is not 0 grants access to every user.
+_UDEV_WORLD_MODE_RE = re.compile(r'\bMODE\s*:?=\s*"?0?[0-7]{2}[1-7](?![0-7])')
+
+
+def _udev_world_mode_findings(name, text):
+    findings = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if _UDEV_WORLD_MODE_RE.search(line):
+            findings.append("%s:%d: the installed rule still lets every user open the device: %s"
+                            % (name, n, line.strip()))
+    return findings
+
+
+def check_installed_udev_rules_not_world(root=ROOT):
+    """Check 31 (issue #2290)."""
+    root = Path(root)
+    rules = read("debian/rules", root)
+    m = re.search(r"^QHY_SDK_DIR\s*:?=\s*\$\(CURDIR\)(\S+)\s*$", rules, re.M)
+    qhy_dir = m.group(1) if m else None
+    sources = []
+    last_install = -1
+    for sm in _UDEV_RULE_SRC_RE.finditer(rules):
+        if sm.group(1) == "QHY_SDK_DIR":
+            if qhy_dir is None:
+                return ["debian/rules installs a rule from $(QHY_SDK_DIR) but does not define QHY_SDK_DIR"]
+            rel = qhy_dir.lstrip("/") + sm.group(2)
+        else:
+            rel = sm.group(2).lstrip("/")
+        sources.append(rel)
+        last_install = max(last_install, sm.start())
+    findings = []
+    if not sources:
+        return ["no udev rule installed from the tree found in debian/rules: the extractor is stale"]
+    call = _UDEV_TIGHTEN_CALL_RE.search(rules)
+    # The last install counts every rule copied into the staged directory, not only the tree sources the
+    # check reads back, so a tighten call moved above the libgphoto2 or debian/ rule installs is caught too.
+    for dm in _UDEV_RULE_DEST_RE.finditer(rules):
+        if call is None or not call.start() <= dm.start() < call.end():
+            last_install = max(last_install, dm.start())
+    if call is None:
+        findings.append("debian/rules does not run %s over $(STAGING)/usr/lib/udev/rules.d/*.rules, so the vendor "
+                        "rules install with their own MODE" % UDEV_TIGHTEN_SCRIPT)
+    elif call.start() < last_install:
+        findings.append("debian/rules runs %s before its last rule install, so that rule is not tightened"
+                        % UDEV_TIGHTEN_SCRIPT)
+    script = root / UDEV_TIGHTEN_SCRIPT
+    if not script.is_file():
+        findings.append("%s is missing" % UDEV_TIGHTEN_SCRIPT)
+        return findings
+    with tempfile.TemporaryDirectory() as tmp:
+        copies = []
+        for i, rel in enumerate(sources):
+            src = root / rel
+            if not src.is_file():
+                findings.append("debian/rules installs %s, which does not exist" % rel)
+                continue
+            dst = Path(tmp) / ("%02d-%s" % (i, src.name))
+            dst.write_bytes(src.read_bytes())
+            copies.append((rel, dst))
+        if copies:
+            r = subprocess.run(["bash", str(script)] + [str(d) for _r, d in copies],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                findings.append("%s failed: %s" % (UDEV_TIGHTEN_SCRIPT, (r.stderr or r.stdout).strip()))
+                return findings
+        for rel, dst in copies:
+            findings.extend(_udev_world_mode_findings(rel, dst.read_text(encoding="utf-8", errors="replace")))
+    return findings
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -3407,6 +3498,7 @@ CHECKS = [
     ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
     ("Each serial device's USB identity is its wrapper's token list", check_usb_identity_single_source),
     ("Fake ConformU run list matches the fake-connectable roster", check_conformu_run_list_matches_roster),
+    ("No udev rule the package installs lets every user open a device", check_installed_udev_rules_not_world),
 ]
 
 
@@ -4771,6 +4863,75 @@ def self_test():
             (Path(tmp) / ".github/workflows" / name).write_text("jobs:\n", encoding="utf-8")
         check("workflow files: both .yml and .yaml are read, nothing else (checks 20 and 27)",
               sorted(_workflow_files(tmp)) == [".github/workflows/a.yml", ".github/workflows/b.yaml"])
+
+    # check 31: no installed udev rule is world-accessible (issue #2290). The fixtures run the real
+    # tighten script, copied into a temporary tree, so the check and the script are tested together.
+    with tempfile.TemporaryDirectory() as ud_tmp:
+        ud = Path(ud_tmp)
+        (ud / "scripts").mkdir()
+        (ud / "debian").mkdir()
+        (ud / "AlpacaCore" / "external" / "V" / "sdk").mkdir(parents=True)
+        real_script = ROOT / UDEV_TIGHTEN_SCRIPT
+        if real_script.is_file():
+            (ud / UDEV_TIGHTEN_SCRIPT).write_bytes(real_script.read_bytes())
+        (ud / "AlpacaCore/external/V/a.rules").write_text(
+            '# If you think permissions of 0666 are too loose, see the README\n'
+            'SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", MODE="0666"\n'
+            'ACTION=="add", ATTRS{idVendor}=="03c3", ATTRS{idProduct}=="1f10", GROUP="users", MODE="0666"\n'
+            'SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", MODE="0666" \n', encoding="utf-8")
+        (ud / "AlpacaCore/external/V/sdk/b.rules").write_text(
+            'ATTRS{idVendor}=="1618", MODE:="0664"\n'
+            'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\n', encoding="utf-8")
+        ud_install = ("QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/V/sdk\n"
+                      "\tinstall -m 644 \\\n\t  $(CURDIR)/AlpacaCore/external/V/a.rules \\\n"
+                      "\t  $(STAGING)/usr/lib/udev/rules.d/\n"
+                      "\tinstall -m 644 \\\n\t  $(QHY_SDK_DIR)/b.rules \\\n\t  $(STAGING)/usr/lib/udev/rules.d/\n")
+        ud_call = "\tbash $(CURDIR)/scripts/tighten_udev_rules.sh $(STAGING)/usr/lib/udev/rules.d/*.rules\n"
+        (ud / "debian/rules").write_text(ud_install + ud_call, encoding="utf-8")
+        check("udev modes: world-accessible vendor rules tightened at install are clean",
+              check_installed_udev_rules_not_world(ud) == [])
+        a = (ud / "AlpacaCore/external/V/a.rules").read_text(encoding="utf-8")
+        check("udev modes: the check never edits the vendor rules in the tree", a.count('MODE="0666"') == 3)
+        out = ud / "out.rules"
+        out.write_text(a + 'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\nX, MODE:="0664"\n'
+                       'Y, GROUP:="users", MODE="0666"\n', encoding="utf-8")
+        subprocess.run(["bash", str(ud / UDEV_TIGHTEN_SCRIPT), str(out)], check=False)
+        check("udev modes: the script gives each world rule plugdev 0660, keeps each := and leaves the rest",
+              out.read_text(encoding="utf-8").splitlines() == [
+                  "# If you think permissions of 0666 are too loose, see the README",
+                  'SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", GROUP="plugdev", MODE="0660"',
+                  'ACTION=="add", ATTRS{idVendor}=="03c3", ATTRS{idProduct}=="1f10", GROUP="plugdev", MODE="0660"',
+                  'SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", GROUP="plugdev", MODE="0660" ',
+                  'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"',
+                  'X, GROUP="plugdev", MODE:="0660"',
+                  'Y, GROUP:="plugdev", MODE="0660"'])
+        (ud / "debian/rules").write_text(ud_install, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: no tighten call in debian/rules is a finding",
+              any("does not run" in x for x in f))
+        (ud / "debian/rules").write_text(ud_call + ud_install, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a tighten call before the last rule install is a finding",
+              any("before its last rule install" in x for x in f))
+        (ud / "debian/rules").write_text(
+            ud_install + ud_call + "\tinstall -m 644 $(GPHOTO_STAGE)/usr/lib/udev/rules.d/61-x.rules \\\n"
+            "\t  $(STAGING)/usr/lib/udev/rules.d/\n", encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a rule installed from outside the tree after the tighten call is a finding",
+              any("before its last rule install" in x for x in f))
+        (ud / "debian/rules").write_text(ud_install + ud_call, encoding="utf-8")
+        (ud / UDEV_TIGHTEN_SCRIPT).unlink(missing_ok=True)
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a missing tighten script is a finding", any("is missing" in x for x in f))
+        (ud / UDEV_TIGHTEN_SCRIPT).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a script that leaves MODE 0666 or 0664 reports each line",
+              len(f) == 4 and any("a.rules:2:" in x for x in f) and any("b.rules:1:" in x for x in f)
+              and not any(":1: " in x and "a.rules" in x for x in f))
+        (ud / "debian/rules").write_text(ud_call, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: no installed rule at all is a floor finding, not a pass",
+              len(f) == 1 and "extractor is stale" in f[0])
 
     # check 28: every NOLINT gives its reason on the same line (issue #2059).
     nl_ok = ("x;  // NOLINT(bugprone-empty-catch): the poll retries\n"

@@ -18,9 +18,14 @@
 #
 # Sourced, never run. The caller sets `set -euo pipefail`. Every privileged step goes through sudo.
 
+# This file's directory, for scripts/tighten_udev_rules.sh.
+HOST_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Copy every vendor udev rule (one copy per basename: the QHY SDK ships three of 85-qhyccd.rules), the
 # QHY firmware and its FX3-capable fxload, and the vendor shared libraries companion software loads,
-# then reload udev. $1: the AlpacaCore directory.
+# then reload udev. Each rule is installed from a copy tightened by scripts/tighten_udev_rules.sh: a
+# vendor MODE="0666" becomes GROUP="plugdev", MODE="0660" (issue #2290), so host_setup_ensure_plugdev
+# must put the user in plugdev. $1: the AlpacaCore directory.
 host_setup_install_vendor_runtime() {
   local core_dir="$1"
   local -A seen_rules=()
@@ -36,10 +41,26 @@ host_setup_install_vendor_runtime() {
   if [[ ${#rules_src[@]} -eq 0 ]]; then
     echo "No udev rules found under ${core_dir}/external"
   else
+    local staged failed=0
+    staged="$(mktemp -d)"
+    # A failed copy, tighten or install still removes the staged copies before the error returns.
     for rule in "${rules_src[@]}"; do
-      echo "Installing udev rule: ${rule}"
-      sudo install -m 644 "${rule}" /etc/udev/rules.d/
+      if ! cp "${rule}" "${staged}/" \
+          || ! bash "${HOST_SETUP_DIR}/tighten_udev_rules.sh" "${staged}/$(basename "${rule}")"; then
+        failed=1
+        break
+      fi
+      echo "Installing udev rule: ${rule} (world access tightened to plugdev 0660)"
+      if ! sudo install -m 644 "${staged}/$(basename "${rule}")" /etc/udev/rules.d/; then
+        failed=1
+        break
+      fi
     done
+    rm -rf "${staged}"
+    if [[ ${failed} -ne 0 ]]; then
+      echo "Installing the udev rules failed" >&2
+      return 1
+    fi
   fi
 
   # QHY cameras need firmware the udev rules load with fxload. The apt fxload has no -t fx3 (FX3-based
@@ -82,11 +103,11 @@ host_setup_install_vendor_runtime() {
   sudo udevadm trigger
 }
 
-# A hash of every file host_setup_install_vendor_runtime() installs, so build_and_run.sh re-runs it
-# when any of them changes. $1: the AlpacaCore directory.
+# A hash of every file host_setup_install_vendor_runtime() installs, and of the script that tightens
+# the rules, so build_and_run.sh re-runs it when any of them changes. $1: the AlpacaCore directory.
 host_setup_input_hash() {
   local core_dir="$1"
-  find "${core_dir}/external" \
+  find "${core_dir}/external" "${HOST_SETUP_DIR}/tighten_udev_rules.sh" \
     -type f \
     \( -name '*.rules' \
       -o -name 'libASICamera2.so*' \
@@ -97,6 +118,7 @@ host_setup_input_hash() {
       -o -name 'libPlayerOneCamera.so*' \
       -o -name 'libPlayerOnePW.so*' \
       -o -name 'fxload' \
+      -o -name 'tighten_udev_rules.sh' \
       -o -path '*/lib/firmware/qhy/*' \) \
     -printf '%s %p\n' 2>/dev/null \
     | sort | sha256sum | awk '{print $1}'
@@ -115,6 +137,25 @@ host_setup_ensure_dialout() {
     echo "Adding ${user} to the dialout group (required for serial/USB device access)."
     sudo usermod -aG dialout "${user}"
     echo "You must log out and back in (or run: newgrp dialout) for the change to take effect."
+  fi
+}
+
+# Make sure the plugdev group exists and the user is in it: the installed vendor rules give USB cameras,
+# wheels and focusers to plugdev 0660 (issue #2290). Debian and Raspberry Pi OS ship the group and put
+# the desktop user in it; a minimal image may not. $1: ON|OFF.
+host_setup_ensure_plugdev() {
+  [[ "${1:-ON}" == "ON" ]] || return 0
+  [[ "${OSTYPE:-}" == "linux"* ]] || return 0
+  local user
+  user="$(id -un)"
+  if ! getent group plugdev >/dev/null; then
+    echo "Creating plugdev group (the udev rules give USB devices to it)."
+    sudo groupadd -f -r plugdev  # a system group, as Debian's own plugdev (GID 46) and the postinst's addgroup --system
+  fi
+  if ! id -nG | tr ' ' '\n' | grep -q '^plugdev$'; then
+    echo "Adding ${user} to the plugdev group (required for USB cameras, filter wheels and focusers)."
+    sudo usermod -aG plugdev "${user}"
+    echo "You must log out and back in (or run: newgrp plugdev) for the change to take effect."
   fi
 }
 
