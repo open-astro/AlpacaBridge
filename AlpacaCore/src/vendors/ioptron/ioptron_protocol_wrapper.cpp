@@ -64,6 +64,16 @@ constexpr int kDisconnectDrainTimeoutMs = 250;
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
+// How long a blind command waits for its optional '1' ack before the line counts as silent (see
+// send_command_blind()). Tuned on the HAE29C (2026-07-14) for :SG/:SDS/:SUT/:Q/:ST/:MP/:MH, which do ack.
+constexpr std::chrono::milliseconds kBlindAckWaitSerial{300};
+constexpr std::chrono::milliseconds kBlindAckWaitNetwork{50};
+// The pulse-guide commands (:ZS/:ZQ/:ZE/:ZC) get no response in the v3 spec, and the HAE29C sends none
+// (2026-11-03), so the blind default made every PulseGuide wait out the full 300 ms (issue #2421). The
+// short window still drains an ack from firmware that sends one (TCP has no flush before the next
+// write) and still sees a hangup at once (decision 0009).
+constexpr std::chrono::milliseconds kPulseGuideAckWait{20};
+
 // The TCP socket's receive and send timeout (SO_RCVTIMEO, SO_SNDTIMEO), and so
 // the read slice over TCP: the window of the old byte-at-a-time recv() loop.
 constexpr int kSocketTimeoutMs = 200;
@@ -1063,8 +1073,9 @@ public:
         
         return response;
     }
-    
-    void send_command_blind(const std::string& command) {
+
+    void send_command_blind(const std::string& command, std::chrono::milliseconds serial_ack_wait = kBlindAckWaitSerial,
+                            std::chrono::milliseconds network_ack_wait = kBlindAckWaitNetwork) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (!connected_) {
@@ -1091,11 +1102,13 @@ public:
         // rapid connect/disconnect cycling lands ~250 ms after the clock-sync
         // trio) can wedge the mount's serial protocol handler until the port
         // is reopened with a flush. Firmware that genuinely does not respond
-        // (the reason these are sent blind) just costs the short wait.
+        // (the reason these are sent blind) costs the whole wait, so a
+        // command known never to ack passes a shorter one (pulse_guide(),
+        // kPulseGuideAckWait, issue #2421).
         if (connection_type_ == ConnectionType::Network) {
-            drain_network_stale(50);
+            drain_network_stale(static_cast<int>(network_ack_wait.count()));
         } else {
-            drain_serial_stale(300);
+            drain_serial_stale(static_cast<int>(serial_ack_wait.count()));
         }
     }
 
@@ -2105,7 +2118,8 @@ void iOptronProtocolWrapper::pulse_guide(int direction, int duration_ms) {
     else throw AlpacaException("Invalid pulse guide direction");
     
     cmd << std::setfill('0') << std::setw(5) << duration_ms << "#";
-    send_command_blind(cmd.str());
+    // :Z never acks (issue #2421): a short drain, not the 300 ms blind default, so PulseGuide returns at once.
+    pimpl_->send_command_blind(cmd.str(), kPulseGuideAckWait, kPulseGuideAckWait);
 }
 
 // Site settings

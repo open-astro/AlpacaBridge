@@ -1,0 +1,5 @@
+### Fixed
+- **iOptron: PulseGuide no longer blocks 300 ms waiting for an ack the pulse commands never send** (AlpacaCore, issue #2421): every `:ZS/:ZQ/:ZE/:ZC` pulse went through the blind-command ack drain, which waits up to 300 ms on serial (50 ms on Wi-Fi) for a `1` the HAE29C never sends for `:Z`, so each PulseGuide returned about 300 ms after its command (a 1 s guide cycle ran 1.9 s). The pulse drain now waits 20 ms on both transports, so PulseGuide on the HAE29C returns about 20 ms after the command; the other blind commands (`:Q`, `:ST`, `:MP`, `:MH`, `:SG`, `:SDS`, `:SUT`, raw `CommandBlind`) keep the 300 ms drain, a hangup during the pulse drain still loses the link at once, and `IsPulseGuiding` timing is unchanged.
+
+### Added (tests)
+- **iOptron pulse ack drain cases** (issue #2421): PulseGuide returns within 50 ms on a serial and on a TCP fake that sends no `:Z` ack, and a pulse ack from firmware that sends one does not shift the next reply; `FakeIoptronMount::set_pulse_acks()` models the silent firmware.
