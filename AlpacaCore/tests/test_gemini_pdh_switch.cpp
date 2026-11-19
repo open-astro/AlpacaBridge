@@ -641,13 +641,16 @@ TEST_CASE("Gemini PDH Switch Driver - A fault that stands past the staleness bou
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     const std::string port = hub.slave_path();
+    // The fake answered the connect's >G#, so it has already recorded it.
+    const int polls_at_mute = hub.count(">G#");
 
     hub.set_muted(true);
     // Three unanswered >G# polls on the steady_clock cadence (about 6 s of real time) latch the fault.
     REQUIRE(wait_until([&] { return value_read_refused(*driver); }, std::chrono::milliseconds(12000)));
-    // The latch needs three unanswered polls. The connect's own request is not pinned here: CI once counted exactly
-    // three ">G#" when the latch was seen (#2347).
-    CHECK(hub.count(">G#") >= 3);
+    // The latch needs three unanswered polls. The driver latches right after it writes the third, and the fake
+    // records it only once its reader has read it from the pty, so wait for that (#2402). The bound is under the
+    // 2 s poll cadence: a latch after two polls sees its third only a poll later, and fails here.
+    CHECK(wait_until([&] { return hub.count(">G#") >= polls_at_mute + 3; }, std::chrono::milliseconds(1500)));
     require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected());
 

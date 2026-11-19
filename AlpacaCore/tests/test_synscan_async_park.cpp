@@ -880,6 +880,10 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
         {"AbortSlew", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
         {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }},
         {"MoveAxis", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); }},
+        // #2263: a MoveAxis claims (or, stopping, cancels) its own axis only; the slew owns both, so either ends it.
+        {"MoveAxis Dec", [](alpacacore::TelescopeDriver& d) { d.move_axis(1, 0.5); }},
+        {"MoveAxis RA stop", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.0); }},
+        {"MoveAxis Dec stop", [](alpacacore::TelescopeDriver& d) { d.move_axis(1, 0.0); }},
     };
     for (const auto& c : cases) {
         INFO(c.name);

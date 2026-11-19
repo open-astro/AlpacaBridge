@@ -74,7 +74,7 @@ Failing this check means guiding will fail at runtime, no matter how green the A
   - `/usr/lib/alpacabridge/` — vendor shared libraries (e.g. `libqhyccd.so`, `libASICamera2.so`).
   - `/usr/share/alpacabridge/web/` — web UI static files.
   - `/lib/firmware/qhy/` — QHY camera firmware files.
-  - `/lib/udev/rules.d/` — udev rules for USB device permissions.
+  - `/usr/lib/udev/rules.d/` — udev rules for USB device permissions. `debian/rules` runs `scripts/tighten_udev_rules.sh` over them after the last install, so a vendor `MODE="0666"` ships as `GROUP="plugdev", MODE="0660"`; never edit the vendor files under `external/` for this (docs-drift check 31, issue #2290). A new rule install goes before that call.
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
