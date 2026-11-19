@@ -286,11 +286,13 @@ public:
             throw AlpacaException("AveragePeriod must be a number of hours of 0 or more", AlpacaError::InvalidValue);
         }
         require_connected();
-        run_command([this, period] {
+        run_command([this, period](util::OperationContext& ctx) {
             client_.put("averageperiod", {{"AveragePeriod", number_text(period)}});
             if (command_hook_) command_hook_();
-            // Write-through (decision 0010 rule 2): the next read sees the period before the next poll.
+            // Write-through (decision 0010 rule 2): the next read sees the period before the next poll. A superseded
+            // body writes nothing (decision 0006 rule 6): the newer command's value stands.
             std::lock_guard<std::mutex> lock(mutex_);
+            if (ctx.stop_reason() == util::StopReason::Superseded) return;
             snapshot_.write([period](Frame& frame) { frame.average_period = {period, 0, {}}; });
         });
     }
@@ -344,10 +346,14 @@ public:
     // and does not count towards the latch; a good measurement clears a standing fault like a good poll.
     void refresh() override {
         require_connected();
-        run_command([this] {
+        run_command([this](util::OperationContext& ctx) {
             client_.put("refresh");
+            if (command_hook_) command_hook_();
+            // A superseded body measures nothing and publishes nothing (decision 0006 rule 6).
+            if (ctx.stop_reason() == util::StopReason::Superseded) return;
             const auto token = snapshot_.begin_poll();
             Frame frame = sample(supported_copy());
+            if (ctx.stop_reason() == util::StopReason::Superseded) return;
             if (note_reply(token, std::move(frame))) {
                 ALPACA_LOG_INFO(kComponent, "Upstream " + upstream_label_ + " restored: Refresh answered");
             }
@@ -356,7 +362,7 @@ public:
 
     void set_poll_paused(bool paused) { poll_paused_.store(paused); }
 
-    // Set while no command runs; an AveragePeriod body calls it after its PUT, before its write-through.
+    // Set while no command runs; an AveragePeriod or Refresh body calls it after its PUT, before it touches state.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
 
 private:
@@ -577,7 +583,7 @@ private:
     // 1); the caller waits for the body's outcome, which the per-call timeout bounds, and gets its error unchanged. A
     // refused connection is a lost link at once (NotConnected); another call with no reply is a DriverException, or
     // NotConnected when the poll lost the link meanwhile.
-    void run_command(std::function<void()> body) {
+    void run_command(std::function<void(util::OperationContext&)> body) {
         struct Outcome {
             std::mutex mutex;
             std::condition_variable done_cv;
@@ -585,10 +591,10 @@ private:
             std::exception_ptr error;
         };
         auto outcome = std::make_shared<Outcome>();
-        command_op_.start([outcome, body = std::move(body)](util::OperationContext&) {
+        command_op_.start([outcome, body = std::move(body)](util::OperationContext& ctx) {
             std::exception_ptr error;
             try {
-                body();
+                body(ctx);
             } catch (...) {
                 error = std::current_exception();
             }

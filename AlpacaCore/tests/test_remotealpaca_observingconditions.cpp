@@ -452,6 +452,26 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded AveragePeriod
     CHECK(rig.driver->get_average_period() == 0.0);
 }
 
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded Refresh sends nothing after its PUT",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    // The first Refresh body holds after its PUT, before it measures, until a second Refresh has returned.
+    alpacacore::test::Latch first_body;
+    std::atomic<bool> held{false};  // only the first body holds
+    remote::set_command_hook_for_testing(*rig.driver, [&] {
+        if (!held.exchange(true)) first_body.block();
+    });
+    std::thread first([&] { rig.driver->refresh(); });
+    REQUIRE(first_body.wait_entered());
+    rig.driver->refresh();  // supersedes the first body and measures a frame of its own
+    const int calls = rig.http.calls();
+    first_body.release();
+    first.join();
+    // Decision 0006 rule 6: the superseded body neither measures nor publishes a frame.
+    CHECK(rig.http.calls() == calls);
+}
+
 TEST_CASE("Remote Alpaca ObservingConditions Driver - Connect refuses an upstream that is this server",
           "[remotealpaca][observingconditions][unit]") {
     // This server listens on every address (a wildcard bind) on the upstream's port: 127.0.0.1 is one of its own.
