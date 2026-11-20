@@ -590,8 +590,7 @@ TEST_CASE("SynScan GOTO landing - the settle time follows the last landing move 
         alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
         REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(10)));
         const std::size_t parked = clock.waiter_count();  // the paused poll's period wait
-        REQUIRE_NOTHROW(
-            run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }, parked + 1));
+        REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }, parked + 1));
         const auto returned = clock.now();
         REQUIRE(st->goto_count.load() == 1);
         REQUIRE(st->nudge_count.load() >= 1);
