@@ -1917,19 +1917,34 @@ public:
             auto release_pulse_locked = [this, axis, ai, my_seq, &stopped_by_other, &end_pulse_locked,
                                          &dec_restore](StateLock& lock) {
                 constexpr int kMaxPasses = 4;
-                const auto owns = [&] { return pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other(); };
+                // Owns its axis, and may start motion on it: on a faulted link or a restarted board the release,
+                // like the restore, starts nothing (the restore's `faulted` gate).
+                const auto owns = [&] {
+                    return pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other() && !link_faulted_locked();
+                };
                 for (int pass = 0; axis == kAxisRa && pass < kMaxPasses; ++pass) {
+                    // The drive RA should run: a continuous rate with no duty rate armed, or (sub-floor or zero)
+                    // the duty rate, which the busy setters pre-arm. The restore leaves exactly that, so with no
+                    // write in the window nothing is sent. A write that leaves the duty or stopped regime arms
+                    // nothing, and the old regime ran on (#2431 review).
+                    const double eff = effective_ra_rate_locked();
                     const double running = cmd_axis_rate_deg_s_[0];
-                    if (!owns() || !tracking_effectively_on_locked() || ra_duty_rate_deg_s_ != 0.0 || running == 0.0 ||
-                        effective_ra_rate_locked() == running) {
+                    const bool continuous = std::abs(eff) >= slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
+                    if (!owns() || !tracking_effectively_on_locked() ||
+                        (running == eff && ra_duty_rate_deg_s_ == (continuous ? 0.0 : eff))) {
                         break;
                     }
                     try {
-                        if ((effective_ra_rate_locked() > 0.0) != (running > 0.0)) {
+                        if (continuous && ra_duty_rate_deg_s_ == 0.0 && running != 0.0 &&
+                            (eff > 0.0) != (running > 0.0)) {
                             restart_ra_in_current_direction_locked(lock);
                         } else {
-                            // A RightAscensionRate write: the same applier as the setter's not-busy branch.
-                            apply_ra_tracking_rate_locked(lock, running);
+                            // A RightAscensionRate write: the same applier as the setter's not-busy branch. An armed
+                            // duty rate is the previous rate, so a move out of the duty regime stops and restarts RA
+                            // (apply_ra_drive_locked()) and clears it. A duty rate this sets was pre-armed by the
+                            // write, which started the worker.
+                            apply_ra_tracking_rate_locked(lock,
+                                                          ra_duty_rate_deg_s_ != 0.0 ? ra_duty_rate_deg_s_ : running);
                         }
                     } catch (const std::exception& e) {
                         if (!lock.owns_lock()) {
