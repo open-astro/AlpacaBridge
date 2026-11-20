@@ -17,6 +17,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/poll_settle.h>
@@ -530,7 +531,10 @@ private:
     void run_pulse_guide(util::OperationContext& context, const util::MotionClaim& claim, CgxAxis axis,
                          int velocity_percent, int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
-    void stop_axes_checked(std::chrono::milliseconds verification_budget = std::chrono::milliseconds(500));
+    // `require_still_encoders` (the explicit AbortSlew and Unpark stop, #2411): verified only once the status shows
+    // both axes stopped and two encoder reads util::kStillSampleSpacing apart agree within util::kStillToleranceArcsec.
+    void stop_axes_checked(std::chrono::milliseconds verification_budget = std::chrono::milliseconds(500),
+                           bool require_still_encoders = false);
     // A cancelled or failed body's stop: skipped while an explicit stop owns cleanup, and once a newer command
     // superseded `claim` and owns the axes.
     void stop_motion_worker_checked(const util::MotionClaim& claim);
@@ -1851,6 +1855,11 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
     if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
     if (!reference_valid_locked())
         throw AlpacaException("Run FindHome before SyncToCoordinates", AlpacaError::InvalidOperation);
+    // #2411: a Sync far from the served position is refused before any tracking or label write, so the reference,
+    // Tracking and the labels stay as they were (decision 0011). The served frame is at most a poll period old.
+    const CgxSkyPosition served = served_sky_position_locked();
+    util::check_sync_bound("SyncToCoordinates", {served.right_ascension_hours, served.declination_degrees}, {ra, dec},
+                           util::kMaxSyncOffsetDegrees);
     const bool restore_tracking = tracking_;
     bool reference_write_started = false;
     try {
@@ -2034,7 +2043,7 @@ void CelestronCgxTelescopeDriver::run_stop_operation(util::OperationContext& con
         }
         for (auto& slot : pulse_slots_) slot.cancel_all_and_join();
         motion_slot_.cancel_all_and_join();
-        stop_axes_checked(std::chrono::seconds(3));
+        stop_axes_checked(std::chrono::seconds(3), true);
         motion_slot_.clear_failure();
         for (auto& slot : pulse_slots_) slot.clear_failure();
         std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
@@ -2086,7 +2095,8 @@ void CelestronCgxTelescopeDriver::stop_motion_worker_checked(const util::MotionC
     stop_axes_checked();
 }
 
-void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds verification_budget) {
+void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds verification_budget,
+                                                    bool require_still_encoders) {
     const std::array axes{CgxAxis::RightAscension, CgxAxis::Declination};
     bool stop_acknowledged = false;
     // The stop write pair runs with mutex_ free (decision 0016) and tracking state is published once after it, so a
@@ -2127,6 +2137,13 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
     }
     std::exception_ptr verification_failure;
     const auto stop_deadline = clock_.now() + verification_budget;
+    // A status can read done while an axis still moves (#2411). Each axis's angle is taken from its first read, so the
+    // check never meets the encoder wrap.
+    util::StillnessCheck still(clock_.now());
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> first_encoders;
+    const auto axis_degrees = [](std::uint32_t encoder, std::uint32_t origin) {
+        return signed_cgx_encoder_delta(encoder, origin) * 360.0 / kCgxEncoderStepsPerRevolution;
+    };
     while (true) {
         std::string pending_status;
         for (const auto axis : axes) {
@@ -2142,6 +2159,21 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
                 }
             } catch (...) {
                 if (!verification_failure) verification_failure = std::current_exception();
+            }
+        }
+        if (!verification_failure && pending_status.empty() && require_still_encoders) {
+            try {
+                const auto ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+                const auto dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
+                if (!first_encoders) first_encoders = std::pair{ra_encoder, dec_encoder};
+                const util::MountPosition axes_angle{axis_degrees(ra_encoder, first_encoders->first) / 15.0,
+                                                     axis_degrees(dec_encoder, first_encoders->second)};
+                if (!still.feed(util::PositionReading{axes_angle, clock_.now()})) {
+                    pending_status =
+                        "Celestron CGX did not confirm that both motor axes stopped: the encoders still move";
+                }
+            } catch (...) {
+                verification_failure = std::current_exception();
             }
         }
         if (verification_failure || pending_status.empty()) break;

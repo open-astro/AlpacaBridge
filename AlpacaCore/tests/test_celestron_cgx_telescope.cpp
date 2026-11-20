@@ -163,7 +163,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop displaces a draini
         initiate = [](auto& driver) { driver.set_tracking_rate(1); };
     }
     SECTION("SyncToCoordinates") {
-        initiate = [](auto& driver) { driver.sync_to_coordinates(6.0, 30.0); };
+        initiate = [](auto& driver) { driver.sync_to_coordinates(6.0, 87.0); };
     }
     SECTION("SyncToTarget") {
         initiate = [](auto& driver) { driver.sync_to_target(); };
@@ -1111,10 +1111,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync waits for encoder stability
     mount.set_ra_stop_drift_reads(8);
     driver->set_tracking(true);
     driver->set_tracking(false);
-    CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 30.0));
+    CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 87.0));
     CHECK_FALSE(driver->get_tracking());
     CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-    CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+    CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
     driver->set_connected(false);
 }
 
@@ -1134,7 +1134,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync refuses unsettled encoders 
     mount.set_ra_stop_drift_reads(10000);
     driver->set_tracking(true);
     driver->set_tracking(false);
-    require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); }, alpacacore::AlpacaError::DriverException);
     CHECK(mount.count_command(0x10, 0x04) == ra_writes);
     CHECK(mount.count_command(0x11, 0x04) == dec_writes);
     CHECK(std::isfinite(driver->get_right_ascension()));
@@ -1161,11 +1161,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
         mount.set_label_read_offsets(
             0x11, settles ? std::vector<std::int32_t>{-8, -7, -1, 1, 1, 0, 0} : std::vector<std::int32_t>(40, 8));
         if (settles) {
-            CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 30.0));
+            CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 87.0));
             CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-            CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+            CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
         } else {
-            require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); },
+            require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); },
                                  alpacacore::AlpacaError::DriverException);
             require_alpaca_error([&] { static_cast<void>(driver->get_declination()); },
                                  alpacacore::AlpacaError::DriverException);
@@ -1807,12 +1807,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor co
     REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
 
     mount.set_ra_tracking_drift_per_read(100);
-    driver->sync_to_coordinates(6.0, 30.0);
+    driver->sync_to_coordinates(6.0, 87.0);
     CHECK(driver->get_tracking());
     CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-    CHECK(std::abs(driver->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(driver->get_declination() - 87.0) < 2.2e-5);
     CHECK(driver->get_target_right_ascension() == 6.0);
-    CHECK(driver->get_target_declination() == 30.0);
+    CHECK(driver->get_target_declination() == 87.0);
 
     const auto tracking_ra_commands = mount.count_command(0x10, 0x06);
     const auto tracking_dec_commands = mount.count_command(0x11, 0x06);
@@ -2105,10 +2105,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     second->find_home();
     REQUIRE(wait_until([&] { return first->get_at_home() && !first->get_slewing(); }));
     REQUIRE(wait_until([&] { return second->get_at_home() && !second->get_slewing(); }));
-    first->sync_to_coordinates(6.0, 30.0);
-    second->sync_to_coordinates(12.0, -30.0);
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    first->sync_to_coordinates(6.0, 87.0);
+    second->sync_to_coordinates(12.0, -87.0);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     const auto ra_rehome_label = first_mount.axis_position(0x10);
     const auto dec_rehome_label = first_mount.axis_position(0x11);
     // Sync happened at physical home, so its labels are the shifted home labels.
@@ -2127,21 +2127,21 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     CHECK_FALSE(first->get_connected());
     CHECK(second->get_connected());
     CHECK(second->get_tracking());
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
 
     first->set_connected(true);
     CHECK_FALSE(first->get_at_home());
     CHECK_FALSE(first->get_tracking());
     CHECK(std::abs(std::remainder(first->get_right_ascension() - 6.0, 24.0)) < 0.001);
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
     CHECK_NOTHROW(first->set_tracking(true));
     second->set_connected(false);
     CHECK(first->get_tracking());
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
     second->set_connected(true);
     CHECK_FALSE(second->get_tracking());
     CHECK(std::abs(std::remainder(second->get_right_ascension() - 12.0, 24.0)) < 0.001);
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     CHECK_NOTHROW(second->set_tracking(true));
     check_no_reference_writes(first_mount);
     check_no_reference_writes(second_mount);
@@ -2170,7 +2170,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     CHECK(std::abs(first->get_declination() - 25.0) < 2.2e-5);
     CHECK(first->get_tracking());
     CHECK(second->get_tracking());
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     check_no_reference_writes(second_mount);
     first->set_connected(false);
     second->set_connected(false);
@@ -2315,7 +2315,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
             driver->set_connected(true);
             driver->find_home();
             REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
-            driver->sync_to_coordinates(6.0, 30.0);
+            driver->sync_to_coordinates(6.0, 87.0);
             driver->set_connected(false);
             mount.set_encoder_position(axis, (mount.axis_position(axis) + delta) & 0x00ffffffU);
             driver->set_connected(true);
@@ -2326,7 +2326,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
             }
             if (std::abs(delta) <= 2) {
                 CHECK(std::isfinite(driver->get_right_ascension()));
-                CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+                CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
                 CHECK_NOTHROW(driver->set_tracking(true));
             } else {
                 require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
@@ -2334,7 +2334,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
                 require_alpaca_error([&] { static_cast<void>(driver->get_declination()); },
                                      alpacacore::AlpacaError::DriverException);
                 require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
-                require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); },
+                require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); },
                                      alpacacore::AlpacaError::InvalidOperation);
                 driver->find_home();
                 REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2978,7 +2978,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
 
     const auto ra_before_sync = mount.axis_position(0x10);
     const auto dec_before_sync = mount.axis_position(0x11);
-    driver->sync_to_coordinates(6.0, 30.0);
+    driver->sync_to_coordinates(ra, 31.0);
     CHECK(driver->get_tracking());
     const auto encoder_revolution = alpacacore::vendor::celestron::kCgxEncoderStepsPerRevolution;
     const auto expected_rehome_label = [encoder_revolution](std::uint32_t home, std::uint32_t before,
@@ -3049,7 +3049,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes after Sync preserve 
         REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         CHECK(std::abs(driver->get_declination() - (home_latitude > 0.0 ? 90.0 : -90.0)) < 2.2e-5);
         driver->set_tracking(true);
-        driver->sync_to_coordinates(6.0, 30.0);
+        driver->sync_to_coordinates(6.0, home_latitude > 0.0 ? 87.0 : -87.0);
         const double ra = driver->get_right_ascension();
         const double dec = driver->get_declination();
         const int side = driver->get_side_of_pier();
@@ -3079,7 +3079,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes after Sync preserve 
         CHECK(driver->get_tracking());
         CHECK_FALSE(driver->get_slewing());
         CHECK(driver->get_target_right_ascension() == 6.0);
-        CHECK(driver->get_target_declination() == 30.0);
+        CHECK(driver->get_target_declination() == (home_latitude > 0.0 ? 87.0 : -87.0));
         CHECK(mount.axis_position(0x10) == ra_label);
         CHECK(mount.axis_position(0x11) == dec_label);
         const auto requests = mount.requests();

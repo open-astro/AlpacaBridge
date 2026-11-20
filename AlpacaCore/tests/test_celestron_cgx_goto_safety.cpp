@@ -116,6 +116,17 @@ struct GotoSafetyRig {
     }
 };
 
+// The coordinates refuse with the unverified-motion latch's own text until a verified stop.
+void require_unverified_motion(const alpacacore::TelescopeDriver& driver) {
+    try {
+        static_cast<void>(driver.get_declination());
+        FAIL_CHECK("Declination must refuse while the motion is unverified");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == AlpacaError::DriverException);
+        CHECK(std::string(error.what()).find("motion may still be active") != std::string::npos);
+    }
+}
+
 struct SkyPoint {
     double ra;
     double dec;
@@ -235,8 +246,7 @@ TEST_CASE("Celestron CGX goto safety - a stop whose encoders never hold still fa
         CHECK(error.error_code() == AlpacaError::DriverException);
         CHECK(std::string(error.what()).find("did not confirm that both motor axes stopped") != std::string::npos);
     }
-    // Unverified motion is latched: the coordinates refuse until a verified stop.
-    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
+    require_unverified_motion(*rig.driver);
     // No stop was resent, and the fake moved exactly once per read the stop made.
     CHECK(rig.mount.count_command(kRa, 0x24) == ra_stops + 1);
     CHECK(rig.mount.count_command(kDec, 0x24) == dec_stops + 1);
@@ -267,8 +277,7 @@ TEST_CASE("Celestron CGX goto safety - a position read that fails during the sto
         }
     };
     REQUIRE(rig.drive([&] { return slewing_error().starts_with("Celestron CGX stop failed: "); }));
-    // The motion stays unverified: the coordinates refuse until a verified stop.
-    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
+    require_unverified_motion(*rig.driver);
     CHECK(rig.mount.count_command(kDec, 0x24) == 1);
 }
 
