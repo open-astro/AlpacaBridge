@@ -47,6 +47,13 @@ public:
     ///                   of blocking that lock's getters (#1457).
     void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200,
                         std::chrono::milliseconds probe_wait = util::kSerialProbeClaimWait);
+    /// SkyPortal WiFi: AUX over TCP to the adapter at a numeric IPv4 or IPv6 `host` (no name lookup under the I/O
+    /// lock) and `port`, closing any link held. Requests go out from source 0x20, whatever source the caller set.
+    /// Input that arrives before the socket has been quiet for 200 ms (the adapter's startup backlog) is discarded.
+    /// Unlike the serial link, a read-only motor query (position, model, home and slew status, guide status,
+    /// version) whose reply is lost is re-sent once, 300 ms after it went out, when the exchange's deadline is
+    /// later; nothing else is ever re-sent. The adapter closing the connection is a lost link (link_alive()).
+    void connect_tcp(const std::string& host, int port, std::chrono::milliseconds timeout = std::chrono::seconds(3));
     void disconnect();
     /// Clears a desynchronized link on the port already held: flushes stale input
     /// and accepts exchanges again. Never opens a port, so a racing disconnect

@@ -148,6 +148,10 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     healthy_.store(true);
 }
 
+void CelestronCgxProtocol::connect_tcp(const std::string&, int, std::chrono::milliseconds) {
+    throw_link_error("TCP is not implemented");
+}
+
 void CelestronCgxProtocol::resync() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (serial_fd_ < 0) {
