@@ -359,6 +359,46 @@ TEST_CASE("Telescope command gate - a guide-rate write refuses in the order valu
     CHECK(passing.calls == std::vector<std::string>{"connected", "fault"});
 }
 
+TEST_CASE("Telescope command gate - a TrackingRate write refuses in the order rate, connected, fault",
+          "[util][command-gate]") {
+    TelescopeCommandLimits limits;
+    limits.tracking_rate_max = 2;
+    limits.texts.tracking_rate = "rate";
+    struct Row {
+        State state;
+        int rate;
+        int expected;
+    };
+    const std::vector<Row> rows = {
+        {State{}, 0, 0},
+        {State{}, 2, 0},
+        {State{}, -1, AlpacaError::InvalidValue},
+        {State{}, 3, AlpacaError::InvalidValue},
+        {everything_wrong(), 3, AlpacaError::InvalidValue},
+        {everything_wrong(), 1, AlpacaError::NotConnected},
+        {faulted(), 1, AlpacaError::DriverException},
+        {parked(), 1, 0},  // a rate change moves no axis
+        {tracking_off(), 1, 0},
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        INFO("rate " << row.rate);
+        CHECK(code_of([&] { alpacacore::util::check_tracking_rate(limits, row.rate, checks); }) == row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(text_of([&] { alpacacore::util::check_tracking_rate_arguments(limits, row.rate); }) == "rate");
+            CHECK(checks.calls.empty());
+        }
+    }
+    RecordingChecks passing;
+    alpacacore::util::check_tracking_rate(limits, 1, passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "fault"});
+
+    // The default refuses only a negative rate.
+    const TelescopeCommandLimits defaults;
+    CHECK_NOTHROW(alpacacore::util::check_tracking_rate_arguments(defaults, std::numeric_limits<int>::max()));
+    CHECK(code_of([&] { alpacacore::util::check_tracking_rate_arguments(defaults, -1); }) == AlpacaError::InvalidValue);
+}
+
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {
     TelescopeCommandLimits limits;
     limits.pulse_guide_order = ParkedFaultOrder::NoFaultCheck;
