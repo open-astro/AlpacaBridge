@@ -776,8 +776,9 @@ Sets RA tracking rate:
 
 Despite the letters, "RA+" raises the RightAscension reading, as `:ZS` (RA+) does
 (AlpacaBridge issue #2424; INDI found the same on a CEM120). The driver treats "Dec+"
-as a mechanical sense that flips with pier side, as the Dec guide pulses do; no rig has
-confirmed that for `:mn#`/`:ms#` yet.
+as a mechanical sense that flips with pier side, as the Dec guide pulses do. The HAE29C
+rig check of #2424 (2026-11-20, USB) confirmed it on both pier sides: `:ms#` raised the
+Declination reading at `:GEP#` pier digit 1 and `:mn#` raised it at pier digit 0.
 
 **Response:**  
 None  
