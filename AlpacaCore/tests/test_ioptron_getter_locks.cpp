@@ -164,7 +164,6 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     // Served from the driver: identity, limits, capabilities and client-held values.
     check_answers_at_once("Name", [&] { CHECK(driver->get_name() == "iOptron Telescope"); });
     check_answers_at_once("SiteElevation", [&] { CHECK(driver->get_site_elevation() == 120.0); });
-    check_answers_at_once("SlewSettleTime", [&] { CHECK(driver->get_slew_settle_time() == 0); });
     check_answers_at_once("CanPark", [&] { CHECK(driver->get_can_park()); });
     check_answers_at_once("AxisRates", [&] { CHECK_FALSE(driver->get_axis_rate_ranges(0).empty()); });
     check_answers_at_once("SupportedActions", [&] { CHECK(driver->get_supported_actions().empty()); });
@@ -176,6 +175,13 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     check_answers_at_once("TargetRightAscension", [&] {
         alpacacore::test::require_alpaca_error([&] { driver->get_target_right_ascension(); },
                                                AlpacaError::NotConnected);
+    });
+    // SlewSettleTime and the optics are client values, but ASCOM members: NotConnected until the connect has finished.
+    check_answers_at_once("SlewSettleTime", [&] {
+        alpacacore::test::require_alpaca_error([&] { driver->get_slew_settle_time(); }, AlpacaError::NotConnected);
+    });
+    check_answers_at_once("ApertureDiameter", [&] {
+        alpacacore::test::require_alpaca_error([&] { driver->get_aperture_diameter(); }, AlpacaError::NotConnected);
     });
     check_answers_at_once("UTCDate", [&] {
         alpacacore::test::require_alpaca_error([&] { driver->get_utc_date(); }, AlpacaError::NotConnected);
@@ -242,6 +248,7 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
 
     check_answers_at_once("Name", [&] { CHECK(driver->get_name() == "iOptron HAE29C EQ"); });
     check_answers_at_once("Connected", [&] { CHECK(driver->get_connected()); });
+    check_answers_at_once("SlewSettleTime", [&] { CHECK(driver->get_slew_settle_time() == 0); });
     check_answers_at_once("TargetDeclination", [&] {
         alpacacore::test::require_alpaca_error([&] { driver->get_target_declination(); }, AlpacaError::ValueNotSet);
     });

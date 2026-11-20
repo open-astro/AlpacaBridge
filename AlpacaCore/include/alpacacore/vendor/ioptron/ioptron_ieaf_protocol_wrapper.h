@@ -83,6 +83,11 @@ struct IeafPortInfo {
  */
 std::vector<IeafPortInfo> enumerate_ieaf_ports();
 
+/// The USB descriptor tokens of a iEAF/iAFS focuser adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ieaf_usb_tokens();
+
 /**
  * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
  *        serial-port probe claim (waits out another scan's probe of the same
@@ -117,7 +122,7 @@ public:
 
     /**
      * @brief False once an exchange has seen the port gone (a hangup, or
-     * EIO/ENXIO/ENODEV on a write); the port is then already released
+     * EIO/ENXIO/ENODEV/EBADF on a write); the port is then already released
      * (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
      */
     bool link_alive() const noexcept;
@@ -139,7 +144,10 @@ public:
     /** @brief Abort movement. Command :FQ# (blind). */
     void halt();
 
-    /** @brief Set the current position as zero. Command :FZ# (blind). */
+    /**
+     * @brief Set the current position as zero. Command :FZ# (blind). Refused with InvalidOperation while
+     * :FI# reports the motor running; the :FI# check and :FZ# run in one hold of the exchange lock.
+     */
     void set_zero();
 
 private:

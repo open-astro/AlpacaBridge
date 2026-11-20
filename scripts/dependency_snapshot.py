@@ -63,12 +63,13 @@ SKIP = {"debhelper-compat"}
 CI = ".github/workflows/ci.yml"
 # (ci.yml step name, purl template): tools CI downloads at a pinned version.
 CI_TOOL_STEPS = (("Build cppcheck 2.17.x from source", "pkg:github/danmar/cppcheck@{ver}"),
-                 ("Install zizmor", "pkg:github/zizmorcore/zizmor@v{ver}"))
+                 ("Install zizmor", "pkg:github/zizmorcore/zizmor@v{ver}"),
+                 ("Install PMD", "pkg:github/pmd/pmd@{ver}"))
 # The same ver= pins in other workflows: {workflow path: ((step name, purl template), ...)}.
 WORKFLOW_TOOL_STEPS = {".github/workflows/osv-scan.yml": (("Install OSV-Scanner",
                                                           "pkg:github/google/osv-scanner@v{ver}"),)}
 # Unpinned tools ci.yml installs from the runner's apt (Ubuntu 24.04, not trixie).
-CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "nodejs", "shellcheck")
+CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "meson", "nodejs", "shellcheck")
 CI_APT_QUALIFIERS = "arch=arm64&distro=ubuntu-24.04"
 # ConformU validates every driver on the rig; no workflow installs it. /conformu installs a
 # maintainer beta (no GitHub release yet) from the project's tools/ mirror and names the build
@@ -170,7 +171,7 @@ def parse_step_pins(text: str, path: str, steps) -> tuple[list[str], list[str]]:
 def parse_ci_tools(text: str) -> tuple[list[str], list[str]]:
     """Return (purls, errors) for the tools ci.yml installs outside debian/control.
 
-    cppcheck and zizmor are pinned by a ``ver=`` line in their install step; the
+    cppcheck, zizmor and PMD are pinned by a ``ver=`` line in their install step; the
     CI_APT_TOOLS come unpinned from the runner's apt (Ubuntu 24.04), so their purls
     carry no version.
     """
@@ -682,6 +683,24 @@ def build_spdx(root: Path, deb: dict[str, str], file_name: str, sha256: str,
                               for a, t, b in rels]}
 
 
+def check_vendored_version(root: Path, e: dict) -> list[str]:
+    """Compare 'version' with what the vendored files state: folder names no longer carry it."""
+    src = e.get("version_from")
+    if not src:
+        return []
+    path = root / e["path"] / src["file"]
+    if not path.is_file():
+        return [f"{TABLE}: {e['name']}: version_from file {src['file']} does not exist under {e['path']}"]
+    m = re.search(src["pattern"], path.read_text(encoding="utf-8", errors="replace"))
+    if not m:
+        return [f"{TABLE}: {e['name']}: version_from pattern {src['pattern']!r} matches nothing in {src['file']}"]
+    found = ".".join(m.groups())
+    numbers = lambda v: [int(n) for n in re.findall(r"\d+", v)]
+    if numbers(found) != numbers(e["version"]):
+        return [f"{TABLE}: {e['name']}: 'version' is {e['version']} but {src['file']} states {found}: update 'version'"]
+    return []
+
+
 def check_drift(root: Path) -> list[str]:
     table = json.loads((root / TABLE).read_text(encoding="utf-8"))
     sdks = [e["path"] for e in table["sdks"]]
@@ -694,6 +713,7 @@ def check_drift(root: Path) -> list[str]:
     for e in table["sdks"]:
         if not (root / e["path"]).is_dir():
             continue
+        errors += check_vendored_version(root, e)
         if not e.get("sha256"):
             errors.append(f"{TABLE}: {e['path']} has no sha256 pin: run python3 scripts/dependency_snapshot.py --pin")
         elif e["sha256"] != tree_digest(root, e["path"]):
@@ -815,16 +835,18 @@ def self_test() -> int:
     ci = ("jobs:\n  a:\n    steps:\n      - name: Install deps\n        run: |\n"
           "          sudo apt-get install -y \\\n            catch2 \\\n            gcovr  \\\n            cmake\n"
           "          sudo apt-get install -y --no-install-recommends clang-format\n"
-          "          sudo apt-get install -y clang-tidy shellcheck nodejs\n"
+          "          sudo apt-get install -y clang-tidy meson shellcheck nodejs\n"
           "          echo nodejs-is-not-a-package-here\n"
           "      - name: Build cppcheck 2.17.x from source\n        run: |\n"
           "          ver=2.17.1\n          sha256=00\n"
           "      - name: Install zizmor\n        run: |\n          ver=1.25.2\n"
+          "      - name: Install PMD\n        run: |\n          ver=7.7.0\n"
           "      - name: Later\n        run: ver=9.9.9\n")
     tools, errs = parse_ci_tools(ci)
     apt = [f"pkg:deb/ubuntu/{t}?{CI_APT_QUALIFIERS}" for t in CI_APT_TOOLS]
     assert errs == [] and tools == ["pkg:github/danmar/cppcheck@2.17.1",
-                                    "pkg:github/zizmorcore/zizmor@v1.25.2", *apt], (tools, errs)
+                                    "pkg:github/zizmorcore/zizmor@v1.25.2",
+                                    "pkg:github/pmd/pmd@7.7.0", *apt], (tools, errs)
     assert "cmake" in parse_apt_installs(ci) and "-y" not in parse_apt_installs(ci)
     assert "echo" not in parse_apt_installs(ci), "a continuation ends at a line without a backslash"
     # A commented-out install is not an install.
@@ -835,7 +857,7 @@ def self_test() -> int:
         assert parse_apt_installs(line) == {"gcovr"}, (sep, parse_apt_installs(line))
     # A reworded step or a dropped apt line is reported, never silently omitted.
     tools, errs = parse_ci_tools(ci.replace("Install zizmor", "Fetch zizmor").replace("catch2 ", ""))
-    assert tools == ["pkg:github/danmar/cppcheck@2.17.1", *apt[1:]], tools
+    assert tools == ["pkg:github/danmar/cppcheck@2.17.1", "pkg:github/pmd/pmd@7.7.0", *apt[1:]], tools
     assert len(errs) == 2 and "'Install zizmor'" in errs[0] and "catch2" in errs[1], errs
     # A tool named outside an apt-get install (here: an echo) is not an install.
     _, errs = parse_ci_tools(ci.replace(" shellcheck nodejs", " shellcheck"))
@@ -1240,6 +1262,27 @@ def self_test() -> int:
         assert len(check_drift(r)) == 1, "a retargeted symlink changes the digest"
         (r / EXTERNAL / "A/sdk-1/lib/liba.so").unlink()
         (r / EXTERNAL / "A/sdk-1/lib/liba.so").symlink_to("liba.so.1.0")
+        # version_from: 'version' must equal what the vendored files state, zero padding aside.
+        (r / EXTERNAL / "A/sdk-1/config.h").write_text("#define V 1\n#define W 02\n")
+        t = json.loads((r / TABLE).read_text())
+        original = json.dumps(t)
+        t["sdks"][0].update(version="01.2", version_from={"file": "config.h", "pattern": r"V (\d+)\s+#define W (\d+)"})
+        (r / TABLE).write_text(json.dumps(t))
+        assert check_drift(r) == [], check_drift(r)
+        t["sdks"][0]["version"] = "1.3"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "1.3" in errs[0] and "1.02" in errs[0] and "config.h" in errs[0], errs
+        t["sdks"][0]["version_from"]["pattern"] = "absent (x)"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "absent" in errs[0], errs
+        t["sdks"][0]["version_from"]["file"] = "gone.h"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "gone.h" in errs[0], errs
+        (r / TABLE).write_text(original)
+        (r / EXTERNAL / "A/sdk-1/config.h").unlink()
         payload = {"usr/lib/alpacabridge/liba.so.1.0": file_digests(lib),
                    "usr/lib/firmware/qhy/qhy.hex": file_digests(fw)}
         installed = {"cmake": "3.31.6-2", "libfoo": "1.2-3", "libc6": "2.41-12"}

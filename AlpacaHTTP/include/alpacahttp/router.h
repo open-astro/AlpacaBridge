@@ -14,6 +14,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/catalog/attached_devices.h>
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/device_registry.h>
@@ -27,6 +28,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/software_update.h>
@@ -42,6 +44,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -85,11 +88,22 @@ public:
     // built-in registration functions don't provide, use it.
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
     explicit Router(const CatalogExtension& extend_catalog);
+    // As above, knowing the HTTP port the server listens on before the saved
+    // devices load, so a proxied device configured on this server is refused
+    // there too (decision 0023 rule 4). The Server passes its configured port.
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port);
 
     // The catalog register_device_from_config() and sanitize_device_config()
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
     // directly via alpacahttp::test_catalog helpers.
     alpacacore::catalog::DeviceCatalog& catalog() { return catalog_; }
+
+    // Where GET /management/v1/attacheddevices reads serial ports (#2312): the
+    // real /dev and /sys unless a test points it at a fake tree. Set before
+    // the router serves requests; it is not locked.
+    void set_attached_device_roots(alpacacore::catalog::AttachedDeviceRoots roots) {
+        attached_device_roots_ = std::move(roots);
+    }
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
@@ -203,6 +217,13 @@ public:
     // value a PUT saved. The description reports it and the web UI edits it;
     // the responder binds the saved port only at the next restart.
     void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
+    // Decision 0023 rule 4: the HTTP port this server listens on, on every
+    // address (the listener binds the wildcard). A proxied device's factory and
+    // its Connect read it through BindContext::listen_addresses to refuse an
+    // upstream that is this server. 0 means not known yet (no check). The
+    // Server sets the port it bound, which differs from the configured one when
+    // that was 0.
+    void set_listen_port(std::uint16_t port) { listen_port_->store(port, std::memory_order_release); }
 
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
@@ -214,6 +235,17 @@ public:
     // mutex_, so calling it under a router lock would be a new, undocumented
     // lock-order edge).
     void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
+
+    // open-astro#2419: watch the host realtime clock for a step against the
+    // monotonic clock, and util::HostClockTrust::trusted() for its false ->
+    // true edge, and hand either to every registered telescope's
+    // on_host_clock_changed(), so a mount that keeps its own clock re-syncs
+    // it. A step also latches HostClockTrust (something set the clock). Called
+    // on every tick of the same timer thread as run_motion_watchdogs(),
+    // before it and whatever the watchdog interval is; `sys` and `mono` are
+    // that tick's two clock readings, so a test feeds synthetic pairs. Only
+    // that thread touches the detector state.
+    void check_host_clock(std::chrono::system_clock::time_point sys, std::chrono::steady_clock::time_point mono);
 
     // Software update (docs/software-update.md): the manager behind
     // /management/v1/update/*. Server installs one over the production
@@ -241,16 +273,27 @@ public:
         return delayed_threads_.size();
     }
 
+    // Test seam (issue #1764): the clock that stamps and ages the per-client
+    // Connected registrations, steady_clock::now() by default. A test sets it
+    // before routing any request; the clock must outlive the Router.
+    void set_client_clock_for_test(std::function<std::chrono::steady_clock::time_point()> clock) {
+        std::lock_guard<std::mutex> lock(client_connections_mutex_);
+        client_clock_ = std::move(clock);
+    }
+
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
 private:
     // open-astro#664: populated in the constructor, before load_persisted_devices().
     alpacacore::catalog::DeviceCatalog catalog_;
+    alpacacore::catalog::AttachedDeviceRoots attached_device_roots_;
 
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
+    // Set and copied under callback_mutex_: a setter may run while a handler reads.
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+    std::mutex callback_mutex_;
 
     // The 100 ms delayed shutdown/restart callback. A second request while one
     // is waiting out the delay is dropped; once its callback runs, a later
@@ -275,6 +318,9 @@ private:
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
     std::atomic<std::uint16_t> discovery_port_{Config::kDefaultDiscoveryPort};
+    // Shared with the listen_addresses source a proxied device keeps, so the
+    // driver never reads a destroyed Router.
+    std::shared_ptr<std::atomic<std::uint16_t>> listen_port_ = std::make_shared<std::atomic<std::uint16_t>>(0);
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.
@@ -319,11 +365,15 @@ private:
     Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
-    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
+    // GET /management/v1/faileddevices (web UI extension).
     Response handle_failed_devices(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#2312: GET /management/v1/attacheddevices, every detected serial,
+    // HID and camera device with the catalog entries it could be; opens no serial port.
+    Response handle_attached_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     // open-astro#2057: in-place telescope optics update (apertureDiameter, focalLength), no re-registration.
     Response handle_update_device(const Request& request, std::uint32_t server_tx_id);
@@ -422,11 +472,21 @@ private:
     // disconnects. Keyed by driver instance; the inner map records each
     // ClientID's last-seen time so registrations from vanished clients can
     // expire instead of pinning the device connected forever.
-    std::size_t register_client_connection(const void* device, const std::string& client_key);
+    // nullopt when the device already holds kMaxClientsPerDevice other clients (#2292).
+    std::optional<std::size_t> register_client_connection(const void* device, const std::string& client_key);
     std::size_t unregister_client_connection(const void* device, const std::string& client_key);
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
     void clear_client_connections(const void* device);
+    // Issue #1764: what configureddevices reports per device from the registry
+    // above, never from the driver. `active_clients` counts registrations
+    // refreshed inside the stale window; `last_request_age` is the age of the
+    // newest of them, empty when there is none.
+    struct ClientActivity {
+        std::size_t active_clients = 0;
+        std::optional<std::chrono::milliseconds> last_request_age;
+    };
+    ClientActivity client_activity(const void* device) const;
     // Erase BOTH maps' entries for a removed device (issue #162). Never call
     // while the device's op mutex is held — see clear_client_connections.
     void purge_device_connection_state(const void* device);
@@ -462,6 +522,10 @@ private:
     std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
         client_connections_;
     std::unordered_map<const void*, std::shared_ptr<std::mutex>> connection_op_mutexes_;
+    // Read and set under client_connections_mutex_ (set_client_clock_for_test).
+    std::function<std::chrono::steady_clock::time_point()> client_clock_ = [] {
+        return std::chrono::steady_clock::now();
+    };
 
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.
@@ -488,6 +552,10 @@ private:
     // so two concurrent calls sending one ID cannot both keep it. Guarded by
     // persisted_devices_mutex_.
     std::set<std::string> reserved_unique_ids_;
+    // open-astro#2292: configuredevice calls that add an entry and have not
+    // stored it yet, counted against the entry cap. Guarded by
+    // persisted_devices_mutex_.
+    std::size_t pending_new_entries_ = 0;
 
     // #1969: what the bind hook said about a device that did register (a ZWO
     // camera that learned no identity), keyed by type and number, shown as
@@ -518,6 +586,10 @@ private:
     // const-propagation, which a unique_ptr silently drops: a const Router
     // method could reach a non-const HostClock through the pointer.
     alpacacore::util::HostClock host_clock_;
+    // open-astro#2419: check_host_clock()'s state, touched only by the
+    // server's timer thread (or a test standing in for it).
+    alpacacore::util::HostClockStepDetector host_clock_step_detector_;
+    bool host_clock_was_trusted_ = false;
     // open-astro#675: replaced wholesale by set_now_fn(), never mutated; see
     // current_now_fn().
     std::shared_ptr<const NowFn> now_fn_ =

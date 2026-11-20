@@ -11,6 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/action_name.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -69,7 +71,7 @@ public:
         shutdown_connection();
         if (link_.is_open()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during EAF destruction: " + std::string(e.what()));
             }
@@ -82,8 +84,12 @@ public:
 
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // EAF_INFO's name reads "EAF" on an EAFN too; the type read at connect tells them apart.
+        if (!model_.empty()) {
+            return util::branded_name("ZWO", model_);
+        }
         if (focuser_info_valid_ && !focuser_info_.name.empty()) {
-            return focuser_info_.name;
+            return util::branded_name("ZWO", focuser_info_.name);
         }
         return "ZWO EAF";
     }
@@ -141,15 +147,7 @@ public:
         return status_cache_.fault();
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
@@ -185,10 +183,15 @@ public:
                     std::lock_guard<std::mutex> lock(firmware_mutex_);
                     firmware_.clear();  // a connect that fails reports no firmware
                 }
-                const auto opened = bind_focuser_locked();
                 try {
+                    const auto opened = bind_focuser_locked();
                     sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
                 } catch (...) {
+                    {
+                        // The scan published the enumerated identity; a failed open keeps none.
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        clear_identity_locked();
+                    }
                     release_open_locked();
                     throw;
                 }
@@ -206,12 +209,7 @@ public:
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
             max_step_.store(0);
             step_range_.store(0);
-            if (focuser_index_.has_value()) {
-                focuser_id_.reset();
-                focuser_info_ = {};
-                focuser_info_valid_ = false;
-                serial_number_.clear();
-            }
+            clear_identity_locked();
         }
         {
             std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -235,28 +233,20 @@ public:
     }
 
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        return {std::string(util::kFocuserSetZeroAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view) override {
+        if (util::same_action_name(action_name, util::kFocuserSetZeroAction)) {
+            set_zero();
+            return "";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name),
                               AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
-    }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
+    bool can_action(std::string_view action_name) const override {
+        return util::same_action_name(action_name, util::kFocuserSetZeroAction);
     }
 
     bool get_absolute() const override {
@@ -352,6 +342,27 @@ public:
     }
 
 private:
+    // The SetZero action: the current position becomes 0 and nothing moves (EAFResetPostion). The moving check and
+    // the reset run in one hold of the I/O lock, so no Move or Halt of this driver lands between them.
+    void set_zero() {
+        ensure_connected();
+        // Decision 0009 rule 1, as move(): a latched fault refuses a write with its text.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO EAF communications compromised: " + fault, AlpacaError::DriverException);
+        }
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            call_locked([&] {
+                if (sdk_.is_moving(open_id_)) {
+                    throw AlpacaException("Cannot set zero while the focuser is moving; Halt or wait for the move",
+                                          AlpacaError::InvalidOperation);
+                }
+                sdk_.reset_position(open_id_, 0);
+            });
+        }
+        status_cache_.invalidate();
+    }
+
     // Reads the unit's static members once, writes the configured max step when it differs from the
     // stored one, and publishes the connect-time state: info, the serial read at the open, then the atomics.
     // Caller holds io_mutex_ and not mutex_ (the state lock is taken for the short publish only), and runs it
@@ -364,6 +375,13 @@ private:
             firmware = sdk_.get_firmware_version(focuser_id);
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "EAF firmware unavailable: " + std::string(e.what()));
+        }
+        // Informational like the firmware: an unreadable type names the unit from EAF_INFO instead.
+        std::string model;
+        try {
+            model = sdk_.get_type(focuser_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "EAF type unavailable: " + std::string(e.what()));
         }
         ZWOEAFFocuserInfo info;
         if (!sdk_.get_focuser_info_by_id(focuser_id, info)) {
@@ -395,6 +413,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             focuser_info_ = info;
             focuser_info_valid_ = true;
+            model_ = model;
             serial_number_ = serial;
         }
         max_step_.store(max_step);
@@ -639,6 +658,17 @@ private:
                               AlpacaError::NotConnected);
     }
 
+    // Caller holds mutex_. A by-index driver re-resolves its unit on each connect, so it forgets the one it found.
+    void clear_identity_locked() {
+        if (focuser_index_.has_value()) {
+            focuser_id_.reset();
+            focuser_info_ = {};
+            focuser_info_valid_ = false;
+            model_.clear();
+            serial_number_.clear();
+        }
+    }
+
     // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the unit is gone, for example
     // a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
     void release_open_locked() const {
@@ -695,6 +725,7 @@ private:
     std::string serial_number_;
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
+    std::string model_;                             // EAFGetType at connect, under mutex_; empty when unread
     const std::optional<int> configured_max_step_;  // config "maxStep"; unset = leave the stored value
     // Published at the end of connect and read lock-free by MaxStep/MaxIncrement (decision 0016).
     std::atomic<int> max_step_{0};

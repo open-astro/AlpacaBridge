@@ -38,6 +38,10 @@ is refused before the GOTO is ever sent.
 
 On the Sky-Watcher direct driver a positive `MoveAxis` rate on axis 0 moves the tube east (the reported RightAscension rises) and a positive rate on axis 1 moves it north (the reported Declination rises), in both hemispheres and on both pier sides, as `indi-eqmod` does. The hemisphere and Dec branch come from `sky_move_axis_rate_locked()`, which reuses `ra_axis_sign_locked()` and the pulse-guide Dec rule. A client needs no reverse toggle: NINA's "Primary Reversed" stays off. Goto, tracking and guiding are unchanged. Tests: `test_skywatcher_pointing.cpp`, `[moveaxis]`.
 
+### iOptron MoveAxis signs (issue #2424)
+
+The iOptron mount follows the same convention. A positive rate on axis 0 sends `:mw#`, which iOptron labels "RA+": the reported RightAscension rises and the tube turns east. A negative rate sends `:me#` ("RA-"). The letters mislead, but the sign is backed by three sources: iOptron's RS-232 v3.10 labels, the GOTO trim, where `:ZQ` ("RA-") lowers RA on the HAE16 and HAE29C, and INDI's finding that `:mw#` raises RA on a CEM120 (indilib/indi `91bda0d00`). A positive rate on axis 1 is meant to raise the reported Declination on both pier sides. The driver sends `:mn#` when the `:GEP#` pier digit is 0 and `:ms#` when it is 1, through the Dec pulse-guide polarity (`dec_guide_inverted_`, `should_flip_dec_for_pier_locked()`). No rig has checked MoveAxis on either axis yet; the #2424 rig steps on the HAE29C settle it. The southern hemisphere is untested on any rig. NINA's "Primary Reversed" stays off. Tests: `test_ioptron_telescope.cpp`, `[moveaxis]`; the fake steps its position on each arrow command (`fake_ioptron_mount.h`).
+
 ### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
 
 ASCOM treats the two target properties as separate: each getter must refuse a read
@@ -90,6 +94,14 @@ Syncs and Alt/Az slews are exempt. A driver test of an equatorial slew turns Tra
 and assert only that the slew threw. An Alt/Az slew test in a driver that refuses Alt/Az slews while Tracking is true
 (ITelescopeV4; OnStep and the iOptron mount since #1377) turns Tracking off first instead.
 
+### Telescope refusal order (all mount drivers)
+
+A telescope member refuses in this order: argument (`InvalidValue`), connected, parked, link fault, tracking (#2257). Out of range always throws `InvalidValue`; no mount driver clamps a client argument (drivers that still drift are listed in `kProbeExemptions` until their fix lands). The parked-against-fault order is per driver (Sky-Watcher checks the fault first). The contract sweep probes PulseGuide, MoveAxis, SlewToCoordinates(Async), the guide-rate setters (#2257) and SideOfPier, TrackingRate, the target setters, SlewToAltAz(Async), SyncToCoordinates, SyncToAltAz, the rate-offset setters and DestinationSideOfPier (#2287) disconnected, connected and parked; `kProbeExemptions` in `test_contract_sweep.cpp` lists each known failure (deleted by the fix) and each member a driver does not implement. A PulseGuide `Duration` above the driver's bound is `InvalidValue`, on a camera too; a driver whose hardware sets no bound of its own uses `kDefaultMaxPulseGuideMs` (60 s, `alpaca_defs.h`, #2292), and none clamps it.
+
+The order lives in one module, `util/telescope_command_gate.h` (#2258): `check_pulse_guide`, `check_move_axis`, `check_equatorial_slew` and `check_guide_rate`, each also as an `_arguments` half and a `_state` half. The argument half takes the driver's `TelescopeCommandLimits` only: the protocol limits and the InvalidValue texts (each driver keeps its own words) are data, so a driver replaces its argument helpers with a limits value. The state half calls the driver's own connected, parked, fault and Tracking checks in order, through a checks object of the driver's, because those checks read the mount or its link (OnStep's `:GU#` read for an unread status, a fault check that closes a stale link); the parked-against-fault order per member family, the MoveAxis stop epsilon and whether a stop skips the fault check are limits too. The gate does no I/O and takes no lock. All eight mount drivers call it: OnStep, Sky-Watcher, NexStar, SynScan, iOptron, ZWO AM, Bisque and Celestron CGX. Sync, Alt/Az slews, rate offsets, targets, TrackingRate and DestinationSideOfPier are not in it yet; each driver still checks them itself.
+
+The motion guards that make telescope motion fail closed live in one module, `util/motion_guards.h` (#2405), and every threshold they use lives in `util/motion_policy.h`, next to `kRelinkMotionPreserveWindow` and `kClientSilenceStopInterval`; a driver that adopts a guard keeps no copy of its own. The guards are the verified stop (`run_verified_stop`: status "no motion" alone never verifies, two position reads 500 ms apart must agree within 30 arcsec, at most 3 stops in 3 s, else `Slewing` raises `AbortSlew: the mount still reports motion after 3 stops`), the slew deadline (`slew_time_budget`) and the MoveAxis cap (`validate_move_axis_time_limit`), both enforced by `enforce_motion_deadline`, which runs the verified stop; the landing gate (`LandingGate`: a still mount more than 600 arcsec off its target is an error, a moving one never is), the sync bound (`check_sync_bound`, InvalidValue) and the relink stop (`RelinkMotionStop`). Each is a clock-free value or a free function over the driver's callbacks: it takes no driver lock and does no I/O of its own (decision 0016), waits only through the slot context on the task clock (decision 0005) and sends nothing once superseded (decision 0006 rule 6). No driver calls them yet; iOptron adopts them in #2396 and the other mounts in #2406-#2412.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
@@ -113,9 +125,11 @@ A camera's "no image yet" answer (`ImageArray` before any exposure, or while one
 
 - `DoesRefraction` throws `PropertyNotImplemented` on read and write in a driver that neither knows nor computes refraction (ITelescopeV4). Never store the flag and read it back: it would claim a correction the driver does not apply. OnStep reads it from the firmware.
 - `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
+- `ApertureDiameter`, `ApertureArea`, `FocalLength` and `SlewSettleTime` (read and write) throw `NotConnected` while disconnected, after the `SlewSettleTime` write's `InvalidValue` check; they are the client's values, so a latched fault does not refuse them. `set_aperture_diameter()` and `set_focal_length()` are not ASCOM members (ASCOM has no setter for either): the catalog factories and `updatedevice` (#2057) inject the configured optics with them, connected or not (the CGX backend still refuses them while disconnected; its factory passes the optics in its connection info), and a test reads the injected values through a seam, never the ASCOM getter. The contract sweep probes all five members.
 - `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
-- RA, Dec and site range checks, local sidereal time, the hour and degree wraps, the shortest RA delta and the destination pier-side rule go through `util/pointing.h` (`validate_ra`, `validate_dec`, `validate_ra_dec`, `validate_latitude`, `validate_longitude`, `local_sidereal_hours`, `wrap_hour_angle`, `pier_side_for_hour_angle`); a telescope driver never defines its own validator, sidereal-time, hour-angle-wrap or pier-side function, so the `InvalidValue` text is the same on every mount. Inline RA wraps and hand-written shortest-RA-delta code inside larger expressions (Celestron NexStar, iOptron, SynScan, ZWO) are not converted yet. Exceptions: CGX `cgx_local_sidereal_time_hours` builds on `gmst_degrees` and adds its own equation of equinoxes; CGX derives its pier side as the `CgxPointingSide` enum from the hour angle, not as an int; Bisque keeps a `detail::validate_ra_dec` forwarder to `util::validate_ra_dec` until its test call is removed.
+- RA, Dec and site range checks, local sidereal time, the hour and degree wraps, the shortest RA delta and the destination pier-side rule go through `util/pointing.h` (`validate_ra`, `validate_dec`, `validate_ra_dec`, `validate_latitude`, `validate_longitude`, `local_sidereal_hours`, `wrap_hour_angle`, `pier_side_for_hour_angle`, and for a German mount whose controller keeps its side past the meridian `gem_destination_pier_side` and `gem_pier_side_reaches` with the `GemPierModel`/`GemPierLimits`/`GemPointing` inputs, #2179); a telescope driver never defines its own validator, sidereal-time, hour-angle-wrap or pier-side function, so the `InvalidValue` text is the same on every mount. Inline RA wraps and hand-written shortest-RA-delta code inside larger expressions (Celestron NexStar, iOptron, SynScan, ZWO) are not converted yet. Exceptions: CGX `cgx_local_sidereal_time_hours` builds on `gmst_degrees` and adds its own equation of equinoxes; CGX derives its pier side as the `CgxPointingSide` enum from the hour angle, not as an int; Bisque keeps a `detail::validate_ra_dec` forwarder to `util::validate_ra_dec` until its test call is removed.
 - A `UTCDate` read the mount clock cannot answer throws `InvalidOperation` until a supported successful time write establishes it; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Internal pointing fallbacks never initialize public UTCDate. Sky-Watcher's direct host-clock backend and the Celestron CGX direct USB backend (#2166), whose controllers store no time, follow [decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md) instead: `UTCDate` reads the host clock that `SiderealTime` and pointing use. Bisque samples the remote TheSkyX computer clock only in UseComputerClock mode (see [vendor notes](bisque.instructions.md)).
+- A mount that keeps its own clock writes the host clock into it only while `util::HostClockTrust::trusted()` (`host_clock_trust.h`: the kernel reports NTP sync, or this process saw a client UTCDate step or confirm the clock, a Sync Time, or a realtime step; a hardware-RTC boot does not count), and re-syncs it from `TelescopeDriver::on_host_clock_changed()`, which the server's 1 s timer calls on a step or on the trust edge (`Router::check_host_clock()`). The hook runs on the timer thread with no lock held: it is `noexcept`, does no I/O, joins nothing, never waits for a driver lock (a held one leaves the change pending), and catches what `AsyncOperation::start()` throws. It is not wait-free: `start()` itself can wait up to `kStaleReapTimeout` (2 s) when three replaced bodies are still running, as on a blocked link (#2432). iOptron adopted it (#2419); ZWO AM (whose `syncTimeOnConnect` also defaults on), OnStep, Celestron and SynScan still push the host clock at connect unchecked. `HostClockTrust` is separate from `HostClock`'s client-step flag, and an observed step never calls `HostClock::mark_stepped()`, which would write the unverified time into the hardware RTC.
 
 ### A failed async operation body keeps its error (all drivers)
 
@@ -144,16 +158,40 @@ configured later on the same number must not inherit it. State under an older ID
 hardware (a serial) may move at connect. Both use `RotatorSyncOffsetStore::load_or_adopt()` or its
 equivalent. The reasons are in [decision 0018](../../docs/decisions/0018-persisted-unique-id.md).
 
+### Name is brand and model (all drivers)
+
+`get_name()` is the device's brand followed by its model, nothing after it: `Sky-Watcher EQM-35 Pro`,
+`ZWO EAFN`, `QHY CFW`. Before the model is read it is the brand followed by the product family
+(`ZWO EAF`) or the ASCOM device type (`Sky-Watcher Telescope`; never `Mount`). A model string from an
+SDK or a device goes through `util::branded_name(brand, model)` (`alpacacore/util/device_name.h`), which
+adds the brand only when the string does not start with it, and an SDK's ` (...)` connection-mode qualifier
+(libgphoto2's `(Control)`) is dropped with `util::without_qualifiers()`. A connection path, protocol, board revision,
+calibration state or host camera goes in `get_description()` (no device I/O), which the web UI shows; two
+drivers reaching one device (EQMOD and SynScan on one mount) give it the same name. A camera-attached dew
+heater or thermal switch is the camera model plus `Dew Heater` or `Thermal Switch`. A new vendor adds its
+brand to `name_brands_of()` in `test_contract_sweep.cpp`, whose two name cases check every driver. The
+reasons are in [decision 0024](../../docs/decisions/0024-device-names.md).
+
 ### Action names are case-insensitive (all drivers with actions)
 
 ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: the
 `ActionName` parameter of `Action()` is case-insensitive, and the names in
 `SupportedActions` may use any casing. Match the requested name against the supported
 list without regard to case, in `action()` and in `can_action()` alike, and throw
-`ActionNotImplemented` only when no supported name matches. The two drivers with
+`ActionNotImplemented` only when no supported name matches. The drivers with
 actions already do this: the Player One camera (`to_lower_copy`), the Celestron
-focuser (`same_action`) and the iOptron and Celestron mounts' `gps_status`
-(`util::is_gps_status_action`). A new driver with actions does the same.
+focuser (`same_action`), the iOptron and Celestron mounts' `gps_status`
+(`util::is_gps_status_action`) and the ZWO EAF, ToupTek AAF and iOptron iEAF
+focusers' `SetZero` (`util::same_action_name`, `alpacacore/util/action_name.h`).
+A new driver with actions does the same.
+
+### The not-implemented answers are `AlpacaDriver`'s defaults (all drivers)
+
+`AlpacaDriver` (`alpacadriver.h`) defines `get_supported_actions()` (empty), `can_action()` (false),
+`action()` (`ActionNotImplemented` naming the action) and the three `command_*` (`MethodNotImplemented`,
+0x400) inline, issue #1757. A driver overrides one of them only to give it real behaviour (a vendor action, a
+`Command*` pass-through to its protocol), never to restate the default: a copied override was how the
+message and the error spelling drifted across 40 files.
 
 ### Camera ROI alignment (all camera vendors)
 
@@ -164,6 +202,38 @@ geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / hei
 after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
+
+### Camera argument order (all camera vendors)
+
+A camera member refuses in one order on every brand (#2259), so a client writes one error handler:
+
+- **`StartExposure(duration, light)`**: (1) a NaN, negative or infinite duration, or one too large to convert to
+  microseconds, is `InvalidValue` (a static cap such as GPhoto's 3600 s belongs here too); (2) `NotConnected`; (3) a
+  duration below `ExposureMin`, 0 included, runs at `ExposureMin`, and one above `ExposureMax` is `InvalidValue`; (4) a
+  frame (NumX, NumY, StartX, StartY, bin) that does not fit the sensor is `InvalidValue`; (5) an exposure running or
+  starting is `InvalidOperation`.
+- **`BinX`, `BinY`, `NumX`, `NumY`, `StartX`, `StartY` setters**: (1) a bin, NumX or NumY of 0 or less, or a StartX or
+  StartY below 0, is `InvalidValue`; (2) `NotConnected`; (3) a bin the camera does not support is `InvalidValue`; (4) an
+  exposure running or starting is `InvalidOperation`. The setters do not check the sensor size: StartExposure does
+  (ConformU sets a NumX beyond the sensor and expects StartExposure to refuse it).
+
+The contract sweep probes these disconnected, connected and while an exposure runs (started through each camera's
+tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camera that still drifts, and
+`kExposingRefusalExemptions` each camera that takes a good write or a second StartExposure while exposing; the fix
+deletes its rows.
+
+The value checks of that order live in one module, `util/camera_frame_request.h` (#2261): `check_exposure_duration`
+(StartExposure step 1), `exposure_microseconds` (step 3), `check_frame_on_sensor` (step 4; `frame_sensor_misfit` is
+the same check as a value, for a driver that answers one text or only skips an SDK write, as ZWO does), and for the
+setters `check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3). A camera
+driver calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the
+device lookups (ExposureMin and ExposureMax, the supported bins, the sensor size at the current bin) and its own
+InvalidValue texts (`CameraRequestTexts`; the codes are the same on every camera). Only the SDK alignment above and
+vendor limits (GPhoto's 3600 s cap and nearest shutter speed, the iGuider exposure steps) stay in the driver. Every
+camera driver calls it: ZWO, SVBONY, Player One (with iCAM), ToupTek (with Altair), QHY, GPhoto and the iGuider. Three
+keep a check for a vendor reason, named at the call: QHY and GPhoto their ExposureMax check in seconds (QHY's range
+may be unreported, GPhoto maps a duration to a shutter speed) and QHY its per-bin SDK query; the iGuider its subframe
+value checks, whose text names the value.
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 
@@ -260,6 +330,11 @@ neither camera. The rules:
   never translate the SDK's moving-read into an exception on the read path.
 - **Names must be non-empty** — default `"Filter 1..N"`; names and focus offsets are
   settable while disconnected.
+- **Slot data lives in `util::FilterWheelSlots`** (`filterwheel_slots.h`, issue #1991): the
+  slot count is known from a successful connect until the next Disconnect (WandererAstro:
+  always, its lineup is 8-slot). While it is known, names and offsets must have one entry per
+  slot and a lone shorthand token expands; while it is not, they are taken as given and
+  resized, with a warning, at the next connect. A lost link keeps the count until the Disconnect.
 - **DeviceState includes operational fields only** (e.g. `Position`); omit `Connected`
   for ConformU compatibility.
 
@@ -269,6 +344,13 @@ All GPIO 12V power-port Switch drivers (ZWO ASIAIR Pro / Plus CM4 / Plus RK3568,
 ToupTek StellaVita, iOptron iMate, and any future board) share these rules; the vendor
 notes carry only the pin map and per-board deltas.
 
+- **One driver for every board above** (issue #2264):
+  `util::PowerPortSwitchDriver<Wrapper>` (`alpacacore/util/power_port_switch_driver.h`) holds
+  the connect and disconnect gates, the power-on state, the value checks and the error order,
+  so a fix to the rules below lands there once. Each vendor's factory builds a plain-data
+  board profile (strings, per-port metadata, the power-on state) and passes its own port
+  wrapper's constructor arguments; the wrapper stays the vendor's. A future board adds a
+  profile and a wrapper, not a driver.
 - **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
   `gpiod_line_request*` owns all lines together; values go through
   `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon
@@ -310,9 +392,14 @@ notes carry only the pin map and per-board deltas.
   against the stock firmware's actual value or on real hardware — never re-derived
   from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
   50 Hz, StellaVita 100 Hz.
-- **Read-only pass-through ports** (e.g. iMate DC3): writes check the connection first
-  (a disconnected write answers `NotConnected`), then throw `NotImplemented`; the
-  capability is unit-tested on a connected fake.
+- **`SetSwitchValue` checks the id, a finite value and the port's range before the
+  connection** (issue #2264): Min/MaxSwitchValue are static on these boards, so a
+  non-finite or out-of-range value answers `InvalidValue` while disconnected, and a valid
+  one `NotConnected`. The order is id, finite value, range, connection, writability.
+  Tests: the "value range is InvalidValue while disconnected" case of each board.
+- **Read-only pass-through ports** (e.g. iMate DC3): a write with a valid value checks the
+  connection first (a disconnected write answers `NotConnected`), then throws
+  `NotImplemented`; the capability is unit-tested on a connected fake.
 
 ### Platform 7 InterfaceVersion + DeviceState
 

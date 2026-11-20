@@ -32,6 +32,13 @@
 // Bytes are read one at a time, so bytes after the stop condition stay in the
 // fd for the next read.
 //
+// ReadSpec::cancel lets another thread end a read in flight (a disconnect that
+// must not wait out a silent device's timeout, issue #2070): the loop checks the
+// flag between waits of at most ReadSpec::cancel_poll and reports Cancelled. The
+// caller decides what that means; the helper still never throws or closes. The
+// late-byte grace wait below checks it too, so a caller that sets cancel must
+// handle Cancelled from a read that already timed out, not only from the main loop.
+//
 // ReadSpec::late_byte_grace keeps the old loops' rule for a reply that is
 // still arriving when its timeout runs out: the byte in flight settles it (a
 // late '#' ends its own reply instead of answering the next command). It is
@@ -47,6 +54,8 @@
 #include <poll.h>
 #include <sys/socket.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -93,16 +102,22 @@ struct ReadSpec {
     /// The read can end up to one grace past the deadline, and a Length read
     /// up to one grace per payload byte past it (the grace restarts each byte).
     std::optional<std::chrono::milliseconds> late_byte_grace;
+    /// Another thread sets it to end the read early (outcome Cancelled, `bytes`
+    /// holds what arrived). Read between waits, each at most `cancel_poll` long,
+    /// and before the first; null: the read is never cancelled.
+    const std::atomic<bool>* cancel = nullptr;
+    std::chrono::milliseconds cancel_poll{20};
 };
 
 enum class ReadOutcome : std::uint8_t {
     Terminator,
     Length,
     Idle,
-    Timeout,   ///< the deadline or first_byte_timeout passed; `bytes` holds what arrived;
-               ///< `err` is non-zero when the read failed with an errno that is not a hangup
-    Overflow,  ///< max_len reached without stopping
-    LinkDead,  ///< the line is gone; `err` holds the errno
+    Timeout,    ///< the deadline or first_byte_timeout passed; `bytes` holds what arrived;
+                ///< `err` is non-zero when the read failed with an errno that is not a hangup
+    Overflow,   ///< max_len reached without stopping
+    LinkDead,   ///< the line is gone; `err` holds the errno
+    Cancelled,  ///< ReadSpec::cancel was set before the read stopped; `bytes` holds what arrived
 };
 
 struct ReadResult {
@@ -113,7 +128,16 @@ struct ReadResult {
 
 namespace detail {
 
-inline bool tty_hangup_errno(int e) { return e == EIO || e == ENXIO || e == ENODEV || e == EBADF; }
+inline bool cancelled(const ReadSpec& spec) { return spec.cancel != nullptr && spec.cancel->load(); }
+
+/// The wait for the next byte: until @p t, cut to ReadSpec::cancel_poll when the read can be cancelled.
+inline int read_wait_ms(const ReadSpec& spec, std::chrono::steady_clock::time_point t) {
+    const int wait = wait_ms_until(t);
+    if (spec.cancel == nullptr) return wait;
+    return std::min(wait, static_cast<int>(std::max<std::chrono::milliseconds::rep>(spec.cancel_poll.count(), 1)));
+}
+
+inline bool tty_hangup_errno(int e) { return is_serial_loss_errno(e); }  // the one serial rule (#2262)
 inline bool socket_hangup_errno(int e) { return e == ENOTCONN || e == ECONNRESET || e == EPIPE || e == ENOTSOCK; }
 
 /// One byte from a socket, waiting at most @p timeout_ms: 1, 0 on timeout, -1
@@ -131,7 +155,8 @@ inline ssize_t socket_read_byte(int fd, char* c, int timeout_ms) {
     }
     // Callers hold their wrapper mutex across I/O. This recv cannot block:
     // MSG_DONTWAIT, and poll() just reported data (or it returns EAGAIN at once).
-    const ssize_t n = ::recv(fd, c, 1, MSG_DONTWAIT);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): MSG_DONTWAIT after poll()
+    const ssize_t n = ::recv(fd, c, 1, MSG_DONTWAIT);
     if (n == 1) return 1;
     if (n == 0) {
         errno = ECONNRESET;
@@ -149,8 +174,12 @@ void read_late_byte(ReadByte& read_byte, IsHangup& is_hangup, const ReadSpec& sp
     using Clock = std::chrono::steady_clock;
     auto until = Clock::now() + grace;
     for (;;) {
+        if (cancelled(spec)) {
+            res.outcome = ReadOutcome::Cancelled;
+            return;
+        }
         char c = 0;
-        const ssize_t r = read_byte(&c, wait_ms_until(until));
+        const ssize_t r = read_byte(&c, read_wait_ms(spec, until));
         if (r < 0) {
             if (errno == EINTR) continue;
             res.err = errno;
@@ -205,8 +234,12 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
         } else if (idle_stop && last_kept + spec.idle_gap < limit) {
             limit = last_kept + spec.idle_gap;
         }
+        if (cancelled(spec)) {
+            res.outcome = ReadOutcome::Cancelled;
+            return res;
+        }
         char c = 0;
-        const ssize_t r = read_byte(&c, wait_ms_until(limit));
+        const ssize_t r = read_byte(&c, read_wait_ms(spec, limit));
         if (r < 0) {
             if (errno == EINTR) continue;
             res.err = errno;
@@ -253,6 +286,15 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
 inline ReadResult read_until(int tty_fd, const ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
     return detail::read_until_impl([tty_fd](char* c, int timeout_ms) { return tty_read(tty_fd, c, 1, timeout_ms); },
                                    detail::tty_hangup_errno, spec, deadline);
+}
+
+/// read_until() on @p link's fd that also feeds the link's loss verdict
+/// (issue #2262): a LinkDead outcome on an open link sets link.lost() before
+/// the return. The helper still never closes or throws; the wrapper decides.
+inline ReadResult read_until(SerialLink& link, const ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+    ReadResult res = read_until(link.fd(), spec, deadline);
+    if (res.outcome == ReadOutcome::LinkDead) link.note_error(res.err);
+    return res;
 }
 
 /// The same read over a connected stream socket. Hangup errnos: ENOTCONN,

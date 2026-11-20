@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -67,7 +68,7 @@ std::chrono::microseconds elapsed_of(Fn&& fn) {
     return alpacacore::test::timed([&] {
         try {
             fn();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the latency matters
         }
     });
 }
@@ -185,6 +186,14 @@ TEST_CASE("ToupTek AAF Focuser Driver - a disconnected move or limit read is Not
     require_alpaca_error([&]() { (void)driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Decision 0024. Falsified by: touptek_focuser_driver.cpp get_name() returning info_.name without the brand.
+TEST_CASE("ToupTek AAF Focuser Driver - the connected Name is ToupTek and the SDK name", "[touptek][focuser][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    CHECK(driver->get_name() == "ToupTek FakeAAF");
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek AAF Focuser Driver - Defaults", "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
 
@@ -235,12 +244,8 @@ TEST_CASE("ToupTek AAF Focuser Driver - Not connected throws", "[touptek][focuse
 TEST_CASE("ToupTek AAF Focuser Driver - Unsupported actions", "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
 
-    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"SetZero"});
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); },
                          alpacacore::AlpacaError::ActionNotImplemented);
@@ -250,6 +255,33 @@ TEST_CASE("ToupTek AAF Focuser Driver - Unsupported actions", "[touptek][focuser
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_string("noop", false); },
                          alpacacore::AlpacaError::MethodNotImplemented);
+}
+
+TEST_CASE("ToupTek AAF Focuser Driver - The SetZero action makes the current position 0 without moving",
+          "[touptek][focuser][unit]") {
+    auto disconnected = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
+    CHECK(disconnected->can_action("SETZERO"));
+    require_alpaca_error([&]() { disconnected->action("SetZero", ""); }, alpacacore::AlpacaError::NotConnected);
+
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    driver->move(1234);
+    CHECK(driver->get_position() == 1234);  // cached frame: SetZero must drop it
+    const int writes = fake.call_count("aaf_set");
+
+    SECTION("an idle focuser is zeroed in place") {
+        CHECK(driver->action("setzero", "") == "");
+        CHECK(fake.call_count("aaf_set") == writes + 1);  // SETZERO only, no SETPOSITION
+        CHECK(driver->get_position() == 0);
+    }
+    SECTION("a moving focuser is refused and keeps its position") {
+        fake.set_aaf_moving(true);
+        require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(fake.call_count("aaf_set") == writes);
+        fake.set_aaf_moving(false);
+        wait_past_status_ttl();
+        CHECK(driver->get_position() == 1234);
+    }
 }
 
 TEST_CASE("ToupTek AAF Focuser Driver - Absolute focuser semantics",

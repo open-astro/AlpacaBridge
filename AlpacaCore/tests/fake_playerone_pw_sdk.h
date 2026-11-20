@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted Player One Phoenix Wheel SDK. One wheel, no background thread: a
@@ -81,7 +83,7 @@ public:
             record("open_wheel");
             delay = open_delay_;
         }
-        if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        alpacacore::test::connect_hold(delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         check_handle_locked(handle);
         maybe_fail_locked("open_wheel");

@@ -186,12 +186,20 @@ bool is_expected_not_connected(const alpacacore::AlpacaException& e) {
     return e.error_code() == alpacacore::AlpacaError::NotConnected;
 }
 
+// Parked or slaved refusals are the client's call to make (decision 0007 rule 9); a plain
+// InvalidOperation can be a real fault and stays at ERROR.
+bool is_expected_invalid_state(const alpacacore::AlpacaException& e) {
+    const int error_code = e.error_code();
+    return error_code == alpacacore::AlpacaError::InvalidWhileParked ||
+           error_code == alpacacore::AlpacaError::InvalidWhileSlaved;
+}
+
 }  // namespace
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + util::escape_for_log(e.what(), 4096);
     if (is_expected_not_implemented(e) || is_expected_validation_error(e) || is_expected_not_connected(e) ||
-        e.is_asked_too_early()) {
+        is_expected_invalid_state(e) || e.is_asked_too_early()) {
         util::log_debug(message);
     } else {
         util::log_error(message);

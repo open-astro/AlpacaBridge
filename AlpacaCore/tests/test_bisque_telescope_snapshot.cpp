@@ -142,7 +142,7 @@ TEST_CASE("Bisque UTCDate - unavailable mode clears time across polls and reconn
     CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(978307200456)));
     rig.driver->set_connected(false);
     rig.mount.reject_connection = true;
-    CHECK_THROWS_AS(rig.driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
     rig.mount.reject_connection = false;
     rig.mount.use_computer_clock = false;
@@ -754,7 +754,7 @@ TEST_CASE("Bisque snapshot - AbortSlew during the SlewToCoordinatesAsync exchang
 }
 
 // Falsified by: bisque_telescope_driver.cpp, wait_for_slew_complete: clear slewing_cached_ without the
-// `epoch == slew_epoch_` check.
+// `owns_slewing_locked(claim)` check.
 TEST_CASE("Bisque snapshot - a SlewToCoordinates that completes does not clear the Slewing of a retarget",
           "[bisque][telescope][snapshot]") {
     Rig rig;

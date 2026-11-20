@@ -14,6 +14,7 @@
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 
@@ -84,7 +85,7 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
@@ -302,12 +303,12 @@ public:
         try {
             abort_slew();
             any_stop_succeeded = true;
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the per-axis stop below still runs
             // The per-axis stop below is the actual backstop (issue #521
             // review: a MoveAxis(axis, 0) alone can be a silent no-op on
             // some vendors, which is why BOTH run) -- swallow so a throwing
             // abort_slew() does not skip it.
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): the per-axis stop below still runs
         }
         for (int axis = 0; axis < 2; ++axis) {
             bool can_move = false;
@@ -324,12 +325,12 @@ public:
             try {
                 move_axis(axis, 0.0);
                 any_stop_succeeded = true;
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a timer thread must not throw
                 // Swallow rather than let it escape from a background timer
                 // thread and terminate the process (driver-lifecycle.instructions.md concurrency
                 // checklist: an async tail that can throw must be caught
                 // inline).
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): a timer thread must not throw
             }
         }
         if (!any_stop_succeeded) {
@@ -341,6 +342,24 @@ public:
         }
         return true;
     }
+
+    /**
+     * @brief The host's realtime clock stepped, or became trusted
+     * (util::HostClockTrust), while this telescope may be connected
+     * (open-astro#2419).
+     *
+     * A mount that keeps its own clock and set it from the host clock at
+     * connect (or left it alone because the host clock was not trusted yet)
+     * re-syncs it here. Called by the server's 1 s timer thread (the one that
+     * ticks stop_motion_if_client_silent()) with no router or driver lock
+     * held, whether or not the device is connected. It must not throw, and
+     * must not block: no mount I/O and no join here, or the motion watchdog
+     * waits behind it. Start a body on an operation slot instead, and catch
+     * what AsyncOperation::start() throws (a disconnect draining the slot, a
+     * refused thread); start() itself may wait up to kStaleReapTimeout when
+     * earlier bodies are stuck on a blocked link. The default does nothing.
+     */
+    virtual void on_host_clock_changed(const util::HostClockEvent& event) noexcept { (void)event; }
 
     // Telescope-specific properties
 

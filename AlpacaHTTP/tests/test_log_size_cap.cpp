@@ -392,19 +392,74 @@ int main() {
 
     {
         // case: age pruning removes old dated files and their parts, and keeps today's
+        // Logged every day from 5 days ago to today, plus a file and its part from 7 days ago: no gap is longer than
+        // the retention, so the cutoff counts back from today (#2292).
         const fs::path dir = make_dir();
-        const fs::path old_file = dir / "alpacabridge-2000-01-01.log";
-        const fs::path old_part = dir / "alpacabridge-2000-01-01.2.log";
+        const fs::path old_file = dir / ("alpacabridge-" + local_date_days_ago(7) + ".log");
+        const fs::path old_part = dir / ("alpacabridge-" + local_date_days_ago(7) + ".2.log");
         std::ofstream(old_file) << "old\n";
         std::ofstream(old_part) << "old\n";
+        std::vector<fs::path> recent;
+        for (int days = 1; days <= 5; ++days) {
+            recent.push_back(dir / ("alpacabridge-" + local_date_days_ago(days) + ".log"));
+            std::ofstream(recent.back()) << "recent\n";
+        }
         const fs::path file = start(dir, 4096);
         write_lines(500);
-        util::set_log_retention_days(90);
+        util::set_log_retention_days(5);
         EXPECT(util::prune_old_log_files() == 2);
         EXPECT(!fs::exists(old_file));
         EXPECT(!fs::exists(old_part));
         EXPECT(fs::exists(file));
         EXPECT(fs::exists(dir / part_name(1)));
+        for (const auto& kept : recent) EXPECT(fs::exists(kept));
+        util::set_log_retention_days(0);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: a clock set far ahead does not prune the logs the server kept before the jump (#2292)
+        // Files from 2000 stand for the history before a client's far-future synctime: to this test today is that
+        // future. The cutoff counts back from the day after the newest earlier file, so only the files older than
+        // the retention before it go.
+        const fs::path dir = make_dir();
+        const fs::path older = dir / "alpacabridge-2000-01-01.log";
+        const fs::path newest = dir / "alpacabridge-2000-01-10.log";
+        const fs::path newest_part = dir / "alpacabridge-2000-01-10.2.log";
+        std::ofstream(older) << "older\n";
+        std::ofstream(newest) << "newest\n";
+        std::ofstream(newest_part) << "newest\n";
+        const fs::path file = start(dir, 4096);
+        write_lines(10);
+        util::set_log_retention_days(5);
+        EXPECT(util::prune_old_log_files() == 1);
+        EXPECT(!fs::exists(older));
+        EXPECT(fs::exists(newest));
+        EXPECT(fs::exists(newest_part));
+        EXPECT(fs::exists(file));
+        util::set_log_retention_days(0);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: the logs before a clock jump survive the days after it, not only its first day (#2292)
+        // The jump came yesterday: yesterday's and today's logs follow the files from 2000. Two days of newer logs
+        // count as following 2000-01-10, so with a 5-day retention only the file from 2000-01-01 goes.
+        const fs::path dir = make_dir();
+        const fs::path older = dir / "alpacabridge-2000-01-01.log";
+        const fs::path newest_before = dir / "alpacabridge-2000-01-10.log";
+        const fs::path yesterday = dir / ("alpacabridge-" + local_date_days_ago(1) + ".log");
+        std::ofstream(older) << "older\n";
+        std::ofstream(newest_before) << "before the jump\n";
+        std::ofstream(yesterday) << "after the jump\n";
+        const fs::path file = start(dir, 4096);
+        write_lines(10);
+        util::set_log_retention_days(5);
+        EXPECT(util::prune_old_log_files() == 1);
+        EXPECT(!fs::exists(older));
+        EXPECT(fs::exists(newest_before));
+        EXPECT(fs::exists(yesterday));
+        EXPECT(fs::exists(file));
         util::set_log_retention_days(0);
         fs::remove_all(dir);
     }

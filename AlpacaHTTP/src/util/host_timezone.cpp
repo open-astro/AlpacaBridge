@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/util/host_timezone.h>
+#include <alpacahttp/util/logging_adapter.h>  // trim_view
 
 #include <cstdlib>
 #include <filesystem>
@@ -21,15 +22,6 @@ namespace alpacahttp {
 namespace util {
 
 namespace {
-
-std::string trim(const std::string& s) {
-    const auto first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return "";
-    }
-    const auto last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
 
 // "posix/Europe/Berlin" -> "Europe/Berlin": the posix/ and right/ subtrees
 // hold the same zones under names a browser's Intl rejects.
@@ -132,7 +124,7 @@ std::string host_time_zone(const char* tz_env, const std::string& etc_dir) {
     std::ifstream in(etc_dir + "/timezone");
     std::string line;
     if (in && std::getline(in, line)) {
-        line = trim(line);
+        line = std::string(trim_view(line));
         if (looks_like_iana_zone(line)) {
             return line;
         }

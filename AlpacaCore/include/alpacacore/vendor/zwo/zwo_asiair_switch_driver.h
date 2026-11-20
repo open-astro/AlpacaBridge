@@ -33,6 +33,9 @@ struct AsiairSwitchConfig {
     // driver, so the only difference clients see is this label. Defaults to the
     // Pro layout; the router overrides it for the CM4 Plus.
     std::string model_name = "ASIAIR Pro";
+    // The board revision when one model ships on two ("Pi CM4" for the CM4 Plus), named in the Description only:
+    // the Name is brand + model (decision 0024).
+    std::string board;
     // What the ports do when the server starts (decision 0021): `powerOnState`.
     util::PowerOnState power_on_state = util::PowerOnState::Leave;
 };

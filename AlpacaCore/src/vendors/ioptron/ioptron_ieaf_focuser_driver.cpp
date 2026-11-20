@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/action_name.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
@@ -59,7 +60,7 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("iOptron", "Error during iEAF destruction: " + std::string(e.what()));
             }
@@ -106,20 +107,7 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        // Disconnect synchronously — trivial (close fd + set flag) and ASCOM
-        // clients expect Connected to be false immediately after.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "iEAF disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other (issue #528): the
@@ -181,24 +169,24 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::vector<std::string> get_supported_actions() const override {
+        return {std::string(util::kFocuserSetZeroAction)};
+    }
 
     std::string action(std::string_view action_name, std::string_view) override {
+        if (util::same_action_name(action_name, util::kFocuserSetZeroAction)) {
+            // :FZ#: the current position becomes 0 and nothing moves. The wrapper refuses it while :FI# reports the
+            // motor running, in the same hold of its exchange lock.
+            ensure_connected();
+            protocol_.set_zero();
+            invalidate_status_cache();
+            return "";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
+    bool can_action(std::string_view action_name) const override {
+        return util::same_action_name(action_name, util::kFocuserSetZeroAction);
     }
 
     // --- Focuser interface ---
@@ -279,7 +267,7 @@ private:
     // IsMoving + Position + Temperature back to back, which is three round
     // trips (~0.26 s) against a 0.1 s ASCOM FAST target. Serve a burst of
     // reads from one poll: the cache lives for STATUS_CACHE_TTL and is
-    // dropped by move()/halt() so the first read after a command is live.
+    // dropped by move()/halt()/SetZero so the first read after a command is live.
     static constexpr auto STATUS_CACHE_TTL = std::chrono::milliseconds(100);
 
     IeafStatus cached_status() const {

@@ -1,0 +1,3 @@
+### Changed
+
+- **The QHY CFW3 filter wheel judges a lost serial link with the shared `util::SerialLink` verdict** (issue #2262 PR 5, decision 0009 point 2a). Its reads go through `util::read_until(link_, ...)` and its writes through `link_.write_all()`, and its own errno list is gone: `EIO`, `ENXIO`, `ENODEV` and `EBADF` on the port's fd stay a lost link at once (`Connected` false, operations `NotConnected`, the port released, `get_link_fault()` "QHYCFW3 link lost on <port>" until the next Connect or Disconnect, the loss stamped once). The wheel already counted `EBADF`; an `EBADF` now also logs one ERROR line naming the port, since it means a driver bug. Every other link-loss behaviour is unchanged.

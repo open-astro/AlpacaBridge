@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -26,8 +27,9 @@ namespace alpacacore::util {
 /**
  * @file
  * @brief Pointing arithmetic every mount driver shares: sidereal time, angle
- *        wraps, the shortest RA delta, the pier-side rule and the RA/Dec and
- *        site range checks.
+ *        wraps, the shortest RA delta, the pier-side rules (the hour-angle
+ *        rule and the German equatorial model of a controller that keeps its
+ *        side past the meridian) and the RA/Dec and site range checks.
  *
  * Free functions, no class, no clock, no I/O, no virtuals (decision 0013 s5).
  * The caller passes the UTC instant and the longitude it already holds; which
@@ -108,6 +110,162 @@ inline double local_sidereal_hours(std::chrono::system_clock::time_point utc, do
 
 /// Destination pier side from the hour angle: 0 (east) when `ha_hours >= 0`, else 1 (west).
 constexpr int pier_side_for_hour_angle(double ha_hours) { return ha_hours >= 0.0 ? 0 : 1; }
+
+// ── German equatorial pier-side model ───────────────────────────────────────────────────────────────────────
+// What a GEM controller does when it picks the pier side for a GOTO, for the controllers that keep their
+// current side past the meridian (OnStepX "Best": it stays on the side it is on while that side can reach the
+// target inside its limits, #2179). Vendor-neutral: the caller reads the controller's settings and passes them.
+// Angles are degrees, hour angles hours; "instrument axes" are the mount's two axes in the controller's own frame.
+
+/// Which side the controller prefers for a GOTO.
+enum class GemPierPreference : std::uint8_t { East, West, Best, Auto };
+
+/// How far each side can point: the meridian limits and the RA-axis (axis 1) limits.
+struct GemPierLimits {
+    double east_limit_hours;   ///< The EAST side reaches hour angles >= -east_limit_hours (past the meridian).
+    double west_limit_hours;   ///< The WEST side reaches hour angles <= +west_limit_hours.
+    double axis1_min_degrees;  ///< RA-axis minimum (the instrument's axis 1 is the hour angle on the east side).
+    double axis1_max_degrees;  ///< RA-axis maximum.
+};
+
+struct GemPierModel {
+    GemPierPreference preference;
+    bool flips_enabled;  ///< False: the controller stays on the east side.
+    GemPierLimits limits;
+    bool southern;  ///< Site latitude below zero.
+};
+
+/// Where the mount points now. `side`: 0 east, 1 west, -1 none (taken as east). `at_home`: at the home position.
+struct GemPointing {
+    int side;
+    bool at_home;
+    double ha_hours;
+    double dec_degrees;
+};
+
+namespace detail {
+
+constexpr double kGemAxisEpsilon = 1e-9;
+
+struct GemAxes {
+    double axis1;
+    double axis2;
+};
+
+/// The instrument axes for `side` (1 west, anything else east) at an hour angle and declination.
+inline GemAxes gem_axes(int side, double ha_hours, double dec_degrees, bool southern) {
+    const double ha_degrees = wrap_hour_angle(ha_hours) * kPointingHoursToDegrees;
+    if (side == 1) {
+        return {ha_degrees + 180.0, (southern ? -180.0 : 180.0) - dec_degrees};
+    }
+    return {ha_degrees, dec_degrees};
+}
+
+/// The axis-1 reading of `side` at the target that lies inside the side's range, shifted by 0 or +/-360 degrees;
+/// of the readings that do, the one nearest `near_axis1`. False when none does.
+inline bool gem_reachable_axis1(const GemPierLimits& limits, int side, double axis1, double near_axis1, double& out) {
+    double low = 0.0;
+    double high = 0.0;
+    if (side == 1) {
+        low = limits.axis1_min_degrees + 180.0;
+        high = std::min(limits.axis1_max_degrees, limits.west_limit_hours * kPointingHoursToDegrees) + 180.0;
+    } else {
+        low = std::max(limits.axis1_min_degrees, -limits.east_limit_hours * kPointingHoursToDegrees);
+        high = limits.axis1_max_degrees;
+    }
+    bool found = false;
+    for (const double shift : {-360.0, 0.0, 360.0}) {
+        const double candidate = axis1 + shift;
+        if (candidate < low - kGemAxisEpsilon || candidate > high + kGemAxisEpsilon) {
+            continue;
+        }
+        if (!found || std::fabs(candidate - near_axis1) < std::fabs(out - near_axis1)) {
+            out = candidate;
+            found = true;
+        }
+    }
+    return found;
+}
+
+}  // namespace detail
+
+/// True when the side (0 east, 1 west) can point at the hour angle inside the meridian and RA-axis limits.
+inline bool gem_pier_side_reaches(const GemPierLimits& limits, int side, double target_ha_hours) {
+    const double axis1 = detail::gem_axes(side, target_ha_hours, 0.0, false).axis1;
+    double reached = 0.0;
+    return detail::gem_reachable_axis1(limits, side, axis1, axis1, reached);
+}
+
+/// The pier side (0 east, 1 west) the controller picks for a GOTO to the target, or -1 when no side reaches it
+/// (the controller refuses the GOTO). Mirrors OnStepX `Goto::setTarget` and `validateTarget`:
+///  - flips disabled: east only;
+///  - at home the side follows the target hour angle (west for negative), with "best" on whatever the preference;
+///  - Best starts from the current side, East/West from that side, Auto from west past 6 h of hour angle either way;
+///  - the other side is taken when only it reaches, or, for Best, when it needs strictly less axis travel.
+inline int gem_destination_pier_side(const GemPierModel& model, const GemPointing& current, double target_ha_hours,
+                                     double target_dec_degrees) {
+    const double target_ha = wrap_hour_angle(target_ha_hours);
+    const int current_side = current.side == 1 ? 1 : 0;
+    detail::GemAxes now{};
+    if (current.at_home) {
+        now = {90.0, model.southern ? -90.0 : 90.0};
+    } else {
+        now = detail::gem_axes(current_side, current.ha_hours, current.dec_degrees, model.southern);
+    }
+
+    // Reach and distance for one side.
+    struct Option {
+        bool reaches = false;
+        double distance = 0.0;
+    };
+    const auto evaluate = [&](int side) {
+        const detail::GemAxes axes = detail::gem_axes(side, target_ha, target_dec_degrees, model.southern);
+        Option option;
+        double axis1 = 0.0;
+        option.reaches = detail::gem_reachable_axis1(model.limits, side, axes.axis1, now.axis1, axis1);
+        if (option.reaches) {
+            option.distance = std::max(std::fabs(axis1 - now.axis1), std::fabs(axes.axis2 - now.axis2));
+        }
+        return option;
+    };
+
+    if (!model.flips_enabled) {
+        return evaluate(0).reaches ? 0 : -1;
+    }
+
+    int selected = 0;
+    bool best = false;
+    if (current.at_home) {
+        selected = target_ha < 0.0 ? 1 : 0;
+        best = true;
+    } else {
+        switch (model.preference) {
+            case GemPierPreference::Best:
+                selected = current_side;
+                best = true;
+                break;
+            case GemPierPreference::East:
+                selected = 0;
+                break;
+            case GemPierPreference::West:
+                selected = 1;
+                break;
+            case GemPierPreference::Auto:
+                selected = std::fabs(wrap_hour_angle(current.ha_hours)) > 6.0 ? 1 : 0;
+                break;
+        }
+    }
+    const int other = 1 - selected;
+    const Option chosen = evaluate(selected);
+    const Option alternative = evaluate(other);
+    if (alternative.reaches && !chosen.reaches) {
+        return other;
+    }
+    if (best && alternative.reaches && alternative.distance < chosen.distance) {
+        return other;
+    }
+    return chosen.reaches ? selected : -1;
+}
 
 /// Throws InvalidValue unless `hours` is finite and in [0, 24).
 inline void validate_ra(double hours, std::string_view label) {

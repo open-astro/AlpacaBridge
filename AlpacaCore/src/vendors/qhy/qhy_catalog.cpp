@@ -20,8 +20,10 @@
 
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
+#include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "qhy_fields.h"
@@ -97,6 +99,12 @@ void register_qhy_factory(DeviceCatalog& catalog) {
                                                         settings);
     };
     catalog.add(std::move(focuser));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity({DeviceKey{"qhy", DeviceType::Focuser}, vendor::qhy::qfocuser_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"qhy", DeviceType::FilterWheel}, vendor::qhy::cfw3_usb_tokens(), {{"wheelType", "cfw3-usb"}}});
 }
 
 }  // namespace alpacacore::catalog

@@ -65,9 +65,6 @@ bool decode_axis_completion(const AuxFrame& response, const char* operation) {
     return response.payload[0] == 0xff;
 }
 
-// A read or write errno that a tty returns only when its device is gone (decision 0009 rule 2a).
-bool transport_gone(int error) { return error == EIO || error == ENXIO || error == ENODEV; }
-
 int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) {
     const auto remaining = deadline - std::chrono::steady_clock::now();
     if (remaining <= std::chrono::steady_clock::duration::zero()) {
@@ -93,6 +90,9 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
         std::lock_guard<std::mutex> loss(loss_mutex_);
         loss_reason_.clear();
     }
+    // A connect, failed or done, starts with a clear verdict on the link too (the fd kept across a logical
+    // disconnect included); a new port moved in below brings its own clear one.
+    link_.clear_loss();
     std::error_code path_error;
     const std::filesystem::path canonical = std::filesystem::canonical(port_path, path_error);
     const std::string registry_path = path_error ? port_path : canonical.string();
@@ -167,6 +167,9 @@ void CelestronCgxProtocol::resync() {
 void CelestronCgxProtocol::disconnect() {
     std::lock_guard<std::mutex> lock(mutex_);
     disconnect_locked();
+    // An explicit disconnect forgets the link's verdict (decision 0009 rule 5); lose_link_locked(), the port release
+    // after a loss, keeps it.
+    link_.clear_loss();
 }
 
 std::string CelestronCgxProtocol::link_fault() const {
@@ -350,7 +353,10 @@ void CelestronCgxProtocol::disconnect_locked() {
 
 // Decision 0009 rule 2a: the port is gone. Release it so a replugged device can be reopened, then latch link_lost_ for
 // the driver (its Connected getter, its poll and its connect) and fail with NotConnected. Caller holds mutex_ inside an
-// exchange; the drivers call the wrapper with their own mutex_ free, so no driver lock is taken under this one.
+// exchange; the drivers call the wrapper with their own mutex_ free, so no driver lock is taken under this one. The
+// errno verdict that leads here is the link's (link_.note_error(), util::SerialLink, #2262); the wrapper keeps its own
+// latch and text because a hangup on poll() and an end of file lose the link with no errno, the drivers read the
+// owner's text, and the latch is published only after the port is released.
 void CelestronCgxProtocol::lose_link_locked(const std::string& reason) {
     ALPACA_LOG_ERROR("Celestron CGX", owner_ + " link lost: " + reason + " (port released; reconnect to resume)");
     {
@@ -406,7 +412,8 @@ void CelestronCgxProtocol::write_frame_locked(const std::vector<std::uint8_t>& b
         } else if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
             const int code = errno;
             const auto error = util::errno_string(code);
-            if (transport_gone(code)) lose_link_locked("write: " + error);
+            // The verdict is the link's (util::SerialLink, #2262), fed from this raw loop.
+            if (link_.note_error(code)) lose_link_locked("write: " + error);
             disconnect_locked();
             throw_link_error("serial write failed: " + error);
         }
@@ -439,7 +446,7 @@ std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::s
         wait_for_locked(POLLIN, deadline);
         std::array<std::uint8_t, 128> incoming{};
         // The owned fd stays O_NONBLOCK; the lock serializes whole AUX exchanges.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): the fd is O_NONBLOCK
         const ssize_t count = ::read(serial_fd_, incoming.data(), incoming.size());
         if (count > 0) {
             receive_buffer_.insert(receive_buffer_.end(), incoming.begin(),
@@ -449,7 +456,7 @@ std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::s
         } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
             const int code = errno;
             const auto error = util::errno_string(code);
-            if (transport_gone(code)) lose_link_locked("read: " + error);
+            if (link_.note_error(code)) lose_link_locked("read: " + error);  // the link's verdict (#2262)
             disconnect_locked();
             throw_link_error("serial read failed: " + error);
         }

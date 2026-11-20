@@ -26,6 +26,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted ZWO EFW SDK: one wheel (id 5, 7 slots), shared by the filter wheel unit
@@ -54,6 +56,8 @@ public:
     using Info = vendor::zwo::ZWOEFWInfo;
 
     int id{5};
+    // The unit's EAF_INFO / EFW_INFO / CAA_INFO name; the SDK reports "EFW".
+    std::string name{"EFW"};
     int slot_index{0};
     int slot_count{7};
     int position{0};
@@ -121,9 +125,9 @@ public:
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
         if (no_wheels || removed) return {};
-        std::vector<Info> wheels{Info{id, "EFW", slot_count, slot_index}};
+        std::vector<Info> wheels{Info{id, name, slot_count, slot_index}};
         if (second_id >= 0) {
-            wheels.insert(second_id < id ? wheels.begin() : wheels.end(), Info{second_id, "EFW", slot_count});
+            wheels.insert(second_id < id ? wheels.begin() : wheels.end(), Info{second_id, name, slot_count});
             for (std::size_t i = 0; i < wheels.size(); ++i) wheels[i].slot_index = static_cast<int>(i);
         }
         return wheels;
@@ -134,7 +138,7 @@ public:
         if (fail_info || no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
             return false;
         }
-        info = Info{wheel_id, "EFW", slot_count};
+        info = Info{wheel_id, name, slot_count};
         return true;
     }
     bool get_wheel_info_by_index(int wheel_index, Info& info) override {
@@ -210,7 +214,7 @@ private:
     // The library under the table: EFWOpen, EFWClose and the per-device calls on the raw units.
     void raw_open(int wheel_id) {
         ++open_entered;
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) throw AlpacaException("EFWOpen: EFW_ERROR_REMOVED", AlpacaError::NotConnected);
         if (no_wheels || (wheel_id != id && wheel_id != second_id)) {

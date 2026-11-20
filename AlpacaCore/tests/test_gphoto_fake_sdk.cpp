@@ -38,6 +38,7 @@
 #include "fake_raw_decoder.h"
 #include "fake_task_clock.h"
 #include "getter_stall_probe.h"
+#include "locked_gphoto_sdk.h"
 
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeGPhotoSDK;
@@ -202,6 +203,61 @@ TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close
     CHECK(fake.close_count == 1);
 }
 
+// open-astro#2148: the real GPhotoSDKWrapper::get_gphoto_version() takes no lock, so the SDK-version hook must not
+// wait behind an open_camera() in flight. LockedGPhotoSDK used to forward it under the one mutex the held open sleeps
+// under, so the contract sweep's "firmware and SDK hooks do not block" case failed whenever the hook landed inside
+// the open (the #1646 shape, here only in the decorator).
+// Falsified by: AlpacaCore/tests/locked_gphoto_sdk.h get_gphoto_version(): forwarding under the shared mutex_
+// (locked([&] {...})), so the hook waits out the 300 ms open.
+TEST_CASE("FakeGPhotoSDK via LockedGPhotoSDK - SDK version hook does not wait on an in-flight open",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    std::atomic<bool> in_open{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "open_camera") {
+            in_open.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));  // a slow USB open, held in real time
+        }
+    };
+    alpacacore::test::LockedGPhotoSDK sdk(fake);
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, sdk, decoder);
+
+    driver->connect();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_open.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(in_open.load());
+    CHECK(alpacacore::test::timed([&] { (void)driver->get_device_sdk_version(); }) < std::chrono::milliseconds(100));
+
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    driver->set_connected(false);
+}
+
+// Decision 0024: libgphoto2 names a Sony body in PC-remote mode "Sony Alpha-A7 III (Control)"; the qualifier is a
+// connection mode, so it goes in the Description. Falsified by: gphoto_camera_driver.cpp get_name() returning
+// camera_info_.model as read.
+TEST_CASE("GPhoto camera fake - the Name drops a libgphoto2 qualifier and the Description keeps it",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera("Sony Alpha-A7 III (Control)"));
+    const std::string model = fake.cameras[0].model;  // "Sony Alpha-A7 III (Control) [pid N]"
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_name().find('(') == std::string::npos);
+    CHECK(driver->get_name().rfind("Sony Alpha-A7 III", 0) == 0);
+    CHECK(driver->get_description() == "DSLR / Mirrorless Camera Driver, " + model);
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - exposure validation distinguishes global and connected camera limits",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
@@ -364,7 +420,7 @@ TEST_CASE("GPhoto camera fake - connect-path throw closes the handle and leaves 
     FakeRawDecoder decoder;
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     // The connect-path open must be balanced by a close on the failure path.
     CHECK(fake.open_count == fake.close_count);
@@ -1793,6 +1849,9 @@ TEST_CASE("GPhoto camera fake - MLU on skips the connect priming capture", "[gph
     CHECK(driver->get_connected() == true);
     CHECK(count_calls(fake, "capture_and_download") == 0);
     CHECK(fake.remote_release_history.empty());
+    // Connected with the geometry still unknown: InvalidOperation, not NotConnected (#1919).
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::InvalidOperation);
 
     driver->set_connected(false);
 }
