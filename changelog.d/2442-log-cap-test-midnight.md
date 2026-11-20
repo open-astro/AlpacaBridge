@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **`test_log_size_cap` passes when a run crosses local midnight** (AlpacaHTTP, issue #2442): the test named the files it checked from the date at check time, while the logger names each file by the date of the write, so a run across midnight (merge-queue run 44640615583, ASan + UBSan) looked for the day's parts under the next day's name. Each case that logs now reads the date once before it seeds or logs anything, names every checked file and every seeded "days ago" file from it, and runs again on the new day if the date changed before its checks. No production code changes.
