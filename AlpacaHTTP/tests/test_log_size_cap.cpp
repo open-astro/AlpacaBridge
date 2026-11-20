@@ -120,7 +120,8 @@ private:
 // Runs @p body(dir, day) in a fresh directory. The body checks day.ended()
 // after its last line is logged and returns false if the day ended: midnight
 // fell inside the case, so it runs again on the new day. One run of a case
-// cannot cross two midnights.
+// cannot cross two midnights. Nothing may log after the last ended() check,
+// and the check relies on the sink writing each line before log_info returns.
 template <typename Body>
 void on_one_day(const Body& body) {
     bool judged = false;
