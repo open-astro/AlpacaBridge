@@ -16,11 +16,11 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hardware_config_refusal.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/power_port_state_store.h>
