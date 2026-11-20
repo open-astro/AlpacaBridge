@@ -30,13 +30,18 @@ if [[ $# -eq 0 ]]; then
 fi
 
 world_mode='MODE[[:space:]]*:?=[[:space:]]*"?0?[0-7]{2}[1-7]"?([^0-7]|$)'
+# No `sed -i`: GNU and BSD sed spell it differently, and check_docs_drift.py runs this script on macOS too.
+# `cat >` rewrites the file in place, keeping its owner and mode.
+tightened="$(mktemp)"
+trap 'rm -f "${tightened}"' EXIT
 for rules in "$@"; do
-  sed -E -i \
+  sed -E \
     -e '/^[[:space:]]*#/b' \
     -e "/${world_mode}/!b" \
     -e 's/GROUP([[:space:]]*:?=[[:space:]]*)"[^"]*"/GROUP\1"plugdev"/g' \
     -e '/GROUP[[:space:]]*:?=[[:space:]]*"plugdev"/!s/MODE[[:space:]]*:?=/GROUP="plugdev", &/' \
     -e 's/(MODE[[:space:]]*:?=[[:space:]]*)"0?[0-7]{2}[1-7]"/\1"0660"/g' \
     -e 's/(MODE[[:space:]]*:?=[[:space:]]*)0?[0-7]{2}[1-7]([^0-7]|$)/\1"0660"\2/g' \
-    "${rules}"
+    "${rules}" > "${tightened}"
+  cat "${tightened}" > "${rules}"
 done
