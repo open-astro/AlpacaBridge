@@ -1807,6 +1807,9 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
         const auto connected_at = clock.now();
 
         driver->find_home();
+        // A zero search (0036) lands only once a status 2 showed it moving: the watchdog's first read sees it.
+        clock.advance(std::chrono::milliseconds(1100));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
         // Past the 5 s Slewing override and the driver's 30 s post-connect status cache, so the reads below
         // reach the mount.
         clock.advance(connected_at + std::chrono::seconds(31) - clock.now());
@@ -2391,6 +2394,14 @@ TEST_CASE("iOptron zero search - an initiator's status read does not send :MSH# 
     mount.set_system_status(7);
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
+    // The watchdog also watches the search and would resend at the grace; held, only the initiators read here.
+    HeldSlewBody watchdog;
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [gate = watchdog.gate](std::function<void()> body) {
+        return std::thread([body = std::move(body), gate] {
+            gate.wait();
+            body();
+        });
+    });
     pass_connect_cache(clock);
 
     driver->find_home();
@@ -2407,6 +2418,90 @@ TEST_CASE("iOptron zero search - an initiator's status read does not send :MSH# 
     REQUIRE_NOTHROW(driver->park());  // its status read must not put a :MSH# ahead of :MP1#
     CHECK(mount.count(":MSH#") == 2);
     CHECK(mount.count(":MP1#") == 1);
+    CHECK(mount.count(":Q#") == 0);
+    watchdog.release();
+    driver->set_connected(false);  // joins the watchdog
+}
+
+// The zero search watchdog's thread, recorded through the slot's spawn seam, so a case can step it deterministically.
+struct WatchdogThread {
+    std::shared_ptr<std::atomic<std::thread::id>> id = std::make_shared<std::atomic<std::thread::id>>();
+    void install(alpacacore::TelescopeDriver& driver) {
+        io::set_zero_search_watchdog_spawn_for_testing(driver, [id = id](std::function<void()> body) {
+            std::thread thread(std::move(body));
+            id->store(thread.get_id());
+            return thread;
+        });
+    }
+};
+
+// Waits for the zero search watchdog to park on the fake clock (it reads the clock and then registers its wait, so
+// an advance before that would move its wake), advances by `step`, and waits until the woken watchdog has finished
+// its read. Once the search has ended the watchdog has exited, and the park wait just times out.
+static void step_watchdog(alpacacore::test::FakeTaskClock& clock, const WatchdogThread& watchdog,
+                          std::chrono::milliseconds step) {
+    (void)clock.wait_for_waiter_thread(watchdog.id->load(), std::chrono::milliseconds(500));
+    clock.advance(step);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+}
+
+TEST_CASE("iOptron zero search - a :MSH# ignored at a false zero is not home",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);  // the false zero after a power loss, and the mount never moves
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    WatchdogThread watchdog;
+    watchdog.install(*driver);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    for (int i = 0; i < 5; ++i) {
+        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+    }
+    step_watchdog(clock, watchdog,
+                  std::chrono::milliseconds(100));  // past the start grace: the watchdog sends :MSH# again
+    CHECK(mount.count(":MSH#") == 2);
+    CHECK(mount.count(":Q#") == 0);
+    CHECK_FALSE(driver->get_at_home());  // a 7 the mount never left is not a landing
+    CHECK(driver->get_slewing());
+
+    for (int i = 0; i < 6; ++i) {
+        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));  // the second search does not start either
+    }
+    CHECK(mount.count(":Q#") == 1);
+    CHECK(mount.count(":MSH#") == 2);
+    const std::string message = alpacacore::test::alpaca_error_message([&] { (void)driver->get_slewing(); },
+                                                                       alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("did not start") != std::string::npos);
+    CHECK(message.find("status 7") != std::string::npos);
+    CHECK_FALSE(driver->get_at_home());
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - the watchdog sees a short search that no client polls, and it lands",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    WatchdogThread watchdog;
+    watchdog.install(*driver);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);  // a search from the true zero: about a second of motion (HAE29C trace)
+    step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+    mount.set_system_status(7);
+    for (int i = 0; i < 5; ++i) {
+        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+    }
+    CHECK(driver->get_at_home());  // the first client read, past the hold: landed
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(mount.count(":MSH#") == 1);
     CHECK(mount.count(":Q#") == 0);
     driver->set_connected(false);
 }
