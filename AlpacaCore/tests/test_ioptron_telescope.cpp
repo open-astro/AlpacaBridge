@@ -2507,6 +2507,67 @@ TEST_CASE("iOptron zero search - an AbortSlew before the search moved leaves a f
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron zero search - a command that supersedes an unmoved search leaves a false zero not home",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);  // a false zero, and the mount ignores :MSH#
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    driver->unpark();  // supersedes the search before any status 2
+    clock.advance(std::chrono::seconds(3));
+    CHECK_FALSE(driver->get_at_home());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - a disconnect during an unmoved search leaves a false zero not home",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    driver->set_connected(false);  // before any status 2
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+    CHECK_FALSE(driver->get_at_home());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - a connect over a link lost during an unmoved search leaves a false zero not home",
+          "[ioptron][telescope][unit][fake][hold-window][link-lost]") {
+    FakeTaskClock clock;
+    auto first = std::make_unique<PtyIoptronMount>("0036");
+    first->model().set_system_status(7);
+    alpacacore::test::ReplugPort port(*first);
+    auto driver = link_driver(serial_endpoint(port.path.string()), clock);
+    io::set_zero_search_poll_for_testing(*driver, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->find_home();
+    first->unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { (void)driver->get_declination(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    PtyIoptronMount second("0036");
+    second.model().set_system_status(7);  // still the false zero
+    port.replug(second);
+    driver->connect();  // no Disconnect first: the connect ends the dead session, search included
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }));
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+    CHECK_FALSE(driver->get_at_home());
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron zero search - a motionless 7 that no client polls is stopped at the bound, not home",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);

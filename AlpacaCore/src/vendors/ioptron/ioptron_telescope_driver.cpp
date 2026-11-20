@@ -2901,11 +2901,12 @@ private:
         }
     }
 
-    // Waits on the task clock for the current search's bound, then reads the status under the operation lock: a
-    // status 7 lands the search there (refresh_status_cache_locked()), anything else stops it with the stored
-    // failure. A status read that fails at the bound stops it too (fail closed); a lost link ends the body, since the
-    // loss already ends the session. Ends at once when no search runs, the driver is disconnected or the slot
-    // stops it.
+    // Until the search shows a status 2, reads the status every kZeroSearchPollInterval and runs the start check
+    // (check_zero_search_started_locked(): one more :MSH#, then a stop). After that it waits on the task clock for
+    // the current search's bound, then reads the status under the operation lock: a status 7 after motion lands the
+    // search there (refresh_status_cache_locked()), anything else stops it with the stored failure. A status read that
+    // fails at the bound stops it too (fail closed); a lost link ends the body, since the loss already ends the
+    // session. Ends at once when no search runs, the driver is disconnected or the slot stops it.
     void run_zero_search_watchdog(util::OperationContext& ctx) {
         while (true) {
             std::chrono::steady_clock::duration remaining{};
@@ -2927,8 +2928,11 @@ private:
                         // Judged at the time the read started: the status is from then, not from after the
                         // exchange (which gives up mutex_), so a slow reply cannot push it past a grace it read in.
                         check_zero_search_started_locked(now);
-                    } catch (const std::exception&) {
+                    } catch (const std::exception& e) {
                         if (link_lost()) return;
+                        ALPACA_LOG_DEBUG("iOptron", std::string("Zero search poll read failed (the next poll or the "
+                                                                "bound retries): ") +
+                                                        e.what());
                     }
                     if (driver_motion_ != DriverMotion::HomeSearch) return;
                 }
@@ -3920,9 +3924,10 @@ private:
     // :MSH# showed motion (status 2), and :MSH# was already sent a second time (check_zero_search_started_locked()).
     mutable bool home_search_seen_moving_ = false;
     mutable bool home_search_resent_ = false;
-    // A zero search the driver stopped without a landing (it never started, or its bound fired): AtHome stays false
-    // while the mount reads 7, since that 7 is the false zero, until a new FindHome or a status other than 7. Kept
-    // across a reconnect, which does not move the mount. Under mutex_.
+    // A zero search that ended without a landing (the driver stopped it because it never started or its bound
+    // fired, or AbortSlew, a superseding command, a connect or a disconnect ended it before any status 2): AtHome
+    // stays false while the mount reads 7, since that 7 is the false zero, until a new FindHome or a status other
+    // than 7. Kept across a reconnect, which does not move the mount. Under mutex_.
     mutable bool home_search_unconfirmed_ = false;
     // Until this task-clock instant a zero search with no status 2 yet is still starting: set with each :MSH#.
     mutable std::chrono::steady_clock::time_point home_search_start_until_{};
