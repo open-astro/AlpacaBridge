@@ -888,8 +888,13 @@ drops the lock and then releases its axis, so a write in that gap was stranded t
 that releases the axis: for RA the rate and the duty regime (a continuous rate written while a
 duty rate is armed arms nothing), for Dec the rate and `dec_offset_running_` (two deferred
 writes, A then B then A, clear the flag while the axis runs A). It applies any difference.
+The Dec side compares with the rate the restore read before its applier, whose stop-wait drops
+the lock, so a write in that wait is applied too. Every pass first checks, under the lock, that
+the pulse still owns its axis (its sequence and its stop reason): a MoveAxis that took the pulse
+over in the gap owns the stored rate, and the old body sends the axis nothing.
 A new owner with a restore must do the same at its release. Tests: `test_skywatcher_async.cpp`,
-the four #2431 cases about a write between a pulse's restore and its release.
+the #2431 cases about a write between a pulse's restore and its release, a write in the
+restore's stop-wait, and a pulse superseded in its release window.
 
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
