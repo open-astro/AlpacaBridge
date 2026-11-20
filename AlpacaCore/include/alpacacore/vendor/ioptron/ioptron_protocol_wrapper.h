@@ -364,12 +364,14 @@ public:
      * Sends :MH# command.
      */
     void go_to_home();
-    
+
     /**
      * @brief Auto-search zero (home) position.
      *
-     * Sends :MSH# command. Uses homing sensors.
-     * Available on CEM120, CEM70, GEM45, CEM40 series.
+     * Sends :MSH# command blind. Uses homing sensors.
+     * Available on CEM120, CEM70, GEM45, CEM40 series per the v3.10 spec; hardware-verified on the HAE29C EQ
+     * (0036, issue #2420). The ack is a bare '1' with no '#', possibly sent only when the search ends, so the
+     * command is not read back: completion is seen by polling :GLS# for system status 7.
      */
     void find_home();
     

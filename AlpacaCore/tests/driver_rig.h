@@ -18,6 +18,7 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -36,6 +37,60 @@
 #include "fake_task_clock.h"
 
 namespace alpacacore::test {
+
+// The message of the AlpacaException fn throws, after requiring expected_code.
+inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+        return ex.what();
+    }
+    FAIL("Expected AlpacaException");
+    return {};
+}
+
+// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
+struct Latch {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool open = false;
+
+    void block() {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        cv.notify_all();
+        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
+    }
+    bool wait_entered() {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            open = true;
+        }
+        cv.notify_all();
+    }
+};
+
+// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
+// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
+// from the host at connect holds one, so it does not depend on the runner's NTP state.
+struct HostClockTrustGuard {
+    explicit HostClockTrustGuard(bool synchronized) {
+        util::HostClockTrust::reset_for_testing();
+        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
+    }
+    ~HostClockTrustGuard() {
+        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+        util::HostClockTrust::reset_for_testing();
+    }
+    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
+    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
+};
 
 // Fails the test case unless fn throws an AlpacaException with expected_code.
 // A bare CHECK_THROWS_AS(..., AlpacaException) passes for any code.

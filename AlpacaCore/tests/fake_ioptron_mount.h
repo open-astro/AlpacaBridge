@@ -18,7 +18,8 @@
 // approach RA trim (goto_refine_active()). The mount "lands" every GOTO at
 // the commanded target plus a configurable RA error, exactly the HAE29C /
 // HAE16 firmware signature, and reports a pulse-guide :ZQ/:ZS as having
-// closed the error. Everything else gets a harmless ack.
+// closed the error. The arrow commands :mw#/:me#/:mn#/:ms# step the modelled
+// RA or Dec (issue #2424). Everything else gets a harmless ack.
 
 #ifndef _WIN32
 
@@ -78,7 +79,16 @@ public:
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
     void set_pulse_reports_guiding(bool on) { pulse_reports_guiding_.store(on); }
 
-    /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
+    /// Issue #2421: false answers a ":Z" pulse-guide command with nothing, as the HAE29C firmware (and the v3 spec)
+    /// does. On by default: a pulse is acked with "1", which also tells a TCP test the command was recorded and its
+    /// :ZQ/:ZS trim applied before the driver call returned.
+    void set_pulse_acks(bool on) { pulse_acks_.store(on); }
+
+    /// Pier-side digit of the ":GEP" reply (0 pier east, 1 pier west, 2 indeterminate). Default 0. It also picks
+    /// which way ":mn#"/":ms#" turn the modelled Dec (see the arrow-motion model in handle()).
+    void set_pier_side(int side) { pier_side_.store(side); }
+
+    /// Where the ":GEP" read says the mount points, until a GOTO, a trim pulse or an arrow command moves it.
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
         dec_units_.store(std::llround(dec_degrees * 3600.0 * 100.0));
@@ -221,7 +231,7 @@ private:
         if (cmd == ":GEP#") {
             const long long ra = ra_units_.load();
             const long long dec = dec_units_.load();
-            return signed_eight(dec) + nine(ra) + "01#";
+            return signed_eight(dec) + nine(ra) + std::to_string(pier_side_.load()) + "1#";
         }
         if (cmd == ":GAC#" && altaz_enabled_.load()) {
             // Altitude (sign + 8 digits) then azimuth (9 digits), 0.01 arcsec: the point set_alt_az() gave, so
@@ -247,6 +257,12 @@ private:
             if (goto_tracks_off_.load()) system_status_.store(2);
             return "1";
         }
+        if (cmd == ":MSH#") {
+            // Issue #2420, HAE29C firmware: the zero sensor search is acked with a bare '1' and no '#', so a driver
+            // that reads a '#'-terminated reply waits out its timeout. Its own branch, so a change to the generic
+            // ":M" ack below cannot hand the search a '#' (issue #2432).
+            return "1";
+        }
         if (goto_tracks_off_.load() && (cmd == ":Q#" || cmd == ":ST1#" || cmd == ":ST0#")) {
             if (cmd == ":ST1#") {
                 system_status_.store(1);
@@ -258,18 +274,38 @@ private:
         if (pulse_reports_guiding_.load() && cmd.rfind(":Z", 0) == 0) {
             system_status_.store(3);  // auto-guiding, for the whole of the pulse (issue #2186)
         }
+        if (cmd == ":mw#" || cmd == ":me#" || cmd == ":ms#" || cmd == ":mn#") {
+            // Arrow motion (issue #2424), modelled as one kArrowStepUnits step per command, in iOptron's own
+            // labels (RS-232 v3.10): ":mw#" RA+ and ":me#" RA-, where RA+ raises the RightAscension reading as the
+            // ":ZS" pulse (RA+) does on the HAE16 and HAE29C (the GOTO trim). ":ms#" is Dec+ and ":mn#" Dec-, a
+            // mechanical sense: on pier side 0 Dec+ lowers the Declination reading and on side 1 it raises it, the
+            // Dec pulse polarity the driver assumes. The #2424 HAE29C rig check (2026-11-20, USB) confirmed this on
+            // both pier sides.
+            // No reply, as the firmware.
+            if (cmd == ":mw#" || cmd == ":me#") {
+                ra_units_.fetch_add(cmd == ":mw#" ? kArrowStepUnits : -kArrowStepUnits);
+            } else {
+                const bool dec_plus = (cmd == ":ms#");
+                const bool raises_dec = (pier_side_.load() == 1) ? dec_plus : !dec_plus;
+                dec_units_.fetch_add(raises_dec ? kArrowStepUnits : -kArrowStepUnits);
+            }
+            return "";
+        }
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
             // A pulse-guide trim closes the residual exactly.
             ra_units_.store(pending_ra_);
-            return "1";
         }
-        if (cmd.rfind(":Z", 0) == 0 || cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 ||
-            cmd.rfind(":Q", 0) == 0) {
+        if (cmd.rfind(":Z", 0) == 0) {
+            return pulse_acks_.load() ? "1" : "";
+        }
+        if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 || cmd.rfind(":Q", 0) == 0) {
             return "1";  // set / motion / rate acks
         }
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
     }
 
+    static constexpr long long kArrowStepUnits = 60LL * 100LL;  // 60 arcsec in 0.01 arcsec units
+    std::atomic<int> pier_side_{0};
     std::atomic<int> system_status_{1};
     std::atomic<int> gps_status_{0};
     std::atomic<long long> longitude_units_{0};
@@ -293,6 +329,7 @@ private:
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
     std::atomic<bool> pulse_reports_guiding_{false};
+    std::atomic<bool> pulse_acks_{true};
     FakeMountServer server_;
 };
 
