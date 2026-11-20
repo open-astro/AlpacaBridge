@@ -1661,6 +1661,75 @@ TEST_CASE("SkyWatcher async - a pulse superseded in its release window sends its
     driver->set_connected(false);
 }
 
+// #2431 review: the supersede can also land inside the release's applier. A sub-floor rate written in the window
+// makes the release stop the axis (the Dec offset running, or the RA drive) and poll it with the lock released. A
+// MoveAxis there takes the axis and starts its motion. The old body then finds its claim lost, and it must leave the
+// MoveAxis's commanded rate alone: the dead-reckoned position follows that rate until the next hardware read, and
+// a sub-floor rate written over it froze the reported position while the axis slewed at 1 deg/s.
+TEST_CASE("SkyWatcher async - a pulse superseded in its release's stop-wait keeps the MoveAxis rate (#2431)",
+          "[skywatcher][async][pulseguide]") {
+    // 1: an East pulse and RightAscensionRate. 2: a North pulse and DeclinationRate.
+    const int channel = GENERATE(1, 2);
+    CAPTURE(channel);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    if (channel == 2) {
+        driver->set_declination_rate(10.0);  // continuous: the pulse end re-applies it, so the release stops it
+        REQUIRE(mount.axis_running(2));
+    }
+    auto body_done = std::make_shared<std::promise<void>>();
+    auto body_finished = body_done->get_future();
+    auto fired = std::make_shared<std::atomic<bool>>(false);
+    sw::set_pulse_spawn_for_testing(*driver, channel, [body_done, fired](std::function<void()> body) {
+        return std::thread([body = std::move(body), body_done, fired] {
+            body();
+            if (!fired->exchange(true)) {
+                body_done->set_value();
+            }
+        });
+    });
+    ParkedPulseHook hook(sw::detail::set_pulse_release_hook);
+
+    driver->pulse_guide(channel == 1 ? 2 : 0, 500);
+    REQUIRE(run_clock_until(clock, [&] { return hook.parked(); }, std::chrono::milliseconds(5000)));
+    // Sub-floor, and the axis is busy: only stored (RA also arms the duty rate and starts the duty worker).
+    if (channel == 1) {
+        driver->set_right_ascension_rate(0.99);
+    } else {
+        driver->set_declination_rate(0.1);
+    }
+    // The release's stop: the axis keeps reading running, so the body polls it with the lock released.
+    mount.hold_running(channel, true);
+    const int stops = mount.frames_seen('K');
+    hook.release();
+    REQUIRE(wait_until([&] { return mount.frames_seen('K') > stops; }, 3000));
+    // The status poll, the body in its stop-wait sleep, and for RA the duty worker's tick.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + (channel == 1 ? 2 : 1), kRendezvous));
+    mount.hold_running(channel, false);
+    driver->move_axis(channel - 1, 1.0);  // takes the pulse over and starts at once: the axis reads stopped
+    REQUIRE_FALSE(driver->get_is_pulse_guiding());
+    REQUIRE(mount.axis_running(channel));
+    clock.advance(std::chrono::milliseconds(100));  // the old body wakes and finds its claim lost
+    REQUIRE(body_finished.wait_for(kRendezvous) == std::future_status::ready);
+    clock.wait_for_woken_settled(kRendezvous);
+
+    const auto read = [&] { return channel == 1 ? driver->get_right_ascension() * 15.0 : driver->get_declination(); };
+    const double axis_before = mount.axis_degrees(channel);
+    const double before = read();
+    elapse(clock, std::chrono::milliseconds(1000));
+    const double axis_moved = mount.axis_degrees(channel) - axis_before;
+    const double reported_moved = read() - before;
+    CAPTURE(axis_moved, reported_moved);
+    REQUIRE(std::abs(axis_moved) > 0.5);  // the MoveAxis slews at 1 deg/s
+    // The model follows the axis (RA reads the sky, so its sign is the hemisphere's).
+    CHECK(std::abs(std::abs(reported_moved) - std::abs(axis_moved)) < 0.1);
+    driver->set_connected(false);
+}
+
 // #1706 review, then #2263: a Dec pulse sent into an async slew's landing hold used to dispatch
 // before the restore and sit in its stop-wait while the post-slew rate check stopped and restarted
 // RA. Since #2263 the slew owns both axes until it ends, so that pulse is refused with
