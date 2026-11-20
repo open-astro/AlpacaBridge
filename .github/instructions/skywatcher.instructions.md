@@ -352,16 +352,18 @@ datagrams before each send so replies cannot get off-by-one.
   `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
   every exit of that body clears it, the early return of a cancelled body included (a
   superseded body leaves it to the operation that replaced it).
-- **Reap the pulse task at every motion boundary** (slews, park, home,
+- **End the pulse task at every motion boundary** (slews, park, home,
   sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
-  the next goto. A CANCELLED pulse task must not touch the hardware -- the
-  canceller stops or re-commands the axes itself, so a path that commands one
-  axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
-  `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`. A moving
-  MoveAxis does not reap: it supersedes its own axis's pulse without a join
-  (decision 0006 rule 3, #2263; see the motion claims bullet below).
-  Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
+  the next goto. A CANCELLED or SUPERSEDED pulse task must not touch the
+  hardware -- the canceller or the newer command stops or re-commands the
+  axes itself, so a path that commands one axis ends only that axis's pulse
+  (PulseGuide #620, MoveAxis #630; a no-op `MoveAxis(axis, 0)` ends none) and
+  sync stops both axes before `:E`. Only the stop paths (AbortSlew, sync,
+  `MoveAxis(axis, 0)`, disconnect) reap with a join; a newer pulse, a moving
+  MoveAxis, a slew, Park or FindHome supersedes the pulse without one
+  (decision 0006 rule 3, #2263, #2416; see the motion claims bullet below).
+  Gate before ending it: a refused slew, MoveAxis or sync changes nothing.
 - **Motion claims: `util::MotionOwner` (#2263).** Every motion command claims the axes it moves under
   `mutex_` (`claim_axis_locked()` one axis, `claim_both_axes_locked()` both), and every unlocked stop-wait
   checks its claim (`claim_lost_locked()`); AbortSlew `cancel()`s both axes. The driver-wide
@@ -376,7 +378,11 @@ datagrams before each send so replies cannot get off-by-one.
   keeps its earlier `InvalidWhileParked` refusal). A moving MoveAxis supersedes its own axis's pulse
   (`supersede_pulse_locked()`: takes the pulse's state and sequence, `cancel()`s the slot, no join); the
   pulse body checks its sequence under `mutex_` before every exchange and sends that axis nothing more.
-  `MoveAxis(axis, 0)`, slews, sync, AbortSlew and disconnect still cancel and join the pulse. Tests:
+  A goto, Park or FindHome supersedes both pulses the same way inside `claim_slew_slot_locked()` (#2416),
+  and a PulseGuide the older pulse on its axis (the sequence bump plus a claim on the axis, which ends a
+  dispatch stop-wait the old pulse is parked in); a slew start the slot refuses after superseding a pulse
+  stops both axes, as for a slew body in flight. `MoveAxis(axis, 0)`, sync, AbortSlew and disconnect still
+  cancel and join the pulse. Tests:
   `[motion-owner]`, and `SkyWatcher async - a pulse on the other axis does not supersede a MoveAxis
   stop-wait (#2067)`.
 - **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins

@@ -1038,9 +1038,6 @@ public:
         bool park_altaz = false;
         double park_target_first = 0.0;
         double park_target_second = 0.0;
-        // A pulse stop body takes mutex_, so its join runs without it. The slew body is not joined: the claim
-        // below supersedes it.
-        join_pulse_bodies();
         bool displaced = false;
         bool prev_slewing = false;
         bool prev_at_home = false;
@@ -1049,8 +1046,6 @@ public:
         auto prev_override = util::TaskClock::clock::time_point::min();
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            // A refusal below (the park position read) clears the windows of pulses the join just cut short.
-            const CutShortPulseRelease cut_short(*this, -1);
             check_connected();
             if (parked_ || parking_) {
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
@@ -1077,8 +1072,11 @@ public:
                 park_target_second = park_dec_degrees_;
                 util::validate_ra_dec(park_target_first, park_target_second, "Park");
             }
-            // Nothing below throws: claim only now, so a refused Park leaves the body in flight alone.
-            displaced = claim_slew_slot_locked();
+            // Nothing below refuses: supersede and claim only now, so a refused Park leaves the body and the pulses
+            // in flight alone.
+            const bool pulse_stopped = supersede_pulses_for_slew_locked(lock);
+            check_connected();
+            displaced = claim_slew_slot_locked() || pulse_stopped;
             // Snapshot what the block below overwrites, for a refused start.
             prev_slewing = slewing_cached_;
             prev_at_home = at_home_;
@@ -1407,13 +1405,14 @@ public:
         {
             const auto axis_index = static_cast<std::size_t>(axis);
             if (!ctx.wait_for(std::chrono::milliseconds(duration))) {
-                // Superseded by a replacement pulse or a moving MoveAxis on this axis (supersede_pulse_locked()): the
-                // newer command owns the axis, so this body sends nothing and touches no state (decision 0006 rule
-                // 6, #2263). Its rate is already replaced on the wire.
+                // Superseded by a replacement pulse or a moving MoveAxis on this axis, or by a slew or Park
+                // (supersede_pulse_locked()): the newer command owns the axis, so this body sends nothing and touches
+                // no state (decision 0006 rule 6, #2263). Its rate is already replaced on the wire, or the slew or Park
+                // sends the stop it owed (supersede_pulses_for_slew_locked(), #2416).
                 if (ctx.stop_reason() == util::StopReason::Superseded) {
                     return;
                 }
-                // Cancelled by MoveAxis(axis, 0), a slew, Park, AbortSlew, disconnect or
+                // Cancelled by MoveAxis(axis, 0), AbortSlew, disconnect or
                 // destruction. Still make a best-effort attempt to stop the
                 // axis before exiting — the mount would otherwise keep slewing.
                 // AbortSlew restores tracking itself; teardown must not. A failed stop is logged and the axis
@@ -1557,15 +1556,12 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates", &lock});
         }
-        join_pulse_bodies();
         std::unique_lock<std::mutex> lock(mutex_);
-        {
-            // A refusal here clears the windows of pulses the join just cut short; the clear below consumes them.
-            const CutShortPulseRelease cut_short(*this, -1);
-            check_connected();
-            clear_pulse_guiding_locked();
-        }
+        check_connected();
         check_not_parked_locked("SlewToCoordinates");
+        supersede_pulses_for_slew_locked(lock);
+        check_connected();
+        clear_pulse_guiding_locked();
         claim_slew_slot_locked();
         parking_ = false;  // a park body in flight no longer clears it: the claim ended it
         const util::MotionClaim claim = claim_motion_locked(util::MotionCommand::Slew);
@@ -1595,9 +1591,6 @@ public:
         uint32_t dec_raw = 0;
         bool precise = false;
         util::MotionClaim claim;
-        // A pulse stop body takes mutex_, so its join runs without it. The slew body is not joined: the claim
-        // below supersedes it.
-        join_pulse_bodies();
         bool displaced = false;
         bool prev_slewing = false;
         bool prev_at_home = false;
@@ -1606,12 +1599,12 @@ public:
         std::optional<util::MotionClaim> prev_refining;
         auto prev_override = util::TaskClock::clock::time_point::min();
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // A refusal below clears the windows of pulses the join just cut short.
-            const CutShortPulseRelease cut_short(*this, -1);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            displaced = claim_slew_slot_locked();
+            const bool pulse_stopped = supersede_pulses_for_slew_locked(lock);
+            check_connected();
+            displaced = claim_slew_slot_locked() || pulse_stopped;
             parking_ = false;  // a park body in flight no longer clears it: the claim ended it
             claim = claim_motion_locked(util::MotionCommand::Slew);
             prev_refining = refining_claim_;
@@ -2427,10 +2420,10 @@ private:
         join_pulse_bodies();
     }
 
-    // The pulse stop bodies take mutex_ (after an RA stop, to restore tracking, and on failure), so the slews, Park,
-    // AbortSlew and the lifecycle paths end them by cancelling and joining with no driver mutex held (decision 0006,
-    // "Pulse and rate-check slots"); MoveAxis(axis, 0) joins its own axis's. A replacement pulse and a moving
-    // MoveAxis supersede instead (supersede_pulse_locked()).
+    // The pulse stop bodies take mutex_ (after an RA stop, to restore tracking, and on failure), so AbortSlew and the
+    // lifecycle paths end them by cancelling and joining with no driver mutex held (decision 0006, "Pulse and
+    // rate-check slots"); MoveAxis(axis, 0) joins its own axis's. A replacement pulse, a moving MoveAxis, a slew and a
+    // Park supersede instead (supersede_pulse_locked(), supersede_pulses_for_slew_locked()).
     void join_pulse_bodies() {
         pulse_ops_[0].cancel_all_and_join();
         pulse_ops_[1].cancel_all_and_join();
@@ -2440,11 +2433,58 @@ private:
     // join. The bump makes the body Superseded and the cancel() wakes it from its wait; it then sends the axis
     // nothing and touches no state (run_pulse_stop_body()). Called under mutex_ once the newer command's rate has
     // landed, before anything lets the old body run again, so a failed command leaves the old pulse to end itself.
+    // A slew or Park, which goes on whatever its stop does, calls it before that stop
+    // (supersede_pulses_for_slew_locked()).
     void supersede_pulse_locked(int axis) {
         // The bump comes before the cancel: a body that the cancel wakes must already read Superseded. Read as
         // Cancelled, it would send its blind stop with no turn, which only a canceller that joins it may allow.
         pulse_generation_[axis].bump();
         pulse_ops_[axis].cancel();
+    }
+
+    // Decision 0006 rule 3 (#2416): a slew or Park supersedes a running pulse and never joins it. The superseded
+    // body sends nothing (run_pulse_stop_body()), so the slew owns the stop that pulse still owed and sends it here,
+    // before its own GOTO. A body parked in its wait returns at once; one queued for its end turn finds itself
+    // superseded at that turn and sends nothing. The stop takes no turn, as the cancelled body's blind stop did:
+    // waiting for a turn the old body may hold or be queued for would be waiting for the body. initiator_mutex_
+    // keeps every newer motion command behind this one, so the stop still lands before any of them. A body that sent
+    // its end just before gets a second stop, which the GOTO follows, as with the cancel. A failed stop is logged; the
+    // slew goes on and owns both axes either way. Returns whether a stop went out. Caller holds mutex_ (released for
+    // the exchange) and initiator_mutex_, after every check that can refuse the command.
+    bool supersede_pulses_for_slew_locked(std::unique_lock<std::mutex>& lock) {
+        std::array<bool, 2> owed{};
+        for (std::size_t axis = 0; axis < owed.size(); ++axis) {
+            owed[axis] = pulse_ops_[axis].running();
+            if (owed[axis]) {
+                supersede_pulse_locked(static_cast<int>(axis));
+            }
+        }
+        if ((!owed[0] && !owed[1]) || !connected_) {
+            return false;
+        }
+        std::array<std::string, 2> errors;
+        without_lock(lock, [&owed, &errors] {
+            for (std::size_t axis = 0; axis < owed.size(); ++axis) {
+                if (!owed[axis]) {
+                    continue;
+                }
+                try {
+                    SynScanProtocolWrapper::instance().move_axis_variable_rate(static_cast<int>(axis), 0.0);
+                } catch (const std::exception& e) {
+                    errors[axis] = e.what();
+                } catch (...) {
+                    errors[axis] = "unknown error";
+                }
+            }
+        });
+        for (std::size_t axis = 0; axis < errors.size(); ++axis) {
+            if (!errors[axis].empty()) {
+                ALPACA_LOG_ERROR("SynScan", "stop of a pulse superseded by a slew failed on axis " +
+                                                std::to_string(axis) +
+                                                "; the axis may still be moving: " + errors[axis]);
+            }
+        }
+        return true;
     }
 
     // Caller holds mutex_, after every check that can refuse the initiator and before it writes its own flags. The
@@ -2684,8 +2724,8 @@ private:
         pulse_cut_short_ = {};
     }
 
-    // Decision 0022 rule 2 (a cancel clears the window): a pulse cut short by MoveAxis(axis, 0), a slew, Park or
-    // AbortSlew leaves its window armed while that canceller runs, because on RA the window is also what keeps
+    // Decision 0022 rule 2 (a cancel clears the window): a pulse cut short by MoveAxis(axis, 0) or AbortSlew leaves
+    // its window armed while that canceller runs, because on RA the window is also what keeps
     // refresh_tracking_mode_locked() from reading the `t` 0 the blind stop left. A canceller that goes on clears the
     // window itself (a new arm, its success clear); one that fails or is refused clears it here, on its way out, so
     // IsPulseGuiding does not stay true over a stopped axis. On RA the owed restore moves to ra_stop_unconfirmed_: the
@@ -4203,8 +4243,8 @@ private:
     // (and join) before any member their bodies touch. The slew slot carries
     // slew, Park and the refinement passes; each axis has its own pulse slot and
     // generation, so a pulse on one axis never supersedes the other's. A
-    // replacement pulse or a moving MoveAxis bumps its own axis's generation
-    // (supersede_pulse_locked()).
+    // replacement pulse or a moving MoveAxis bumps its own axis's generation,
+    // a slew or Park both (supersede_pulse_locked()).
     util::OperationGeneration slew_generation_;
     util::AsyncOperation slew_{"SynScan slew", slew_generation_, clock_};
     util::OperationGeneration poll_generation_;

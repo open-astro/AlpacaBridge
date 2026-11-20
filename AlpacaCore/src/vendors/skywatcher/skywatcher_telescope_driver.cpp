@@ -1571,7 +1571,6 @@ public:
                 return;
             }
         }
-        stop_pulse_ops();
         bool displaced = false;
         uint64_t home_error_epoch = 0;
         util::MotionClaim claim;
@@ -1676,7 +1675,7 @@ public:
     // turns true when the slew completes and tracking is stopped.
     void park() override {
         // Serialize against other initiators (SlewToCoordinatesAsync): the
-        // check-then-reap-then-spawn sequence must not interleave with
+        // check-then-claim-then-spawn sequence must not interleave with
         // another initiator's, or a park could be cancelled and restarted
         // (or a slew could clobber a park) in the gap.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
@@ -1691,7 +1690,6 @@ public:
                 return;  // calling Park twice (or while parking) is harmless
             }
         }
-        stop_pulse_ops();
         double target_ra_axis = 0.0;
         double target_dec_axis = 0.0;
         bool displaced = false;
@@ -1779,7 +1777,7 @@ public:
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         // open-astro#620: serialize against the other async initiators
         // (Park, SlewToCoordinatesAsync) so PulseGuide's own
-        // check -> reap -> spawn sequence cannot interleave with theirs.
+        // check -> supersede -> spawn sequence cannot interleave with theirs.
         // Taken BEFORE io_mutex_ and mutex_ (precedent: park(), slew_to_coordinates_async()) --
         // never taken while either is held (see initiator_mutex_'s comment).
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
@@ -1853,6 +1851,12 @@ public:
             // dead-reckoned live reads report exactly that.
 
             const int ai = axis - 1;  // 0=RA, 1=Dec (open-astro#620)
+            // #2416, decision 0006 rule 3: a pulse still running on this axis is superseded, never joined. The
+            // sequence bump below makes its body send the axis nothing more; this claim ends a dispatch stop-wait
+            // it is parked in, which checks its claim, not the sequence. The other axis's pulse runs on.
+            if (pulse_ops_[ai].running()) {
+                static_cast<void>(claim_axis_locked(axis));
+            }
             pulse_axis_active_[ai] = true;
             pulse_axis_in_motion_[ai] = true;
             my_seq = ++pulse_seq_[ai];
@@ -1861,13 +1865,11 @@ public:
         }
 
         const int ai = axis - 1;  // 0=RA, 1=Dec (open-astro#620)
-        // Stop-the-pulse timer body: one slot per axis, never detached. Ends
-        // only THIS axis's body: a Dec pulse must not cancel a running RA
-        // pulse's body (open-astro#620), unlike goto/park/home/abort/sync/
-        // disconnect, which own and re-command both axes. initiator_mutex_
-        // keeps a second pulse_guide() from starting between this join and the
-        // start() below; mutex_ is not held (AsyncOperation rule 10).
-        pulse_ops_[ai].cancel_all_and_join();
+        // Stop-the-pulse timer body: one slot per axis, never detached. The
+        // start() below replaces only THIS axis's body, which the dispatch
+        // lock has already superseded: a Dec pulse must not end a running RA
+        // pulse's body (open-astro#620). mutex_ is not held (AsyncOperation
+        // rule 10).
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
@@ -1879,14 +1881,15 @@ public:
             // re-commands the axes itself.
             const auto stopped_by_other = [&ctx] { return ctx.stop_reason() != util::StopReason::None; };
             const auto may_resend_locked = [&stopped_by_other] { return !stopped_by_other(); };
-            // #2263: a MoveAxis on this axis took the pulse over (supersede_pulse_locked()) without waiting
-            // for this body. From then on the body sends its axis nothing; checked under mutex_ before every
-            // exchange. A reaper's cancel is not this: its join waits for the stop below to finish.
+            // #2263, #2416: a newer pulse or a moving MoveAxis on this axis, or a goto, Park or FindHome, took
+            // the pulse over (supersede_pulse_locked()) without waiting for this body. From then on the body
+            // sends its axis nothing; checked under mutex_ before every exchange. A reaper's cancel is not this:
+            // its join waits for the stop below to finish.
             const auto superseded_locked = [this, ai, my_seq] { return pulse_seq_[ai] != my_seq; };
             // open-astro#559: a task clears pulse state only while its pulse
             // is still the current one. A superseding pulse sets both flags
-            // before it reaps this task, and this task's exit used to clear
-            // them from under it.
+            // before this task ends, and this task's exit used to clear them
+            // from under it.
             auto end_pulse_locked = [this, ai, my_seq]() {
                 if (pulse_seq_[ai] == my_seq) {
                     pulse_axis_active_[ai] = false;
@@ -2386,9 +2389,10 @@ public:
                                              std::chrono::milliseconds(duration) - verify_elapsed)
                                        : std::chrono::milliseconds(0);
             if (!ctx.wait_for(remaining)) {
-                // Cancelled by a reaper (a new pulse/slew/park/home/moveaxis/
-                // abort/disconnect). DO NOT touch the hardware here: the
-                // reaper stops or re-commands the axes itself, and a stop or
+                // Superseded (a new pulse, a moving MoveAxis, a slew, Park or
+                // FindHome) or cancelled by a reaper (MoveAxis(axis, 0), sync,
+                // abort, disconnect). DO NOT touch the hardware here: the
+                // newer command or the reaper re-commands the axes, and a stop or
                 // step-period restore landing mid-goto corrupted the next
                 // operation (ConformU: "declination axis did not move" on the
                 // first pulse after a slew).
@@ -2418,8 +2422,8 @@ public:
             }
             // Same duration guard as the dispatch check: this one runs after
             // the motion, so it costs no pulse distance, but it does hold the
-            // pulse task ~450 ms (or more) longer, which the next command's
-            // reap must join. Not worth that latency on short guide pulses.
+            // pulse task ~450 ms (or more) longer, which a stop path's join
+            // must wait out. Not worth that latency on short guide pulses.
             if (stopped && restore_still_wanted && !pulse_restart && !restored_by_drive_applier &&
                 duration >= kMinPulseForRateVerifyMs) {
                 // What stop_axis() RE-DERIVED, not the dispatch-time capture.
@@ -2454,10 +2458,13 @@ public:
                 release_pulse_locked(lock);
             }
             if (!stopped) {
+                StateLock lock(lock_gate_);
+                if (superseded_locked()) {
+                    return;  // the retry wait was cut short by the newer owner, whose axis this no longer is
+                }
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
                                                    " attempts on axis " + std::to_string(axis) +
                                                    " — axis may still be moving (mount runaway risk): " + last_error);
-                StateLock lock(lock_gate_);
                 end_pulse_locked();
                 if (connected_) {
                     manual_axis_slewing_[axis - 1] = true;
@@ -6451,10 +6458,16 @@ private:
     // Returns whether a body was in flight (now superseded): only then is there
     // a motion nobody will stop if the start is refused. `claim` is the new
     // operation's claim on both axes, for its SlewClaimScope.
+    // A pulse in flight on either axis is superseded too, without a join
+    // (decision 0006 rule 3, #2416): the goto, Park or FindHome re-commands
+    // both axes, and the pulse body sends neither axis anything more. A pulse
+    // counts as a body in flight, since its axis may be moving at the guide rate.
     bool claim_slew_slot_locked(util::MotionClaim& claim) {
-        const bool displaced = slew_.running();
+        const bool displaced = slew_.running() || pulse_ops_[0].running() || pulse_ops_[1].running();
         slew_generation_.bump();
         claim = motion_owner_.claim(util::MotionCommand::Slew);
+        supersede_pulse_locked(0);
+        supersede_pulse_locked(1);
         parking_ = false;
         homing_ = false;
         // The replaced goto's 8 s Slewing window is not the new operation's
@@ -6628,13 +6641,11 @@ private:
             }
         };
         {
-            // A refused goto must not cancel a goto, park or pulse in flight,
+            // A refused goto must not supersede a goto, park or pulse in flight,
             // so gate BEFORE touching them (the copy below re-checks).
             StateLock gate(lock_gate_);
             check_request_locked();
         }
-        // A stale pulse timer firing mid-goto corrupts the slew.
-        stop_pulse_ops();
         StateLock lock(lock_gate_);
         check_request_locked();
         util::MotionClaim claim;
@@ -6733,11 +6744,12 @@ private:
         pulse_ops_[axis - 1].cancel_all_and_join();
     }
 
-    // #2263, decision 0006 rule 3: a MoveAxis supersedes the pulse on its own axis (`axis` 0 RA, 1 Dec) without
-    // a join. Under mutex_ it takes the pulse's published state (IsPulseGuiding, the hold window) and its
-    // sequence, so the old body owns nothing any more, and cancel()s the slot to wake it. The body checks its
-    // sequence under mutex_ before every exchange (pulse_superseded_locked()) and sends its axis nothing more;
-    // the MoveAxis's own claim makes a dispatch stop-wait it is parked in give up the same way.
+    // #2263, decision 0006 rule 3: a moving MoveAxis supersedes the pulse on its own axis (`axis` 0 RA, 1 Dec)
+    // without a join, and a goto, Park or FindHome both pulses (claim_slew_slot_locked(), #2416). Under mutex_ it
+    // takes the pulse's published state (IsPulseGuiding, the hold window) and its sequence, so the old body owns
+    // nothing any more, and cancel()s the slot to wake it. The body checks its sequence under mutex_ before every
+    // exchange and sends its axis nothing more; the newer command's own claim makes a dispatch stop-wait it is
+    // parked in give up the same way.
     void supersede_pulse_locked(int axis) {
         ++pulse_seq_[axis];
         pulse_axis_active_[axis] = false;
@@ -6746,10 +6758,11 @@ private:
         pulse_ops_[axis].cancel();
     }
 
-    // Both-axes wrapper for the reapers that stop or re-command BOTH axes
-    // afterwards: goto/park/home/abort/disconnect, and sync_to_coordinates(),
-    // which stops both for its ":E" writes. pulse_guide() and move_axis()
-    // command only their own axis and stop only that axis's body
+    // Both-axes wrapper for the stop paths that stop BOTH axes afterwards:
+    // AbortSlew, and sync_to_coordinates(), which stops both for its ":E"
+    // writes (disconnect joins in cancel_async_tasks()). A goto, Park or
+    // FindHome supersedes the pulses instead (claim_slew_slot_locked(),
+    // #2416); MoveAxis(axis, 0) stops only its own axis's body
     // (open-astro#620, open-astro#630). Cancel BOTH before joining either
     // (mirrors cancel_async_tasks()): joining RA first would let the
     // still-uncancelled Dec body run to completion (sending its own
@@ -7003,7 +7016,7 @@ private:
     std::string firmware_cache_;
 
     // Serializes the async initiators (park, slew_to_coordinates_async,
-    // pulse_guide -- open-astro#620) so their check -> reap -> spawn
+    // pulse_guide -- open-astro#620) so their check -> claim -> spawn
     // sequences cannot interleave. Never held by the task threads and never
     // taken while io_mutex_ or mutex_ is held (it comes first in the lock order).
     std::mutex initiator_mutex_;
@@ -7039,10 +7052,11 @@ private:
     util::AsyncOperation slew_{"SkyWatcher slew", slew_generation_, clock_};
     // Pulse guide, one slot per axis (open-astro#620) with a generation of its
     // own each: a pulse start must not supersede the slew body or the other
-    // axis's pulse (decision 0006). A slew, park, home, abort, sync,
-    // MoveAxis(axis, 0) or disconnect ends a pulse by cancelling and joining its
-    // slot (stop_pulse_op[s]); a moving MoveAxis supersedes it without a join
-    // (supersede_pulse_locked(), #2263).
+    // axis's pulse (decision 0006). An abort, sync, MoveAxis(axis, 0) or
+    // disconnect ends a pulse by cancelling and joining its slot
+    // (stop_pulse_op[s]); a newer pulse, a moving MoveAxis, a slew, Park or
+    // FindHome supersedes it without a join (supersede_pulse_locked(), #2263,
+    // #2416).
     util::OperationGeneration pulse_generation_[2];
     util::AsyncOperation pulse_ops_[2] = {{"SkyWatcher pulse guide (RA)", pulse_generation_[0], clock_},
                                           {"SkyWatcher pulse guide (Dec)", pulse_generation_[1], clock_}};

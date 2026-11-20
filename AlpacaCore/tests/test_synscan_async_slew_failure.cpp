@@ -1649,8 +1649,10 @@ TEST_CASE("SynScan hold window - an RA MoveAxis stop that cuts a pulse short kee
     driver->set_connected(false);
 }
 
-// Park with no stored park position reads the position after its join; a read the handset never answers refuses it.
-TEST_CASE("SynScan hold window - a Park refused after cutting a pulse short leaves IsPulseGuiding false",
+// Park with no stored park position reads the position before it claims anything; a read the handset never answers
+// refuses it. #2416: a refused Park supersedes nothing, so the pulse it found keeps its axis and its window and
+// nothing stops it.
+TEST_CASE("SynScan hold window - a refused Park leaves a running pulse alone (#2416)",
           "[synscan][telescope][hold-window][pulseguiding][park]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -1669,11 +1671,13 @@ TEST_CASE("SynScan hold window - a Park refused after cutting a pulse short leav
 
     driver->pulse_guide(0, 3000);  // North: Dec
     REQUIRE(driver->get_is_pulse_guiding());
+    const int rate_commands = st->command_count('P');
     silent_position.store(true);
     REQUIRE_THROWS(driver->park());
     silent_position.store(false);
     CHECK_FALSE(driver->get_at_park());
-    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(st->command_count('P') == rate_commands);  // nothing stopped the pulse's axis
     driver->set_connected(false);
 }
 
@@ -2077,6 +2081,116 @@ TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the repl
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_tracking());
     driver->set_connected(false);
+}
+
+// #2416, decision 0006 rule 3: a slew or Park supersedes a running pulse and never joins it. The Dec pulse's wait has
+// run out and its body is held as it queues for its end-of-pulse wire turn, outside every lock. A join would wait
+// for that body. The slew sends the stop the pulse still owed itself, with no turn, before its GOTO: the
+// asynchronous slew and the Park return with the body still held, the synchronous slew's stop is on the wire while
+// it is. Let go, the superseded body sends nothing, so the axis gets exactly one stop.
+TEST_CASE("SynScan PulseGuide - a slew or Park supersedes a running pulse without a join and stops its axis (#2416)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, Park };
+    for (const Op op : {Op::SlewToCoordinates, Op::SlewToCoordinatesAsync, Op::Park}) {
+        INFO("op " << static_cast<int>(op));
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+
+        const ParkedPulse pulse = start_pulse_parked(clock, *driver, 0, 3000);  // North: Dec
+        // Holds the pulse body, and only it, where it queues for its end turn, until `release` (at most 15 s).
+        auto release = std::make_shared<std::promise<void>>();
+        auto released = release->get_future().share();
+        auto held = std::make_shared<std::promise<void>>();
+        auto held_once = std::make_shared<std::atomic<bool>>(false);
+        const std::thread::id body = pulse.body;
+        alpacacore::vendor::synscan::set_wire_turn_wait_hook_for_testing(*driver, [body, released, held, held_once] {
+            if (std::this_thread::get_id() == body && !held_once->exchange(true)) {
+                held->set_value();
+                released.wait_for(std::chrono::seconds(15));
+            }
+        });
+        clock.advance(std::chrono::milliseconds(3000));  // the pulse's wait runs out
+        REQUIRE(held->get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        const int stops = zero_rate_commands(*st, 17);
+        const int gotos = st->goto_count.load();
+
+        std::atomic<bool> done{false};
+        std::atomic<bool> threw{false};
+        std::thread initiator([&] {
+            try {
+                if (op == Op::SlewToCoordinates) {
+                    driver->slew_to_coordinates(5.5, 20.0);
+                } else if (op == Op::SlewToCoordinatesAsync) {
+                    driver->slew_to_coordinates_async(5.5, 20.0);
+                } else {
+                    driver->park();
+                }
+            } catch (const alpacacore::AlpacaException&) {
+                threw.store(true);
+            }
+            done.store(true);
+        });
+        // Past the pulse: returned (asynchronous), or its stop is on the wire (synchronous).
+        const bool past_pulse = op == Op::SlewToCoordinates
+                                    ? wait_until([&] { return zero_rate_commands(*st, 17) > stops; }, 2000)
+                                    : wait_until([&] { return done.load(); }, 2000);
+        const bool body_still_held = pulse.ended.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+        const int stops_while_held = zero_rate_commands(*st, 17);
+        release->set_value();
+        CHECK(past_pulse);
+        CHECK(body_still_held);
+        CHECK(stops_while_held == stops + 2);  // one stop (two zero-rate commands), the slew's
+        CHECK(returned(pulse));
+        CHECK(wait_until([&] { return st->goto_count.load() > gotos; }, 5000));
+        CHECK(zero_rate_commands(*st, 17) == stops + 2);  // the superseded body sent no stop of its own
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        // The synchronous slew waits for its landing on the clock; the asynchronous ones have returned.
+        CHECK(advance_until(clock, [&] { return done.load(); }));
+        initiator.join();
+        CHECK_FALSE(threw.load());
+        alpacacore::vendor::synscan::set_wire_turn_wait_hook_for_testing(*driver, {});
+        driver->set_connected(false);
+    }
+}
+
+// #2416: a slew start the slot refuses after the initiator stopped a superseded RA pulse puts handset tracking back.
+// The RA pulse rate replaced tracking on the handset, and the superseded body sends no restore, so the refusal's
+// stop restores the mode, as for a body in flight.
+TEST_CASE("SynScan PulseGuide - a refused slew start after superseding an RA pulse restores handset tracking (#2416)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    enum class Op { SlewToCoordinatesAsync, Park };
+    for (const Op op : {Op::SlewToCoordinatesAsync, Op::Park}) {
+        INFO("op " << static_cast<int>(op));
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_tracking_driver(clock, server.port());
+        const int mode = st->tracking_mode.load();
+        REQUIRE(mode > 0);
+
+        start_pulse_parked(clock, *driver, 3, 3000);  // West: RA
+        REQUIRE(st->tracking_mode.load() == 0);       // the pulse rate replaced tracking on the handset
+        alpacacore::vendor::synscan::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        require_alpaca_error(
+            [&] {
+                if (op == Op::SlewToCoordinatesAsync) {
+                    driver->slew_to_coordinates_async(5.5, 20.0);
+                } else {
+                    driver->park();
+                }
+            },
+            alpacacore::AlpacaError::DriverException);
+        CHECK(st->tracking_mode.load() == mode);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        alpacacore::vendor::synscan::set_slew_spawn_for_testing(*driver, nullptr);
+        driver->set_connected(false);
+    }
 }
 
 #endif  // _WIN32
