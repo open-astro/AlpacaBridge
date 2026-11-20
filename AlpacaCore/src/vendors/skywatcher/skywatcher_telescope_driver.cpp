@@ -1926,7 +1926,10 @@ public:
                     // The drive RA should run: a continuous rate with no duty rate armed, or (sub-floor or zero)
                     // the duty rate, which the busy setters pre-arm. The restore leaves exactly that, so with no
                     // write in the window nothing is sent. A write that leaves the duty or stopped regime arms
-                    // nothing, and the old regime ran on (#2431 review).
+                    // nothing, and the old regime ran on (#2431 review). The exact `running == eff` test holds
+                    // because the restore stores exactly effective_ra_rate_locked() in cmd_axis_rate_deg_s_[0], so
+                    // equal means nothing changed; a later rounding or clamp of that stored rate must change this
+                    // comparison too, or every pulse end re-sends :I.
                     const double eff = effective_ra_rate_locked();
                     const double running = cmd_axis_rate_deg_s_[0];
                     const bool continuous = std::abs(eff) >= slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
@@ -4836,6 +4839,8 @@ private:
                 if (!stop_axis_and_wait_locked(lock, kAxisDec, claim)) {
                     // Lost in the stop-wait: the command that took Dec (a MoveAxis, say) dead-reckons its own
                     // rate, which this stale one must not replace (#2431 review). Its end re-applies the offset.
+                    // dec_offset_running_ stays true, unlike the zero branch above: the new owner's end re-applies
+                    // the offset through here, and with the flag set it stops the axis first.
                     return;
                 }
             }
