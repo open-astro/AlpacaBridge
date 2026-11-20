@@ -49,13 +49,56 @@ constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
 // (nobody watching a live axis at all) has no other backstop.
 constexpr auto kClientSilenceStopInterval = std::chrono::seconds(30);
 
-// open-astro#2396 AB-9, #2407: the longest one MoveAxis call keeps an axis
-// running. A jog is a human or a client steering by eye; a minute at the
-// fastest rate is tens of degrees, and a client that wants more sends MoveAxis
-// again (each call restarts the cap). On expiry the driver stops the axis and
-// the next Slewing read raises the error. The client-silence stop above covers
-// a client that stops polling; this one covers a client that keeps polling
-// (or another client that does) while the one that started the jog is gone.
+// open-astro#2405: what "the mount is still" means to the shared motion guards (util/motion_guards.h), for the
+// verified stop and the landing gate alike. A status flag alone is never enough: the iOptron HAE29C reports
+// "stopped" 1-2 s before the motion ends (#2396 rig evidence, one GoTo read stopped with Dec still 4.7 deg from its
+// target). So two position reads at least kStillSampleSpacing apart must agree within kStillToleranceArcsec on each
+// axis. 500 ms is two status polls, long enough for a decelerating axis to show its motion; 30 arcsec over 500 ms
+// still passes an axis that drifts at the sidereal rate (about 7.5 arcsec in that time) with tracking off.
+constexpr auto kStillSampleSpacing = std::chrono::milliseconds(500);
+constexpr double kStillToleranceArcsec = 30.0;
+
+// open-astro#2405: the verified stop. The stop is sent, then the mount is read every kStopVerifyPollInterval; a
+// round that has not verified after kStopVerifyBudget / kStopResendRounds sends the stop again, and the stop fails
+// after kStopResendRounds stops (one round each) have not verified it: a stop that does not take within 3 s is a
+// mount the driver no longer controls, and the client must hear that rather than a success. Resending covers a stop
+// lost on the wire. Three rounds within 3 s leave room for a deceleration the status flag reports early (1-2 s on
+// the HAE29C, #2396) while a mount that ignores the stop is reported within seconds.
+constexpr auto kStopVerifyPollInterval = std::chrono::milliseconds(250);
+constexpr int kStopResendRounds = 3;
+constexpr auto kStopVerifyBudget = std::chrono::seconds(3);
+
+// open-astro#2405: the slew deadline. No slew a supported mount runs takes 300 s (a meridian-crossing GOTO on the
+// slowest of them is about two minutes), so a slew still running then is a fault, and the guard stops it. Within
+// that cap a slew whose distance and rate are known gets twice the time it should take plus 10 s for the start and
+// the deceleration; a slew with no known rate gets the cap alone.
+constexpr auto kMaxSlewDuration = std::chrono::seconds(300);
+constexpr double kSlewDeadlineFactor = 2.0;
+constexpr auto kSlewDeadlineMargin = std::chrono::seconds(10);
+
+// open-astro#2405: the MoveAxis dead-man. A MoveAxis runs until the client stops it, so a client that crashed or
+// lost its link leaves the axis moving. 60 s is longer than any manual centring move and far shorter than the time
+// an axis needs to reach a hard stop; the operator may set 5 to 300 s per device. This cap does not replace the
+// client-silence watchdog (kClientSilenceStopInterval) and fixes no silence interval of its own: a shorter silence
+// interval while a MoveAxis runs (#2396 AB-9) stays possible.
 constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
+constexpr auto kMoveAxisDurationMin = std::chrono::seconds(5);
+constexpr auto kMoveAxisDurationMax = std::chrono::seconds(300);
+
+// open-astro#2405: the landing gate's far miss. A mount that has come to rest more than 600 arcsec (10 arcmin) from
+// its target on either axis did not land: the GOTO was refused, stopped at a limit or never ran. Smaller residuals
+// are pointing error a re-GOTO or a sync corrects, not a failure. The Celestron Park arrival check and the SynScan
+// landing refine limit keep their own 600 arcsec copies until those drivers adopt the guards (#2409, #2412).
+constexpr double kLandingFarMissArcsec = 600.0;
+
+// open-astro#2405: the sync bound. A sync re-defines where the mount points, so a sync far from where the mount
+// believes it is (a wrong target, a client that synced to the wrong object, a plate solve of the wrong field) would
+// throw every later GOTO off by that much, with no motion to notice. 5 deg covers any real polar alignment or cone
+// error; the operator may set 1 to 30 deg per device. The bound is the angle on the sky between the two positions,
+// never minutes of RA, so it means the same at every declination, the pole and the CGX home at Dec +90 included
+// (maintainer decision on #2405). 5 deg is the #2396 value; no rig data yet argues for another.
+constexpr double kMaxSyncOffsetDegrees = 5.0;
+constexpr double kSyncOffsetMinDegrees = 1.0;
+constexpr double kSyncOffsetMaxDegrees = 30.0;
 
 }  // namespace alpacacore::util
