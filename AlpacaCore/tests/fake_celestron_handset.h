@@ -38,7 +38,7 @@
 //   position, set-position, PEC and GPS pass-throughs get the unknown-command garbage byte.
 // - Rate moves (fixed 36/37, variable 6/7) are acknowledged and move nothing; they do not end a GOTO.
 // - The clock (h) always answers 12:00:00 on 1 Jan 2026, UTC; the site (w) always answers 0/0; writes change neither.
-// - J (alignment) always answers aligned unless held.
+// - J (alignment) answers aligned unless `aligned` is false, held for j_hold_ms when set.
 
 #ifndef _WIN32
 
@@ -122,6 +122,8 @@ public:
     std::atomic<int> stop_gate_ms{0};
     std::atomic<Clock::rep> stop_gate_entered{0};
     std::atomic<Clock::rep> stop_gate_left{0};
+    /// false: J answers chr(0) (not aligned), so the slew-safety gate refuses a slew or Park until a Sync.
+    std::atomic<bool> aligned{true};
     /// The (j_hold_skip+1)th J read is held j_hold_ms (real time); j_hold_ms < 0 means no hold.
     std::atomic<int> j_hold_ms{-1};
     std::atomic<int> j_hold_skip{0};
@@ -312,9 +314,9 @@ private:
                        static_cast<char>(firmware_minor.load()) + "#";
             case 'm':  // model: chr(model) '#'
                 return std::string(1, static_cast<char>(model_id.load())) + "#";
-            case 'J':  // alignment complete: chr(1) '#' (the slew-safety gate requires it)
+            case 'J':  // alignment complete: chr(1) '#' (the slew-safety gate requires it), chr(0) '#' when not
                 hold_j();
-                return std::string("\x01#", 2);
+                return std::string(aligned.load() ? "\x01#" : "\x00#", 2);
             case 'p':  // pier side: 'W' or 'E' '#'
                 hold_for(pier_hold_ms, &pier_hold_entered, nullptr);
                 return std::string(1, pier_side.load()) + "#";

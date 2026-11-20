@@ -122,10 +122,11 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
     };
 }
 
-// Connects, then starts one slew and one pulse guide and requires that each
+// Connects, then starts one pulse guide and one slew and requires that each
 // reached its slot body and the slew reached the handset. The pulse is longer
 // than one 2.55 s MC_AUX_GUIDE chunk, so its chunk chain runs in the pulse slot. Without this a
-// handset that refuses the GOTO left every storm on the refusal path (#1859).
+// handset that refuses the GOTO left every storm on the refusal path (#1859). The pulse goes
+// first: a PulseGuide during a slew is refused (#2263), and the slew then supersedes the pulse.
 void require_slew_and_pulse_bodies(alpacacore::TelescopeDriver& scope, const Handset& handset,
                                    const alpacacore::test::SlotBodyTracker& slews,
                                    const alpacacore::test::SlotBodyTracker& pulses) {
@@ -133,8 +134,8 @@ void require_slew_and_pulse_bodies(alpacacore::TelescopeDriver& scope, const Han
     const int gotos = handset.gotos.load();
     const int slew_bodies = slews.started();
     const int pulse_bodies = pulses.started();
-    scope.slew_to_coordinates_async(5.0, 20.0);
     scope.pulse_guide(0, 4000);
+    scope.slew_to_coordinates_async(5.0, 20.0);
     REQUIRE(slews.started() > slew_bodies);
     REQUIRE(pulses.started() > pulse_bodies);
     const auto deadline = Clock::now() + std::chrono::seconds(5);
@@ -185,7 +186,8 @@ TEST_CASE("Celestron telescope - concurrent connect/disconnect/slew/pulse stress
 
     // The storm reaches the slew and pulse bodies (#1859): a connected driver
     // accepts one of each, and a Disconnect cancels and joins both before it
-    // returns, the GOTO still "slewing" and the 4 s pulse still chaining.
+    // returns, the GOTO still "slewing" (the 4 s pulse's body, superseded by the
+    // slew, may already have returned).
     require_slew_and_pulse_bodies(*driver, *handset, slews, pulses);
     driver->set_connected(false);
     CHECK(slews.running() == 0);
@@ -249,7 +251,7 @@ TEST_CASE("Celestron telescope - destruction mid-operation (slew/pulse threads l
         alpacacore::test::SlotBodyTracker pulses;
         alpacacore::vendor::celestron::set_slew_spawn_for_testing(*driver, slews.spawn());
         alpacacore::vendor::celestron::set_pulse_spawn_for_testing(*driver, pulses.spawn());
-        // The slew and pulse bodies really are live at destruction (#1859).
+        // The slew body really is live at destruction, and a pulse body was started (#1859; the slew supersedes it).
         require_slew_and_pulse_bodies(*driver, *handset, slews, pulses);
         if ((i % 2) != 0) {
             // Half the time a disconnect is also in flight at destruction —
