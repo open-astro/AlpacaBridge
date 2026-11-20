@@ -286,13 +286,16 @@ public:
             throw AlpacaException("AveragePeriod must be a number of hours of 0 or more", AlpacaError::InvalidValue);
         }
         require_connected();
+        if (caller_hook_) caller_hook_();
         run_command([this, period](util::OperationContext& ctx) {
             client_.put("averageperiod", {{"AveragePeriod", number_text(period)}});
             if (command_hook_) command_hook_();
             // Write-through (decision 0010 rule 2): the next read sees the period before the next poll. A superseded
-            // body writes nothing (decision 0006 rule 6): the newer command's value stands.
+            // body writes nothing (decision 0006 rule 6): the newer command's value stands. Nor does a body whose
+            // caller passed its check before a Disconnect: with no connection there is no frame, and the write's epoch
+            // bump would drop the next Connect's first frame (decision 0010 rule 8, #2446).
             std::lock_guard<std::mutex> lock(mutex_);
-            if (ctx.stop_reason() == util::StopReason::Superseded) return;
+            if (ctx.stop_reason() == util::StopReason::Superseded || !connected_.load()) return;
             snapshot_.write([period](Frame& frame) { frame.average_period = {period, 0, {}}; });
         });
     }
@@ -366,6 +369,9 @@ public:
 
     // Set while no command runs; an AveragePeriod or Refresh body calls it after its PUT, before it touches state.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
+
+    // Set while no command runs; set_average_period() calls it after its NotConnected check, before its body starts.
+    void set_caller_hook(std::function<void()> hook) { caller_hook_ = std::move(hook); }
 
     std::uint64_t command_generation() const { return command_generation_.current(); }
 
@@ -759,6 +765,7 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> poll_paused_{false};
     std::function<void()> command_hook_;  // test seam: set_command_hook_for_testing()
+    std::function<void()> caller_hook_;   // test seam: set_caller_hook_for_testing()
     // Under transition_mutex_: the upstream was told Connect and not yet Disconnect, and its InterfaceVersion then.
     bool forwarded_connect_ = false;
     int forwarded_version_ = 0;
@@ -809,6 +816,12 @@ void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused)
 void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_command_hook(std::move(hook));
+    }
+}
+
+void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_caller_hook(std::move(hook));
     }
 }
 

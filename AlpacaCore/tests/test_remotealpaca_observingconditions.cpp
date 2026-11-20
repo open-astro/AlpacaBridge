@@ -580,3 +580,48 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - the poll waits on the task
     rig.driver->set_connected(false);
     CHECK(rig.clock.waiter_count() == 0);
 }
+
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a write racing a reconnect keeps the Connect's frame",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    // Issue #2446: the caller passes its NotConnected check, then holds while a Disconnect and a Connect run; its body
+    // starts behind the Connect's join of the command slot and writes once the Connect is sampling its first frame.
+    alpacacore::test::Latch caller;
+    alpacacore::test::Latch body;
+    std::atomic<bool> armed{false};
+    std::atomic<bool> writer_done{false};
+    remote::set_caller_hook_for_testing(*rig.driver, [&] { caller.block(); });
+    remote::set_command_hook_for_testing(*rig.driver, [&] { body.block(); });
+    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+        // Only the sample asks TimeSinceLastUpdate, after the Connect's begin_poll().
+        if (request.url.find("timesincelastupdate") != std::string::npos && armed.exchange(false)) {
+            body.release();
+            const auto deadline = std::chrono::steady_clock::now() + kRendezvous;
+            while (!writer_done.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        }
+        return rig.upstream.answer(request);
+    });
+    std::thread writer([&] {
+        rig.driver->set_average_period(0.0);
+        writer_done.store(true);
+    });
+    REQUIRE(caller.wait_entered());
+    rig.driver->set_connected(false);
+
+    // The Connect waits on the clock for the upstream's own connect, after it has joined the command slot.
+    rig.upstream.set("connecting", "true");
+    const auto waits = rig.clock.wait_count();
+    std::thread connect([&] { rig.driver->set_connected(true); });
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, kRendezvous));
+    caller.release();
+    REQUIRE(body.wait_entered());  // the body sent its PUT and holds before its write-through
+    armed.store(true);
+    rig.upstream.set("connecting", "false");
+    rig.clock.advance(std::chrono::milliseconds(100));
+    connect.join();
+    writer.join();
+    REQUIRE(rig.driver->get_connected());
+    // Decision 0010 rule 8: a connected driver holds the Connect's frame.
+    CHECK(rig.driver->get_temperature() == 19.0);
+}

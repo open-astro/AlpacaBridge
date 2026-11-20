@@ -68,6 +68,10 @@ void set_poll_paused_for_testing(ObservingConditionsDriver& driver, bool paused)
 // test can hold a body there. Set it while no command runs.
 void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
 
+// Runs `hook` in the AveragePeriod caller after its NotConnected check, before its body starts, so a test can hold a
+// caller that passed the check while a Disconnect and a Connect run. Set it while no command runs.
+void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
+
 // The command slot's generation: it moves when a command body starts, so a test sees a newer command supersede one.
 std::uint64_t command_generation_for_testing(ObservingConditionsDriver& driver);
 
