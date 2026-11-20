@@ -2277,6 +2277,7 @@ TEST_CASE("iOptron zero search - Slewing and AtHome follow the search until a st
     clock.advance(std::chrono::milliseconds(1100));
     CHECK(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());
+    CHECK(mount.count(":MSH#") == 1);  // it moved, so the stop reads as a pause, not as a search that never started
 
     mount.set_system_status(7);
     clock.advance(std::chrono::milliseconds(1100));
@@ -2327,7 +2328,45 @@ TEST_CASE("iOptron zero search - a search with no status 7 in 120 s is stopped a
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before its bound",
+TEST_CASE("iOptron zero search - a search the mount never starts is sent once more, then stopped",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    // The mount ignored :MSH#: stopped, not at the zero, no motion.
+    mount.set_system_status(0);
+    clock.advance(std::chrono::milliseconds(5100));  // past the hold and the status cache
+    CHECK(driver->get_slewing());                    // this read sends :MSH# once more
+    CHECK(mount.count(":MSH#") == 2);
+    CHECK(mount.count(":Q#") == 0);
+    clock.advance(std::chrono::milliseconds(1100));  // a status read inside the second :MSH#'s own grace
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(mount.count(":MSH#") == 2);
+
+    clock.advance(std::chrono::milliseconds(4000));  // past the second grace, still status 0
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing did not raise a zero search that never started");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("did not start") != std::string::npos);
+    }
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(mount.count(":MSH#") == 2);
+    CHECK_FALSE(driver->get_at_home());
+    driver->abort_slew();
+    CHECK_NOTHROW(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - a second :MSH# that starts the search runs it to the zero",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -2338,10 +2377,141 @@ TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before
 
     driver->find_home();
     mount.set_system_status(0);
+    clock.advance(std::chrono::milliseconds(5100));
+    CHECK(driver->get_slewing());
+    REQUIRE(mount.count(":MSH#") == 2);
+
+    mount.set_system_status(2);  // the second :MSH# started the search
+    clock.advance(std::chrono::milliseconds(5100));
+    CHECK(driver->get_slewing());
+    mount.set_system_status(0);  // a pause after motion is not a search that never started
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_slewing());
+    CHECK(mount.count(":MSH#") == 2);
+
+    mount.set_system_status(7);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_at_home());
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - a status 0 inside the start grace is a search still starting",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    driver->move_axis(0, 0.0);  // keeps the search but closes the slew hold; the start grace is its own
+    mount.set_system_status(0);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_slewing());  // a real read inside the grace: not a search that never started
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(mount.count(":MSH#") == 1);
+
+    mount.set_system_status(2);  // it started late
+    clock.advance(std::chrono::milliseconds(5000));
+    CHECK(driver->get_slewing());
+    mount.set_system_status(0);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_slewing());
+    CHECK(mount.count(":MSH#") == 1);
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - the start check runs when another getter refreshed the status first",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(0);  // the mount ignored :MSH#
+    clock.advance(std::chrono::milliseconds(5100));
+    (void)driver->get_tracking();  // a client that reads Tracking first refreshes the shared status
+    CHECK(driver->get_slewing());  // the start check still runs: :MSH# once more
+    CHECK(mount.count(":MSH#") == 2);
+
+    clock.advance(std::chrono::milliseconds(5100));
+    CHECK_FALSE(driver->get_at_park());  // AtPark refreshes it this time
+    CHECK_FALSE(driver->get_at_home());  // AtHome runs the check too: the second search never started
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    CHECK(mount.count(":MSH#") == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - an initiator's status read does not send :MSH# again",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    // The mount ignored :MSH# and tracks; then past the grace, with no Slewing or AtHome read.
+    mount.set_system_status(1);
+    clock.advance(std::chrono::seconds(6));
+
+    driver->find_home();  // a second FindHome reads the status (a search is running) and sends one :MSH#
+    CHECK(mount.count(":MSH#") == 2);
+    CHECK(mount.count(":Q#") == 0);
+
+    mount.set_system_status(1);
+    clock.advance(std::chrono::seconds(6));
+    REQUIRE_NOTHROW(driver->park());  // its status read must not put a :MSH# ahead of :MP1#
+    CHECK(mount.count(":MSH#") == 2);
+    CHECK(mount.count(":MP1#") == 1);
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - FindHome with no search running sends :MSH# with no status read first",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    CHECK_FALSE(driver->get_at_park());  // the cached status says not parked
+
+    const auto before = mount.commands().size();
+    driver->find_home();
+    const auto commands = mount.commands();
+    const std::vector<std::string> sent(commands.begin() + static_cast<std::ptrdiff_t>(before), commands.end());
+    CHECK(sent == std::vector<std::string>{":MSH#"});
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before its bound",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);  // a running search reads status 2 (HAE29C traces, 2026-11-20)
     clock.advance(std::chrono::seconds(10));
     REQUIRE(driver->get_slewing());
     driver->abort_slew();
     CHECK(mount.count(":Q#") == 1);
+    mount.set_system_status(0);  // the stop
     clock.advance(std::chrono::seconds(1));
     CHECK_FALSE(driver->get_slewing());  // status 0 is the mount's own answer again
     clock.advance(std::chrono::seconds(130));
