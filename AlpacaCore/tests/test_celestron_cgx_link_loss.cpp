@@ -62,6 +62,7 @@ struct LinkLossRig {
         driver = cgx::create_celestron_cgx_telescope(0, info, clock);
         cgx::set_state_poll_paused_for_testing(*driver, true);  // the poll body waits its ticks and probes nothing
         driver->set_connected(true);
+        REQUIRE(clock.wait_for_waiters(1, 2s));  // Connect only spawns the poll; idle counts must include it (#2447)
         driver->find_home();
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
@@ -294,6 +295,7 @@ struct HangupRig {
     // Connected and homed, so the reference is valid until the loss.
     void connect_and_home() {
         driver->set_connected(true);
+        REQUIRE(clock.wait_for_waiters(1, 2s));  // Connect only spawns the poll; idle counts must include it (#2447)
         driver->find_home();
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);

@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -90,9 +91,13 @@ inline void reset_gphoto_sensor_cache() {
  * the priming path it means to exercise. (AlpacaHTTP solves the same
  * CWD-sharing problem with per-test WORKING_DIRECTORY; the Catch2 tests here
  * are all one binary, so key separation is the equivalent.)
+ * The serial makes each call unique too: a sibling's read-modify-write of the
+ * file can restore a line this process's reset removed (issue #2448), and that
+ * line must not match a later connect's model.
  */
 inline std::string unique_test_model(const std::string& base) {
-    return base + " [pid " + std::to_string(::getpid()) + "]";
+    static std::atomic<int> serial{0};
+    return base + " #" + std::to_string(++serial) + " [pid " + std::to_string(::getpid()) + "]";
 }
 
 /**
