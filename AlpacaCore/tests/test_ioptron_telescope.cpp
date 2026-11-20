@@ -3383,6 +3383,7 @@ TEST_CASE("iOptron MoveAxis - a positive secondary rate raises Declination on bo
             driver->set_connected(false);
         }
     }
+}
 
 // Issue #2063: an async GOTO that nobody polls leaves slew_in_progress_ set after the mount stopped.
 TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after an unpolled async GOTO finished",
