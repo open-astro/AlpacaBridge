@@ -2317,7 +2317,8 @@ TEST_CASE("iOptron zero search - a search with no status 7 in 120 s is stopped a
         CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(e.what()).find("zero sensor search") != std::string::npos);
     }
-    CHECK(mount.count(":Q#") == 1);
+    // This read or the bound's own watchdog (issue #2432), whichever came first, sent the one stop.
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK_FALSE(driver->get_at_home());
     // Kept until the client acts on it (ASCOM async FAQ): AbortSlew clears it.
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
@@ -2380,8 +2381,9 @@ TEST_CASE("iOptron zero search - MoveAxis rate 0 keeps the search and its bound"
     CHECK_FALSE(driver->get_at_home());
     clock.advance(std::chrono::seconds(115));
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
-    CHECK(mount.count(":Q#") == 1);
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));  // this read or the watchdog (#2432) stopped it
     driver->set_connected(false);
+    CHECK(mount.count(":Q#") == 1);
 }
 
 TEST_CASE("iOptron zero search - other models keep :MH# and the at-home return",
@@ -2420,6 +2422,138 @@ TEST_CASE("iOptron zero search - a parked HAE29C refuses FindHome and sends no s
     require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(mount.count(":MSH#") == 0);
     driver->set_connected(false);
+}
+
+// Issue #2432: the bound does not wait for a client to read the status. A client that sends FindHome and never
+// polls (or a client that has gone away) still gets the :Q# at 120 s, and Slewing keeps the failure.
+TEST_CASE("iOptron zero search - the bound stops a search that no client polls",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    // The watchdog's thread, from the slot's spawn seam: start() spawns it on this thread, inside find_home().
+    std::thread::id watchdog_thread;
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [&watchdog_thread](std::function<void()> body) {
+        std::thread thread(std::move(body));
+        watchdog_thread = thread.get_id();
+        return thread;
+    });
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    mount.set_system_status(2);  // still searching, and nobody reads it
+    // The body reads the clock, then registers its wait: an advance before that would move its wake past the bound.
+    REQUIRE(clock.wait_for_waiter_thread(watchdog_thread, std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(119));
+    CHECK(mount.count(":Q#") == 0);
+
+    clock.advance(std::chrono::seconds(2));
+    // The stop goes out on the driver's own thread, so the case waits for the fake to record it.
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing did not raise the zero search timeout");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("zero sensor search") != std::string::npos);
+    }
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2432: a FindHome while an earlier search is past its bound. The FindHome's own status read (or the
+// bound's stop, when it got there first) stops the old search, then the new :MSH# goes out, and the old failure
+// does not outlive the new command.
+TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it and starts a new one",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MSH#") == 1);
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(121));  // past the bound, with no status read
+
+    REQUIRE_NOTHROW(driver->find_home());
+    CHECK(mount.count(":Q#") == 1);
+    REQUIRE(mount.count(":MSH#") == 2);
+    const auto commands = mount.commands();
+    const auto stop = std::find(commands.begin(), commands.end(), ":Q#");
+    const auto second_search =
+        std::find(std::next(std::find(commands.begin(), commands.end(), ":MSH#")), commands.end(), ":MSH#");
+    CHECK(stop < second_search);
+
+    // The new search runs, with no failure kept from the old one, and has a bound of its own.
+    CHECK(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());
+    clock.advance(std::chrono::seconds(119));
+    CHECK(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2432: the slot that holds the bound cannot start (no thread). A zero search with no bound must not run, so
+// FindHome stops the mount it has just sent searching and throws, and Slewing keeps the failure.
+TEST_CASE("iOptron zero search - a FindHome whose bound cannot start stops the search and throws",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    const std::string message =
+        alpacacore::test::alpaca_error_message([&] { driver->find_home(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("watchdog could not start") != std::string::npos);
+    CHECK(message.find("the mount was stopped") != std::string::npos);
+    CHECK(mount.count(":MSH#") == 1);
+    CHECK(mount.count(":Q#") == 1);
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    driver->set_connected(false);
+}
+
+// Issue #2432: the bound's watchdog is the first to stop an overdue search, and a status read past the bound is the
+// backstop. Here the watchdog's thread is held, so the client's Slewing read is the one that stops the search; the
+// watchdog, once released, finds no search left and sends nothing.
+TEST_CASE("iOptron zero search - a status read past the bound stops the search while the watchdog is held",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    HeldSlewBody watchdog;  // released before the driver joins its slot
+    io::set_zero_search_watchdog_spawn_for_testing(*driver, [gate = watchdog.gate](std::function<void()> body) {
+        return std::thread([body = std::move(body), gate] {
+            gate.wait();
+            body();
+        });
+    });
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(121));
+    CHECK(mount.count(":Q#") == 0);
+    const std::string message = alpacacore::test::alpaca_error_message([&] { (void)driver->get_slewing(); },
+                                                                       alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("zero sensor search") != std::string::npos);
+    CHECK(mount.count(":Q#") == 1);
+
+    watchdog.release();
+    driver->set_connected(false);  // joins the watchdog
+    CHECK(mount.count(":Q#") == 1);
 }
 
 // The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 1.6 s at the
