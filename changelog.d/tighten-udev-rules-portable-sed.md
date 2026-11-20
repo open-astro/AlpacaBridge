@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **The udev tightening script runs on macOS** (scripts, issue #2290 follow-up): `scripts/tighten_udev_rules.sh` used GNU `sed -i`, which BSD sed reads as a backup suffix, so `check_docs_drift.py` check 31 failed on a Mac with "sed: -e: No such file or directory". It now writes sed's output to a temporary file and copies it back, which both seds accept; the rules the `.deb` installs are unchanged.
