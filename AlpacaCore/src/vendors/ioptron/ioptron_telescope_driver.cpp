@@ -1299,16 +1299,25 @@ public:
             cmd << ":SR" << arrow_speed << "#";
             protocol.send_command_blind(cmd.str());
         }
+        // Issue #2424: a positive rate turns the tube east on axis 0 (the reported RightAscension rises) and north
+        // on axis 1 (the reported Declination rises), the convention in ascom-contract.instructions.md.
         if (axis == 0) {
+            // iOptron calls :mw# "RA+" and :me# "RA-" (RS-232 v3.10). RA+ raises RA despite the letter: the :ZS (RA+)
+            // and :ZQ (RA-) GOTO trim closes the HAE16/HAE29C landing error that way, and INDI found :mw# raises RA on
+            // a CEM120. Not yet checked on a rig for MoveAxis (#2424).
             if (rate > 0.0) {
-                protocol.send_command_blind(":mw#"); // RA+ (west)
+                protocol.send_command_blind(":mw#");  // RA+: RA rises, tube turns east
             } else if (rate < 0.0) {
-                protocol.send_command_blind(":me#"); // RA- (east)
+                protocol.send_command_blind(":me#");  // RA-: RA falls, tube turns west
             } else {
                 protocol.send_command_blind(":qR#"); // stop RA
             }
         } else if (axis == 1) {
             if (rate > 0.0 || rate < 0.0) {
+                // :ms# is iOptron's "Dec+" and :mn# "Dec-", a mechanical sense. The Dec pulse-guide polarity picks
+                // the command (shared with pulse_guide(), which this does not change): dec_guide_inverted_ (true; its
+                // calibration is never called) and the :GEP# pier digit, so north is :mn# on side 0 and :ms# on
+                // side 1. Not yet checked on a rig (#2424).
                 bool north = (rate > 0.0);
                 bool invert_dec = dec_guide_inverted_;
                 refresh_position_cache_locked();

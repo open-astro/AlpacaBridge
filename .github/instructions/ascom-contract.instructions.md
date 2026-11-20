@@ -38,6 +38,10 @@ is refused before the GOTO is ever sent.
 
 On the Sky-Watcher direct driver a positive `MoveAxis` rate on axis 0 moves the tube east (the reported RightAscension rises) and a positive rate on axis 1 moves it north (the reported Declination rises), in both hemispheres and on both pier sides, as `indi-eqmod` does. The hemisphere and Dec branch come from `sky_move_axis_rate_locked()`, which reuses `ra_axis_sign_locked()` and the pulse-guide Dec rule. A client needs no reverse toggle: NINA's "Primary Reversed" stays off. Goto, tracking and guiding are unchanged. Tests: `test_skywatcher_pointing.cpp`, `[moveaxis]`.
 
+### iOptron MoveAxis signs (issue #2424)
+
+The iOptron mount follows the same convention. A positive rate on axis 0 sends `:mw#`, which iOptron labels "RA+": the reported RightAscension rises and the tube turns east. A negative rate sends `:me#` ("RA-"). The letters mislead, but the sign is backed by three sources: iOptron's RS-232 v3.10 labels, the GOTO trim, where `:ZQ` ("RA-") lowers RA on the HAE16 and HAE29C, and INDI's finding that `:mw#` raises RA on a CEM120 (indilib/indi `91bda0d00`). A positive rate on axis 1 is meant to raise the reported Declination on both pier sides. The driver sends `:mn#` when the `:GEP#` pier digit is 0 and `:ms#` when it is 1, through the Dec pulse-guide polarity (`dec_guide_inverted_`, `should_flip_dec_for_pier_locked()`). No rig has checked MoveAxis on either axis yet; the #2424 rig steps on the HAE29C settle it. The southern hemisphere is untested on any rig. NINA's "Primary Reversed" stays off. Tests: `test_ioptron_telescope.cpp`, `[moveaxis]`; the fake steps its position on each arrow command (`fake_ioptron_mount.h`).
+
 ### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
 
 ASCOM treats the two target properties as separate: each getter must refuse a read
