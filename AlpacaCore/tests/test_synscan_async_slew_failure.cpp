@@ -1824,6 +1824,7 @@ TEST_CASE("SynScan PulseGuide - a second pulse on an axis supersedes the first w
         const ParkedPulse first = start_pulse_parked(clock, *driver, a.direction, 3000);
         const int stops = zero_rate_commands(*st, a.device);
         const int tracking_writes = st->command_count('T');
+        const auto replacement = name_next_pulse_body(*driver);
         driver->pulse_guide(a.direction, 3000);
         REQUIRE(returned(first));                           // woken by the supersede; a join would also have ended it
         CHECK(zero_rate_commands(*st, a.device) == stops);  // the old body sent no stop: the replacement owns the axis
@@ -1831,12 +1832,15 @@ TEST_CASE("SynScan PulseGuide - a second pulse on an axis supersedes the first w
         CHECK(last_rate_moves(*st, a.device));
         CHECK(driver->get_is_pulse_guiding());
 
-        // The replacement's own end still stops the axis (Dec) or hands it back to tracking (RA).
-        REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        // The replacement's own end still stops the axis (Dec) or hands it back to tracking (RA). IsPulseGuiding
+        // turns false when the pulse window closes on the clock, before the woken body sends its end command, so the
+        // wait for that command is on the handset's log (#2431).
         if (a.device == 17) {
-            CHECK(zero_rate_commands(*st, a.device) > stops);
+            CHECK(step_pulse_to_end(clock, *driver, replacement,
+                                    [&] { return zero_rate_commands(*st, a.device) > stops; }));
         } else {
-            CHECK(st->command_count('T') > tracking_writes);
+            CHECK(step_pulse_to_end(clock, *driver, replacement,
+                                    [&] { return st->command_count('T') > tracking_writes; }));
         }
         driver->set_connected(false);
     }

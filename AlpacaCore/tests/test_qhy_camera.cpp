@@ -3011,6 +3011,60 @@ TEST_CASE("QHY Camera Driver - a disconnect during an exposure stops the SDK exp
     CHECK(fake.call_count("start_single_frame") == arms);
 }
 
+// #2431: a Disconnect that runs while a StartExposure holds its reservation (rule 9) and has not yet published
+// Exposing records an abort for that start, under mutex_, before it looks for a running exposure. The StartExposure
+// is parked in the fake's register_exposure_worker (its last SDK call before session_.start()), and the disconnect in
+// its stop hook, between its stop and disconnect_and_join(). Released in that window, the start runs no body and
+// throws NotConnected. Without the abort, the start published Exposing, its body met disconnecting_ and returned
+// with no image, and ImageReady raised "the exposure ended without an image" until the join cleared it.
+TEST_CASE("QHY Camera Driver - a Disconnect during a reserved StartExposure ends it with NotConnected (#2431)",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    alpacacore::test::Latch disconnect_parked;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "register_exposure_worker");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    alpacacore::vendor::qhy::set_disconnect_stop_hook_for_testing(*driver, [&] { disconnect_parked.block(); });
+
+    std::atomic<int> start_error{-1};
+    std::thread starter([&] { start_error = error_code_of([&] { driver->start_exposure(0.05, true); }); });
+    JoinPumped start_joiner{clock, starter, &gate};
+    REQUIRE(eventually([&] { return gate.entered.load(); }));  // reserved, settings written, not yet Exposing
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+
+    std::atomic<bool> disconnected{false};
+    std::thread disconnector([&] {
+        driver->set_connected(false);
+        disconnected = true;
+    });
+    JoinPumped disconnect_joiner{clock, disconnector};
+    REQUIRE(disconnect_parked.wait_entered());
+    REQUIRE(driver->get_connected());  // the disconnect has not cleared Connected yet
+
+    gate.release = true;
+    starter.join();
+    CHECK(start_error.load() == AlpacaError::NotConnected);
+    CHECK(fake.call_count("start_single_frame") == 0);
+    // Still inside the disconnect: no body ran, so no exposure is in flight and no failure was kept.
+    CHECK(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == 0);
+
+    disconnect_parked.release();
+    step_until(clock, [&] { return disconnected.load(); }, milliseconds(10));
+    REQUIRE(disconnected.load());
+    alpacacore::vendor::qhy::set_disconnect_stop_hook_for_testing(*driver, {});
+
+    driver->set_connected(true);
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == 0);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
 TEST_CASE("QHY Camera Driver - destruction stops the SDK exposure and joins a body inside its frame call",
           "[qhy][camera][unit][taskclock]") {
     FakeTaskClock clock;

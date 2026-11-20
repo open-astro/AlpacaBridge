@@ -749,8 +749,9 @@ TEST_CASE("iOptron iGuider Camera Driver - A failed connect closes the camera", 
 TEST_CASE("iOptron iGuider Camera Driver - Dropped frames do not cut the first-frame wait short",
           "[ioptron][iguider][camera][unit]") {
     Rig rig;
-    // More instant drops than the 3 s budget holds 200 ms reads: the wait is
-    // bounded by the clock, so the frame after them still connects.
+    // More drops than the 3 s budget holds 200 ms reads: the wait is bounded
+    // by the clock, not by a count of reads, so the frame after them still
+    // connects. Each drop takes one 5 ms frame interval of real time (#2431).
     rig.fake.drop_frames = 40;
     rig.camera->set_connected(true);
     CHECK(rig.camera->get_connected());
