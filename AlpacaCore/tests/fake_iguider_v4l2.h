@@ -86,8 +86,13 @@ public:
     /// driver publishing a lost link and the transport actually closing (#1487).
     std::chrono::milliseconds close_delay{0};
     std::chrono::milliseconds frame_interval{5};
-    /// Atomic: this many reads return no frame at once, as the wrapper does for
-    /// an incomplete or error-flagged buffer (it drops it without waiting).
+    /// Atomic: this many reads return no frame, as the wrapper does for an
+    /// incomplete or error-flagged buffer. Each takes one frame_interval, as a
+    /// complete frame does: uvcvideo hands back every buffer at the frame
+    /// cadence, and the wrapper's poll() waits for it before it drops it. A
+    /// drop with no wait took a few nanoseconds, less than one tick of a 24 MHz
+    /// steady_clock (an Apple-silicon arm64 VM), so the driver's first-frame
+    /// wait counted it as a read across a frozen clock (#2431).
     std::atomic<int> drop_frames{0};
     /// Explicit blocking hook, set before connecting: the selected frame is complete but not yet returned.
     std::function<void(std::int32_t)> before_frame_return;
@@ -180,11 +185,11 @@ public:
         check(handle);
         // Harsher than "no frame": the wrapper throws when it is not streaming.
         if (!streaming_) fail("is not streaming");
+        std::this_thread::sleep_for(std::min(timeout, frame_interval));  // the frame cadence, complete or not
         if (drop_frames > 0) {
             --drop_frames;
             return false;
         }
-        std::this_thread::sleep_for(std::min(timeout, frame_interval));
         if (stalled) {
             ++stalled_reads;
             return false;
