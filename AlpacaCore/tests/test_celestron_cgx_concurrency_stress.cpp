@@ -61,7 +61,7 @@ void operate(alpacacore::test::StressCallGuard& guard, alpacacore::AlpacaDriver&
     guard([&] { scope.abort_slew(); });
     guard([&] { scope.park(); });
     guard([&] { scope.unpark(); });
-    guard([&] { scope.sync_to_coordinates(6.0, 30.0); });
+    guard([&] { scope.sync_to_coordinates(6.0, 87.0); });
     guard([&] { scope.set_tracking(true); });
     guard([&] { scope.set_tracking(false); });
 }
@@ -112,7 +112,7 @@ TEST_CASE("Celestron CGX USB telescope - getters read the polled frame through c
         served([&] { static_cast<void>(scope.get_azimuth()); });
         served([&] { static_cast<void>(scope.get_side_of_pier()); });
         served([&] { static_cast<void>(scope.get_device_state()); });
-        motion([&] { scope.sync_to_coordinates(6.0, 30.0); });
+        motion([&] { scope.sync_to_coordinates(6.0, 87.0); });
         motion([&] { scope.abort_slew(); });
     });
     CHECK(alpacacore::test::settle_connected(*driver, false));

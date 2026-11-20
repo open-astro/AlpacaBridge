@@ -297,6 +297,7 @@ if(TARGET alpacacore_celestron)
          test_celestron_cgx_geometry.cpp test_celestron_cgx_telescope.cpp
          test_celestron_cgx_telemetry.cpp
          test_celestron_cgx_link_loss.cpp
+         test_celestron_cgx_goto_safety.cpp
          test_celestron_cgx_getter_wait.cpp
          test_celestron_cgx_concurrency_stress.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
