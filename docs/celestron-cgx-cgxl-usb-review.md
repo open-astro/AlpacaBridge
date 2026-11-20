@@ -342,8 +342,8 @@ Combined validation subsequently passed all 2168 all-vendor Release Core tests
 and all 16 HTTP tests, with the unchanged HTTP suite run in network isolation to
 exclude live discovery responders. The integrated Release binary
 `f11acde940431dbe2d275af9c112a921ca4bb07383654e7d272dafbbcd7783e8` was deployed.
-The [current published ConformU report](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-records a complete pass on 2026-10-15 with both motors 7.18.2214 / model 0x1788:
+The ConformU report published then (since replaced; the [current report](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
+is the 2026-11-11 v6.0.0-beta.2 pass) recorded a complete pass on 2026-10-15 with both motors 7.18.2214 / model 0x1788:
 zero errors, issues or configuration alerts, all 16 extended guide tests and all
 98 response-timing rows passing. DeviceState included UTCDate and took 62 ms.
 Cleanup verified Home with slewing, tracking and guiding off; original settings,

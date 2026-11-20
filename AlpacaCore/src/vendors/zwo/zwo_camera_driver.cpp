@@ -277,6 +277,7 @@ public:
                     for (const auto& cap : dev_.get_control_caps(resolved_id)) {
                         caps[cap.type] = cap;
                     }
+                    shorten_exposure_register(resolved_id, caps);
                     apply_usb_bandwidth(resolved_id, caps, info.name);
                     image_type = select_default_image_type(info, info_valid);
 
@@ -1255,6 +1256,7 @@ private:
     // The status poll's step (Player One's readiness step) and the session's default margin (Player One's grace,
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).
     static constexpr std::chrono::milliseconds kStatusPollInterval{50};
+    static constexpr long kFormatWriteExposureUs = 10'000;  // under the SDK's 100 ms slow-clock threshold
     // Issue #2414: how much earlier than its trigger plus the exposure a frame may be reported ready and still count
     // as fresh. A fresh frame cannot be ready before then except by the sensor rounding the exposure to whole lines
     // (well under 1 ms) and the camera's clock running fast against the host's (crystals hold 50-100 ppm; the 0.1 %
@@ -1741,6 +1743,20 @@ private:
         }
     }
 
+    // ASI SDK 1.41 (rig SDK debug log, ASI120MM Mini): with the exposure register above 100 ms the SDK runs the
+    // sensor at its slowest clock, and a frame-format or USB Limit write there paces RAW16 above the USB Limit
+    // (23.95 MB/s at limit 40 instead of 17.20; frames lose bytes on a Pi 4 USB2 path). The SDK reloads the last
+    // exposure from ASIconfig.xml at every open, so the register is set short before those writes; the pacing then
+    // survives a long exposure, and each exposure writes its own value before it triggers.
+    void shorten_exposure_register(int camera_id,
+                                   const std::unordered_map<ZWOControlType, ZWOControlCaps>& control_caps) {
+        long exposure_us = kFormatWriteExposureUs;
+        if (const auto it = control_caps.find(ZWOControlType::Exposure); it != control_caps.end()) {
+            exposure_us = std::clamp(exposure_us, it->second.min_value, it->second.max_value);
+        }
+        dev_.set_control_value(camera_id, ZWOControlType::Exposure, exposure_us, false);
+    }
+
     // Runs with mutex_ released: the caps and the camera name come from the connect in flight.
     void apply_usb_bandwidth(int camera_id, const std::unordered_map<ZWOControlType, ZWOControlCaps>& control_caps,
                              const std::string& camera_name) {
@@ -1907,6 +1923,7 @@ private:
         if (!adjust_roi_size_locked(max_width, max_height, width, height)) {
             throw AlpacaException("ROI size invalid for binning", AlpacaError::InvalidValue);
         }
+        shorten_exposure_register(active_camera_id, control_caps_);
         dev_.set_roi_format(active_camera_id, width, height, bin_x_, image_type_);
         dev_.set_start_pos(active_camera_id, 0, 0);
         num_x_ = max_width;
@@ -1946,6 +1963,7 @@ private:
         if (valid && is_roi_valid_locked(width, height, start_x_, start_y_)) {
             roi_width_effective_ = adjusted_width;
             roi_height_effective_ = adjusted_height;
+            shorten_exposure_register(active_camera_id, control_caps_);
             dev_.set_roi_format(active_camera_id, adjusted_width, adjusted_height, bin_x_, image_type_);
             // The padded size may change how far the applied start must be
             // shifted to keep the SDK window on-sensor — re-apply it so the
