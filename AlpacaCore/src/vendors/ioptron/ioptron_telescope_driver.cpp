@@ -546,6 +546,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             clear_hold_windows_locked();
             slew_in_progress_ = false;
+            note_unlanded_zero_search_locked();
             driver_motion_ = DriverMotion::None;
             utc_query_supported_ = true;
             pulse_guiding_hold_ra_hours_ = 0.0;
@@ -645,6 +646,7 @@ public:
         tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
         clear_hold_windows_locked();
         slew_in_progress_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
         pulse_guiding_hold_ra_hours_ = 0.0;
         last_ra_read_valid_ = false;
@@ -778,7 +780,8 @@ public:
                 }
                 // Issue #2420: the status 7 a zero search starts from is the false zero
                 // it is there to correct. AtHome only once the search has landed.
-                return driver_motion_ != DriverMotion::HomeSearch && cached_status_.is_at_home;
+                return driver_motion_ != DriverMotion::HomeSearch && cached_status_.is_at_home &&
+                       !home_search_unconfirmed_;
             });
     }
     
@@ -1611,6 +1614,9 @@ public:
 
             ensure_not_parked_locked("FindHome");
             zero_search = zero_search_active();
+            // A new FindHome starts over; a zero search's own status 2 would clear the flag anyway, and a :MH# model
+            // returns below at a status 7 it can trust.
+            home_search_unconfirmed_ = false;
             // Force-refresh: a stale cached is_at_home (e.g. set before a park/
             // unpark cycle, which never touches it) short-circuits the whole home
             // operation and the client then sees AtHome == false. A zero search ignores is_at_home, so it reads the
@@ -1643,6 +1649,7 @@ public:
                 home_search_seen_moving_ = false;
                 home_search_resent_ = false;
                 home_search_start_until_ = clock_.now() + kZeroSearchStartGrace;
+                home_search_next_poll_ = clock_.now() + kZeroSearchPollInterval;
             }
             status_cache_valid_ = false;
             position_cache_valid_ = false;
@@ -1754,6 +1761,7 @@ public:
         }
         slew_in_progress_ = false;
         equatorial_slew_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
         axis_move_active_primary_ = false;
         axis_move_active_secondary_ = false;
@@ -2533,6 +2541,7 @@ private:
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
     }
 
@@ -2744,16 +2753,21 @@ private:
         finalize_wedged_park_locked();
         stop_overdue_zero_search_locked(now);
         note_zero_search_motion_locked();
+        if (!cached_status_.is_at_home) {
+            home_search_unconfirmed_ = false;  // the mount left the 7 a failed search stopped at
+        }
         // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
         // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
         // initiator's override (the firmware can still report its old status just after the command). A Park
         // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
         // Runs after the finalizer, which may have re-read the status.
-        // A zero search (issue #2420) ends only on status 7 past its hold: the false zero it starts from reads 7
-        // too, and what it reports while it runs is unverified, so another no-motion status does not end it.
+        // A zero search (issue #2420) ends only on status 7 past its hold, and only once a status 2 showed it
+        // moving: the false zero it starts from reads 7 too, so a 7 the mount never left is not a landing (a
+        // :MSH# ignored at a false zero would otherwise read as home). A running search reads 2 until it lands, so
+        // another no-motion status does not end it either.
         const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
-        const bool search_running =
-            driver_motion_ == DriverMotion::HomeSearch && (!cached_status_.is_at_home || slew_hold_.active(now));
+        const bool search_running = driver_motion_ == DriverMotion::HomeSearch &&
+                                    (!cached_status_.is_at_home || slew_hold_.active(now) || !home_search_seen_moving_);
         if (!search_running && (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now)))) {
             driver_motion_ = DriverMotion::None;
         }
@@ -2771,7 +2785,8 @@ private:
     // Issue #2432: the watchdog slot (run_zero_search_watchdog()) reads the status at the bound, so this runs then
     // whether or not a client polls; a client's read past the bound that gets here first stops it the same way.
     void stop_overdue_zero_search_locked(std::chrono::steady_clock::time_point now) const {
-        if (driver_motion_ != DriverMotion::HomeSearch || cached_status_.is_at_home || now < home_search_deadline_) {
+        if (driver_motion_ != DriverMotion::HomeSearch || (cached_status_.is_at_home && home_search_seen_moving_) ||
+            now < home_search_deadline_) {
             return;
         }
         stop_zero_search_locked("FindHome: the zero sensor search did not reach the zero position within " +
@@ -2790,25 +2805,27 @@ private:
     // another getter (Tracking, AtPark, TrackingRate) or an initiator refreshed the shared status just before.
     bool zero_search_start_check_due_locked(std::chrono::steady_clock::time_point now) const {
         return driver_motion_ == DriverMotion::HomeSearch && !home_search_seen_moving_ && status_cache_valid_ &&
-               !cached_status_.is_slewing && !cached_status_.is_at_home && now >= home_search_start_until_;
+               !cached_status_.is_slewing && now >= home_search_start_until_;
     }
 
     // A zero search the mount never started. A running search reads status 2 until it lands on 7 (HAE29C traces over
     // USB and Wi-Fi, 2026-11-20). In one Wi-Fi ConformU run the mount ignored :MSH# and read 0 for the whole
     // kZeroSearchTimeout bound. So past its start grace, a status that is neither motion nor the zero, with no motion
     // seen since :MSH#, means the search did not start: send :MSH# once more with a fresh grace, and if that one does
-    // not start either, stop the search with a stored error instead of waiting out the bound. A status 7 is left to
-    // the landing clause: a search from a true zero can be over between two reads. Called only by the getters that
-    // watch the search (Slewing, AtHome), under the operation lock: an initiator's own status read must not put a
-    // :MSH# on the wire just before its command supersedes the search. The grace is its own deadline, not the slew
-    // hold, which MoveAxis clears while the search keeps running.
+    // not start either, stop the search with a stored error instead of waiting out the bound. A status 7 with no
+    // motion seen counts the same: the HAE29C wakes from a power loss at a false zero that reads 7, and a :MSH# it
+    // ignores there must not read as home. Every search traced, from the true zero too, read 2 for at least a
+    // second, and the watchdog reads the status every kZeroSearchPollInterval until it sees one, so a short search
+    // is not missed for want of a client poll. Called by the getters that watch the search (Slewing, AtHome) and
+    // by the watchdog, under the operation lock: an initiator's own status read must not put a :MSH# on the wire
+    // just before its command supersedes the search. The grace is its own deadline, not the slew hold, which
+    // MoveAxis clears while the search keeps running.
     void check_zero_search_started_locked(std::chrono::steady_clock::time_point now) const {
         if (driver_motion_ != DriverMotion::HomeSearch) {
             return;
         }
         note_zero_search_motion_locked();
-        if (home_search_seen_moving_ || cached_status_.is_slewing || cached_status_.is_at_home ||
-            now < home_search_start_until_) {
+        if (home_search_seen_moving_ || cached_status_.is_slewing || now < home_search_start_until_) {
             return;
         }
         if (home_search_resent_) {
@@ -2832,9 +2849,19 @@ private:
         status_cache_valid_ = false;  // the status just read is from before the second :MSH#
     }
 
+    // A zero search that ends before it showed motion (AbortSlew, a superseding command, a connect or disconnect):
+    // the 7 the mount may still read is the false zero it started from, so AtHome must not take it for home.
+    void note_unlanded_zero_search_locked() const {
+        if (driver_motion_ == DriverMotion::HomeSearch && !home_search_seen_moving_) {
+            home_search_unconfirmed_ = true;
+        }
+    }
+
     // Ends the zero search the driver started: sends :Q# and keeps `failure` for Slewing (issue #2420, #2432).
     void stop_zero_search_locked(const std::string& failure) const {
         driver_motion_ = DriverMotion::None;
+        // The search did not land: the 7 the mount may still read is the false zero it started from, not home.
+        home_search_unconfirmed_ = true;
         clear_slew_hold_locked();
         // Stored before the stop goes out: the exchange gives up mutex_, and a reader in that gap must not take
         // the stale status for a finished search.
@@ -2874,11 +2901,12 @@ private:
         }
     }
 
-    // Waits on the task clock for the current search's bound, then reads the status under the operation lock: a
-    // status 7 lands the search there (refresh_status_cache_locked()), anything else stops it with the stored
-    // failure. A status read that fails at the bound stops it too (fail closed); a lost link ends the body, since the
-    // loss already ends the session. Ends at once when no search runs, the driver is disconnected or the slot
-    // stops it.
+    // Until the search shows a status 2, reads the status every kZeroSearchPollInterval and runs the start check
+    // (check_zero_search_started_locked(): one more :MSH#, then a stop). After that it waits on the task clock for
+    // the current search's bound, then reads the status under the operation lock: a status 7 after motion lands the
+    // search there (refresh_status_cache_locked()), anything else stops it with the stored failure. A status read that
+    // fails at the bound stops it too (fail closed); a lost link ends the body, since the loss already ends the
+    // session. Ends at once when no search runs, the driver is disconnected or the slot stops it.
     void run_zero_search_watchdog(util::OperationContext& ctx) {
         while (true) {
             std::chrono::steady_clock::duration remaining{};
@@ -2889,6 +2917,25 @@ private:
                     return;
                 }
                 const auto now = clock_.now();
+                // Until the search shows motion, read its status every kZeroSearchPollInterval and run the start
+                // check, so a short search is seen and an ignored :MSH# is caught with no client polling. A failed
+                // read here is left to the next poll or the bound; a lost link ends the body.
+                const bool polling = zero_search_poll_enabled_.load() && !home_search_seen_moving_;
+                if (now < home_search_deadline_ && polling && now >= home_search_next_poll_) {
+                    home_search_next_poll_ = now + kZeroSearchPollInterval;
+                    try {
+                        refresh_status_cache_locked(true);
+                        // Judged at the time the read started: the status is from then, not from after the
+                        // exchange (which gives up mutex_), so a slow reply cannot push it past a grace it read in.
+                        check_zero_search_started_locked(now);
+                    } catch (const std::exception& e) {
+                        if (link_lost()) return;
+                        ALPACA_LOG_DEBUG("iOptron", std::string("Zero search poll read failed (the next poll or the "
+                                                                "bound retries): ") +
+                                                        e.what());
+                    }
+                    if (driver_motion_ != DriverMotion::HomeSearch) return;
+                }
                 if (now >= home_search_deadline_) {
                     try {
                         refresh_status_cache_locked(true);
@@ -2904,6 +2951,9 @@ private:
                     return;
                 }
                 remaining = home_search_deadline_ - now;
+                if (zero_search_poll_enabled_.load() && !home_search_seen_moving_) {
+                    remaining = std::min(remaining, home_search_next_poll_ - now);
+                }
             }
             if (!ctx.wait_for(remaining)) return;
         }
@@ -3617,6 +3667,7 @@ public:
     void set_zero_search_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         zero_search_watchdog_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_zero_search_poll_for_testing(bool enabled) { zero_search_poll_enabled_.store(enabled); }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
@@ -3873,9 +3924,21 @@ private:
     // :MSH# showed motion (status 2), and :MSH# was already sent a second time (check_zero_search_started_locked()).
     mutable bool home_search_seen_moving_ = false;
     mutable bool home_search_resent_ = false;
+    // A zero search that ended without a landing (the driver stopped it because it never started or its bound
+    // fired, or AbortSlew, a superseding command, a connect or a disconnect ended it before any status 2): AtHome
+    // stays false while the mount reads 7, since that 7 is the false zero, until a new FindHome or a status other
+    // than 7. Kept across a reconnect, which does not move the mount. Under mutex_.
+    mutable bool home_search_unconfirmed_ = false;
     // Until this task-clock instant a zero search with no status 2 yet is still starting: set with each :MSH#.
     mutable std::chrono::steady_clock::time_point home_search_start_until_{};
     static constexpr std::chrono::seconds kZeroSearchStartGrace{5};
+    // The watchdog's status reads until a search shows motion (status 2); the shortest traced search read 2 for
+    // about a second before its 7. Read and written only under the operation lock (the watchdog body, find_home()).
+    mutable std::chrono::steady_clock::time_point home_search_next_poll_{};
+    static constexpr std::chrono::milliseconds kZeroSearchPollInterval{1000};
+    // Test seam (set_zero_search_poll_for_testing): off, the watchdog waits only for the bound, as before the polling,
+    // so a case about client reads is not raced by the watchdog's reads. On in production.
+    std::atomic<bool> zero_search_poll_enabled_{true};
     // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
     static constexpr std::chrono::seconds kZeroSearchTimeout{120};
     // open-astro#575: an async slew that fails AFTER the initiator returned
@@ -4128,6 +4191,12 @@ void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                 std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_zero_search_watchdog_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_zero_search_poll_for_testing(enabled);
     }
 }
 
