@@ -22,6 +22,7 @@
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
@@ -116,6 +117,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     return limits;
 }();
+// #2263: a PulseGuide while a slew, Park or FindHome runs (util::MotionOwner's refusal text).
+constexpr const char* kPulseRefusedText = "PulseGuide is not allowed while a slew, park or home is running";
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -331,7 +334,7 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            ++motion_generation_;
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);
         }
         if (!connected) {
             // State first, then the close: it waits for an exchange in flight, so none sees a closed link, and
@@ -1029,20 +1032,18 @@ public:
             check_connected();
             check_not_parked_locked("FindHome");
         }
-        join_pulse_bodies();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        clear_pulse_guiding_locked();
         check_not_parked_locked("FindHome");
-        claim_slew_slot_locked();  // supersedes a slew or park body in flight; it is not joined
-        const std::uint64_t mine = motion_generation_;
+        claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
+        const util::MotionClaim mine = slew_claim_;
 
         // MC_LEVEL_START (0x0B) — moves each axis to its hardware home switch.
         // Asynchronous: returns immediately, client polls Slewing/AtHome. The initiator lock held here keeps any
         // other initiator out while mutex_ is free for the exchange.
         try {
             const bool sent = send_motion_locked(
-                lock, [this, mine] { return motion_generation_ == mine; },
+                lock, [this, &mine] { return !lost_locked(mine); },
                 [] {
                     auto& protocol = CelestronProtocolWrapper::instance();
                     protocol.level_start(0);
@@ -1096,21 +1097,18 @@ public:
         }
         double park_ra = 0.0;
         double park_dec = 0.0;
-        // A pulse body is joined first (no mutex_ held: it ends its axis late); a slew or park body in flight is
-        // superseded by the claim below, not joined.
-        join_pulse_bodies();
+        // A slew, park or pulse body in flight is superseded by the claim below, not joined (decision 0006 rule 3).
         bool displaced = false;
         bool prev_slewing = false;
         bool prev_homing = false;
         bool prev_at_home = false;
         bool prev_manual[2] = {false, false};
         auto prev_override = util::TaskClock::clock::time_point::min();
-        uint64_t superseded = 0;
-        uint64_t park_generation = 0;
+        util::MotionClaim superseded;
+        util::MotionClaim park_claim;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
-            clear_pulse_guiding_locked();
             if (parked_ || parking_) {
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
@@ -1127,9 +1125,9 @@ public:
             check_slew_safety(lock, "Park");
             // Every check that can refuse Park has run: claim the slot, then snapshot what the block below
             // overwrites (for a refused start) and publish.
-            superseded = motion_generation_;
-            displaced = claim_slew_slot_locked();
-            park_generation = motion_generation_;
+            superseded = live_slew_claim_locked();
+            displaced = claim_slew_locked();
+            park_claim = slew_claim_;
             // Snapshot what the block below overwrites, for a refused start.
             prev_slewing = slewing_cached_;
             prev_homing = homing_;
@@ -1154,19 +1152,19 @@ public:
         }
 
         // Every hook runs with mutex_ held and releases it around its own exchange; whatever takes the park over
-        // (AbortSlew, Unpark, a disconnect) claims the slot, which bumps motion_generation_, and `superseded` reads
-        // that after each hook. A hook that wrote after an exchange tests `still_mine` first.
-        const auto still_mine = [this, park_generation](const util::OperationContext& ctx) {
-            return body_owns_locked(ctx) && motion_generation_ == park_generation;
+        // (AbortSlew, Unpark, a disconnect) cancels or takes the park's claim, and `superseded` reads that after each
+        // hook. A hook that wrote after an exchange tests `still_mine` first.
+        const auto still_mine = [this, park_claim](const util::OperationContext& ctx) {
+            return body_owns_locked(ctx) && !lost_locked(park_claim);
         };
         start_slew_body(
-            [this, park_ra, park_dec, park_generation, still_mine](util::OperationContext& ctx) {
+            [this, park_ra, park_dec, park_claim, still_mine](util::OperationContext& ctx) {
                 std::unique_lock<std::mutex> lock(mutex_);
                 util::ParkSlewHooks hooks;
                 hooks.still_parking = [this] { return connected_ && parking_; };
-                hooks.superseded = [this, park_generation] { return motion_generation_ != park_generation; };
-                hooks.abandon = [this, park_generation] {
-                    if (motion_generation_ == park_generation) {
+                hooks.superseded = [this, park_claim] { return lost_locked(park_claim); };
+                hooks.abandon = [this, park_claim] {
+                    if (!lost_locked(park_claim)) {
                         parking_ = false;
                     }
                 };
@@ -1254,27 +1252,27 @@ public:
     // never has it cut short by a stale stop. try_lock, never a blocking lock: set_connected joins the poll while it
     // holds initiator_mutex_. A changed generation means a newer motion owns the mount and the stale stop is
     // dropped (Superseded). A busy lock means an initiator is dispatching but may not have taken the mount (a sync,
-    // a pulse guide, a motion command that fails validation bump no generation): the stop stays pending (Busy) and
-    // the poll retries it. `generation` is the motion generation the failure was found under.
+    // a refused pulse guide, a motion command that fails validation claim nothing): the stop stays pending (Busy) and
+    // the poll retries it. `claim` is the motion claim the failure was found under.
     enum class StopOutcome : std::uint8_t { Sent, Busy, Superseded };
     struct FailureStop {
         StopOutcome outcome = StopOutcome::Superseded;
         std::string error;  // Sent only
     };
     struct PendingStop {
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         std::string message;
         bool home = false;
     };
 
-    FailureStop stop_park_slew_unless_superseded(std::uint64_t generation) const {
+    FailureStop stop_park_slew_unless_superseded(const util::MotionClaim& claim) const {
         run_failure_stop_hook();
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
         if (!ilock.owns_lock()) {
             bool first_deferral = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                first_deferral = !pending_stop_ || pending_stop_->generation != generation;
+                first_deferral = !pending_stop_ || !same_claim(pending_stop_->claim, claim);
             }
             if (first_deferral) {  // the poll retries every tick; one line per deferred stop
                 ALPACA_LOG_WARN("Celestron",
@@ -1284,8 +1282,8 @@ public:
         }
         std::unique_lock<std::mutex> lock(mutex_);
         std::string stop_error;
-        const bool sent = send_motion_locked(
-            lock, [&] { return motion_generation_ == generation; }, [&] { stop_error = stop_park_slew_wire(); });
+        const bool sent =
+            send_motion_locked(lock, [&] { return !lost_locked(claim); }, [&] { stop_error = stop_park_slew_wire(); });
         if (!sent) {
             ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command owns the mount");
             return {StopOutcome::Superseded, {}};
@@ -1294,23 +1292,23 @@ public:
     }
 
     // Sends the failure stops with mutex_ free and publishes the outcome: Sent finishes the failure, Busy keeps the
-    // stop pending for the next poll tick, Superseded drops it. Busy never writes an older generation over a newer one
-    // (generations only go up): a retry that read the stop before an initiator handed it on leaves it handed on.
-    void send_failure_stop(std::uint64_t generation, const std::string& message, bool home) const {
-        const FailureStop stop = stop_park_slew_unless_superseded(generation);
+    // stop pending for the next poll tick, Superseded drops it. Busy never writes over a stop handed on to a claim
+    // that still holds the mount: a retry that read the stop before an initiator handed it on leaves it handed on.
+    void send_failure_stop(const util::MotionClaim& claim, const std::string& message, bool home) const {
+        const FailureStop stop = stop_park_slew_unless_superseded(claim);
         std::lock_guard<std::mutex> lock(mutex_);
         if (stop.outcome == StopOutcome::Busy) {
-            if (!pending_stop_ || pending_stop_->generation <= generation) {
-                pending_stop_ = PendingStop{generation, message, home};
+            if (!pending_stop_ || same_claim(pending_stop_->claim, claim) || lost_locked(pending_stop_->claim)) {
+                pending_stop_ = PendingStop{claim, message, home};
             }
             return;
         }
-        if (pending_stop_ && pending_stop_->generation == generation) {
+        if (pending_stop_ && same_claim(pending_stop_->claim, claim)) {
             pending_stop_.reset();
         }
         if (stop.outcome == StopOutcome::Sent && connected_) {
             if (home) {
-                finish_home_failure_locked(generation, message, stop.error);
+                finish_home_failure_locked(claim, message, stop.error);
             } else {
                 finish_slew_poll_failure_locked(message, stop.error);
             }
@@ -1333,15 +1331,15 @@ public:
             }
             pending = *pending_stop_;
         }
-        send_failure_stop(pending.generation, pending.message, pending.home);
+        send_failure_stop(pending.claim, pending.message, pending.home);
     }
 
-    // An initiator that took the mount from generation `superseded` and then failed before it sent anything: a stop
-    // still pending under `superseded` stays due under the new generation (only a stop or a motion on the wire, or a
-    // disconnect, drops one).
-    void keep_pending_stop_locked(std::uint64_t superseded) const {
-        if (pending_stop_ && pending_stop_->generation == superseded) {
-            pending_stop_->generation = motion_generation_;
+    // An initiator that took the mount from claim `superseded` (live_slew_claim_locked() before its claim) and then
+    // failed before it sent anything: a stop still pending under `superseded` stays due under the new claim (only a
+    // stop or a motion on the wire, or a disconnect, drops one).
+    void keep_pending_stop_locked(const util::MotionClaim& superseded) const {
+        if (pending_stop_ && same_claim(pending_stop_->claim, superseded)) {
+            pending_stop_->claim = slew_claim_;
         }
     }
 
@@ -1454,11 +1452,11 @@ public:
         ALPACA_LOG_WARN("Celestron", message);
     }
 
-    // `generation` is the motion generation the failing read was taken under.
+    // `claim` is the motion claim the failing read was taken under.
     void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message,
-                        std::uint64_t generation) const {
+                        const util::MotionClaim& claim) const {
         begin_motion_failure_locked(message);
-        without_lock(lock, [&] { send_failure_stop(generation, message, false); });
+        without_lock(lock, [&] { send_failure_stop(claim, message, false); });
     }
 
     // After the stops of a poll-found slew failure went out (`connected_` already holds).
@@ -1480,11 +1478,11 @@ public:
 
     // The FindHome dispatch failure: the hold of a GOTO that FindHome took over ends with it (decision 0022 rule 2).
     void fail_home(std::unique_lock<std::mutex>& lock, const std::string& message) const {
-        const std::uint64_t generation = motion_generation_;
+        const util::MotionClaim claim = slew_claim_;  // the FindHome's own
         slew_hold_.clear();
         begin_home_failure_locked(message);
-        finish_home_failure_locked(
-            generation, message, stop_park_slew(lock, [this, generation] { return motion_generation_ == generation; }));
+        finish_home_failure_locked(claim, message,
+                                   stop_park_slew(lock, [this, &claim] { return !lost_locked(claim); }));
     }
 
     // The two halves of fail_home, for the status poll, which sends the stop between them with mutex_ free
@@ -1498,15 +1496,15 @@ public:
         ALPACA_LOG_WARN("Celestron", message);
     }
 
-    // `message` is what begin_home_failure_locked stored and `generation` the motion generation it ran under; a new
-    // initiator (it bumps the generation) owns the state now, so only the log carries the stop's outcome then.
-    void finish_home_failure_locked(std::uint64_t generation, const std::string& message,
+    // `message` is what begin_home_failure_locked stored and `claim` the motion claim it ran under; once a newer
+    // command took or cancelled it, that command owns the state, so only the log carries the stop's outcome then.
+    void finish_home_failure_locked(const util::MotionClaim& claim, const std::string& message,
                                     const std::string& stop_error) const {
         if (!stop_error.empty()) {
             ALPACA_LOG_ERROR("Celestron",
                              "stop after FindHome failure failed: " + stop_error + "; the mount may still be moving");
         }
-        if (motion_generation_ != generation) {
+        if (lost_locked(claim)) {
             return;
         }
         if (stop_error.empty()) {
@@ -1527,10 +1525,14 @@ public:
         int axis = -1;
         int velocity = 0;
         bool read_pier = false;
-        // Validation only. The pier read, the join and the start below run with mutex_ free (decision 0006).
+        // Validation only. The pier read, the guide write and the start below run with mutex_ free (decision 0006).
         {
             std::lock_guard<std::mutex> lock(mutex_);
             util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", nullptr, true});
+            // #2263: refused while a slew, Park or FindHome runs, before the pier read; the claim below asks again.
+            if (motion_owner_.slew_running()) {
+                throw AlpacaException(kPulseRefusedText, AlpacaError::InvalidOperation);
+            }
 
             // 0 North and 1 South move Dec (axis 1), 2 East and 3 West move RA (axis 0). North and West are positive
             // (East slows tracking, so RA increases on the sky); a rate that rounds to 0 still moves one step.
@@ -1554,25 +1556,26 @@ public:
             }
         }
 
-        int total_cs = duration / 10;
-        int first_chunk_cs = std::min(total_cs, 255);
-
-        // The pulse body never takes mutex_, but joining it waits out the serial transaction it is in: do it
-        // with mutex_ free, so no getter stalls for that long.
-        pulse_ops_[axis].cancel_all_and_join();
+        const int total_cs = duration / 10;
+        const int first_chunk_cs = std::min(total_cs, 255);
 
         std::chrono::milliseconds pulse_length{duration};
-        const auto axis_index = static_cast<std::size_t>(axis);
+        const std::size_t axis_index = axis == 1 ? 1 : 0;  // axis is 0 or 1; spelled out for cppcheck
         const std::size_t other_index = 1 - axis_index;
         // This axis's position hold, armed by a pulse on the other axis that may still be running: the arm below
         // clears it, and a guide write that fails puts it back (that pulse still owns it).
         util::HoldWindow prev_axis_position_hold;
+        std::unique_lock<std::mutex> lock(mutex_);
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
+        // The pulse takes this axis (#2263): an older pulse on it is superseded and woken, never joined (decision 0006
+        // rule 3), and sends nothing more, since its body checks its claim under mutex_ before every chunk. The other
+        // axis's pulse keeps running. Refused here, changing nothing, while a slew, Park or FindHome runs.
+        const util::MotionClaim claim = motion_owner_.claim(util::MotionCommand::PulseGuide, axis, kPulseRefusedText);
+        pulse_ops_[axis_index].cancel();
+        send_cv_.notify_all();
+        prev_axis_position_hold = pg_hold_[axis_index];
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
-            prev_axis_position_hold = pg_hold_[axis_index];
-
-            // Taken after the join: it can last a full transaction timeout, which would leave these stale.
+            // Taken after the pier read: it can last a full transaction timeout, which would leave these stale.
             const bool is_dec_axis = (direction == 0 || direction == 1);
             const double duration_sec = duration / 1000.0;
             const auto now = clock_.now();
@@ -1616,45 +1619,64 @@ public:
             // moment the command can reach the mount. The cross-axis holds above read the other axis's window only.
             pulse_hold_[axis_index].arm(now, pulse_length + kPulseGuideCompletionDelay);
         }
-        // The guide write goes out with mutex_ free; the initiator lock keeps any other motion out meanwhile.
-        try {
-            protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
-        } catch (...) {
-            // The pulse never started as far as the driver knows: every window it armed closes before the error
-            // reaches the client (decision 0022 rule 2), so the next pulse on the other axis takes its cross-axis
-            // hold as before, and RA and Dec serve neither a correction nor a hold for a pulse that never ran. The
-            // hold on this axis goes back to the other axis's pulse that armed it, unless a disconnect cleared it.
-            std::lock_guard<std::mutex> lock(mutex_);
+        // The pulse never started as far as the driver knows: every window it armed closes before the error
+        // reaches the client (decision 0022 rule 2), so the next pulse on the other axis takes its cross-axis hold as
+        // before, and RA and Dec serve neither a correction nor a hold for a pulse that never ran. The hold on this
+        // axis goes back to the other axis's pulse that armed it, unless a disconnect cleared it. Call with mutex_.
+        const auto disarm_locked = [&] {
             pulse_hold_[axis_index].clear();
             pg_correction_[axis_index].clear();
             pg_hold_[other_index].clear();
             if (connected_) {
                 pg_hold_[axis_index] = prev_axis_position_hold;
             }
+        };
+        // The guide write goes out through the send gate with mutex_ free: a chunk of the older pulse already on the
+        // wire lands first, and the initiator lock keeps any other initiator out meanwhile.
+        bool sent = false;
+        try {
+            sent = send_motion_locked(
+                lock, [this, &claim] { return connected_ && !lost_locked(claim); },
+                [&] { protocol.pulse_guide_axis(axis, velocity, first_chunk_cs); });
+        } catch (...) {
+            disarm_locked();  // the gate holds mutex_ again here
             throw;
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            drop_poll_in_flight_locked();
+        if (!sent) {
+            // The gate refused (disconnected, or the claim lost): no guide write went out, so no window stays armed
+            // and no chain starts. initiator_mutex_ keeps every claimer and the disconnect out today, so this is a
+            // guard, not a path a client reaches.
+            disarm_locked();
+            check_connected();
+            throw AlpacaException("PulseGuide superseded by a concurrent motion command",
+                                  AlpacaError::InvalidOperation);
         }
+        drop_poll_in_flight_locked();
+        lock.unlock();
 
         // Chain remaining chunks on the axis's own slot (MC_AUX_GUIDE max =
         // 255cs = 2550ms): one slot per axis, so a pulse on RA never supersedes
         // one on Dec. Cancelled + joined on disconnect and in the destructor.
-        // Started with mutex_ free, like the join above.
+        // Started with mutex_ free. Each chunk goes through the send gate only while this pulse still holds its axis.
         int remaining_cs = total_cs - first_chunk_cs;
         if (remaining_cs > 0) {
             try {
-                pulse_ops_[axis].start([axis, velocity, remaining_cs, first_chunk_cs](util::OperationContext& ctx) {
+                pulse_ops_[axis].start([this, axis, velocity, remaining_cs, first_chunk_cs,
+                                        claim](util::OperationContext& ctx) {
                     if (!ctx.wait_for(std::chrono::milliseconds(first_chunk_cs * 10))) {
                         return;
                     }
                     int left = remaining_cs;
-                    auto& proto = CelestronProtocolWrapper::instance();
                     while (left > 0) {
-                        int chunk = std::min(left, 255);
+                        const int chunk = std::min(left, 255);
                         try {
-                            proto.pulse_guide_axis(axis, velocity, chunk);
+                            std::unique_lock<std::mutex> chunk_lock(mutex_);
+                            const bool sent = send_motion_locked(
+                                chunk_lock, [&] { return pulse_owns_locked(ctx, claim); },
+                                [&] { CelestronProtocolWrapper::instance().pulse_guide_axis(axis, velocity, chunk); });
+                            if (!sent) {
+                                return;  // superseded or cancelled: the newer command owns this axis
+                            }
                         } catch (const std::exception& e) {
                             // Each MC_AUX_GUIDE chunk is hardware-timed, so a
                             // failed re-arm just ends the pulse early (no runaway).
@@ -1676,7 +1698,7 @@ public:
                 // before the refusal reaches the client. The correction predicted the whole pulse and the
                 // cross-axis hold was for its length, so both close too (decision 0022 rule 2).
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::lock_guard<std::mutex> guard(mutex_);
                     pulse_hold_[axis_index].clear();
                     pg_correction_[axis_index].clear();
                     pg_hold_[other_index].clear();
@@ -1711,20 +1733,38 @@ public:
             check_slew_safety(lock, "SlewToCoordinates");
             check_tracking_for_slew(lock, "SlewToCoordinates");
         }
-        join_pulse_bodies();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
-        claim_slew_slot_locked();  // supersedes a slew or park body in flight; it is not joined
-        const uint64_t owner_generation = motion_generation_;
-        const auto still_mine = [this, owner_generation] { return motion_generation_ == owner_generation; };
+        claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
+        const util::MotionClaim mine = slew_claim_;
+        const auto still_mine = [this, mine] { return !lost_locked(mine); };
+        // #2263: the call owns the mount until it returns. Slewing reads false once the slew lands, but the motion
+        // owner hears finished() only here, on every exit, so a PulseGuide during the landing read, the settle and
+        // the tracking restore is refused instead of superseding the slew (set_slewing_flag_locked()).
+        blocking_slew_ = mine;
+        struct EndBlockingSlew {
+            CelestronTelescopeDriver& driver;
+            std::unique_lock<std::mutex>& lock;
+            const util::MotionClaim& mine;
+            ~EndBlockingSlew() {
+                if (!lock.owns_lock()) {
+                    lock.lock();
+                }
+                if (driver.blocking_slew_ && same_claim(*driver.blocking_slew_, mine)) {
+                    driver.blocking_slew_.reset();
+                }
+                if (!driver.slewing_cached_) {
+                    driver.motion_owner_.finished(mine);  // a timed-out slew still slewing keeps refusing, as before
+                }
+            }
+        } end_blocking_slew{*this, lock, mine};
         // The initiator lock stays held through the dispatch, so no other initiator runs while mutex_ is free.
         if (!do_slew_to_coordinates(lock, ra, dec, nullptr, still_mine)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
         ilock.unlock();
-        if (!wait_for_slew_complete(lock, owner_generation)) {
+        if (!wait_for_slew_complete(lock, mine)) {
             // Another client's AbortSlew / Park / MoveAxis / FindHome / slew took the
             // mount: skip the completion tail so it cannot write T2 over their motion.
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
@@ -1748,19 +1788,17 @@ public:
         bool use_passthrough = false;
         bool do_flip = false;
         uint32_t flip_ra = 0, flip_dec = 0;
-        // A pulse body is joined first (no mutex_ held: it ends its axis late). A slew or park body in flight is
-        // superseded by the claim below, before the new slew's state is published; it is not joined.
-        join_pulse_bodies();
+        // A slew, park or pulse body in flight is superseded by the claim below, before the new slew's state is
+        // published; none is joined (decision 0006 rule 3).
         bool displaced = false;
         bool prev_slewing = false;
         bool prev_at_home = false;
         bool prev_manual[2] = {false, false};
         auto prev_override = util::TaskClock::clock::time_point::min();
-        uint64_t superseded = 0;
+        util::MotionClaim superseded;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
-            clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
             check_slew_safety(lock, "SlewToCoordinatesAsync");
 
@@ -1788,8 +1826,8 @@ public:
                 ALPACA_LOG_WARN("Celestron", std::string(buf));
             }
 
-            superseded = motion_generation_;
-            displaced = claim_slew_slot_locked();
+            superseded = live_slew_claim_locked();
+            displaced = claim_slew_locked();
             slew_aborted_ = false;
             drop_poll_in_flight_locked();
             prev_slewing = slewing_cached_;
@@ -2104,10 +2142,12 @@ public:
                 // park GOTO already on the wire lands before the stops below, which pass the same send gate.
                 // An Unpark with no park in flight claims nothing: it sends no motion, and a slew body that failed
                 // and is inside its stops finishes its own failure.
+                // A stop, so it cancels both axes and claims none (#2263); the initiator lock it holds keeps every
+                // other command out until its stops are sent.
                 parking_ = false;
                 claim_slew_slot_locked();
-                const std::uint64_t mine = motion_generation_;
-                stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+                motion_owner_.cancel(util::MotionOwner::kBothAxes);
+                stop_error = stop_park_slew(lock, [] { return true; });
             }
         }
         {
@@ -2151,18 +2191,32 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         }
-        pulse_ops_[axis].cancel_all_and_join();
+        if (!moving) {
+            // MoveAxis(axis, 0) is a stop path: it cancels and joins the pulse on its axis, with mutex_ free (decision
+            // 0006 rule 3). A moving MoveAxis supersedes it below instead.
+            pulse_ops_[axis].cancel_all_and_join();
+        }
         std::unique_lock<std::mutex> lock(mutex_);
         util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
-        const std::uint64_t mine = motion_generation_;
+        // #2263: a moving MoveAxis takes its own axis, superseding the slew, Park or FindHome (they own both axes) and
+        // the pulse on this axis; that pulse body is woken, not joined, and sends this axis nothing more (it checks its
+        // claim under mutex_ before every chunk). A pulse on the other axis keeps running. A stop claims nothing and
+        // cancels its axis. Axis 2 never gets here: the argument check refuses it.
+        util::MotionClaim mine;  // a stop's stays empty, so it is never lost: the initiator lock keeps others out
+        if (moving) {
+            mine = motion_owner_.claim(util::MotionCommand::MoveAxis, axis);
+            pulse_ops_[axis].cancel();
+        } else {
+            motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+        }
 
         set_slewing_locked(false);
         slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         manual_axis_slewing_[axis] = moving;
-        // MoveAxis ends a pulse on this axis (its chain was joined above): the pulse's window, its correction and
+        // MoveAxis ends a pulse on this axis (superseded or joined above): the pulse's window, its correction and
         // its hold on the other axis close (decision 0022 rule 2). A moving axis also ends the hold a pulse on the
         // other axis put on it, which no longer describes where it points.
         pulse_hold_[static_cast<std::size_t>(axis)].clear();
@@ -2174,7 +2228,7 @@ public:
             at_home_ = false;
         }
         send_motion_locked(
-            lock, [this, mine] { return motion_generation_ == mine; },
+            lock, [this, &mine] { return !lost_locked(mine); },
             [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
         clear_motion_errors_locked();
     }
@@ -2198,7 +2252,6 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
-        std::uint64_t mine = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -2208,9 +2261,11 @@ public:
             // was superseded, so it cannot run its completion tail before slew_aborted_ is set. The park state
             // ends here, not after the stop: a failed stop must not leave parking_ set, which would refuse every
             // later slew and make every later Park a no-op (the stored error and Slewing report the failure).
+            // A stop, so it cancels both axes and claims none (#2263); the initiator lock it holds keeps every other
+            // command out until its stops are sent.
             claim_slew_slot_locked();
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);
             parking_ = false;
-            mine = motion_generation_;
         }
         // Stop both pulse chains before stopping hardware, so none can re-arm a guide pulse after the stop commands:
         // the joins wait out an exchange a pulse body is in, with mutex_ free. The slew body is not joined; its
@@ -2222,7 +2277,7 @@ public:
         check_not_fully_parked_locked("AbortSlew");
         // Try every stop on its own, so one lost command cannot skip the others (#781). The send gate orders them
         // behind any motion command in flight.
-        const std::string stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+        const std::string stop_error = stop_park_slew(lock, [] { return true; });
         if (!stop_error.empty()) {
             last_home_error_.clear();
             last_slew_error_ = "AbortSlew stop failed: " + stop_error;
@@ -2545,9 +2600,10 @@ private:
         join_pulse_bodies();
     }
 
-    // A pulse body stops its axis late, so an initiator ends it by cancelling and joining its slot with no driver
-    // mutex held (decision 0006, "Pulse and rate-check slots"). The pulse body never takes mutex_ and waits for at
-    // most the exchange it is in. Only the slew slot is never joined by an initiator.
+    // The stop paths (AbortSlew, disconnect, relink, the destructor) end both pulse bodies by cancelling and joining
+    // their slots with no driver mutex held (decision 0006, "Pulse and rate-check slots"): a body takes mutex_ only
+    // to pass the send gate, and waits for at most the exchange it is in. A motion command never joins one: it
+    // supersedes it through the motion owner (#2263, rule 3).
     void join_pulse_bodies() {
         pulse_ops_[0].cancel_all_and_join();
         pulse_ops_[1].cancel_all_and_join();
@@ -2559,13 +2615,50 @@ private:
     // wait (Superseded still wins over Cancelled), and the notify wakes a body or initiator waiting in the send gate.
     // The body is not joined (it may be inside an exchange). Returns whether a body was in flight: only then is there
     // a motion nobody will stop if the start is refused.
+    // The motion owner's side of the claim is the caller's: a slew, Park or FindHome takes both axes
+    // (claim_slew_locked()), a moving MoveAxis its own axis, and a stop cancels.
     bool claim_slew_slot_locked() {
         const bool displaced = slew_.running();
         slew_generation_.bump();
         slew_.cancel();
-        ++motion_generation_;
         send_cv_.notify_all();
         return displaced;
+    }
+
+    // A slew, Park or FindHome: claims the slew slot and both axes (#2263), which supersedes both pulses as well.
+    // Their bodies are woken, never joined (decision 0006 rule 3); each checks its claim under mutex_ before a chunk.
+    // The pulse windows close in this same locked step, not before the initiator's own checks: a command those checks
+    // refuse changes nothing, as a refused start() does (decision 0006 rule 2), so its pulse keeps running and
+    // IsPulseGuiding stays true. A check after the claim (the blocking slew's compute_flip(), the Park body's pier
+    // read) still ends the pulse when it throws, as it did before #2263.
+    bool claim_slew_locked() {
+        const bool displaced = claim_slew_slot_locked();
+        slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
+        pulse_ops_[0].cancel();
+        pulse_ops_[1].cancel();
+        clear_pulse_guiding_locked();
+        return displaced;
+    }
+
+    // The newest slew, Park or FindHome claim while it still holds the mount, else an empty claim (which matches no
+    // pending stop): what an initiator hands a pending failure stop on from (keep_pending_stop_locked()).
+    util::MotionClaim live_slew_claim_locked() const {
+        return lost_locked(slew_claim_) ? util::MotionClaim{} : slew_claim_;
+    }
+
+    // True once a newer command took one of the claim's axes or a stop reached one (util::MotionOwner).
+    bool lost_locked(const util::MotionClaim& claim) const {
+        return motion_owner_.stop_reason(claim) != util::StopReason::None;
+    }
+
+    static bool same_claim(const util::MotionClaim& a, const util::MotionClaim& b) {
+        return a.axes == b.axes && a.generation == b.generation && a.cancels == b.cancels;
+    }
+
+    // A pulse chain body may send its next chunk: the driver is connected, its slot did not cancel it and no newer
+    // command took its axis.
+    bool pulse_owns_locked(const util::OperationContext& ctx, const util::MotionClaim& claim) const {
+        return connected_ && ctx.stop_reason() == util::StopReason::None && !lost_locked(claim);
     }
 
     // The send gate: at most one motion command is committed to the wire at a time, so an old goto that is on its
@@ -2620,8 +2713,8 @@ private:
     // AbortSlew's stop and published state, for a refused start whose claim superseded a body in flight. A failed
     // stop leaves Slewing as it was: the mount may still be moving.
     void stop_after_refused_start(std::unique_lock<std::mutex>& lock) {
-        const std::uint64_t mine = motion_generation_;  // initiator_mutex_ is held: no other claimer ran
-        const std::string stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+        // initiator_mutex_ is held: no other command can claim or cancel before these stops are sent.
+        const std::string stop_error = stop_park_slew(lock, [] { return true; });
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
@@ -2631,7 +2724,7 @@ private:
         homing_ = false;
         parking_ = false;
         slew_aborted_ = true;
-        ++motion_generation_;
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
         flip_in_progress_ = false;
         slew_hold_.clear();
         position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -2651,7 +2744,8 @@ public:
 
 private:
     // Ends every pulse's state: the IsPulseGuiding windows and the position holds and corrections they armed
-    // (decision 0022 rule 2). AbortSlew, the slews, Park, FindHome, connect and disconnect call it.
+    // (decision 0022 rule 2). AbortSlew, connect, disconnect and claim_slew_locked() (the slews, Park, FindHome) call
+    // it.
     void clear_pulse_guiding_locked() {
         for (auto& window : pulse_hold_) {
             window.clear();
@@ -2876,7 +2970,7 @@ private:
 
     // The slewing value the control path just decided (a slew started or ended, an abort), written through.
     void set_slewing_locked(bool slewing) const {
-        slewing_cached_ = slewing;
+        set_slewing_flag_locked(slewing);
         snapshot_.write([slewing](PolledFrame& frame) {
             frame.slewing = slewing;
             frame.slewing_known = true;
@@ -2889,10 +2983,21 @@ private:
     void note_slewing_read_locked(bool slewing) const {
         const auto held = snapshot_.read();
         if (held && held->value.slewing_known && held->value.slewing == slewing) {
-            slewing_cached_ = slewing;
+            set_slewing_flag_locked(slewing);
             return;
         }
         set_slewing_locked(slewing);
+    }
+
+    // The control path's Slewing flag. Once it reads false the newest slew, Park or FindHome is over for the motion
+    // owner, and a PulseGuide is accepted again (#2263); a blocking SlewToCoordinates is over only when it returns.
+    // Only the command that owns the mount writes it (decision 0006 rule 6), so the claim it ends is that command's. A
+    // failed or deferred stop keeps the flag true, and with it the refusal: the mount may still be moving.
+    void set_slewing_flag_locked(bool slewing) const {
+        slewing_cached_ = slewing;
+        if (!slewing && !(blocking_slew_ && same_claim(*blocking_slew_, slew_claim_))) {
+            motion_owner_.finished(slew_claim_);
+        }
     }
 
     // One read of the mount for the control path at the end of a motion (slew landed, park complete, home done), taken
@@ -3027,7 +3132,7 @@ private:
         SamplePlan plan;
         bool read_site = false;
         bool check_home = false;
-        std::uint64_t home_generation = 0;
+        util::MotionClaim home_claim;
         SamplePlan home_plan;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -3037,7 +3142,7 @@ private:
                 return false;
             }
             check_home = homing_;
-            home_generation = motion_generation_;
+            home_claim = slew_claim_;  // the FindHome's own while homing_
             home_plan = sample_plan_locked(true);
         }
         retry_pending_stop();
@@ -3056,7 +3161,7 @@ private:
                 if (!connected_ || link_lost() || stopped()) {
                     return false;
                 }
-                if (homing_ && motion_generation_ == home_generation) {
+                if (homing_ && !lost_locked(home_claim)) {
                     failure = apply_home_probe_locked(probe, landed);
                     if (!failure.empty()) {
                         begin_home_failure_locked(failure);
@@ -3065,7 +3170,7 @@ private:
             }
             if (!failure.empty()) {
                 // The three stop exchanges go out only while no newer initiator owns the mount.
-                send_failure_stop(home_generation, failure, true);
+                send_failure_stop(home_claim, failure, true);
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (home_status_poll_failures_ != 0) {
@@ -3373,7 +3478,10 @@ private:
         bool hardware_slewing = false;
         // The read runs with mutex_ free: a newer motion command (AbortSlew, MoveAxis, Park, a new slew) may take the
         // mount meanwhile, and its state is then not this read's to change.
-        const std::uint64_t generation = motion_generation_;
+        // The slew or Park this read serves. Compared with the stored slew_claim_, which stays lost for good after any
+        // later claim or cancel: call only right after a fresh claim_slew_locked() (the blocking slew's wait, the Park
+        // hook), never from the status poll, or slewing_cached_ freezes.
+        const util::MotionClaim generation = slew_claim_;
         try {
             const SamplePlan landed_plan = sample_plan_locked(true);
             std::tie(hardware_slewing, landed) = without_lock(lock, [&] {
@@ -3394,13 +3502,13 @@ private:
                 run_slewing_read_hook();  // test seam: a newer motion command lands before the read is applied
                 return std::make_tuple(slewing, measurement);
             });
-            if (motion_generation_ != generation) {
+            if (lost_locked(generation)) {
                 return slewing_cached_;  // superseded: the newer motion owns the published state
             }
             note_slewing_read_locked(hardware_slewing);
             slew_status_poll_failures_ = 0;
         } catch (const std::exception& ex) {
-            if (motion_generation_ != generation) {
+            if (lost_locked(generation)) {
                 return slewing_cached_;
             }
             const int failures = ++slew_status_poll_failures_;
@@ -3415,7 +3523,7 @@ private:
             if (slewing_cached_) fail_slew_poll(lock, message, generation);
             throw AlpacaException(last_slew_error_.empty() ? message : last_slew_error_, AlpacaError::DriverException);
         } catch (...) {
-            if (motion_generation_ != generation) {
+            if (lost_locked(generation)) {
                 return slewing_cached_;
             }
             const int failures = ++slew_status_poll_failures_;
@@ -3845,7 +3953,7 @@ private:
             if (!connected_ || !still_mine()) {
                 return;  // a newer owner (or the disconnect) has the state
             }
-            slewing_cached_ = prev_slewing_cached;
+            set_slewing_flag_locked(prev_slewing_cached);
             if (prev_frame) {
                 snapshot_.write([&prev_frame](PolledFrame& frame) {
                     frame.slewing = prev_frame->value.slewing;
@@ -3935,9 +4043,9 @@ private:
     // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
     // `lock` must be held on entry; it is held again on return/throw. The
     // connection state is re-checked after each relock.
-    // Returns false when a concurrent motion command bumped motion_generation_
-    // past `owner_generation` while the lock was released (the slew was superseded).
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
+    // Returns false when a concurrent motion command took or cancelled the slew's claim `mine` while the lock was
+    // released (the slew was superseded).
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, const util::MotionClaim& mine) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
@@ -3950,12 +4058,12 @@ private:
             check_connected();
         };
         while (true) {
-            if (motion_generation_ != owner_generation) {
+            if (lost_locked(mine)) {
                 return false;
             }
             bool slewing = get_slewing_fresh(lock);
             // cppcheck-suppress identicalConditionAfterEarlyExit
-            if (motion_generation_ != owner_generation) {
+            if (lost_locked(mine)) {
                 return false;  // the read released mutex_: a concurrent motion command took the mount meanwhile
             }
             if (slewing) {
@@ -3975,7 +4083,7 @@ private:
         }
         // The position is read first; Slewing then flips beside it in one locked step.
         const Measurement landed = measure_full(lock);
-        if (motion_generation_ != owner_generation) {
+        if (lost_locked(mine)) {
             return false;
         }
         publish_measurement_locked(landed);
@@ -3984,7 +4092,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
-        return motion_generation_ == owner_generation;
+        return !lost_locked(mine);
     }
 
     int device_number_;
@@ -4104,9 +4212,16 @@ private:
     double ra_slew_offset_hours_ = 0.0005; // ~27" initial seed for CGX-L fw 7.18 goto tracking deficit
     int ra_offset_samples_ = 0;
     bool slew_aborted_ = false;
-    // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
-    // released compares it to learn it was superseded (Sky-Watcher shape, #832).
-    uint64_t motion_generation_ = 0;
+    // The per-axis motion owner (#2263): under mutex_ every motion command claims the axes it moves (a slew, Park or
+    // FindHome both, a moving MoveAxis or a PulseGuide its own) and every stop cancels its axes. A body or a waiting
+    // initiator holds a util::MotionClaim and has lost the mount once lost_locked() says so.
+    mutable util::MotionOwner motion_owner_;
+    // The newest slew, Park or FindHome claim; mutex_. The poll's home check, poll_hardware_slewing() and fail_home()
+    // read it as the claim of the operation they serve.
+    util::MotionClaim slew_claim_;
+    // The claim of a blocking SlewToCoordinates from its claim until it returns; mutex_. While it is the newest slew
+    // claim, a published Slewing false does not end it for the owner (set_slewing_flag_locked()).
+    std::optional<util::MotionClaim> blocking_slew_;
     // The send gate (send_motion_locked()): how many motion command groups are on the wire, and the wait for one to
     // end. Both guarded by mutex_.
     mutable unsigned motion_sends_in_flight_ = 0;

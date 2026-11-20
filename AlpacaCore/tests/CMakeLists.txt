@@ -61,6 +61,7 @@ set(TEST_SOURCES
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_motion_owner.cpp
+    test_motion_guards.cpp
     test_lock_gate.cpp
     test_capture_session.cpp
     test_connection_resolver.cpp
