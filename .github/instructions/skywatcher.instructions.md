@@ -884,11 +884,12 @@ No hemisphere is involved in either:
 
 A deferral is only safe while the owner's restore is still to run. A pulse runs its restore,
 drops the lock and then releases its axis, so a write in that gap was stranded too (#2431):
-`release_pulse_locked()` now compares the stored `RightAscensionRate` and `DeclinationRate`
-with what its restore applied and applies a difference under the lock that releases the axis.
+`release_pulse_locked()` now compares the whole drive with the stored rates under the lock
+that releases the axis: for RA the rate and the duty regime (a continuous rate written while a
+duty rate is armed arms nothing), for Dec the rate and `dec_offset_running_` (two deferred
+writes, A then B then A, clear the flag while the axis runs A). It applies any difference.
 A new owner with a restore must do the same at its release. Tests: `test_skywatcher_async.cpp`,
-"a DeclinationRate write between a Dec pulse's restore and its release is applied (#2431)" and
-its RightAscensionRate twin.
+the four #2431 cases about a write between a pulse's restore and its release.
 
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
