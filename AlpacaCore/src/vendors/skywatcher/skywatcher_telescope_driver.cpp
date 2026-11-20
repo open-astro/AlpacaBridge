@@ -4833,7 +4833,11 @@ private:
         } else {
             if (dec_offset_running_ && !defer_motion) {
                 const util::MotionClaim claim = claim_axis_locked(kAxisDec);
-                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, claim));
+                if (!stop_axis_and_wait_locked(lock, kAxisDec, claim)) {
+                    // Lost in the stop-wait: the command that took Dec (a MoveAxis, say) dead-reckons its own
+                    // rate, which this stale one must not replace (#2431 review). Its end re-applies the offset.
+                    return;
+                }
             }
             dec_duty_rate_deg_s_ = rate;
             if (defer_motion) {
@@ -4902,8 +4906,9 @@ private:
                             if (lost) {
                                 stop_claim = claim_axis_locked(channel);  // lost to no same-axis owner: still ours
                             }
-                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, stop_claim));
-                            if (duty_rate_locked(channel) == ax[i].rate) {
+                            // A command that took the axis in the stop-wait owns its commanded rate.
+                            if (stop_axis_and_wait_locked(lock, channel, stop_claim) &&
+                                duty_rate_locked(channel) == ax[i].rate) {
                                 cmd_axis_rate_deg_s_[i] = ax[i].rate;  // still the average rate
                             }
                             ax[i].bursting = false;
@@ -4997,7 +5002,9 @@ private:
             return;
         }
         const util::MotionClaim claim = claim_axis_locked(kAxisRa);
-        static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, claim));
+        if (!stop_axis_and_wait_locked(lock, kAxisRa, claim)) {
+            return;  // a command that took RA in the stop-wait owns its rate and model (#2431 review)
+        }
         ra_duty_rate_deg_s_ = eff;  // 0.0 = stay stopped; else the worker bursts
         cmd_axis_rate_deg_s_[0] = eff;
     }
