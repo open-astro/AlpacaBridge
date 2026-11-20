@@ -285,8 +285,9 @@ private:
             //
             // Decision 0020 rule 5: stop the SDK exposure, then close the session and join its body, BEFORE the SDK
             // close below: the body blocks in GetQHYCCDSingleFrame on the camera id, so closing underneath it is a
-            // use-after-close inside libqhyccd. begin_stop() marks the exposure stopping (its broken download is
-            // dropped, not kept) and its token tells the body the stop is meant for it; disconnecting_ refuses a
+            // use-after-close inside libqhyccd. stop_or_abort_exposure_locked() marks the exposure stopping (its broken
+            // download is dropped, not kept) and its token tells the body the stop is meant for it, or ends a start
+            // still reserved; disconnecting_ refuses a
             // StartExposure from here on. The join has no time bound: when cancel_exposure() does not interrupt
             // the frame call, the disconnect waits for that one call (decision 0020, the QHY row; as on ZWO).
             std::string exposure_id;
@@ -298,16 +299,14 @@ private:
                 }
                 disconnecting_ = true;
                 ++connection_generation_;
-                const std::uint64_t token = session_.begin_stop();
-                if (token != 0) {
-                    stop_token_ = token;
-                }
+                const std::uint64_t token = stop_or_abort_exposure_locked();
                 stop_exposure = token != 0 || session_.busy();
                 exposure_id = camera_id_.value_or("");
             }
             if (stop_exposure) {
                 cancel_sdk_exposure(exposure_id, "during disconnect");
             }
+            run_disconnect_stop_hook();
             session_.disconnect_and_join();
             // Bound the wait for OFF cleanup, which waits for every PID call to
             // return; the OFF body never takes mutex_.
@@ -1375,7 +1374,12 @@ public:
                 std::move(reservation), exposure_s,
                 [this, request, clear_in_sdk](util::CaptureControl& c) { run_exposure(c, request, *clear_in_sdk); },
                 std::chrono::duration_cast<std::chrono::nanoseconds>(watchdog_margin_))) {
-            // An AbortExposure arrived while the start was reserved: no body ran, nothing was armed (rule 9).
+            // An AbortExposure, or a disconnect, arrived while the start was reserved: no body ran, nothing was
+            // armed (rule 9). The disconnect's is NotConnected, as when its join drops the reservation first.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (disconnecting_ || !connected_.load()) {
+                throw AlpacaException("Camera is disconnecting", AlpacaError::NotConnected);
+            }
             ALPACA_LOG_DEBUG("QHY", "StartExposure ended by an AbortExposure that arrived while it started");
         }
     }
@@ -1384,6 +1388,12 @@ public:
         ensure_connected();
         throw AlpacaException("StopExposure is not supported (CanStopExposure is false); use AbortExposure",
                               AlpacaError::MethodNotImplemented);
+    }
+
+    // Test seam (#2431): see set_disconnect_stop_hook_for_testing() in the header.
+    void set_disconnect_stop_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+        disconnect_stop_hook_ = std::move(hook);
     }
 
 private:
@@ -1585,6 +1595,39 @@ private:
         return {};
     }
 
+    // The disconnect's and the destructor's stop, under mutex_: ends a StartExposure that holds its reservation
+    // and has not published Exposing the way an AbortExposure does (rule 9), so its start() runs no body, or marks
+    // the running exposure stopping and records its token. Returns that token, 0 when none runs. The abort is
+    // recorded first: StartExposure's session_.start() does not take mutex_, so it can publish Exposing between
+    // the two calls, and only this order then finds it. A start in that gap with a begin_stop() first got no stop
+    // and no recorded abort; its body met disconnecting_ and returned without an image, and the session kept "the
+    // exposure ended without an image" (DriverException from ImageReady and ImageArray) until
+    // disconnect_and_join() cleared it (#2431). No new reservation can come in between: reserve() runs under
+    // mutex_, which the caller holds.
+    std::uint64_t stop_or_abort_exposure_locked() {
+        if (session_.record_abort()) {
+            return 0;
+        }
+        const std::uint64_t token = session_.begin_stop();
+        if (token != 0) {
+            stop_token_ = token;
+        }
+        return token;
+    }
+
+    // Test seam: runs in the disconnect between its stop and disconnect_and_join(), with no state, I/O or session
+    // lock held (only transition_mutex_). Empty in production.
+    void run_disconnect_stop_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+            hook = disconnect_stop_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // AbortExposure (decision 0020 rule 5): stops the SDK exposure, then ends the session's exposure and joins its
     // body. Its worst case is one whole GetQHYCCDSingleFrame call, when cancel_exposure() does not interrupt it (as
     // ZWO's abort waits for one SDK call). A finished frame survives; a kept failure stays until the next
@@ -1599,9 +1642,12 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
+            // Recorded before the state is read, as on ZWO and ToupTek: a start that publishes Exposing between
+            // a begin_stop() that found nothing and the record_abort() that came after it made the abort a no-op,
+            // and the exposure ran on (#2431 review).
+            if (session_.record_abort()) return;
             token = session_.begin_stop();
             if (token == 0) {
-                if (session_.record_abort()) return;
                 body_returning = session_.busy();
             } else {
                 stop_token_ = token;
@@ -1677,6 +1723,8 @@ private:
     // The session token of the exposure an AbortExposure or a disconnect stopped (CaptureSession::begin_stop()), so
     // its body publishes nothing after the stop. State lock.
     std::uint64_t stop_token_{0};
+    mutable std::mutex test_hook_mutex_;
+    std::function<void()> disconnect_stop_hook_;  // test-only, guarded by test_hook_mutex_
 
     // Temperature regulation (temp_slot_ below). temp_active_ (state lock) is
     // true from a start until the next OFF or disconnect, so a repeated ON does
@@ -1968,10 +2016,7 @@ private:
         bool stop_exposure = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const std::uint64_t token = session_.begin_stop();
-            if (token != 0) {
-                stop_token_ = token;
-            }
+            const std::uint64_t token = stop_or_abort_exposure_locked();
             stop_exposure = token != 0 || session_.busy();
             exposure_id = camera_id_.value_or("");
         }
@@ -2362,6 +2407,12 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
                                                 std::chrono::seconds watchdog_margin, util::TaskClock& clock) {
     return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start),
                                              watchdog_margin, clock);
+}
+
+void set_disconnect_stop_hook_for_testing(CameraDriver& driver, std::function<void()> hook) {
+    if (auto* qhy = dynamic_cast<QHYCameraDriver*>(&driver)) {
+        qhy->set_disconnect_stop_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::qhy

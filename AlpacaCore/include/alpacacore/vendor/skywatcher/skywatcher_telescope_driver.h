@@ -61,6 +61,13 @@ void run_pulse_restore_hook();
 // empty; process-wide; tests clear it afterwards.
 void set_pulse_dispatch_failure_hook(std::function<void()> hook);
 void run_pulse_dispatch_failure_hook();
+// Test-only: called by a pulse task whose end-of-pulse stop or restore has
+// run, before it takes the lock that releases the axis, with no driver lock
+// held, so a test can write a rate in that window (#2431). Default empty; a
+// blocking hook must be released before the driver is destroyed.
+// Process-wide; tests clear it afterwards.
+void set_pulse_release_hook(std::function<void()> hook);
+void run_pulse_release_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.

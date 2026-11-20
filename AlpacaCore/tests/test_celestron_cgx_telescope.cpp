@@ -2916,8 +2916,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect waits only for the ac
     driver->set_tracking(true);
     mount.set_hold_guide_until_completed(true);
     mount.drop_next_reply(0x11, 0x26, true);
+    // The first half's disconnect read the guide status too (#2431): wait for a read of this pulse's packet, or
+    // the Home below can start before the pulse body's resync and fail on the dropped reply's timeout.
+    const int guide_reads = mount.count_command(0x11, 0x27);
     require_alpaca_error([&] { driver->pulse_guide(0, 600000); }, alpacacore::AlpacaError::DriverException);
-    REQUIRE(wait_until([&] { return mount.count_command(0x11, 0x27) > 0; }));
+    REQUIRE(wait_until([&] { return mount.count_command(0x11, 0x27) > guide_reads; }));
     CHECK(mount.axis_guiding(0x11));
     const int home_commands = mount.count_command(0x10, 0x0b);
     auto home = std::async(std::launch::async, [&] { driver->find_home(); });
