@@ -6835,3 +6835,178 @@ TEST_CASE("SkyWatcher async - a synchronous goto supersedes a running slew body 
     alpacacore::vendor::skywatcher::set_slew_spawn_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
+
+// #2416, decision 0006 rule 3: a slew, Park or FindHome supersedes a running pulse and never waits for it. The East
+// pulse's end-of-pulse restore is parked between its ':I' and its ':J', outside the locks, so a join would wait
+// there. The asynchronous initiators return with the pulse still parked; the synchronous SlewToCoordinates reaches
+// its dispatch (its ':K' stops) before the pulse is let go. Each operation's own body is held back, so nothing else
+// is on the wire when the superseded pulse resumes: it sends RA no ':I', no ':J' and no stop.
+TEST_CASE("SkyWatcher async - a slew, Park or FindHome supersedes an RA pulse in its restore without a join (#2416)",
+          "[skywatcher][async][pulseguide][motion-owner]") {
+    // 0 SlewToCoordinatesAsync, 1 Park, 2 FindHome, 3 the synchronous SlewToCoordinates.
+    const int operation = GENERATE(0, 1, 2, 3);
+    CAPTURE(operation);
+    SlotGate gate;  // declared before the driver, which joins the held slew thread
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+    // Fires when the pulse body's thread has returned.
+    auto body_done = std::make_shared<std::promise<void>>();
+    auto body_finished = body_done->get_future();
+    auto fired = std::make_shared<std::atomic<bool>>(false);
+    sw::set_pulse_spawn_for_testing(*driver, 1, [body_done, fired](std::function<void()> body) {
+        return std::thread([body = std::move(body), body_done, fired] {
+            body();
+            if (!fired->exchange(true)) {
+                body_done->set_value();
+            }
+        });
+    });
+    ParkedPulseHook hook(sw::detail::set_pulse_restore_hook);
+    driver->pulse_guide(2, 300);  // East: an in-place rate change on the tracking RA axis
+    REQUIRE(run_clock_until(clock, [&] { return hook.parked(); }, std::chrono::milliseconds(5000)));
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    gate.close();
+    sw::set_slew_spawn_for_testing(*driver, gate.spawn());
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
+    const int dec_stops = mount.stop_count(2);
+    std::atomic<bool> done{false};
+    std::thread initiator([&] {
+        try {
+            if (operation == 0) {
+                driver->slew_to_coordinates_async(target_ra, 40.0);
+            } else if (operation == 1) {
+                driver->park();
+            } else if (operation == 2) {
+                driver->find_home();
+            } else {
+                driver->slew_to_coordinates(target_ra, 40.0);
+            }
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): the abort below ends it
+        }
+        done = true;
+    });
+    // The operation got past the pulse: returned (asynchronous), or its dispatch stopped Dec (synchronous).
+    const bool past_pulse = operation == 3 ? wait_until([&] { return mount.stop_count(2) > dec_stops; }, 2000)
+                                           : wait_until([&] { return done.load(); }, 2000);
+    const bool pulse_still_parked =
+        hook.parked() && body_finished.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+    const bool guiding_after_claim = driver->get_is_pulse_guiding();
+    const int ra_starts = mount.start_count(1);
+    const int ra_stops = mount.stop_count(1);
+    const int rate_writes = mount.frames_seen('I');
+    const int relatches = mount.frames_seen('J');
+    hook.release();
+    const bool body_returned = body_finished.wait_for(kRendezvous) == std::future_status::ready;
+    CHECK(past_pulse);
+    CHECK(pulse_still_parked);
+    CHECK_FALSE(guiding_after_claim);  // the pulse ended when the operation took both axes
+    CHECK(body_returned);
+    if (operation != 3) {
+        // Only the superseded pulse could send anything here: the operation's body is still held back.
+        CHECK(mount.start_count(1) == ra_starts);
+        CHECK(mount.stop_count(1) == ra_stops);
+        CHECK(mount.frames_seen('I') == rate_writes);
+        CHECK(mount.frames_seen('J') == relatches);
+    }
+    gate.release();
+    driver->abort_slew();
+    CHECK(run_clock_until(clock, [&] { return done.load() && !driver->get_slewing(); }, std::chrono::seconds(120)));
+    initiator.join();
+    sw::set_slew_spawn_for_testing(*driver, nullptr);
+    driver->set_connected(false);
+}
+
+// #2416: a second PulseGuide on an axis supersedes the running pulse there and does not wait for it. The first
+// North pulse is parked in its dispatch stop-wait behind a ramping Dec jog, with the locks released and its claim
+// on Dec still held; the second pulse's body is held back. The second PulseGuide returns at once, and the first
+// body, woken by the end of the ramp, finds its claim taken and sends Dec no start.
+TEST_CASE(
+    "SkyWatcher async - a second pulse on an axis supersedes one in its dispatch stop-wait without a join (#2416)",
+    "[skywatcher][async][pulseguide][motion-owner]") {
+    SlotGate gate;  // declared before the driver, which joins the held pulse thread
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(1, 1.0);  // Dec jog: the first pulse's dispatch must stop it first
+    REQUIRE(mount.axis_running(2));
+    // The first pulse body signals its return; the second runs behind the gate.
+    auto first_done = std::make_shared<std::promise<void>>();
+    auto first_finished = first_done->get_future();
+    auto spawned = std::make_shared<std::atomic<int>>(0);
+    auto held = gate.spawn();
+    sw::set_pulse_spawn_for_testing(*driver, 2, [first_done, spawned, held](std::function<void()> body) {
+        if (spawned->fetch_add(1) > 0) {
+            return held(std::move(body));
+        }
+        return std::thread([body = std::move(body), first_done] {
+            body();
+            first_done->set_value();
+        });
+    });
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the first dispatch, in the Dec stop-wait
+    const int dec_starts = mount.start_count(2);
+    gate.close();
+    std::atomic<bool> done{false};
+    std::thread second([&] {
+        try {
+            driver->pulse_guide(1, 500);
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): CHECKed through `done`
+        }
+        done = true;
+    });
+    const bool returned = wait_until([&] { return done.load(); }, 2000);
+    const bool first_still_waiting = first_finished.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+    // Past the ramp: the first body wakes in its stop-wait and returns.
+    const bool first_returned = run_clock_until(
+        clock, [&] { return first_finished.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; },
+        std::chrono::milliseconds(5000));
+    CHECK(returned);
+    CHECK(first_still_waiting);
+    CHECK(first_returned);
+    CHECK(mount.start_count(2) == dec_starts);  // the superseded pulse sent Dec no start
+    CHECK(driver->get_is_pulse_guiding());      // the second pulse's
+    gate.release();
+    CHECK(run_clock_until(
+        clock, [&] { return done.load() && !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    second.join();
+    CHECK(mount.start_count(2) == dec_starts + 1);  // the second pulse's own start
+    mount.set_stop_ramp_ms(0);
+    driver->set_connected(false);
+}
+
+// #2416: a slew start the slot refuses after its claim superseded a running pulse stops the pulse's axis. The
+// superseded pulse sends nothing more, so no one else would: the Dec axis would run on at the guide rate.
+TEST_CASE("SkyWatcher async - a refused slew start that superseded a pulse stops the pulse's axis (#2416)",
+          "[skywatcher][async][pulseguide][motion-owner]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->set_tracking(true);
+    driver->pulse_guide(0, 3000);  // North: a Dec speed-mode nudge
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(5000)));
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the pulse body, in its wait
+    sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    require_alpaca_error(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0), 40.0); },
+        alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(mount.axis_running(2));
+    sw::set_slew_spawn_for_testing(*driver, nullptr);
+    driver->set_connected(false);
+}
