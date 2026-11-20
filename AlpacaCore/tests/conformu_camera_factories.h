@@ -70,7 +70,13 @@ namespace alpacacore::test::conformu {
 
 #ifdef FAKE_CONFORMU_ZWO
 inline FakeZWOSDK& zwo_camera_sdk() {
+    // Each exposure takes its length in real time, as on a camera: one reported ready sooner is a stale frame, which
+    // the driver discards and retakes (#2414).
     static FakeZWOSDK sdk;
+    [[maybe_unused]] static const bool timed = [] {
+        sdk.exposure_clock = &util::default_task_clock();
+        return true;
+    }();
     return sdk;
 }
 inline std::unique_ptr<CameraDriver> make_zwo_camera(int device_number) {

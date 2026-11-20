@@ -340,8 +340,10 @@ public:
         // that the `if (connected_)` branch above never reaps, which would outlive
         // the members it touches. Both reapers are idempotent (each cancels and
         // joins its slot, a no-op when it is idle), so running them again here
-        // costs nothing on the normal path.
+        // costs nothing on the normal path. The zero search watchdog (#2432) is
+        // started after find_home() releases its locks, so the same applies.
         stop_clock_sync();
+        stop_zero_search_watchdog();
         reap_slew_dispatch();
     }
     
@@ -444,14 +446,17 @@ public:
             iOptronTelescopeDriver& self;
             ~PendingResync() { self.start_pending_resync_transition_locked(); }
         } pending_resync{*this};
+        if (set_connected_entry_hook_) set_connected_entry_hook_();  // test seam: transition_mutex_ held
         const Wire protocol = wire();
         if (!connected || (connected_ && link_lost())) {
             // A disconnect, or a connect over a lost link (decision 0009 rule 4), ends the session's bodies
             // first, with no driver lock held: the clock-sync body and the slew dispatch take both locks, so a
             // join under either would deadlock, and a body mid-exchange must finish that exchange and then see
             // its stop before this call takes the operation lock, so it sends nothing more (the clock-sync
-            // slot cases). transition_mutex_ keeps every other connect and disconnect out meanwhile.
+            // slot cases). transition_mutex_ keeps every other connect and disconnect out meanwhile. The zero
+            // search watchdog takes both locks the same way (#2432).
             stop_clock_sync();
+            stop_zero_search_watchdog();
             {
                 std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
                 reap_slew_dispatch();
@@ -1299,16 +1304,25 @@ public:
             cmd << ":SR" << arrow_speed << "#";
             protocol.send_command_blind(cmd.str());
         }
+        // Issue #2424: a positive rate turns the tube east on axis 0 (the reported RightAscension rises) and north
+        // on axis 1 (the reported Declination rises), the convention in ascom-contract.instructions.md.
         if (axis == 0) {
+            // iOptron calls :mw# "RA+" and :me# "RA-" (RS-232 v3.10). RA+ raises RA despite the letter: the :ZS (RA+)
+            // and :ZQ (RA-) GOTO trim closes the HAE16/HAE29C landing error that way, and INDI found :mw# raises RA on
+            // a CEM120. Not yet checked on a rig for MoveAxis (#2424).
             if (rate > 0.0) {
-                protocol.send_command_blind(":mw#"); // RA+ (west)
+                protocol.send_command_blind(":mw#");  // RA+: RA rises, tube turns east
             } else if (rate < 0.0) {
-                protocol.send_command_blind(":me#"); // RA- (east)
+                protocol.send_command_blind(":me#");  // RA-: RA falls, tube turns west
             } else {
                 protocol.send_command_blind(":qR#"); // stop RA
             }
         } else if (axis == 1) {
             if (rate > 0.0 || rate < 0.0) {
+                // :ms# is iOptron's "Dec+" and :mn# "Dec-", a mechanical sense. The Dec pulse-guide polarity picks
+                // the command (shared with pulse_guide(), which this does not change): dec_guide_inverted_ (true; its
+                // calibration is never called) and the :GEP# pier digit, so north is :mn# on side 0 and :ms# on
+                // side 1. Not yet checked on a rig (#2424).
                 bool north = (rate > 0.0);
                 bool invert_dec = dec_guide_inverted_;
                 refresh_position_cache_locked();
@@ -1626,40 +1640,50 @@ public:
     // Telescope methods
     
     void find_home() override {
-        StateLock lock(lock_gate_);
-        check_connected();
-        
-        if (!get_can_find_home()) {
-            throw AlpacaException("Find home not supported on this mount model");
-        }
+        bool zero_search = false;
+        {
+            StateLock lock(lock_gate_);
+            check_connected();
 
-        ensure_not_parked_locked("FindHome");
-        // Force-refresh: a stale cached is_at_home (e.g. set before a park/
-        // unpark cycle, which never touches it) short-circuits the whole home
-        // operation and the client then sees AtHome == false.
-        refresh_status_cache_locked(true);
-        const bool zero_search = zero_search_active();
-        // Issue #2420: a mount with a zero sensor search wakes from a power loss at status 7 wherever it points, so
-        // status 7 proves nothing there and the search always runs (about 20 s from a true zero too).
-        if (!zero_search && cached_status_.is_at_home) {
-            return;
-        }
-
-        const Wire protocol = wire();
-        // ASCOM FindHome locates home with sensors: :MSH# on the verified zero-search models, otherwise :MH#
-        // (go to zero by the position model).
-        send_with_slew_hold_locked(std::chrono::seconds(5), [&] {
-            if (zero_search) {
-                protocol.find_home();
-            } else {
-                protocol.go_to_home();
+            if (!get_can_find_home()) {
+                throw AlpacaException("Find home not supported on this mount model");
             }
-        });
-        supersede_slew_dispatch_locked();
-        driver_motion_ = zero_search ? DriverMotion::HomeSearch : DriverMotion::Home;
-        home_search_deadline_ = clock_.now() + kZeroSearchTimeout;
-        status_cache_valid_ = false;
-        position_cache_valid_ = false;
+
+            ensure_not_parked_locked("FindHome");
+            // Force-refresh: a stale cached is_at_home (e.g. set before a park/
+            // unpark cycle, which never touches it) short-circuits the whole home
+            // operation and the client then sees AtHome == false.
+            refresh_status_cache_locked(true);
+            zero_search = zero_search_active();
+            // Issue #2420: a mount with a zero sensor search wakes from a power loss at status 7 wherever it points,
+            // so status 7 proves nothing there and the search always runs (about 20 s from a true zero too).
+            if (!zero_search && cached_status_.is_at_home) {
+                return;
+            }
+
+            const Wire protocol = wire();
+            // ASCOM FindHome locates home with sensors: :MSH# on the verified zero-search models, otherwise :MH#
+            // (go to zero by the position model).
+            send_with_slew_hold_locked(std::chrono::seconds(5), [&] {
+                if (zero_search) {
+                    protocol.find_home();
+                } else {
+                    protocol.go_to_home();
+                }
+            });
+            supersede_slew_dispatch_locked();
+            driver_motion_ = zero_search ? DriverMotion::HomeSearch : DriverMotion::Home;
+            if (zero_search) {
+                home_search_deadline_ = clock_.now() + kZeroSearchTimeout;  // only a search has a bound (#2432)
+            }
+            status_cache_valid_ = false;
+            position_cache_valid_ = false;
+        }
+        // Issue #2432: the bound runs on its own slot, so the :Q# goes out at kZeroSearchTimeout whether or not a
+        // client reads the status. Started with no driver lock held (decision 0006 rule 4).
+        if (zero_search) {
+            start_zero_search_watchdog();
+        }
     }
 
     void park() override {
@@ -2790,27 +2814,96 @@ private:
     // Issue #2420: bound a zero sensor search. Past kZeroSearchTimeout with no status 7 the mount is stopped (:Q#,
     // best-effort like the park finalizer) and the failure is kept for Slewing until AbortSlew or a new initiator
     // (the failed-async-body rule). Runs before the landing clause, so a search that lands this read is not stopped.
+    // Issue #2432: the watchdog slot (run_zero_search_watchdog()) reads the status at the bound, so this runs then
+    // whether or not a client polls; a client's read past the bound that gets here first stops it the same way.
     void stop_overdue_zero_search_locked(std::chrono::steady_clock::time_point now) const {
         if (driver_motion_ != DriverMotion::HomeSearch || cached_status_.is_at_home || now < home_search_deadline_) {
             return;
         }
+        stop_zero_search_locked("FindHome: the zero sensor search did not reach the zero position within " +
+                                std::to_string(kZeroSearchTimeout.count()) + " s");
+    }
+
+    // Ends the zero search the driver started: sends :Q# and keeps `failure` for Slewing (issue #2420, #2432).
+    void stop_zero_search_locked(const std::string& failure) const {
         driver_motion_ = DriverMotion::None;
         clear_slew_hold_locked();
         // Stored before the stop goes out: the exchange gives up mutex_, and a reader in that gap must not take
         // the stale status for a finished search.
-        last_slew_error_ = "FindHome: the zero sensor search did not reach the zero position within " +
-                           std::to_string(kZeroSearchTimeout.count()) + " s; the mount was stopped";
+        last_slew_error_ = failure + "; the mount was stopped";
         try {
             wire().stop_slewing();
         } catch (const std::exception& e) {
             throw_if_link_lost();  // a pulled cable is NotConnected
-            last_slew_error_ = "FindHome: the zero sensor search did not reach the zero position within " +
-                               std::to_string(kZeroSearchTimeout.count()) +
-                               " s, and stopping the mount failed: " + e.what();
+            last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
         }
         ALPACA_LOG_WARN("iOptron", last_slew_error_);
         status_cache_valid_ = false;  // the status just read is from before the stop
     }
+
+    // Issue #2432: the zero search's bound on its own slot. Call with no driver lock held (decision 0006 rule 4). The
+    // body follows whichever search is current when it wakes, so two FindHome calls that start it in either order
+    // leave the newer search bounded. A start the slot refuses fails closed: the search is stopped and FindHome
+    // throws, so no zero search runs without its bound.
+    void start_zero_search_watchdog() {
+        try {
+            zero_search_watchdog_.start([this](util::OperationContext& ctx) {
+                try {
+                    run_zero_search_watchdog(ctx);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("iOptron", std::string("Zero search watchdog failed: ") + e.what());
+                    throw;
+                }
+            });
+        } catch (const std::exception& e) {
+            std::string failure = std::string("FindHome: the zero search watchdog could not start: ") + e.what();
+            StateLock lock(lock_gate_);
+            if (connected_ && driver_motion_ == DriverMotion::HomeSearch) {
+                stop_zero_search_locked(failure);
+                failure = last_slew_error_;
+            }
+            throw AlpacaException(failure, AlpacaError::DriverException);
+        }
+    }
+
+    // Waits on the task clock for the current search's bound, then reads the status under the operation lock: a
+    // status 7 lands the search there (refresh_status_cache_locked()), anything else stops it with the stored
+    // failure. A status read that fails at the bound stops it too (fail closed); a lost link ends the body, since the
+    // loss already ends the session. Ends at once when no search runs, the driver is disconnected or the slot
+    // stops it.
+    void run_zero_search_watchdog(util::OperationContext& ctx) {
+        while (true) {
+            std::chrono::steady_clock::duration remaining{};
+            {
+                StateLock lock(lock_gate_);
+                if (!connected_ || ctx.stop_reason() != util::StopReason::None ||
+                    driver_motion_ != DriverMotion::HomeSearch) {
+                    return;
+                }
+                const auto now = clock_.now();
+                if (now >= home_search_deadline_) {
+                    try {
+                        refresh_status_cache_locked(true);
+                    } catch (const std::exception& e) {
+                        if (link_lost()) return;
+                        if (driver_motion_ == DriverMotion::HomeSearch) {
+                            const std::string read_failure = e.what();
+                            stop_zero_search_locked("FindHome: no zero sensor search status could be read at its " +
+                                                    std::to_string(kZeroSearchTimeout.count()) + " s bound (" +
+                                                    read_failure + ")");
+                        }
+                    }
+                    return;
+                }
+                remaining = home_search_deadline_ - now;
+            }
+            if (!ctx.wait_for(remaining)) return;
+        }
+    }
+
+    // Cancel and join the zero search watchdog. Without mutex_ held; under transition_mutex_ (set_connected()) or in
+    // the destructor, which serializes its reapers. The body never takes transition_mutex_.
+    void stop_zero_search_watchdog() { zero_search_watchdog_.cancel_all_and_join(); }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
     // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
@@ -3147,8 +3240,10 @@ private:
     }
 
     // Issue #2419: the server's timer saw the host clock step or become trusted. Re-syncs the mount clock on the
-    // clock-sync slot. The timer thread calls this with no lock held, and it never blocks: a connect or a
-    // disconnect holding transition_mutex_ leaves a pending flag that set_connected() acts on as it returns.
+    // clock-sync slot. The timer thread calls this with no lock held. It does no I/O and joins nothing, and it does not
+    // wait for transition_mutex_: a connect or a disconnect holding it leaves a pending flag that set_connected() acts
+    // on as it returns. AsyncOperation::start() itself can wait up to kStaleReapTimeout (2 s) when three replaced
+    // bodies are still running, for example on a blocked link (#2432).
     void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
         // sync_time_on_connect_ is fixed at construction; published_connected_ is lock-free.
         if (!sync_time_on_connect_ || !published_connected_.load()) return;
@@ -3260,9 +3355,12 @@ private:
             connect_pass_done = clock_sync_connect_pass_done_;
         }
         // A re-sync that superseded the connect's own pass before that pass finished (a host clock change in the
-        // first second after Connect) runs as the connect pass: it must still send the site, and may not stop at
-        // a mount clock that already agrees (#2419).
-        const bool resync = !resync_why.empty() && connect_pass_done;
+        // first second after Connect), or that follows a connect pass that threw before it published, runs as the
+        // connect pass: it must still send the site, and may not stop at a mount clock that already agrees (#2419).
+        // It is still a host clock re-sync (`host_clock_resync`), so the motion wait and the write check below
+        // apply to it too (#2432).
+        const bool host_clock_resync = !resync_why.empty();
+        const bool resync = host_clock_resync && connect_pass_done;
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
@@ -3286,6 +3384,25 @@ private:
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) return;
             send();
         };
+        // Issue #2432: a re-sync's site and clock writes. The motion wait below is only a check, and a GOTO, Park,
+        // FindHome or MoveAxis can start right after it, so each write checks again inside its own exchange: under
+        // the operation lock, which every motion command takes, no motion can start between that check and the
+        // write. A write that finds motion waits for it to end and checks again; a stop or a disconnect during that
+        // wait sends nothing (fail closed). Any host clock re-sync checks, one that runs as the connect pass
+        // included; the connect's own pass writes as before.
+        auto gated_write = [&](auto&& send) {
+            while (true) {
+                {
+                    StateLock lock(lock_gate_);
+                    if (!connected_ || ctx.stop_reason() != util::StopReason::None) return;
+                    if (!host_clock_resync || !driver_motion_active_locked()) {
+                        send();
+                        return;
+                    }
+                }
+                if (!wait_for_driver_motion_to_end(ctx)) return;
+            }
+        };
         // The mount's own clock, fresh from :GUT#; nullopt when it cannot say.
         auto read_mount_utc = [&]() -> std::optional<std::chrono::system_clock::time_point> {
             std::optional<std::chrono::system_clock::time_point> utc;
@@ -3298,8 +3415,11 @@ private:
         };
 
         std::optional<std::chrono::system_clock::time_point> old_mount_utc;
-        if (resync) {
+        if (host_clock_resync) {
             if (!wait_for_driver_motion_to_end(ctx)) return;
+            if (clock_sync_resync_hook_) clock_sync_resync_hook_();  // test seam: no driver lock held
+        }
+        if (resync) {
             old_mount_utc = read_mount_utc();
             if (old_mount_utc) {
                 const auto diff =
@@ -3318,21 +3438,21 @@ private:
             retry_mount_command(
                 "site latitude",
                 [&]() {
-                    exchange([&] {
+                    gated_write([&] {
                         protocol.set_latitude(latitude);
                         lat_generation = site_latitude_write_generation_;
                     });
                 },
                 &ctx);
             retry_mount_command(
-                "hemisphere", [&]() { exchange([&] { protocol.set_hemisphere(latitude >= 0.0); }); }, &ctx);
+                "hemisphere", [&]() { gated_write([&] { protocol.set_hemisphere(latitude >= 0.0); }); }, &ctx);
         }
         if (lon.has_value()) {
             double longitude = lon.value();
             retry_mount_command(
                 "site longitude",
                 [&]() {
-                    exchange([&] {
+                    gated_write([&] {
                         protocol.set_longitude(longitude);
                         lon_generation = site_longitude_write_generation_;
                     });
@@ -3346,14 +3466,14 @@ private:
         if (do_clock_sync) {
             tz_info = compute_local_timezone_info(std::chrono::system_clock::to_time_t(host_utc_now()));
             retry_mount_command(
-                "timezone offset", [&]() { exchange([&] { protocol.set_timezone_offset(tz_info.offset_minutes); }); },
-                &ctx);
+                "timezone offset",
+                [&]() { gated_write([&] { protocol.set_timezone_offset(tz_info.offset_minutes); }); }, &ctx);
             retry_mount_command(
-                "DST flag", [&]() { exchange([&] { protocol.set_dst_observed(tz_info.dst_active); }); }, &ctx);
+                "DST flag", [&]() { gated_write([&] { protocol.set_dst_observed(tz_info.dst_active); }); }, &ctx);
             retry_mount_command(
                 "UTC clock",
                 [&]() {
-                    exchange([&] {
+                    gated_write([&] {
                         if (clock_sync_utc_hook_) clock_sync_utc_hook_(false);
                         // Fresh host time for each send attempt: a retry must not send the first attempt's time.
                         const auto now_utc = host_utc_now();
@@ -3486,11 +3606,20 @@ public:
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_zero_search_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        zero_search_watchdog_.set_spawn_for_testing(std::move(spawn));
+    }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
     void set_host_utc_source_for_testing(std::function<std::chrono::system_clock::time_point()> source) {
         host_utc_source_ = std::move(source);
+    }
+    void set_clock_sync_resync_hook_for_testing(std::function<void()> hook) {
+        clock_sync_resync_hook_ = std::move(hook);
+    }
+    void set_connected_entry_hook_for_testing(std::function<void()> hook) {
+        set_connected_entry_hook_ = std::move(hook);
     }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
@@ -3728,8 +3857,9 @@ private:
     // initiator and by AbortSlew.
     bool equatorial_slew_ = false;
     mutable DriverMotion driver_motion_ = DriverMotion::None;
-    // Task-clock instant past which a zero search with no status 7 is stopped (issue #2420). Set by find_home(), read
-    // only while driver_motion_ is HomeSearch, so the sites that end the motion need not reset it.
+    // Task-clock instant past which a zero search with no status 7 is stopped (issue #2420). Set by find_home() for a
+    // zero search only (#2432) and read only while driver_motion_ is HomeSearch (the status refresh and the zero
+    // search watchdog), so the sites that end the motion need not reset it.
     std::chrono::steady_clock::time_point home_search_deadline_{};
     // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
     static constexpr std::chrono::seconds kZeroSearchTimeout{120};
@@ -3770,6 +3900,10 @@ private:
     std::function<void(bool)> clock_sync_utc_hook_;
     // Test seam, set before connect: the host UTC the clock sync writes and set_utc_date() compares (#2419).
     std::function<std::chrono::system_clock::time_point()> host_utc_source_;
+    // Test seams (issue #2432), set before the call they hook: run on a re-sync's body once its motion wait found
+    // the mount still, and at the start of set_connected() with transition_mutex_ held.
+    std::function<void()> clock_sync_resync_hook_;
+    std::function<void()> set_connected_entry_hook_;
     // Issue #2419: a host clock change on_host_clock_changed() saw while set_connected() held transition_mutex_.
     std::atomic<bool> resync_pending_{false};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
@@ -3799,6 +3933,11 @@ private:
     // supersedes it. Declared after everything the body touches.
     util::OperationGeneration clock_sync_generation_;
     util::AsyncOperation clock_sync_{"iOptron clock sync", clock_sync_generation_, clock_};
+    // Issue #2432: the zero search's bound (run_zero_search_watchdog()); its own generation, so no other start
+    // supersedes it. Declared after everything the body touches.
+    util::OperationGeneration zero_search_watchdog_generation_;
+    util::AsyncOperation zero_search_watchdog_{"iOptron zero search watchdog", zero_search_watchdog_generation_,
+                                               clock_};
 };
 
 // Factory function implementation
@@ -3970,6 +4109,13 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
     }
 }
 
+void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
+                                                std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_zero_search_watchdog_spawn_for_testing(std::move(spawn));
+    }
+}
+
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_clock_sync_hook_for_testing(std::move(hook));
@@ -3992,6 +4138,18 @@ void set_host_utc_source_for_testing(TelescopeDriver& driver,
                                      std::function<std::chrono::system_clock::time_point()> source) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_host_utc_source_for_testing(std::move(source));
+    }
+}
+
+void set_clock_sync_resync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_resync_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_connected_entry_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_connected_entry_hook_for_testing(std::move(hook));
     }
 }
 

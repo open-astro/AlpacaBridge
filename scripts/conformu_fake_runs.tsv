@@ -2,7 +2,7 @@ vendor	deviceType	fakeHeader	status	slice	reportPath	reason
 skywatcher	telescope	fake_skywatcher_mount.h	run	1	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt	-
 skywatcher	telescope	fake_skywatcher_serial_board.h	run	2	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-telescope-fake_skywatcher_serial_board-Linux-arm64.txt	-
 zwo	telescope	fake_mount_server.h	pending	6	-	needs a ZWO AM simulator: the row serves FakeMountServer with a fixed reply table (:GU# "NG#", :Gps# "0#"), so the mount never moves, tracks or parks; FakeZwoMount is stateful but runs on a test FakeTaskClock and has no sky model
-zwo	camera	fake_zwo_sdk.h	pending	6	-	needs an exposure model: FakeZWOSDK reports an exposure done at once (ConformU: ImageReady true before the exposure time elapsed); its camera also lists bins 1, 2 and 4 under MaxBin 4 and a 16-pixel-wide sensor, so bin 3 and the 4x4 ROI are refused, and its TargetTemperature control takes any set point (-273.25 and 100 C accepted, where the SDK refuses them)
+zwo	camera	fake_zwo_sdk.h	pending	6	-	not yet tried with the exposure model of #2414 (the host times each exposure in real time through FakeZWOSDK::exposure_clock); its camera also lists bins 1, 2 and 4 under MaxBin 4 and a 16-pixel-wide sensor, so bin 3 and the 4x4 ROI are refused, and its TargetTemperature control takes any set point (-273.25 and 100 C accepted, where the SDK refuses them)
 zwo	filterwheel	fake_zwo_efw_sdk.h	run	4	AlpacaCore/conformu/ZWO/Fake/Fake-filterwheel-fake_zwo_efw_sdk-Linux-arm64.txt	-
 zwo	focuser	fake_zwo_eaf_sdk.h	run	3	AlpacaCore/conformu/ZWO/Fake/Fake-focuser-fake_zwo_eaf_sdk-Linux-arm64.txt	-
 zwo	rotator	fake_zwo_caa_sdk.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit

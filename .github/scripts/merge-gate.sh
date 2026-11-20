@@ -29,13 +29,19 @@ echo "Pull request #${pr} by ${author}, head ${sha}."
 # run of each name decides (by id: a queued run may have no started_at yet).
 # Skipped runs are dropped first, on purpose: a skipped run did not run, so an
 # older run of the same name still decides.
+#
+# The runs and statuses reach jq on stdin, never as an argument: one argument
+# is capped at 128 KiB on Linux, and the check runs of a busy head are larger
+# (#2436). printf is a bash builtin, so it has no such cap.
+both() { printf '%s\n%s\n' "$runs" "$statuses"; }
 deadline=$(( $(date +%s) + wait_minutes * 60 ))
 while :; do
   runs="$(gh api --paginate "repos/${repo}/commits/${sha}/check-runs?filter=latest&per_page=100" \
     | jq -s '[.[].check_runs[] | select(.conclusion != "skipped")] | group_by(.name) | map(max_by(.id))')"
   statuses="$(gh api "repos/${repo}/commits/${sha}/status" | jq '.statuses')"
-  pending="$(jq -n --argjson r "$runs" --argjson s "$statuses" \
-    '[($r[] | select(.status != "completed") | .name), ($s[] | select(.state == "pending") | .context)]')"
+  pending="$(both | jq -s \
+    '.[0] as $r | .[1] as $s
+     | [($r[] | select(.status != "completed") | .name), ($s[] | select(.state == "pending") | .context)]')"
   if [ "$(jq length <<<"$pending")" = 0 ]; then
     break
   fi
@@ -47,8 +53,9 @@ while :; do
   sleep 30
 done
 
-bad="$(jq -n -r --argjson r "$runs" --argjson s "$statuses" \
-  '($r[] | select(.conclusion != "success" and .conclusion != "neutral") | "\(.name): \(.conclusion)"),
+bad="$(both | jq -s -r \
+  '.[0] as $r | .[1] as $s
+   | ($r[] | select(.conclusion != "success" and .conclusion != "neutral") | "\(.name): \(.conclusion)"),
    ($s[] | select(.state != "success") | "\(.context): \(.state)")')"
 if [ -n "$bad" ]; then
   echo "::error::Not every check is green on ${sha}:"
