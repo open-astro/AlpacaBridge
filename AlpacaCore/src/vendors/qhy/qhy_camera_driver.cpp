@@ -306,6 +306,7 @@ private:
             if (stop_exposure) {
                 cancel_sdk_exposure(exposure_id, "during disconnect");
             }
+            run_disconnect_stop_hook();
             session_.disconnect_and_join();
             // Bound the wait for OFF cleanup, which waits for every PID call to
             // return; the OFF body never takes mutex_.
@@ -1389,6 +1390,12 @@ public:
                               AlpacaError::MethodNotImplemented);
     }
 
+    // Test seam (#2431): see set_disconnect_stop_hook_for_testing() in the header.
+    void set_disconnect_stop_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+        disconnect_stop_hook_ = std::move(hook);
+    }
+
 private:
     // What one exposure body needs, snapshotted by start_exposure under mutex_ with the reservation: the body reads
     // no driver geometry, and the settings are locked until it returns.
@@ -1608,6 +1615,19 @@ private:
         return token;
     }
 
+    // Test seam: runs in the disconnect between its stop and disconnect_and_join(), with no state, I/O or session
+    // lock held (only transition_mutex_). Empty in production.
+    void run_disconnect_stop_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+            hook = disconnect_stop_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // AbortExposure (decision 0020 rule 5): stops the SDK exposure, then ends the session's exposure and joins its
     // body. Its worst case is one whole GetQHYCCDSingleFrame call, when cancel_exposure() does not interrupt it (as
     // ZWO's abort waits for one SDK call). A finished frame survives; a kept failure stays until the next
@@ -1703,6 +1723,8 @@ private:
     // The session token of the exposure an AbortExposure or a disconnect stopped (CaptureSession::begin_stop()), so
     // its body publishes nothing after the stop. State lock.
     std::uint64_t stop_token_{0};
+    mutable std::mutex test_hook_mutex_;
+    std::function<void()> disconnect_stop_hook_;  // test-only, guarded by test_hook_mutex_
 
     // Temperature regulation (temp_slot_ below). temp_active_ (state lock) is
     // true from a start until the next OFF or disconnect, so a repeated ON does
@@ -2385,6 +2407,12 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
                                                 std::chrono::seconds watchdog_margin, util::TaskClock& clock) {
     return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start),
                                              watchdog_margin, clock);
+}
+
+void set_disconnect_stop_hook_for_testing(CameraDriver& driver, std::function<void()> hook) {
+    if (auto* qhy = dynamic_cast<QHYCameraDriver*>(&driver)) {
+        qhy->set_disconnect_stop_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::qhy

@@ -92,4 +92,15 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
                                                 std::chrono::seconds watchdog_margin = std::chrono::seconds(60),
                                                 util::TaskClock& clock = util::default_task_clock());
 
+/**
+ * @brief Test-only seam (#2431): runs `hook` inside a disconnect, after it has stopped the exposure (or ended a
+ * start still reserved) and released the state lock, and before it closes the capture session and joins the body.
+ *
+ * No SDK call runs there, so FakeQHYSDK::before_call cannot hold it open. The hook runs on the disconnecting thread
+ * with only `transition_mutex_` held, so a StartExposure (which never takes that lock) can finish in the window. It
+ * must not call back into the driver's connect or disconnect, and a hook that blocks must be released before the
+ * driver is destroyed. Empty by default; an empty `hook` clears it. A driver that is not a QHY camera is ignored.
+ */
+void set_disconnect_stop_hook_for_testing(CameraDriver& driver, std::function<void()> hook);
+
 } // namespace alpacacore::vendor::qhy
