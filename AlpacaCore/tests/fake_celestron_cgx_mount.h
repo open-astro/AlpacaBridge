@@ -50,6 +50,7 @@ namespace alpacacore::test {
 // Stop-completion delay, label-readback transients and post-rate-off encoder drift are scripted fault hooks,
 // not a simulation of the controller's deceleration or settling dynamics.
 // Per-read RA drift is a legacy Sync fault hook, not the elapsed-time model.
+// A crawling home search never reports done and does not move the encoder; it is not the controller's fallback path.
 // Hardware qualification must replace assumptions before they become claims.
 
 /// Small stateful AUX endpoint for direct-USB protocol tests.
@@ -218,6 +219,20 @@ public:
         return axes_[axis_index(axis)].physical_position;
     }
 
+    // The next `searches` MC_LEVEL_START on this axis start a search that never reports MC_LEVEL_DONE, even with
+    // auto-completion: the controller's slow fallback crawl after a missed home sensor (#2213). A stop ends it; a later
+    // start homes as usual.
+    void set_crawling_home_searches(std::uint8_t axis, int searches) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].crawling_home_searches = searches;
+    }
+
+    // One entry per MC_LEVEL_START on this axis: the number of 0x24 commands the axis had received before it.
+    std::vector<int> stops_before_home_starts(std::uint8_t axis) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return axes_[axis_index(axis)].stops_before_home_starts;
+    }
+
     int count_command(std::uint8_t axis, std::uint8_t command) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return axes_[axis_index(axis)].command_counts[command];
@@ -243,6 +258,8 @@ private:
         bool guiding = false;
         int stop_reads_remaining = 0;
         int post_stop_drift_remaining = 0;
+        int crawling_home_searches = 0;
+        std::vector<int> stops_before_home_starts;
         std::deque<std::int32_t> label_read_offsets;
         std::chrono::steady_clock::time_point guide_deadline{};
         std::uint8_t autoguide_rate = 128;
@@ -490,15 +507,19 @@ private:
                 }
                 payload = {static_cast<std::uint8_t>(axis.slewing ? 0x00 : 0xff)};
                 break;
-            case 0x0b:
+            case 0x0b: {
                 axis.post_stop_drift_remaining = 0;
-                axis.homing = !auto_complete_motions_.load();
+                axis.stops_before_home_starts.push_back(axis.command_counts[0x24]);
+                const bool crawl = axis.crawling_home_searches > 0;
+                if (crawl) --axis.crawling_home_searches;
+                axis.homing = crawl || !auto_complete_motions_.load();
                 axis.slewing = axis.homing;
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
                 if (!axis.homing) axis.physical_position = 0;
                 break;
+            }
             case 0x12:
                 payload = {static_cast<std::uint8_t>(axis.homing ? 0x00 : 0xff)};
                 break;

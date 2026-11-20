@@ -1,0 +1,5 @@
+### Fixed
+- **Celestron CGX: a home search that misses the sensor is re-homed once instead of timing out** (AlpacaCore, issue #2213): on a bare CGX the controller's home search sometimes missed the home sensor and fell back to a slow crawl of about 420 s, so FindHome, Park and the meridian home route of a pier-side-changing slew failed at their 180 s deadline ("home timed out" / "meridian home route timed out") and lost the reference. Now an axis that is not home-done 60 s after its home command is stopped on that axis alone, waited still, and sent the home command once more, logged at INFO with the axis, position and elapsed time. A second miss, or the 180 s deadline, still fails with the same error, and there is never a third home command. A home that finishes inside 60 s sends nothing more.
+
+### Added (tests)
+- **CGX crawling-home cases** (issue #2213): the CGX fake can script home searches that never complete and records the stops before each home start; five `[home-search]` cases cover FindHome and the meridian home route re-homing once, a home inside the bound, two missed searches failing after two sends, and AbortSlew during the re-home.
