@@ -2431,10 +2431,10 @@ struct WatchdogThread {
 
 // Waits for the zero search watchdog to park on the fake clock (it reads the clock and then registers its wait, so
 // an advance before that would move its wake), advances by `step`, and waits until the woken watchdog has finished
-// its read. Once the search has ended the watchdog has exited, and the park wait just times out.
+// its read. Every step is taken while the search runs, so the watchdog is always there to park.
 static void step_watchdog(alpacacore::test::FakeTaskClock& clock, const WatchdogThread& watchdog,
                           std::chrono::milliseconds step) {
-    (void)clock.wait_for_waiter_thread(watchdog.id->load(), std::chrono::milliseconds(500));
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.id->load(), std::chrono::seconds(5)));
     clock.advance(step);
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
 }
@@ -2487,6 +2487,23 @@ TEST_CASE("iOptron zero search - a :MSH# ignored at a false zero is not home",
     mount.set_system_status(7);
     clock.advance(std::chrono::milliseconds(1100));
     CHECK(driver->get_at_home());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron zero search - an AbortSlew before the search moved leaves a false zero not home",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(7);  // a false zero, and the mount ignores :MSH#
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    driver->abort_slew();  // the client gives up before any status 2
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_home());  // the 7 is the false zero the search never left
     driver->set_connected(false);
 }
 

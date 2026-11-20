@@ -546,6 +546,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             clear_hold_windows_locked();
             slew_in_progress_ = false;
+            note_unlanded_zero_search_locked();
             driver_motion_ = DriverMotion::None;
             utc_query_supported_ = true;
             pulse_guiding_hold_ra_hours_ = 0.0;
@@ -645,6 +646,7 @@ public:
         tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
         clear_hold_windows_locked();
         slew_in_progress_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
         pulse_guiding_hold_ra_hours_ = 0.0;
         last_ra_read_valid_ = false;
@@ -1612,7 +1614,9 @@ public:
 
             ensure_not_parked_locked("FindHome");
             zero_search = zero_search_active();
-            home_search_unconfirmed_ = false;  // a new FindHome; a :MH# model returns below at a status 7
+            // A new FindHome starts over; a zero search's own status 2 would clear the flag anyway, and a :MH# model
+            // returns below at a status 7 it can trust.
+            home_search_unconfirmed_ = false;
             // Force-refresh: a stale cached is_at_home (e.g. set before a park/
             // unpark cycle, which never touches it) short-circuits the whole home
             // operation and the client then sees AtHome == false. A zero search ignores is_at_home, so it reads the
@@ -1757,6 +1761,7 @@ public:
         }
         slew_in_progress_ = false;
         equatorial_slew_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
         axis_move_active_primary_ = false;
         axis_move_active_secondary_ = false;
@@ -2536,6 +2541,7 @@ private:
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
+        note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
     }
 
@@ -2841,6 +2847,14 @@ private:
         }
         home_search_start_until_ = clock_.now() + kZeroSearchStartGrace;  // from the send, as find_home()
         status_cache_valid_ = false;  // the status just read is from before the second :MSH#
+    }
+
+    // A zero search that ends before it showed motion (AbortSlew, a superseding command, a connect or disconnect):
+    // the 7 the mount may still read is the false zero it started from, so AtHome must not take it for home.
+    void note_unlanded_zero_search_locked() const {
+        if (driver_motion_ == DriverMotion::HomeSearch && !home_search_seen_moving_) {
+            home_search_unconfirmed_ = true;
+        }
     }
 
     // Ends the zero search the driver started: sends :Q# and keeps `failure` for Slewing (issue #2420, #2432).
