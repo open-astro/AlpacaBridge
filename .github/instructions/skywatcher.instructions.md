@@ -861,6 +861,22 @@ No hemisphere is involved in either:
   autoguiding is the way in. Only the continuous branch was affected: a sub-floor rate
   recovers on its own through the duty worker's start gate.
 
+A deferral is only safe while the owner's restore is still to run. A pulse runs its restore,
+drops the lock and then releases its axis, so a write in that gap was stranded too (#2431):
+`release_pulse_locked()` now compares the whole drive with the stored rates under the lock
+that releases the axis: for RA the rate and the duty regime (a continuous rate written while a
+duty rate is armed arms nothing), for Dec the rate and `dec_offset_running_` (two deferred
+writes, A then B then A, clear the flag while the axis runs A). It applies any difference.
+The Dec side compares with the rate the restore read before its applier, whose stop-wait drops
+the lock, so a write in that wait is applied too. Every pass first checks, under the lock, that
+the pulse still owns its axis (its sequence and its stop reason): a reaper that cancelled the
+pulse owns the axes, and the old body sends the axis nothing. On this branch a MoveAxis joins
+the pulse body on its axis, so it cannot take the axis inside the release. The appliers keep
+going after a `stop_axis_and_wait_locked()` that returns false: here the wait follows the global
+motion generation, which a command on the other axis also moves, so returning early would drop
+the rate. Tests: `test_skywatcher_async.cpp`, the #2431 cases about a write between a pulse's
+restore and its release and a write in the restore's stop-wait.
+
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
 the ones asking "is the mount doing anything at all", such as the duty worker's
