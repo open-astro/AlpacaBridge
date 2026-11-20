@@ -472,6 +472,8 @@ private:
     // ranges, CanWrite) keeps answering: it does not depend on the hub.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
+            // A loss latched since the caller's ensure_connected() is NotConnected, not a fault (#2451).
+            ensure_connected();
             throw AlpacaException("Gemini power hub communications compromised: " + *fault,
                                   AlpacaError::DriverException);
         }
