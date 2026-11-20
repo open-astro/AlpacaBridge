@@ -1489,6 +1489,89 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// #2431 review: the same window, from a drive that is not a continuous rate. A sub-floor RightAscensionRate runs RA
+// in bursts (the duty worker), and a rate that cancels the drive leaves RA stopped. A write in the window that asks
+// for a continuous rate found RA busy and only stored it; the release then skipped RA because a duty rate was armed
+// or RA was stopped, and the old regime went on until the next rate write or tracking toggle.
+TEST_CASE(
+    "SkyWatcher async - a continuous RightAscensionRate written between a duty-cycled RA pulse's restore and its "
+    "release is applied (#2431)",
+    "[skywatcher][async][pulseguide]") {
+    // The RightAscensionRate (s/sidereal s) that cancels the sidereal drive, to within an ulp: RA stopped or in
+    // the shortest bursts. 0.99 leaves ~0.15 arcsec/s: floor-rate bursts.
+    const double cancelling = (360.0 / 86164.0905) / (15.0 / (0.9972695663 * 3600.0));
+    const double rate = GENERATE_COPY(0.99, cancelling);
+    CAPTURE(rate);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+    const uint32_t sidereal_period = mount.step_period(1);
+    driver->set_right_ascension_rate(rate);
+    ParkedPulseHook hook(sw::detail::set_pulse_release_hook);
+
+    driver->pulse_guide(2, 500);  // East
+    REQUIRE(run_clock_until(clock, [&] { return hook.parked(); }, std::chrono::milliseconds(5000)));
+    driver->set_right_ascension_rate(0.0);  // RA still busy: stored for a restore that already ran
+    hook.release();
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
+    // Plain steps: with the fix no duty worker is left on the clock, so advance_through() would find no waiter.
+    for (int i = 0; i < 20; ++i) {
+        clock.advance(std::chrono::milliseconds(100));
+        clock.wait_for_woken_settled(kRendezvous);
+    }
+    const int stops = mount.stop_count(1);
+    for (int i = 0; i < 40; ++i) {  // longer than a 3 s duty period
+        clock.advance(std::chrono::milliseconds(100));
+        clock.wait_for_woken_settled(kRendezvous);
+    }
+    CHECK(mount.axis_running(1));
+    CHECK(mount.step_period(1) == sidereal_period);  // continuous sidereal, not floor-rate bursts
+    CHECK(mount.stop_count(1) == stops);             // no burst ends
+    driver->set_connected(false);
+}
+
+// #2431 review: a DeclinationRate written away from the restored rate and back again inside the window. The two
+// deferred writes cleared the offset's running flag without touching the axis, and the release compared only the
+// rate: equal, so it did nothing. The axis kept the offset with the flag false, and a later DeclinationRate = 0 on
+// the free axis skipped its stop and left Dec moving.
+TEST_CASE(
+    "SkyWatcher async - a DeclinationRate written away and back between a Dec pulse's restore and its release "
+    "stays stoppable (#2431)",
+    "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    driver->set_declination_rate(10.0);  // continuous: the pulse end re-applies it
+    REQUIRE(mount.axis_running(2));
+    ParkedPulseHook hook(sw::detail::set_pulse_release_hook);
+
+    driver->pulse_guide(0, 500);  // North
+    REQUIRE(run_clock_until(clock, [&] { return hook.parked(); }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(2));      // the restore re-applied the 10 arcsec/s offset
+    driver->set_declination_rate(20.0);  // Dec still busy: both writes are deferred
+    driver->set_declination_rate(10.0);
+    hook.release();
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
+    CHECK(mount.axis_running(2));  // the client's last rate is the one running
+
+    auto stop = std::async(std::launch::async, [&] { driver->set_declination_rate(0.0); });  // Dec free now
+    REQUIRE(run_clock_until(
+        clock, [&] { return stop.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; },
+        std::chrono::milliseconds(5000)));
+    stop.get();
+    clock.advance(std::chrono::milliseconds(2000));
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 // #1706 review, then #2263: a Dec pulse sent into an async slew's landing hold used to dispatch
 // before the restore and sit in its stop-wait while the post-slew rate check stopped and restarted
 // RA. Since #2263 the slew owns both axes until it ends, so that pulse is refused with
