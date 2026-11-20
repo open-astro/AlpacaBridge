@@ -122,6 +122,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.move_axis_stop_epsilon = 1e-6;
     limits.stop_checks_fault = false;
+    limits.tracking_rate_max = 3;
+    limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), 2 (solar) or 3 (King)";
     return limits;
 }();
 constexpr int kCeSlewInMotion = 22;
@@ -1720,13 +1722,9 @@ public:
     // written through, then the rate offsets are read again. A change of rate with a non-zero offset zeroes
     // both first (:SXTR,0# :SXTD,0#; see below).
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 3) {
-            throw AlpacaException("TrackingRate must be 0 (sidereal), 1 (lunar), 2 (solar) or 3 (King)",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_tracking_rate_arguments(kCommandLimits, rate);
         StateLock lock(lock_gate_);
-        check_connected();
-        refuse_while_faulted_locked("TrackingRate");
+        util::check_tracking_rate_state(kCommandLimits, GateChecks{*this, "TrackingRate"});
         if (!onstepx_) {
             if (rate != 0) {
                 throw AlpacaException("This firmware tracks at the sidereal rate only", AlpacaError::InvalidValue);

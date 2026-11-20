@@ -75,6 +75,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.move_axis_rate_range = "Axis rate out of range";
     limits.texts.guide_rate_not_finite = "GuideRate values must be finite";
     limits.texts.guide_rate_range = "GuideRate must not be negative";
+    limits.tracking_rate_max = 2;
+    limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), or 2 (solar)";
     return limits;
 }();
 constexpr double kHoursToDegrees = 15.0;
@@ -1541,11 +1543,7 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 2) {
-            throw AlpacaException("TrackingRate must be 0 (sidereal), 1 (lunar), or 2 (solar)",
-                                  AlpacaError::InvalidValue);
-        }
-        check_connected();
+        util::check_tracking_rate(kCommandLimits, rate, GateChecks{*this, "TrackingRate"});
 
         protocol_.set_tracking_rate(rate);
 
