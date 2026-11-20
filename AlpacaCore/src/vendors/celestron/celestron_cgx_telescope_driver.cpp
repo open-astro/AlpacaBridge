@@ -74,6 +74,9 @@ constexpr std::chrono::seconds kStatePollMaxAge{1};
 // uses the same margin.
 constexpr std::chrono::milliseconds kGuidePacketMax{2550};
 constexpr std::chrono::milliseconds kGuideEndMargin{500};
+// A home search not done by then missed the sensor (#2213): on the rig a normal search ended within about 30 s, and a
+// missed one fell back to a crawl that needed about 420 s, so the axis is stopped and re-homed once from where it is.
+constexpr std::chrono::seconds kHomeSearchBound{60};
 
 // The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
 // computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
@@ -522,6 +525,21 @@ private:
                             CgxPointingSide destination_side);
     void run_flip_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
                                  CgxPointingSide destination_side);
+    // The home searches of a FindHome, Park or meridian home route, per axis (RA, Dec): when the current search
+    // started, whether it is the re-home, and whether the axis was seen home-done after the bound.
+    struct HomeSearch {
+        explicit HomeSearch(util::TaskClock::clock::time_point start) : started{start, start} {}
+        std::array<util::TaskClock::clock::time_point, 2> started;
+        std::array<bool, 2> rehomed{};
+        std::array<bool, 2> done{};
+    };
+    // Called by both home waits between their polls (#2213): an axis not home-done kHomeSearchBound after its
+    // MC_LEVEL_START is stopped, waited still and sent MC_LEVEL_START once more; a re-home that misses the bound too,
+    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). The stop and the home send
+    // are run_motion_stage() stages on `claim`, and the still-wait asks motion_stop_reason(), so a cancel or a
+    // supersede ends it sending nothing more; it then returns early and the caller's loop handles the reason.
+    void supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim, HomeSearch& search,
+                               util::TaskClock::clock::time_point deadline, const char* timeout_message);
     void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
     // A slew, Park or FindHome's wait for the guide packet of each pulse it superseded (`axes`, RA then Dec): reads
     // the mount's MC_AUX_GUIDE_ACTIVE until it reports the packet inactive, never the pulse slot, bounded by
@@ -2282,6 +2300,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                                                      bool park_after) {
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     auto next_log = clock_.now() + std::chrono::seconds(10);
+    HomeSearch search(clock_.now());
     try {
         while (true) {
             const auto reason = motion_stop_reason(context, claim);
@@ -2336,6 +2355,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
             if (clock_.now() >= deadline)
                 throw AlpacaException("Celestron CGX home timed out: " + home_axes_status(),
                                       AlpacaError::DriverException);
+            supervise_home_search(context, claim, search, deadline, "Celestron CGX home timed out");
             log_home_wait(next_log);
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
@@ -2364,6 +2384,45 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
             return;
         }
         throw;
+    }
+}
+
+void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim,
+                                                        HomeSearch& search, util::TaskClock::clock::time_point deadline,
+                                                        const char* timeout_message) {
+    const auto timed_out = [&] {
+        return AlpacaException(std::string(timeout_message) + ": " + home_axes_status(), AlpacaError::DriverException);
+    };
+    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
+        const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
+        if (search.done[index] || clock_.now() - search.started[index] < kHomeSearchBound) continue;
+        if (protocol_.is_axis_home_done(axis)) {
+            search.done[index] = true;
+            continue;
+        }
+        // The one exception to the no-retry rule (celestron instructions): never a third home.
+        if (search.rehomed[index]) throw timed_out();
+        // This axis only: the other one may be home-done already.
+        if (!run_motion_stage(context, claim, [&] {
+                const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
+                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+            }))
+            return;
+        while (!protocol_.is_axis_slew_done(axis)) {
+            // A cancel (AbortSlew, disconnect) or a supersede (a newer slew, Park or FindHome) ends the still-wait.
+            if (motion_stop_reason(context, claim) != util::StopReason::None) return;
+            if (clock_.now() >= deadline) throw timed_out();
+            if (!context.wait_for(std::chrono::milliseconds(20))) return;
+        }
+        const auto position = protocol_.get_axis_position(axis);
+        const std::chrono::duration<double> elapsed = clock_.now() - search.started[index];
+        if (!run_motion_stage(context, claim, [&] { protocol_.start_axis_home(axis); })) return;
+        search.rehomed[index] = true;
+        search.started[index] = clock_.now();
+        const char* name = axis == CgxAxis::RightAscension ? "RA" : "Dec";
+        ALPACA_LOG_INFO("Celestron CGX", std::string("Home search missed the sensor; re-homing ") + name +
+                                             " once from position " + std::to_string(position) + " after " +
+                                             std::to_string(static_cast<int>(elapsed.count())) + " s");
     }
 }
 
@@ -2536,6 +2595,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
     };
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     auto next_log = clock_.now() + std::chrono::seconds(10);
+    HomeSearch search(clock_.now());
     try {
         while (true) {
             const auto reason = motion_stop_reason(context, claim);
@@ -2600,6 +2660,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
             if (clock_.now() >= deadline)
                 throw AlpacaException("Celestron CGX meridian home route timed out: " + home_axes_status(),
                                       AlpacaError::DriverException);
+            supervise_home_search(context, claim, search, deadline, "Celestron CGX meridian home route timed out");
             log_home_wait(next_log);
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
