@@ -1,0 +1,2 @@
+### Fixed (tests)
+- **CGX re-home AbortSlew case no longer races the clock** (AlpacaCore tests, issue #2213 follow-up): "AbortSlew during a re-home sends no further home" stepped the fake clock as soon as the home body waited on it, before the async AbortSlew had cancelled the body; five 20 ms steps end the stop's still-wait, so a slow AbortSlew thread let the body send its second home (`2 == 1`, seen on `main` in #2449). The case now gives the AbortSlew up to 2 s of real time first. Test-only.
