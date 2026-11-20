@@ -279,7 +279,8 @@ private:
             // labels (RS-232 v3.10): ":mw#" RA+ and ":me#" RA-, where RA+ raises the RightAscension reading as the
             // ":ZS" pulse (RA+) does on the HAE16 and HAE29C (the GOTO trim). ":ms#" is Dec+ and ":mn#" Dec-, a
             // mechanical sense: on pier side 0 Dec+ lowers the Declination reading and on side 1 it raises it, the
-            // Dec pulse polarity the driver assumes. Not yet confirmed on a rig: the #2424 rig check settles it.
+            // Dec pulse polarity the driver assumes. The #2424 HAE29C rig check (2026-11-20, USB) confirmed this on
+            // both pier sides.
             // No reply, as the firmware.
             if (cmd == ":mw#" || cmd == ":me#") {
                 ra_units_.fetch_add(cmd == ":mw#" ? kArrowStepUnits : -kArrowStepUnits);

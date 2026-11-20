@@ -3133,7 +3133,8 @@ TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait
 // AlpacaBridge's convention (ascom-contract.instructions.md, "iOptron MoveAxis signs"): a positive primary rate
 // turns the tube east, so the reported RightAscension rises; a positive secondary rate turns it north, so the
 // reported Declination rises, on both pier sides. The fake steps its position on each arrow command in iOptron's
-// own labels (fake_ioptron_mount.h); the HAE29C rig check of #2424 confirms or corrects that model.
+// own labels (fake_ioptron_mount.h); the HAE29C rig check of #2424 (2026-11-20, USB) confirmed that model on both
+// pier sides.
 namespace {
 
 // The first arrow command (:mw#, :me#, :mn#, :ms#) the mount received at or after index `from`.
