@@ -1959,7 +1959,11 @@ public:
                     double applied = dec_restore->rate;
                     bool running = dec_restore->running;
                     for (int pass = 0; pass < kMaxPasses; ++pass) {
-                        if (!owns() || !tracking_effectively_on_locked() || dec_rate_arcsec_per_sec_ == applied) {
+                        // Both halves of the state: a write away and back (A, B, A) leaves the rate equal but
+                        // dec_offset_running_ cleared while the axis runs A, and a later DeclinationRate = 0 then
+                        // skipped its stop (#2431 review). Re-applying A is harmless.
+                        if (!owns() || !tracking_effectively_on_locked() ||
+                            (dec_rate_arcsec_per_sec_ == applied && dec_offset_running_ == running)) {
                             break;
                         }
                         applied = dec_rate_arcsec_per_sec_;
