@@ -1612,6 +1612,7 @@ public:
 
             ensure_not_parked_locked("FindHome");
             zero_search = zero_search_active();
+            home_search_unconfirmed_ = false;  // a new FindHome; a :MH# model returns below at a status 7
             // Force-refresh: a stale cached is_at_home (e.g. set before a park/
             // unpark cycle, which never touches it) short-circuits the whole home
             // operation and the client then sees AtHome == false. A zero search ignores is_at_home, so it reads the
@@ -1643,7 +1644,6 @@ public:
                 home_search_deadline_ = clock_.now() + kZeroSearchTimeout;  // only a search has a bound (#2432)
                 home_search_seen_moving_ = false;
                 home_search_resent_ = false;
-                home_search_unconfirmed_ = false;
                 home_search_start_until_ = clock_.now() + kZeroSearchStartGrace;
                 home_search_next_poll_ = clock_.now() + kZeroSearchPollInterval;
             }
@@ -2905,11 +2905,14 @@ private:
                 // Until the search shows motion, read its status every kZeroSearchPollInterval and run the start
                 // check, so a short search is seen and an ignored :MSH# is caught with no client polling. A failed
                 // read here is left to the next poll or the bound; a lost link ends the body.
-                if (now < home_search_deadline_ && !home_search_seen_moving_ && now >= home_search_next_poll_) {
+                const bool polling = zero_search_poll_enabled_.load() && !home_search_seen_moving_;
+                if (now < home_search_deadline_ && polling && now >= home_search_next_poll_) {
                     home_search_next_poll_ = now + kZeroSearchPollInterval;
                     try {
                         refresh_status_cache_locked(true);
-                        check_zero_search_started_locked(clock_.now());
+                        // Judged at the time the read started: the status is from then, not from after the
+                        // exchange (which gives up mutex_), so a slow reply cannot push it past a grace it read in.
+                        check_zero_search_started_locked(now);
                     } catch (const std::exception&) {
                         if (link_lost()) return;
                     }
@@ -2930,7 +2933,7 @@ private:
                     return;
                 }
                 remaining = home_search_deadline_ - now;
-                if (!home_search_seen_moving_) {
+                if (zero_search_poll_enabled_.load() && !home_search_seen_moving_) {
                     remaining = std::min(remaining, home_search_next_poll_ - now);
                 }
             }
@@ -3646,6 +3649,7 @@ public:
     void set_zero_search_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         zero_search_watchdog_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_zero_search_poll_for_testing(bool enabled) { zero_search_poll_enabled_.store(enabled); }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
@@ -3913,6 +3917,9 @@ private:
     // about a second before its 7. Read and written only under the operation lock (the watchdog body, find_home()).
     mutable std::chrono::steady_clock::time_point home_search_next_poll_{};
     static constexpr std::chrono::milliseconds kZeroSearchPollInterval{1000};
+    // Test seam (set_zero_search_poll_for_testing): off, the watchdog waits only for the bound, as before the polling,
+    // so a case about client reads is not raced by the watchdog's reads. On in production.
+    std::atomic<bool> zero_search_poll_enabled_{true};
     // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
     static constexpr std::chrono::seconds kZeroSearchTimeout{120};
     // open-astro#575: an async slew that fails AFTER the initiator returned
@@ -4165,6 +4172,12 @@ void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                 std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_zero_search_watchdog_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_zero_search_poll_for_testing(enabled);
     }
 }
 
