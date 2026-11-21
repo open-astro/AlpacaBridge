@@ -199,11 +199,13 @@ TEST_CASE("Celestron CGX AUX TCP - never re-sends a motion or write command", "[
         std::uint8_t command;
         std::vector<std::uint8_t> payload;
     };
-    const std::vector<Write> writes = {
-        {"MC_GOTO_FAST", 0x02, {0x01, 0x02, 0x03}},    {"MC_GOTO_SLOW", 0x17, {0x01, 0x02, 0x03}},
-        {"MC_SET_POSITION", 0x04, {0x01, 0x02, 0x03}}, {"MC_LEVEL_START", 0x0b, {}},
-        {"MC_AUX_GUIDE", 0x26, {0x32, 0x0a}},          {"MC_SET_POS_GUIDERATE (rate zero)", 0x06, {0x00, 0x00, 0x00}}};
-    // The stop (0x24 {0}) is in the confirmation cases below: on this idle mount the status shows a still axis.
+    const std::vector<Write> writes = {{"MC_GOTO_FAST", 0x02, {0x01, 0x02, 0x03}},
+                                       {"MC_GOTO_SLOW", 0x17, {0x01, 0x02, 0x03}},
+                                       {"MC_SET_POSITION", 0x04, {0x01, 0x02, 0x03}},
+                                       {"MC_LEVEL_START", 0x0b, {}},
+                                       {"MC_AUX_GUIDE", 0x26, {0x32, 0x0a}}};
+    // The stop (0x24 {0}) is in the confirmation cases below: on this idle mount the status shows a still axis. The
+    // absolute rate writes (0x06, 0x07) are re-sent (slice 5c, the next case).
     for (const auto& write : writes) {
         CAPTURE(write.name);
         FakeCelestronAuxTcpAdapter adapter;
@@ -214,6 +216,56 @@ TEST_CASE("Celestron CGX AUX TCP - never re-sends a motion or write command", "[
             [&] { (void)protocol.exchange(request(kDec, write.command, write.payload), milliseconds(450)); },
             AlpacaError::DriverException);
         CHECK(adapter.count(kDec, write.command) == 1);
+    }
+}
+
+// Slice 5c (user decision, amending decision 3): an absolute tracking-rate write names the whole rate, so a second
+// copy sets the same rate. Its lost reply is re-sent on the read-only queries' schedule, and counted once.
+TEST_CASE("Celestron CGX AUX TCP - re-sends a lost absolute rate write up to twice",
+          "[celestron][cgx][protocol][tcp]") {
+    struct Rate {
+        const char* name;
+        std::uint8_t destination;
+        std::uint8_t command;
+        std::vector<std::uint8_t> payload;
+    };
+    const std::vector<Rate> rates = {{"RA sidereal", kRa, 0x06, {0xff, 0xff}},
+                                     {"RA south sidereal", kRa, 0x07, {0xff, 0xff}},
+                                     {"RA rate zero", kRa, 0x06, {0x00, 0x00, 0x00}},
+                                     {"Dec rate zero", kDec, 0x06, {0x00, 0x00, 0x00}}};
+    for (const auto& rate : rates) {
+        CAPTURE(rate.name);
+        {  // the first reply and the first re-send lost: the second re-send recovers it
+            FakeCelestronAuxTcpAdapter adapter;
+            adapter.script(rate.destination, rate.command, 1, Fault::DropReply);
+            adapter.script(rate.destination, rate.command, 2, Fault::Drop);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            const auto started = std::chrono::steady_clock::now();
+            const auto ack = protocol.exchange(request(rate.destination, rate.command, rate.payload));
+            CHECK(ack.source == rate.destination);
+            CHECK(since(started) >= milliseconds(600));
+            CHECK(adapter.count(rate.destination, rate.command) == 3);
+            for (const auto& frame : adapter.received())
+                if (frame.command == rate.command) CHECK(frame.payload == rate.payload);
+            CHECK(protocol.is_healthy());
+            CHECK(protocol.session_generation() == session);
+            CHECK(protocol.recovered_retries() == 1);
+        }
+        {  // three replies lost: a timeout, never a fourth send
+            FakeCelestronAuxTcpAdapter adapter;
+            for (const int nth : {1, 2, 3}) adapter.script(rate.destination, rate.command, nth, Fault::DropReply);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            require_alpaca_error(
+                [&] { (void)protocol.exchange(request(rate.destination, rate.command, rate.payload)); },
+                AlpacaError::DriverException);
+            CHECK(adapter.count(rate.destination, rate.command) == 3);
+            CHECK(protocol.session_generation() != session);
+            CHECK(protocol.recovered_retries() == 0);
+        }
     }
 }
 
@@ -619,6 +671,19 @@ TEST_CASE("Celestron CGX AUX link - a lost USB reply is never re-sent", "[celest
         }
     }
     CHECK(sent == 1);
+    protocol.disconnect();
+}
+
+TEST_CASE("Celestron CGX AUX link - a lost USB rate-write reply is never re-sent",
+          "[celestron][cgx][protocol][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    mount.drop_next_reply(kRa, 0x06, true);
+    require_alpaca_error([&] { (void)protocol.exchange(request(kRa, 0x06, {0xff, 0xff})); },
+                         AlpacaError::DriverException);
+    CHECK(mount.count_command(kRa, 0x06) == 1);
     protocol.disconnect();
 }
 

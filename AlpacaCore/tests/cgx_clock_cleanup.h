@@ -67,7 +67,7 @@ inline void drain_cgx_clock_task(std::future<void>& task, FakeTaskClock& clock) 
 
 // Steps a CGX motion body through its clock waits until `done()` holds: each time a waiter is registered, `advance`
 // moves every clock the case models (the fake clock last, which wakes the body) by `step`. False when the body stops
-// settling or 20 s of real time pass.
+// settling (5 s: a lost TCP reply's timeouts run in real time, 1 s each) or 20 s of real time pass.
 inline bool step_cgx_motion(FakeTaskClock& clock, const std::function<void(std::chrono::milliseconds)>& advance,
                             const std::function<bool()>& done, std::chrono::milliseconds step) {
     using namespace std::chrono_literals;
@@ -76,7 +76,7 @@ inline bool step_cgx_motion(FakeTaskClock& clock, const std::function<void(std::
         if (std::chrono::steady_clock::now() >= watchdog) return false;
         if (!clock.wait_for_waiters(1, 1ms)) continue;
         advance(step);
-        if (!clock.wait_for_woken_settled(2s)) return false;
+        if (!clock.wait_for_woken_settled(5s)) return false;
     }
     return true;
 }

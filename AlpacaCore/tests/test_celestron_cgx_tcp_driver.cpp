@@ -26,10 +26,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
@@ -365,65 +367,151 @@ cgx::CelestronCgxConnectionInfo wifi_info(int port) {
 }
 }  // namespace
 
+namespace {
+
 // Slice 5 rig finding (2026-11-21): over WiFi each exchange takes ~21 ms, and an untracked mount falls behind the sky
 // between aiming a correction and reading its arrival, so every GOTO used all three corrections and one failed at
-// 3.055". Here every exchange costs 21 ms on every clock (the task clock, the pointing UTC and the adapter's motors),
-// a GOTO takes 150 ms (the rig's 2-3 SLEW_DONE polls), and sidereal tracking drifts the RA axis.
-TEST_CASE("Celestron CGX TCP driver - GOTO arrival over 21 ms exchanges lands within 3 arcsec",
-          "[celestron][cgx][telescope][tcp]") {
+// 3.055". The rig: every exchange costs 21 ms on every clock (the task clock, the pointing UTC and the adapter's
+// motors), a GOTO takes 150 ms (the rig's 2-3 SLEW_DONE polls), and sidereal tracking drifts the RA axis.
+struct TcpArrivalRig {
     FakeCelestronAuxTcpAdapter adapter;
-    REQUIRE(adapter.ok());
-    adapter.use_virtual_time();
     std::atomic<std::int64_t> epoch_milliseconds{1800000000000};
     alpacacore::test::FakeTaskClock clock;
-    cgx::CelestronCgxConnectionInfo info;
-    info.port_path = "/dev/null/not-a-port";
-    info.host = "127.0.0.1";
-    info.tcp_port = adapter.port();
-    info.site_latitude_degrees = 45.0;
-    info.site_longitude_degrees = -75.0;
-    const auto now = [&] {
-        return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_milliseconds.load())};
-    };
-    std::unique_ptr<alpacacore::TelescopeDriver> driver =
-        alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
-    alpacacore::test::set_cgx_connected(*driver, clock, true);
-    auto home = std::async(std::launch::async, [&] { driver->find_home(); });
-    alpacacore::test::drain_cgx_clock_task(home, clock);
-    home.get();
-    const auto advance = [&](std::chrono::milliseconds elapsed) {
+    double target_ra = 0.0;
+
+    TcpArrivalRig() {
+        REQUIRE(adapter.ok());
+        adapter.use_virtual_time();
+        cgx::CelestronCgxConnectionInfo info;
+        info.port_path = "/dev/null/not-a-port";
+        info.host = "127.0.0.1";
+        info.tcp_port = adapter.port();
+        info.site_latitude_degrees = 45.0;
+        info.site_longitude_degrees = -75.0;
+        const auto now = [this] {
+            return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_milliseconds.load())};
+        };
+        driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+        alpacacore::test::set_cgx_connected(*driver, clock, true);
+        auto home = std::async(std::launch::async, [this] { driver->find_home(); });
+        alpacacore::test::drain_cgx_clock_task(home, clock);
+        home.get();
+        REQUIRE(step([this] { return slew_ended(); }));
+        REQUIRE(driver->get_at_home());
+        driver->set_tracking(true);
+        adapter.set_goto_duration(150ms);
+        adapter.set_tracking_rate(16777216.0 / 86164.0905);  // counts per second at the sidereal rate
+        adapter.set_before_request([this] { advance(21ms); });
+    }
+    // The hook goes before the clock and the UTC it advances, which die before the adapter whose thread runs it.
+    ~TcpArrivalRig() { adapter.set_before_request(nullptr); }
+
+    void advance(std::chrono::milliseconds elapsed) {
         epoch_milliseconds.fetch_add(elapsed.count());
         adapter.advance(elapsed);
         clock.advance(elapsed);
-    };
-    const auto slew_ended = [&] {
+    }
+    bool step(const std::function<bool()>& done) {
+        return alpacacore::test::step_cgx_motion(
+            clock, [this](std::chrono::milliseconds elapsed) { advance(elapsed); }, done, 20ms);
+    }
+    bool slew_ended() const {
         try {
             return !driver->get_slewing();
         } catch (const alpacacore::AlpacaException&) {
-            return true;
+            return true;  // a failed slew ends too; the case reads the failure
         }
-    };
-    REQUIRE(alpacacore::test::step_cgx_motion(clock, advance, slew_ended, 20ms));
-    REQUIRE(driver->get_at_home());
-    driver->set_tracking(true);
-    adapter.set_goto_duration(150ms);
-    adapter.set_tracking_rate(16777216.0 / 86164.0905);  // counts per second at the sidereal rate
-    // By value: the cleanup's Disconnect runs after `advance` is gone.
-    adapter.set_before_request([advance] { advance(21ms); });
+    }
+    // A slew to hour angle +1 (Normal), stepped until it ends.
+    void slew() {
+        target_ra = std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+        driver->slew_to_coordinates_async(target_ra, 30.0);
+        REQUIRE(step([this] { return slew_ended(); }));
+    }
+    void check_landed() {
+        REQUIRE_NOTHROW(driver->get_slewing());
+        CHECK_FALSE(driver->get_slewing());
+        CHECK(driver->get_tracking());
+        advance(500ms);
+        cgx::poll_state_now_for_testing(*driver);
+        CHECK(std::abs(std::remainder(driver->get_right_ascension() - target_ra, 24.0)) * 15.0 * 3600.0 <= 0.5);
+        CHECK(std::abs(driver->get_declination() - 30.0) * 3600.0 <= 3.0);
+    }
+    // The RA rate commands (0x06) sent so far, in order.
+    std::vector<std::vector<std::uint8_t>> ra_rates() const {
+        std::vector<std::vector<std::uint8_t>> rates;
+        for (const auto& frame : adapter.received())
+            if (frame.destination == kRa && frame.command == 0x06) rates.push_back(frame.payload);
+        return rates;
+    }
+    // A failed slew ends with both axes stopped and verified: the stop went out and RA stands still.
+    void check_failed_and_stopped(int ra_stops_before) {
+        require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, AlpacaError::DriverException);
+        CHECK_FALSE(driver->get_tracking());
+        CHECK(adapter.count(kRa, 0x24) > ra_stops_before);
+        CHECK(adapter.count(kDec, 0x24) > 0);
+        const auto ra = adapter.position(kRa);
+        adapter.advance(1000ms);
+        CHECK(adapter.position(kRa) == ra);
+    }
+};
 
-    const double target_ra = std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
-    driver->slew_to_coordinates_async(target_ra, 30.0);
-    REQUIRE(alpacacore::test::step_cgx_motion(clock, advance, slew_ended, 20ms));
-    REQUIRE_NOTHROW(driver->get_slewing());
-    CHECK_FALSE(driver->get_slewing());
-    CHECK(driver->get_tracking());
-    CHECK(adapter.count(kRa, 0x17) <= 2);
-    advance(500ms);
-    cgx::poll_state_now_for_testing(*driver);
-    CHECK(std::abs(std::remainder(driver->get_right_ascension() - target_ra, 24.0)) * 15.0 * 3600.0 <= 0.5);
-    CHECK(std::abs(driver->get_declination() - 30.0) * 3600.0 <= 3.0);
-    adapter.set_before_request(nullptr);
+const std::vector<std::uint8_t> kSidereal{0xff, 0xff};
+const std::vector<std::uint8_t> kRateZero{0x00, 0x00, 0x00};
+
+}  // namespace
+
+TEST_CASE("Celestron CGX TCP driver - GOTO arrival over 21 ms exchanges lands within 3 arcsec",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpArrivalRig rig;
+    rig.slew();
+    rig.check_landed();
+    CHECK(rig.adapter.count(kRa, 0x17) <= 2);
+}
+
+// Slice 5c, rig 2026-11-21 23:41 (5b build): the tracking-off write of the first correction lost its reply, and the
+// 1000 ms timeout failed the GOTO. An absolute rate written twice is the same rate, so its lost reply is re-sent.
+TEST_CASE("Celestron CGX TCP driver - a lost tracking-rate reply during the corrections is re-sent and the GOTO lands",
+          "[celestron][cgx][telescope][tcp]") {
+    // The RA rate writes of a slew that needs one correction: 1 Tracking on (before the slew), 2 off for the FAST
+    // GOTO, 3 on at its landing, 4 off before the correction, 5 on at the correction's landing.
+    const auto [nth, payload] = GENERATE(table<int, std::vector<std::uint8_t>>({{3, kSidereal}, {4, kRateZero}}));
+    INFO("RA rate write " << nth);
+    TcpArrivalRig rig;
+    rig.adapter.script(kRa, 0x06, nth, Fault::DropReply);
+    rig.slew();
+    const auto rates = rig.ra_rates();
+    REQUIRE(rates.size() > static_cast<std::size_t>(nth));
+    CHECK(rates[static_cast<std::size_t>(nth - 1)] == payload);
+    CHECK(rates[static_cast<std::size_t>(nth)] == payload);  // the re-send: the same absolute rate
+    rig.check_landed();
+    CHECK(rig.driver->get_description().find("lost replies recovered: 1") != std::string::npos);
+}
+
+TEST_CASE("Celestron CGX TCP driver - three lost replies to a tracking-rate write fail the GOTO and the stop verifies",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpArrivalRig rig;
+    // The tracking-off write before the first correction and both of its re-sends.
+    for (const int nth : {4, 5, 6}) rig.adapter.script(kRa, 0x06, nth, Fault::DropReply);
+    const int ra_stops = rig.adapter.count(kRa, 0x24);
+    rig.slew();
+    const auto rates = rig.ra_rates();
+    REQUIRE(rates.size() >= 6);
+    for (const std::size_t index : {3U, 4U, 5U}) CHECK(rates[index] == kRateZero);
+    CHECK(rig.adapter.count(kRa, 0x17) == 0);
+    rig.check_failed_and_stopped(ra_stops);
+}
+
+TEST_CASE("Celestron CGX TCP driver - a lost GOTO_SLOW fails the GOTO and is never re-sent",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpArrivalRig rig;
+    rig.adapter.script(kRa, 0x17, 1, Fault::Drop);  // lost on its way to the bus: the status cannot confirm it
+    const int ra_stops = rig.adapter.count(kRa, 0x24);
+    rig.slew();
+    CHECK(rig.adapter.count(kRa, 0x17) == 1);
+    rig.check_failed_and_stopped(ra_stops);
 }
 
 TEST_CASE("Celestron CGX WiFi Telescope Driver - Defaults", "[celestron][cgx][telescope][tcp][unit]") {
