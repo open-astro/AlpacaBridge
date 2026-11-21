@@ -246,9 +246,9 @@ void CelestronCgxProtocol::connect_tcp(const std::string& host, int port, std::c
                 throw_link_error(true, "cannot connect to " + endpoint + ": " + util::errno_string(errno));
             }
             const auto deadline = std::chrono::steady_clock::now() + timeout;
-            struct pollfd descriptor {
-                fd, POLLOUT, 0
-            };
+            pollfd descriptor{};
+            descriptor.fd = fd;
+            descriptor.events = POLLOUT;
             int ready = 0;
             do {
                 ready = ::poll(&descriptor, 1, poll_timeout_ms(deadline));
@@ -279,9 +279,9 @@ void CelestronCgxProtocol::drain_backlog_locked() {
     const auto bound = std::chrono::steady_clock::now() + kTcpBacklogBound;
     std::size_t discarded = 0;
     while (std::chrono::steady_clock::now() < bound) {
-        struct pollfd descriptor {
-            serial_fd_, POLLIN, 0
-        };
+        pollfd descriptor{};
+        descriptor.fd = serial_fd_;
+        descriptor.events = POLLIN;
         const int ready = ::poll(&descriptor, 1,
                                  poll_timeout_ms(std::min(std::chrono::steady_clock::now() + kTcpBacklogQuiet, bound)));
         if (ready == 0) break;
@@ -304,6 +304,7 @@ std::size_t CelestronCgxProtocol::discard_input_locked() {
     receive_buffer_.clear();
     std::array<std::uint8_t, 128> incoming{};
     while (true) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): MSG_DONTWAIT on an O_NONBLOCK socket
         const ssize_t count = ::recv(serial_fd_, incoming.data(), incoming.size(), MSG_DONTWAIT);
         if (count > 0) {
             discarded += static_cast<std::size_t>(count);
