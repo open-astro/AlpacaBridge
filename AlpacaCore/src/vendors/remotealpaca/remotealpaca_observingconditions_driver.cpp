@@ -606,7 +606,8 @@ private:
     // A command (Refresh, an AveragePeriod write) runs as a body in its own slot (decision 0023, decision 0006 rule
     // 1); the caller waits for the body's outcome, which the per-call timeout bounds, and gets its error unchanged. A
     // refused connection is a lost link at once (NotConnected); another call with no reply is a DriverException, or
-    // NotConnected when the poll lost the link meanwhile.
+    // NotConnected when the poll lost the link meanwhile. Both are decided inside the body: a Connect joins the slot
+    // first, so no reconnect lands between the failure and its answer (#2456).
     void run_command(std::function<void(util::OperationContext&)> body) {
         struct Outcome {
             std::mutex mutex;
@@ -615,10 +616,19 @@ private:
             std::exception_ptr error;
         };
         auto outcome = std::make_shared<Outcome>();
-        command_op_.start([outcome, body = std::move(body)](util::OperationContext& ctx) {
+        command_op_.start([this, outcome, body = std::move(body)](util::OperationContext& ctx) {
             std::exception_ptr error;
             try {
-                body(ctx);
+                try {
+                    body(ctx);
+                } catch (const RemoteConnectRefused& e) {
+                    lose_link(e.what());
+                    require_connected();
+                    throw;
+                } catch (const RemoteTransportError&) {
+                    require_connected();
+                    throw;
+                }
             } catch (...) {
                 error = std::current_exception();
             }
@@ -635,17 +645,7 @@ private:
             outcome->done_cv.wait(lock, [&outcome] { return outcome->done; });
         }
         if (command_done_hook_) command_done_hook_();
-        if (!outcome->error) return;
-        try {
-            std::rethrow_exception(outcome->error);
-        } catch (const RemoteConnectRefused& e) {
-            lose_link(e.what());
-            require_connected();
-            throw;
-        } catch (const RemoteTransportError&) {
-            require_connected();
-            throw;
-        }
+        if (outcome->error) std::rethrow_exception(outcome->error);
     }
 
     // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under transition_mutex_, so a start never
