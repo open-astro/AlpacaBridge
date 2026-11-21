@@ -649,6 +649,33 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     driver->set_connected(false);
 }
 
+// Issue #2292: get_single_frame was the one SDK call in the exposure worker outside a try/catch, so a throw from it
+// (the wrapper's NotConnected for a closed handle) left the raw std::thread body and ended the process in
+// std::terminate. It now fails the exposure with the SDK's text, like a false return.
+TEST_CASE("QHY Camera Driver - a throwing frame read fails the exposure instead of ending the process (#2292)",
+          "[qhy][camera][unit][issue2292]") {
+    auto fake = make_fake();
+    fake.frame_throw = "QHY camera not open: fake-qhy-0";
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.1, true);
+    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    std::string what;
+    try {
+        (void)driver->get_image_ready();
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        what = ex.what();
+    }
+    CHECK(what.find("QHY camera not open: fake-qhy-0") != std::string::npos);
+    // The next StartExposure clears the stored failure.
+    fake.frame_throw.reset();
+    driver->start_exposure(0.05, true);
+    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    driver->set_connected(false);
+}
+
 // ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired (issue #1477).
 TEST_CASE("QHY Camera Driver - LastExposure values follow successful images only", "[qhy][camera][unit]") {
     auto fake = make_fake();

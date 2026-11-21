@@ -1846,7 +1846,16 @@ public:
 
             ALPACA_LOG_DEBUG("QHY", "exposure worker: calling get_single_frame...");
             uint32_t w = 0, h = 0, bpp = 0, channels = 0;
-            bool ok = sdk.get_single_frame(id, local_buf.data(), w, h, bpp, channels);
+            bool ok = false;
+            // Caught like every other SDK call in this worker (#2292): the wrapper throws NotConnected once the
+            // handle is closed, and an exception out of this raw std::thread body is std::terminate.
+            std::string frame_error;
+            try {
+                ok = sdk.get_single_frame(id, local_buf.data(), w, h, bpp, channels);
+            } catch (const std::exception& e) {
+                frame_error = e.what();
+                ALPACA_LOG_WARN("QHY", "get_single_frame failed: " + frame_error);
+            }
             ALPACA_LOG_DEBUG("QHY",
                              "exposure worker: get_single_frame returned ok=" + std::string(ok ? "true" : "false"));
 
@@ -1938,7 +1947,8 @@ public:
                 }
             } else {
                 exposure_status_ = QHYExposureStatus::Failed;
-                exposure_failure_ = "The camera failed to deliver the frame";
+                exposure_failure_ =
+                    frame_error.empty() ? "The camera failed to deliver the frame" : std::move(frame_error);
                 image_ready_     = false;
             }
             exposure_deadline_valid_ = false;
