@@ -77,6 +77,14 @@ constexpr std::chrono::milliseconds kGuideEndMargin{500};
 // A home search not done by then missed the sensor (#2213): on the rig a normal search ended within about 30 s, and a
 // missed one fell back to a crawl that needed about 420 s, so the axis is stopped and re-homed once from where it is.
 constexpr std::chrono::seconds kHomeSearchBound{60};
+// The home travel guard (docs/failures/0016-cgx-home-travel.md): each axis's encoder travel during one FindHome, Park
+// or meridian home route, summed across the #2213 re-home. No legitimate home found needs more than about 230 deg
+// (a direct home from the farthest slew position is 180 deg Dec; the #2213 rig miss with its re-home about 179 deg),
+// and no home needs a full turn, so an axis past 270 deg is a runaway. A re-home is sent only while the axis is at
+// 90 deg or less, leaving it the half turn any home can need: the #2213 miss had gone at most 83 deg at 60 s, while
+// the Oct-28 shape (a fast wrong-way search that never finds the switch) had gone about 190 deg.
+constexpr double kHomeTravelBoundDegrees = 270.0;
+constexpr double kHomeRehomeTravelLimitDegrees = kHomeTravelBoundDegrees - 180.0;
 // Added to every stop verification budget over TCP (slice 3): one WiFi status poll of both axes with a recovered
 // re-send. USB keeps its 500 ms cleanup and 3 s AbortSlew budgets.
 constexpr std::chrono::milliseconds kTcpStopVerifyAllowance{600};
@@ -540,12 +548,17 @@ private:
         std::array<util::TaskClock::clock::time_point, 2> started;
         std::array<bool, 2> rehomed{};
         std::array<bool, 2> done{};
+        // The home travel guard: each axis's last encoder read and the travel summed from read to read.
+        std::array<std::optional<std::uint32_t>, 2> last_encoder;
+        std::array<double, 2> travel_degrees{};
     };
     // Called by both home waits between their polls (#2213): an axis not home-done kHomeSearchBound after its
     // MC_LEVEL_START is stopped, waited still and sent MC_LEVEL_START once more; a re-home that misses the bound too,
-    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). The stop and the home send
-    // are run_motion_stage() stages on `claim`, and the still-wait asks motion_stop_reason(), so a cancel or a
-    // supersede ends it sending nothing more; it then returns early and the caller's loop handles the reason.
+    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). First it reads both encoders
+    // and adds each axis's travel since the last read: a sum past kHomeTravelBoundDegrees, or a re-home due above
+    // kHomeRehomeTravelLimitDegrees, throws the travel-guard error (the caller's catch stops the axes). The stop and
+    // the home send are run_motion_stage() stages on `claim`, and the still-wait asks motion_stop_reason(), so a cancel
+    // or a supersede ends it sending nothing more; it then returns early and the caller's loop handles the reason.
     void supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim, HomeSearch& search,
                                util::TaskClock::clock::time_point deadline, const char* timeout_message);
     void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
@@ -2424,6 +2437,24 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
     const auto timed_out = [&] {
         return AlpacaException(std::string(timeout_message) + ": " + home_axes_status(), AlpacaError::DriverException);
     };
+    // No status reads in this error: the catch's stop must go out at once (each read can take 1 s over WiFi).
+    const auto travel_exceeded = [&](std::size_t index, const std::string& what) {
+        return AlpacaException(std::string("Celestron CGX home travel guard: ") + (index == 0 ? "RA" : "Dec") +
+                                   " moved " + std::to_string(static_cast<int>(search.travel_degrees[index])) +
+                                   " deg without finding home" + what,
+                               AlpacaError::DriverException);
+    };
+    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
+        const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
+        const auto encoder = protocol_.get_axis_position(axis);
+        if (search.last_encoder[index])
+            search.travel_degrees[index] += std::abs(signed_cgx_encoder_delta(encoder, *search.last_encoder[index])) *
+                                            360.0 / kCgxEncoderStepsPerRevolution;
+        search.last_encoder[index] = encoder;
+        if (search.travel_degrees[index] > kHomeTravelBoundDegrees)
+            throw travel_exceeded(index,
+                                  " (bound " + std::to_string(static_cast<int>(kHomeTravelBoundDegrees)) + " deg)");
+    }
     for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
         const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
         if (search.done[index] || clock_.now() - search.started[index] < kHomeSearchBound) continue;
@@ -2433,6 +2464,10 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
         }
         // The one exception to the no-retry rule (celestron instructions): never a third home.
         if (search.rehomed[index]) throw timed_out();
+        // A re-home must fit inside the same bound: a half turn of room.
+        if (search.travel_degrees[index] > kHomeRehomeTravelLimitDegrees)
+            throw travel_exceeded(index, "; not re-homing past " +
+                                             std::to_string(static_cast<int>(kHomeRehomeTravelLimitDegrees)) + " deg");
         // This axis only: the other one may be home-done already.
         if (!run_motion_stage(context, claim, [&] {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};

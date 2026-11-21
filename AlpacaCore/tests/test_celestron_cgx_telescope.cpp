@@ -1677,13 +1677,14 @@ TEST_CASE("Celestron CGX USB Telescope Driver - home wait logs both axes at DEBU
         }
     } else {
         CHECK(logged.empty());
-        // Below DEBUG the loop reads only RA's MC_LEVEL_DONE (Dec's is short-circuited while RA is pending).
+        // Below DEBUG the loop reads only RA's MC_LEVEL_DONE (Dec's is short-circuited while RA is pending) and,
+        // for the home travel guard, both encoders once per iteration.
         CHECK(mount.count_command(0x10, 0x12) == before[0] + iterations);
         CHECK(mount.count_command(0x10, 0x13) == before[1]);
-        CHECK(mount.count_command(0x10, 0x01) == before[2]);
+        CHECK(mount.count_command(0x10, 0x01) == before[2] + iterations);
         CHECK(mount.count_command(0x11, 0x12) == before[3]);
         CHECK(mount.count_command(0x11, 0x13) == before[4]);
-        CHECK(mount.count_command(0x11, 0x01) == before[5]);
+        CHECK(mount.count_command(0x11, 0x01) == before[5] + iterations);
     }
     mount.set_auto_complete_motions(true);
 }
@@ -4513,9 +4514,11 @@ double degrees_forward(const alpacacore::test::FakeCelestronCgxMount& mount, std
 }  // namespace
 
 // The 2026-10-28 incident (docs/failures/0016-cgx-home-travel.md): a home search that never finds its switch and
-// drives away. Under #2213 alone it was stopped at 60 s (about 190 deg) and searched again for 60 s more (about 380 deg).
-TEST_CASE("Celestron CGX USB Telescope Driver - a runaway home search is stopped at the re-home point, not searched again",
-          "[celestron][cgx][telescope][home-search][travel-guard]") {
+// drives away. Under #2213 alone it was stopped at 60 s (about 190 deg) and searched again for 60 s more (about 380
+// deg).
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a runaway home search is stopped at the re-home point, not searched again",
+    "[celestron][cgx][telescope][home-search][travel-guard]") {
     using namespace std::chrono_literals;
     const int route = GENERATE(0, 1, 2);  // FindHome, Park, the meridian home route
     INFO("route=" << route);

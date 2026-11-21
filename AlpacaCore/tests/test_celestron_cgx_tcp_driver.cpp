@@ -239,7 +239,8 @@ TEST_CASE("Celestron CGX TCP driver - a runaway home search is stopped by the tr
           "[celestron][cgx][telescope][tcp][home-search][travel-guard]") {
     TcpRig rig;
     rig.set_connected(true);
-    // About 172 deg per real second: the sum passes 270 deg in under 2 s, long before 60 s of task-clock time.
+    // About 172 deg per real second: the sum passes 270 deg in about 1.6 s. The loop below lets at most 20 ms of
+    // task-clock time pass per real millisecond, so that is at most 32 s of task-clock time, before the 60 s point.
     rig.adapter.set_home_runaway(kRa, 8'000'000.0);
     const int stops = rig.adapter.count(kRa, 0x24);
     rig.driver->find_home();
@@ -255,6 +256,7 @@ TEST_CASE("Celestron CGX TCP driver - a runaway home search is stopped by the tr
     const auto deadline = std::chrono::steady_clock::now() + 20s;
     while (!ended() && std::chrono::steady_clock::now() < deadline) {
         if (rig.clock.wait_for_waiters(1, 1ms)) rig.clock.advance(20ms);
+        std::this_thread::sleep_for(1ms);  // real time: the fake's runaway drifts in real time
     }
     INFO("Slewing failure: " << failure);
     CHECK(failure.find("Celestron CGX home travel guard") != std::string::npos);
