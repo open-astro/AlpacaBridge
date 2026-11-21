@@ -68,6 +68,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
     limits.texts.guide_rate_not_finite = "GuideRate must be a finite number greater than 0";
     limits.texts.guide_rate_range = "GuideRate must be a finite number greater than 0";
+    limits.tracking_rate_max = 4;  // DriveRates 0-3 and 4, the custom rate
+    limits.texts.tracking_rate = "Invalid tracking rate";
     return limits;
 }();
 
@@ -1600,11 +1602,9 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 4) {
-            throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
-        }
+        util::check_tracking_rate_arguments(kCommandLimits, rate);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_tracking_rate_state(kCommandLimits, GateChecks{*this, "TrackingRate"});
 
         const Wire protocol = wire();
 

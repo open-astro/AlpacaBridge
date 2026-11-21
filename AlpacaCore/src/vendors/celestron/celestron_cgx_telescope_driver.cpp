@@ -55,6 +55,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegreesPerSecond;
     limits.texts.guide_rate_not_finite = limits.texts.guide_rate_range =
         "Guide rates must be between 10% and 100% of sidereal";
+    limits.tracking_rate_max = 2;
+    limits.texts.tracking_rate = "TrackingRate must be Sidereal, Lunar, or Solar";
     return limits;
 }();
 constexpr std::uint32_t kRaHomeEncoder = kCgxEncoderStepsPerRevolution / 4;
@@ -1692,8 +1694,7 @@ void CelestronCgxTelescopeDriver::set_target_right_ascension(double ra) {
     target_ra_set_ = true;
 }
 void CelestronCgxTelescopeDriver::set_tracking_rate(int rate) {
-    if (rate < 0 || rate > 2)
-        throw AlpacaException("TrackingRate must be Sidereal, Lunar, or Solar", AlpacaError::InvalidValue);
+    util::check_tracking_rate_arguments(kCommandLimits, rate);
     require_connected();
     MotionTransition transition(*this);
     std::unique_lock<std::mutex> lock(mutex_);

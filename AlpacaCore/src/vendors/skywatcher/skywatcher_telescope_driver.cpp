@@ -140,6 +140,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
+    limits.tracking_rate_max = 2;
+    limits.texts.tracking_rate = "Unsupported tracking rate";
     return limits;
 }();
 // Above ~128x sidereal the controller needs high-speed (fast) mode.
@@ -1487,9 +1489,7 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 2) {  // #2287: the argument check runs first
-            throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
-        }
+        util::check_tracking_rate_arguments(kCommandLimits, rate);  // #2287: the argument check runs first
         StateLock lock(lock_gate_);
         check_writable_locked();
         double previous = effective_ra_rate_locked();

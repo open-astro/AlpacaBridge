@@ -24,8 +24,8 @@
 // The telescope command gate (#2258): the checks a mount runs before a command, in one order for every mount
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
-// Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes). Sync,
-// the Alt/Az slews, the rate offsets, the targets, TrackingRate and DestinationSideOfPier join after #2287.
+// Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes), and
+// TrackingRate (#2418). Sync, the Alt/Az slews, the rate offsets, the targets and DestinationSideOfPier join next.
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
 // only: the ranges and the InvalidValue texts are fields of the limits (each driver keeps its own words), so a driver
@@ -69,6 +69,7 @@ struct TelescopeArgumentTexts {
     const char* move_axis_rate_range = "MoveAxis rate exceeds supported range";
     const char* guide_rate_not_finite = "GuideRate must be a finite number";
     const char* guide_rate_range = "GuideRate is out of range";
+    const char* tracking_rate = "TrackingRate is not a supported DriveRates value";
 };
 
 /// A driver's protocol limits, orders and argument texts. Every range defaults to "no limit"; the PulseGuide
@@ -93,6 +94,8 @@ struct TelescopeCommandLimits {
     double guide_rate_ra_max = std::numeric_limits<double>::infinity();
     double guide_rate_dec_min = -std::numeric_limits<double>::infinity();
     double guide_rate_dec_max = std::numeric_limits<double>::infinity();
+
+    int tracking_rate_max = std::numeric_limits<int>::max();  ///< TrackingRate takes 0 .. tracking_rate_max
 
     TelescopeArgumentTexts texts;
 };
@@ -220,6 +223,27 @@ template <typename Checks>
 void check_guide_rate(const TelescopeCommandLimits& limits, GuideRateAxis axis, double deg_per_sec, Checks&& checks) {
     check_guide_rate_arguments(limits, axis, deg_per_sec);
     check_guide_rate_state(limits, checks);
+}
+
+// TrackingRate set: a rate from 0 to the driver's highest, then connected and the link fault. A rate change moves no
+// axis, so it has no parked or Tracking check (ITelescopeV4 names neither).
+
+inline void check_tracking_rate_arguments(const TelescopeCommandLimits& limits, int rate) {
+    if (rate < 0 || rate > limits.tracking_rate_max) {
+        telescope_gate_detail::refuse(limits.texts.tracking_rate);
+    }
+}
+
+template <typename Checks>
+void check_tracking_rate_state(const TelescopeCommandLimits& /*limits*/, Checks&& checks) {
+    checks.check_connected();
+    checks.check_no_fault();
+}
+
+template <typename Checks>
+void check_tracking_rate(const TelescopeCommandLimits& limits, int rate, Checks&& checks) {
+    check_tracking_rate_arguments(limits, rate);
+    check_tracking_rate_state(limits, checks);
 }
 
 }  // namespace alpacacore::util

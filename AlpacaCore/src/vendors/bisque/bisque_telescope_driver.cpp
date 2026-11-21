@@ -107,6 +107,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.pulse_direction = "PulseGuide direction or duration is invalid";
     limits.texts.pulse_duration = "PulseGuide duration must be at most 30000 ms";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
+    limits.tracking_rate_max = 0;  // TODO: support solar/lunar/custom rates via SetTracking
+    limits.texts.tracking_rate = "Only sidereal tracking rate is currently supported";
     return limits;
 }();
 
@@ -679,11 +681,10 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        // TODO: Support solar/lunar/custom rates via SetTracking.
-        if (rate != 0) {
-            throw AlpacaException("Only sidereal tracking rate is currently supported", AlpacaError::InvalidValue);
-        }
-        check_link_now();  // sidereal is already the default; a write still needs a live link
+        util::check_tracking_rate_arguments(kCommandLimits, rate);
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Sidereal is already the default; a write still needs a live link.
+        util::check_tracking_rate_state(kCommandLimits, GateChecks{*this, "TrackingRate"});
     }
 
     std::vector<int> get_tracking_rates() const override {
