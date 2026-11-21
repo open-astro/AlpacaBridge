@@ -52,8 +52,8 @@ private:
 };
 
 std::string_view skip_spaces(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' ||
-                             text.front() == '\n')) {
+    while (!text.empty() &&
+           (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' || text.front() == '\n')) {
         text.remove_prefix(1);
     }
     return text;
@@ -113,9 +113,9 @@ std::vector<AuxBeacon> listen_for_aux_beacons(std::chrono::milliseconds window, 
     const std::string where = "UDP port " + std::to_string(port);
     UdpSocket socket;
     if (socket.fd() < 0) {
-        throw AlpacaException("Celestron SkyPortal beacon: cannot open a socket for " + where + ": " +
-                                  util::errno_string(errno),
-                              AlpacaError::DriverException);
+        throw AlpacaException(
+            "Celestron SkyPortal beacon: cannot open a socket for " + where + ": " + util::errno_string(errno),
+            AlpacaError::DriverException);
     }
     // A passive receive of the adapter's broadcast: nothing is sent and nothing is answered (decision 0023 rule 1
     // is about serving). SO_REUSEADDR lets it share the port with another listener; each gets a copy of a broadcast.
@@ -126,9 +126,9 @@ std::vector<AuxBeacon> listen_for_aux_beacons(std::chrono::milliseconds window, 
     local.sin_addr.s_addr = htonl(INADDR_ANY);
     if (::setsockopt(socket.fd(), SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0 ||
         ::bind(socket.fd(), reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
-        throw AlpacaException("Celestron SkyPortal beacon: cannot listen on " + where + ": " +
-                                  util::errno_string(errno),
-                              AlpacaError::DriverException);
+        throw AlpacaException(
+            "Celestron SkyPortal beacon: cannot listen on " + where + ": " + util::errno_string(errno),
+            AlpacaError::DriverException);
     }
 
     std::vector<AuxBeacon> found;

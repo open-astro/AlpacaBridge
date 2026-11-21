@@ -215,15 +215,15 @@ TEST_CASE("Celestron SkyPortal beacon - garbage datagrams are ignored", "[celest
     REQUIRE(port > 0);
     BeaconSender noise("127.0.0.6", port,
                        {
-                           std::string(),                                          // empty datagram
-                           std::string("\x3b\x03\x20\x11\x01\xcb", 6),             // an AUX frame
-                           "not json at all",                                      //
+                           std::string(),                                           // empty datagram
+                           std::string("\x3b\x03\x20\x11\x01\xcb", 6),              // an AUX frame
+                           "not json at all",                                       //
                            R"({ "manufacturer":"Sky-Watcher" , "ip":"1.2.3.4" })",  // another vendor
-                           R"({ "manufacturer":"Celest)",                          // truncated
-                           R"({ "manufacturer" "Celestron" })",                    // no colon
-                           R"({ "ssid":"Celestron-AFFC" })",                       // no manufacturer
+                           R"({ "manufacturer":"Celest)",                           // truncated
+                           R"({ "manufacturer" "Celestron" })",                     // no colon
+                           R"({ "ssid":"Celestron-AFFC" })",                        // no manufacturer
                            R"({ "vendor":"x", "note":"manufacturer:Celestron" })",  // the word, not the field
-                           std::string(2000, 'C'),                                 // oversize
+                           std::string(2000, 'C'),                                  // oversize
                        });
     REQUIRE(noise.ok());
     BeaconSender adapter("127.0.0.7", port, {kCapturedBeacon});
