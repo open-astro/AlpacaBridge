@@ -2204,7 +2204,7 @@ TEST_CASE("Builtin catalog - Celestron CGX over WiFi needs the adapter's numeric
         "Celestron CGX over WiFi needs the SkyPortal adapter's numeric IPv4 or IPv6 address "
         "(1.2.3.4 on the adapter's own network)";
     for (const std::string& host : {std::string("skyportal.local"), std::string("1.2.3"), std::string("1.2.3.4:2000"),
-                                   std::string("fe80::1%eth0"), std::string("1.2.3.4\0evil", 12)}) {
+                                    std::string("fe80::1%eth0"), std::string("1.2.3.4\0evil", 12)}) {
         INFO(host);
         const auto api = catalog.normalize(kCelestronKey, wifi_with(host), Source::Api);
         REQUIRE(api.rejection.has_value());

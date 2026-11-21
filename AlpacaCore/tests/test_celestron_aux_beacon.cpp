@@ -286,7 +286,8 @@ TEST_CASE("Celestron SkyPortal beacon - the catalog's Find adapter hook listens 
           "[celestron][beacon]") {
     alpacacore::catalog::DeviceCatalog catalog;
     alpacacore::catalog::register_builtin_factories(catalog);
-    BeaconSender adapter("127.0.0.9", alpacacore::vendor::celestron::kAuxBeaconPort, {kCapturedBeacon}, milliseconds(4000));
+    BeaconSender adapter("127.0.0.9", alpacacore::vendor::celestron::kAuxBeaconPort, {kCapturedBeacon},
+                         milliseconds(4000));
     REQUIRE(adapter.ok());
     const auto started = std::chrono::steady_clock::now();
 

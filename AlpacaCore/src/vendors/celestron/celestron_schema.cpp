@@ -102,8 +102,9 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
         endpoint_missing = "Host IP address is required";
     } else if (type == "network" && protocol == "cgx-aux" && !is_numeric_ip(in.get(kCelestronHost))) {
         // The CGX link names no host it would have to resolve under its I/O lock (celestron_cgx_protocol_wrapper.cpp).
-        endpoint_missing = "Celestron CGX over WiFi needs the SkyPortal adapter's numeric IPv4 or IPv6 address "
-                           "(1.2.3.4 on the adapter's own network)";
+        endpoint_missing =
+            "Celestron CGX over WiFi needs the SkyPortal adapter's numeric IPv4 or IPv6 address "
+            "(1.2.3.4 on the adapter's own network)";
     } else if (type == "network") {
         endpoint_missing = network_port_fault(kCelestronTcpPort.key, result.config.get(kCelestronTcpPort));
     }

@@ -948,7 +948,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_cgx_tcp_telescope) X(celestron_focuser)
+#define CS_CELESTRON(X) \
+    X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_cgx_tcp_telescope) X(celestron_focuser)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -1085,7 +1086,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
-    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},        // direct USB backend
     {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
     {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},

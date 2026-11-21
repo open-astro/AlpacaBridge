@@ -2010,12 +2010,13 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
     return host;
 }
 
-// The CGX over FakeCelestronAuxTcpAdapter, the loopback SkyPortal WiFi adapter (recipe of test_celestron_cgx_tcp_driver.cpp).
-// The adapter serves one client at a time, as the driver's endpoint claim does.
+// The CGX over FakeCelestronAuxTcpAdapter, the loopback SkyPortal WiFi adapter (recipe of
+// test_celestron_cgx_tcp_driver.cpp). The adapter serves one client at a time, as the driver's endpoint claim does.
 Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
     namespace cel = alpacacore::vendor::celestron;
     using alpacacore::test::FakeCelestronAuxTcpAdapter;
-    const auto make = [](const FakeCelestronAuxTcpAdapter& adapter, int device_number) -> std::unique_ptr<AlpacaDriver> {
+    const auto make = [](const FakeCelestronAuxTcpAdapter& adapter,
+                         int device_number) -> std::unique_ptr<AlpacaDriver> {
         cel::CelestronCgxConnectionInfo info;
         info.host = "127.0.0.1";
         info.tcp_port = adapter.port();
@@ -2024,25 +2025,24 @@ Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
         return cel::create_celestron_cgx_telescope(device_number, info);
     };
     auto adapter = std::make_shared<FakeCelestronAuxTcpAdapter>();
-    Tier2Host host{
-        "celestron_telescope_cgx_tcp",
-        "celestron",
-        "telescope",
-        "fake_celestron_aux_tcp_adapter.h",
-        DeviceType::Telescope,
-        "celestron_telescope_cgx_tcp",
-        [adapter, make](bool) -> Hosted { return {adapter, make(*adapter, 0)}; },
-        false,
-        [make]() -> Hosted {
-            // The adapter closes the connection instead of answering the first identity query: a lost link.
-            auto closing = std::make_shared<FakeCelestronAuxTcpAdapter>();
-            closing->script(0x10, 0xfe, 1, FakeCelestronAuxTcpAdapter::Fault::Close);
-            return {closing, make(*closing, 0)};
-        },
-        "",
-        "The adapter answers at once; the connect's 200 ms backlog drain may end before the first poll "
-        "(fake_celestron_aux_tcp_adapter.h)",
-        err::InvalidOperation};
+    Tier2Host host{"celestron_telescope_cgx_tcp",
+                   "celestron",
+                   "telescope",
+                   "fake_celestron_aux_tcp_adapter.h",
+                   DeviceType::Telescope,
+                   "celestron_telescope_cgx_tcp",
+                   [adapter, make](bool) -> Hosted { return {adapter, make(*adapter, 0)}; },
+                   false,
+                   [make]() -> Hosted {
+                       // The adapter closes the connection instead of answering the first identity query: a lost link.
+                       auto closing = std::make_shared<FakeCelestronAuxTcpAdapter>();
+                       closing->script(0x10, 0xfe, 1, FakeCelestronAuxTcpAdapter::Fault::Close);
+                       return {closing, make(*closing, 0)};
+                   },
+                   "",
+                   "The adapter answers at once; the connect's 200 ms backlog drain may end before the first poll "
+                   "(fake_celestron_aux_tcp_adapter.h)",
+                   err::InvalidOperation};
     host.at_park_unreachable =
         "FakeCelestronAuxTcpAdapter models no park position, so a Park never lands and AtPark never reads true "
         "(fake_celestron_aux_tcp_adapter.h)";

@@ -302,7 +302,8 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - Device metadata", "[celestron][
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(3, wifi_info(1), clock);
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_name() == "Celestron CGX/CGX-L");  // decision 0024: the transport is not in the name
-    CHECK(driver->get_description() == "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: 0");
+    CHECK(driver->get_description() ==
+          "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: 0");
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);

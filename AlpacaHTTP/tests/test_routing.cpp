@@ -9522,8 +9522,8 @@ int main() {
         int finder_calls = 0;
         router.catalog().add_network_adapter_finder("zzz", [&finder_calls] {
             ++finder_calls;
-            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{
-                {"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"}, {"192.168.4.20", "", ""}};
+            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{{"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"},
+                                                                         {"192.168.4.20", "", ""}};
         });
         const auto response =
             route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz&ClientTransactionID=33");
@@ -9546,10 +9546,11 @@ int main() {
     {
         // case: networkadapters refuses an unknown vendor and any verb but GET, and reports a throwing finder
         alpacahttp::Router router;
-        router.catalog().add_network_adapter_finder("zzz", []() -> std::vector<alpacacore::catalog::FoundNetworkAdapter> {
-            throw alpacacore::AlpacaException("Celestron SkyPortal beacon: cannot bind UDP port 55555",
-                                              alpacacore::AlpacaError::DriverException);
-        });
+        router.catalog().add_network_adapter_finder(
+            "zzz", []() -> std::vector<alpacacore::catalog::FoundNetworkAdapter> {
+                throw alpacacore::AlpacaException("Celestron SkyPortal beacon: cannot bind UDP port 55555",
+                                                  alpacacore::AlpacaError::DriverException);
+            });
         const auto unknown = nlohmann::json::parse(
             route_request(router, "GET", "/management/v1/networkadapters?vendor=nope").body(), nullptr, false);
         EXPECT(!unknown.is_discarded() && unknown.value("ErrorNumber", 0) == 0x401);
@@ -9566,7 +9567,8 @@ int main() {
         EXPECT(!again.is_discarded() && again.value("ErrorNumber", 0) == 0x500);
     }
     {
-        // case: a networkadapters search holds no lock: other requests are served while it listens, and a second search is refused at once
+        // case: a networkadapters search holds no lock: other requests are served while it listens, and a second search
+        // is refused at once
         alpacahttp::Router router;
         std::mutex gate_mutex;
         std::condition_variable gate_cv;
@@ -9578,7 +9580,8 @@ int main() {
             gate_cv.notify_all();
             // Bounded: a broken release fails the case instead of hanging it.
             gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
-            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{{"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"}};
+            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{
+                {"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"}};
         });
         const auto release = [&] {
             std::lock_guard<std::mutex> lock(gate_mutex);
@@ -9593,9 +9596,8 @@ int main() {
             EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
         }
         // A client and the web UI keep being served while the search listens.
-        auto listing = std::async(std::launch::async, [&] {
-            return route_request(router, "GET", "/management/v1/configureddevices");
-        });
+        auto listing = std::async(std::launch::async,
+                                  [&] { return route_request(router, "GET", "/management/v1/configureddevices"); });
         const bool listing_served = listing.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
         auto second = std::async(std::launch::async, [&] {
             return route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz");
