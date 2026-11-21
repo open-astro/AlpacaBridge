@@ -373,7 +373,8 @@ public:
     // Set while no command runs; set_average_period() calls it after its NotConnected check, before its body starts.
     void set_caller_hook(std::function<void()> hook) { caller_hook_ = std::move(hook); }
 
-    // Set while no command runs; a Refresh or AveragePeriod caller calls it after its body has ended, before it answers.
+    // Set while no command runs; a Refresh or AveragePeriod caller calls it after its body has ended, before it
+    // answers.
     void set_command_done_hook(std::function<void()> hook) { command_done_hook_ = std::move(hook); }
 
     std::uint64_t command_generation() const { return command_generation_.current(); }
