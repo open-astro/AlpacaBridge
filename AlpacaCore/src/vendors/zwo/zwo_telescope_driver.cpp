@@ -1291,13 +1291,14 @@ public:
         // initiator_mutex_ keeps a SlewAsync from claiming between the fence and
         // the command; it is released before the tracking restore.
         std::unique_lock<std::mutex> initiator_lock(initiator_mutex_);
+        PendingCommand pending(*this, jog_pending_[axis]);  // a jog, from its claim until this call returns (#2459)
         fence_goto();
         // open-astro#2094, #2263: a stop cancels and a jog claims this axis only, ending its queued and running guide
         // pulses, so no ":Mg" on this axis follows the command; a pulse on the other axis keeps running.
         if (stop) {
             stop_axes(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
         } else {
-            claim_move_axis(axis);
+            claim_move_axis(axis, pending);
         }
         if (initiator_hook_) initiator_hook_("MoveAxis");
 
@@ -1613,7 +1614,7 @@ public:
         // claim between the fence and ":hC" (initiator_mutex_, held to the end).
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
-        PendingSlewCommand pending(*this);
+        PendingCommand pending(*this, slew_commands_pending_);
         claim_slew(pending, /*home=*/true);
         if (initiator_hook_) initiator_hook_("FindHome");
         bump_motion_epoch();  // open-astro#1925: before ":hC"
@@ -1653,7 +1654,7 @@ public:
         // lock anyway).
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
-        PendingSlewCommand pending(*this);
+        PendingCommand pending(*this, slew_commands_pending_);
         claim_slew(pending);
         if (initiator_hook_) initiator_hook_("Park");
         if (get_at_park()) {
@@ -1813,10 +1814,11 @@ public:
             std::lock_guard<std::mutex> lock(pulse_mutex_);
             std::lock_guard<std::mutex> state_lock(mutex_);
             const auto now = clock_.now();
-            // #2263, ITelescopeV4: refused while a slew, park or home runs; nothing has changed yet.
-            if (!slew_motion_running_locked(now)) motion_owner_.finished(slew_claim_);
-            if (motion_owner_.slew_running()) {
-                throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+            // #2263, #2459, ITelescopeV4: refused while a slew, park or home runs, or while MoveAxis moves this axis;
+            // nothing has changed yet. The other axis is not checked.
+            refuse_pulse_during_slew_locked(now);
+            if (manual_axis_slewing_[axis] || jog_pending_[axis] != 0) {
+                throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
                                       AlpacaError::InvalidOperation);
             }
             ++slew_error_epoch_;
@@ -1938,7 +1940,8 @@ public:
         // leave poll_pause_ stuck true.
         double target_ra = 0.0;
         double target_dec = 0.0;
-        PendingSlewCommand pending(*this);  // until this call returns: past the initiator_mutex_ wait and the arm
+        // Until this call returns: past the initiator_mutex_ wait and the arm.
+        PendingCommand pending(*this, slew_commands_pending_);
         try {
             ensure_not_parked("SlewToTargetAsync");
             {
@@ -2566,36 +2569,59 @@ private:
     //
     // A slew, park or home counts as running from its claim (`pending`, in the claim's section) until its call ends,
     // on the throw path too: between the claim and its own state (goto_active_, park_command_active_, the slew window)
-    // it does wire I/O or waits for initiator_mutex_, and a PulseGuide there must be refused (#2263).
-    class PendingSlewCommand {
+    // it does wire I/O or waits for initiator_mutex_, and a PulseGuide there must be refused (#2263). A jog in that gap
+    // takes an axis from the slew claim, so the refusal reads this count itself (#2459). A jog counts the same way
+    // (jog_pending_[axis]) from its claim until its call returns, over its ":Rv" and jog command, before its flag is
+    // set (#2459).
+    class PendingCommand {
     public:
-        explicit PendingSlewCommand(ZWOTelescopeDriver& driver) : driver_(driver) {}
-        PendingSlewCommand(const PendingSlewCommand&) = delete;
-        PendingSlewCommand& operator=(const PendingSlewCommand&) = delete;
-        ~PendingSlewCommand() {
+        PendingCommand(ZWOTelescopeDriver& driver, int& count) : driver_(driver), count_(count) {}
+        PendingCommand(const PendingCommand&) = delete;
+        PendingCommand& operator=(const PendingCommand&) = delete;
+        ~PendingCommand() {
             if (!counted_) return;
             std::lock_guard<std::mutex> lock(driver_.mutex_);
-            --driver_.slew_commands_pending_;
+            --count_;
         }
 
     private:
         friend class ZWOTelescopeDriver;
+        void count_locked() {
+            ++count_;
+            counted_ = true;
+        }
         ZWOTelescopeDriver& driver_;
+        int& count_;
         bool counted_ = false;
     };
 
-    uint64_t claim_slew(PendingSlewCommand& pending, bool home = false) {
+    uint64_t claim_slew(PendingCommand& pending, bool home = false) {
         return end_pulses(util::MotionOwner::kBothAxes, [&] {
             slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
             home_claimed_ = home;
-            ++slew_commands_pending_;
-            pending.counted_ = true;
+            pending.count_locked();
         });
     }
 
-    uint64_t claim_move_axis(int axis) {
-        return end_pulses(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis),
-                          [&] { static_cast<void>(motion_owner_.claim(util::MotionCommand::MoveAxis, axis)); });
+    uint64_t claim_move_axis(int axis, PendingCommand& pending) {
+        return end_pulses(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis), [&] {
+            static_cast<void>(motion_owner_.claim(util::MotionCommand::MoveAxis, axis));
+            pending.count_locked();
+        });
+    }
+
+    // #2263, #2459, ITelescopeV4: a PulseGuide is refused while a slew, park or home runs: while its claim is the
+    // newest, from that claim until its call returns (PendingCommand) and while this driver's GOTO is in flight, so
+    // also after a jog in the claim gap took an axis from the slew claim. Under mutex_; it only ends a finished claim.
+    void refuse_pulse_during_slew_locked(util::HoldWindow::mono now) {
+        if (!slew_motion_running_locked(now)) {
+            motion_owner_.finished(slew_claim_);
+            home_claimed_ = false;  // the home is over too (#2459); only slew_motion_running_locked() reads it
+        }
+        if (motion_owner_.slew_running() || slew_commands_pending_ != 0 || own_goto_in_flight_locked()) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
+        }
     }
 
     uint64_t stop_axes(std::uint8_t axes) {
@@ -3546,11 +3572,13 @@ private:
     // #2263: the per-axis motion owner, under mutex_ (its stop_reason() reads atomics). slew_claim_ is the newest
     // slew, park or home claim, home_claimed_ whether it was FindHome's (slew_motion_running_locked()).
     // slew_commands_pending_ counts the slew, park and home calls between their claim and their return
-    // (PendingSlewCommand).
+    // (PendingCommand).
     util::MotionOwner motion_owner_;
     util::MotionClaim slew_claim_;
     bool home_claimed_ = false;
     int slew_commands_pending_ = 0;
+    // #2459: the non-zero MoveAxis calls per axis between their claim and their return (PendingCommand). Under mutex_.
+    std::array<int, 2> jog_pending_{};
     // Serializes set_connected() bodies (sync PUT / async task / refresh) and
     // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'
     // start/reap and their stop flags can never interleave between two
