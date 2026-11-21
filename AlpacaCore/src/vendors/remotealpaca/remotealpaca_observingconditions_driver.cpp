@@ -373,6 +373,9 @@ public:
     // Set while no command runs; set_average_period() calls it after its NotConnected check, before its body starts.
     void set_caller_hook(std::function<void()> hook) { caller_hook_ = std::move(hook); }
 
+    // Set while no command runs; a Refresh or AveragePeriod caller calls it after its body has ended, before it answers.
+    void set_command_done_hook(std::function<void()> hook) { command_done_hook_ = std::move(hook); }
+
     std::uint64_t command_generation() const { return command_generation_.current(); }
 
 private:
@@ -631,6 +634,7 @@ private:
             std::unique_lock<std::mutex> lock(outcome->mutex);
             outcome->done_cv.wait(lock, [&outcome] { return outcome->done; });
         }
+        if (command_done_hook_) command_done_hook_();
         if (!outcome->error) return;
         try {
             std::rethrow_exception(outcome->error);
@@ -764,8 +768,9 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> poll_paused_{false};
-    std::function<void()> command_hook_;  // test seam: set_command_hook_for_testing()
-    std::function<void()> caller_hook_;   // test seam: set_caller_hook_for_testing()
+    std::function<void()> command_hook_;       // test seam: set_command_hook_for_testing()
+    std::function<void()> caller_hook_;        // test seam: set_caller_hook_for_testing()
+    std::function<void()> command_done_hook_;  // test seam: set_command_done_hook_for_testing()
     // Under transition_mutex_: the upstream was told Connect and not yet Disconnect, and its InterfaceVersion then.
     bool forwarded_connect_ = false;
     int forwarded_version_ = 0;
@@ -822,6 +827,12 @@ void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::functi
 void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_caller_hook(std::move(hook));
+    }
+}
+
+void set_command_done_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_command_done_hook(std::move(hook));
     }
 }
 

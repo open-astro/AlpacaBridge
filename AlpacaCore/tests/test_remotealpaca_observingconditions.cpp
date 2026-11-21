@@ -30,6 +30,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "alpaca_upstream_script.h"
@@ -623,5 +624,26 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a write racing a reconnect
     writer.join();
     REQUIRE(rig.driver->get_connected());
     // Decision 0010 rule 8: a connected driver holds the Connect's frame.
+    CHECK(rig.driver->get_temperature() == 19.0);
+}
+
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a refused Refresh racing a reconnect keeps the new link",
+          "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    // Issue #2456: the Refresh body meets a refused connection and ends; a Disconnect and a Connect run before its
+    // caller answers. The refusal belongs to the link it was sent on: it must not drop the new one, and the caller
+    // answers NotConnected, never the bare DriverException.
+    bool reconnected = false;
+    remote::set_command_done_hook_for_testing(*rig.driver, [&] {
+        if (std::exchange(reconnected, true)) return;
+        rig.driver->set_connected(false);
+        rig.connect();
+    });
+    rig.http.refuse_next(1);
+    require_alpaca_error([&] { rig.driver->refresh(); }, AlpacaError::NotConnected);
+    REQUIRE(reconnected);
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_temperature() == 19.0);
 }
