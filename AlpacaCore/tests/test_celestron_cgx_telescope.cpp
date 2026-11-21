@@ -3565,9 +3565,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - AbortSlew during a re-home sends
     const int home_sends = mount.count_command(0x10, 0x0b);
     // Async with the clock driven: an AbortSlew that met a body stopping the mount would wait for that stop.
     auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
-    // Give the AbortSlew real time to cancel the body before the clock moves: five 20 ms steps end the stop's
-    // still-wait, and a body not yet cancelled would send its second home first. Unbounded waits fall to the steps.
-    static_cast<void>(abort.wait_for(2s));
+    // The AbortSlew must cancel the body before the clock moves: five 20 ms steps end the stop's still-wait, and a
+    // body not yet cancelled would send its second home first. AbortSlew cancels the body before it returns and
+    // waits only for motion_start_mutex_, which the body holds for one exchange and never across a clock wait, so
+    // wait for it to return instead of a fixed real-time grace (#2466).
+    REQUIRE(abort.wait_for(10s) == std::future_status::ready);
     REQUIRE(step_until(
         clock, [&] { return abort.wait_for(0ms) == std::future_status::ready && stop_done(*driver); }, 20ms));
     CHECK_NOTHROW(abort.get());
