@@ -8969,10 +8969,11 @@ int main() {
         // The one documented asymmetry, pinned so docs/wifi-api.md cannot
         // drift from it: the collection's guard sits inside its DELETE
         // branch, so a cross-origin PUT here is answered by the method check
-        // rather than refused, while the per-file form returns 403.
+        // (405, #2484) rather than refused, while the per-file form returns 403.
         const auto collection_put =
             router.route(request_with("PUT", "/management/v1/logfiles", "http://evil.example", ""), 1);
-        EXPECT(collection_put.status_code() == 200);
+        EXPECT(collection_put.status_code() == 405);
+        EXPECT(collection_put.get_header("Allow") == "GET, DELETE");
         const auto collection_json = nlohmann::json::parse(collection_put.body(), nullptr, false);
         EXPECT(!collection_json.is_discarded() && collection_json.value("ErrorNumber", 0) != 0);
         const auto item_put =
@@ -11313,6 +11314,41 @@ int main() {
         expect_allow("GET", "/management/v1/shutdown", "POST, PUT");
         expect_allow("GET", "/management/v1/restart", "POST, PUT");
         expect_allow("DELETE", "/management/v1/synctime", "GET, POST, PUT");
+    }
+    {
+        // case: a wrong verb on a log endpoint answers 405 with Allow, not 200 (#2484)
+        alpacahttp::Router router;
+        const auto expect_allow = [&](const std::string& method, const std::string& path, const std::string& allow) {
+            const auto resp = route_request(router, method, path, "");
+            EXPECT(resp.status_code() == 405);
+            EXPECT(resp.get_header("Allow") == allow);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        };
+        // Each probe uses a verb the endpoint does not accept: DELETE is real on both logfiles forms.
+        for (const std::string prefix : {"/management/v1", "/management"}) {
+            expect_allow("DELETE", prefix + "/loglevel", "GET, POST, PUT");
+            expect_allow("PUT", prefix + "/logs", "GET");
+            expect_allow("PUT", prefix + "/logfiles", "GET, DELETE");
+            expect_allow("POST", prefix + "/logfiles/alpaca.log", "GET, DELETE");
+        }
+    }
+    {
+        // case: every AlpacaBridge-only 405 carries InvalidOperation (0x40B) (#2484)
+        alpacahttp::Router router;
+        const auto expect_invalid_operation = [&](const std::string& method, const std::string& path) {
+            const auto resp = route_request(router, method, path, "");
+            EXPECT(resp.status_code() == 405);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        };
+        expect_invalid_operation("PUT", "/management/v1/faileddevices");
+        expect_invalid_operation("GET", "/management/v1/configuredevice");
+        expect_invalid_operation("GET", "/management/v1/removedevice");
+        expect_invalid_operation("GET", "/management/v1/updatedevice");
+        expect_invalid_operation("GET", "/management/v1/shutdown");
+        expect_invalid_operation("GET", "/management/v1/restart");
+        expect_invalid_operation("DELETE", "/management/v1/synctime");
     }
     {
         // case: routes outside the Alpaca schema are rejected (#576)
