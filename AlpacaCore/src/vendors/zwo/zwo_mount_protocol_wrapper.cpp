@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -749,12 +750,20 @@ public:
     std::string send_command(const std::string& command,
                              bool require_hash_terminator,
                              int timeout_ms_override) {
-        const auto lock = lock_exchange();
-        if (!connected_ || closing_.load()) {
-            throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
-        }
+        auto reply = exchange(command, nullptr, require_hash_terminator, timeout_ms_override);
+        // A null `build` always sends, so exchange() returns a reply or throws.
+        if (!reply) throw AlpacaException("ZWO mount sent no reply to " + command, AlpacaError::DriverException);
+        return *reply;
+    }
 
-        std::string full_command = command;
+    // open-astro#2419 follow-up: `build` runs under the I/O lock just before the write, on a settled line, and
+    // returns the command to send, or nullopt to send nothing (the result is then nullopt).
+    std::optional<std::string> send_built_command(const std::function<std::optional<std::string>()>& build,
+                                                  bool require_hash_terminator) {
+        return exchange({}, &build, require_hash_terminator, 0);
+    }
+
+    static std::string frame_command(std::string full_command) {
         if (full_command.empty()) {
             throw AlpacaException("Command cannot be empty", AlpacaError::InvalidValue);
         }
@@ -764,9 +773,22 @@ public:
         if (full_command.back() != '#') {
             full_command.push_back('#');
         }
+        return full_command;
+    }
+
+    std::optional<std::string> exchange(const std::string& command,
+                                        const std::function<std::optional<std::string>()>* build,
+                                        bool require_hash_terminator, int timeout_ms_override) {
+        const auto lock = lock_exchange();
+        if (!connected_ || closing_.load()) {
+            throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
+        }
+
+        // A built command is never an identity read; it is framed once `build` has run.
+        std::string full_command = build ? std::string() : frame_command(command);
 
         // Recheck under the I/O lock: an older admitted caller may reach a replacement link.
-        const bool identity_read = full_command == ":GVP#" || full_command == ":GMA#";
+        const bool identity_read = !build && (full_command == ":GVP#" || full_command == ":GMA#");
         if (require_identity_ && !identity_verified_ && !identity_read) {
             throw AlpacaException("ZWO mount identity is not verified", AlpacaError::NotConnected);
         }
@@ -790,6 +812,11 @@ public:
             timeout_ms = static_cast<int>(std::max<long long>(0, timeout_ms - spent));
         }
         discard_pending_input();
+        if (build) {
+            auto built = (*build)();
+            if (!built) return std::nullopt;
+            full_command = frame_command(std::move(*built));
+        }
         if (!write_data(full_command)) {
             note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
@@ -1925,7 +1952,9 @@ TimeInfo ZWOMountProtocolWrapper::get_time_info() {
     return info;
 }
 
-void ZWOMountProtocolWrapper::set_time_info(const TimeInfo& info) {
+namespace {
+
+std::string time_info_command(const TimeInfo& info) {
     if (info.month < 1 || info.month > 12 ||
         info.day < 1 || info.day > 31 ||
         info.hour < 0 || info.hour > 23 ||
@@ -1946,12 +1975,33 @@ void ZWOMountProtocolWrapper::set_time_info(const TimeInfo& info) {
             << std::setfill('0') << std::setw(2) << info.minute << ':'
             << std::setfill('0') << std::setw(2) << info.second << '&'
             << format_utc_minutes_to_protocol_timezone(info.timezone_offset_minutes);
+    return command.str();
+}
 
-    const std::string response = trim_copy(send_command(command.str(), false));
+void check_time_info_reply(const std::string& response) {
     throw_if_mount_error(response, ":SMTI");
     if (!response.empty() && response[0] != '1') {
         throw AlpacaException("Failed to set mount date/time", AlpacaError::InvalidOperation);
     }
+}
+
+}  // namespace
+
+void ZWOMountProtocolWrapper::set_time_info(const TimeInfo& info) {
+    check_time_info_reply(trim_copy(send_command(time_info_command(info), false)));
+}
+
+bool ZWOMountProtocolWrapper::set_time_info_if(const std::function<std::optional<TimeInfo>()>& decide) {
+    const auto response = pimpl_->send_built_command(
+        [&]() -> std::optional<std::string> {
+            const auto info = decide();
+            if (!info) return std::nullopt;
+            return time_info_command(*info);
+        },
+        false);
+    if (!response) return false;
+    check_time_info_reply(trim_copy(*response));
+    return true;
 }
 
 double ZWOMountProtocolWrapper::get_sidereal_time_hours() {

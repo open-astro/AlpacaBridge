@@ -2013,6 +2013,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when Park cannot 
 // Connected false, so a retry opens it afresh.
 TEST_CASE("Celestron connect - a failed time write closes the link and leaves Connected false",
           "[celestron][telescope][snapshot][iolock]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the clock only from a trusted host
     FakeTaskClock clock;
     auto st = std::make_shared<SnapshotMount>();
     alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
@@ -2347,6 +2348,7 @@ TEST_CASE(
     "Celestron Link - a cable pulled during the connect with sync_time_on_connect on fails the Connect with "
     "NotConnected",
     "[celestron][telescope][unit][fake][link-lost]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the clock only from a trusted host
     SerialLinkRig rig(-33.856784, 151.215297, true);
     auto& driver = *rig.driver;
     rig.mount->unplug_on(on_command('V'));  // the first handshake query; the time write would meet the released port

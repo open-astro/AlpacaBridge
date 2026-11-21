@@ -550,7 +550,7 @@ command channel. Nothing scans the network; the host is typed in.
   time + UTC offset" pair, but combining a nonzero offset with local time produced a further,
   not-cleanly-explained ~85-minute LST error on real hardware (not a clean multiple of the
   offset). Fixed pragmatically — an established pattern for LX200-family mounts — by always
-  computing UTC via `std::gmtime()` and sending it as "local" time with `offset_hours=0.0`,
+  computing UTC via `gmtime_r()` and sending it as "local" time with `offset_hours=0.0`,
   sidestepping the firmware's own timezone/DST handling entirely. Verified via hardware:
   offset=0 + longitude=0 gave a GMST match within 6 seconds.
 - **`:SG#` (UTC offset) parser is strict integer-hour ± optional fixed minutes**: accepts
@@ -1084,7 +1084,12 @@ command channel. Nothing scans the network; the host is typed in.
   local time outside 0-24 h or a month or day outside 1-12 and 1-31 (checked before the calendar
   check, since `std::chrono::month` and `day` keep only 0-255). If that read fails, `UTCDate` throws `InvalidOperation` with
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
-  computations still fall back to the host clock, without storing it. `SiteElevation` throws
+  computations still fall back to the host clock, without storing it. The `syncTimeOnConnect`
+  write (off by default) goes out only while `util::HostClockTrust::trusted()`; otherwise one WARN,
+  and the site writes and the seed are unchanged. `on_host_clock_changed()` re-syncs on the
+  `clock_resync_` slot: the body sends only `:SL#`/`:SC#`/`:SG#`, never the site, and checks motion
+  inside the write's own exchange under `io_mutex_` (ascom-contract host clock rule). Tests:
+  `test_onstep_clock_trust.cpp`. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation
   command, so it is client-side only. `SiteLatitude` and `SiteLongitude` throw `InvalidOperation`
   (with the reason the last `:Gt#`/`:Gg#` read failed) until the coordinate is known: written from

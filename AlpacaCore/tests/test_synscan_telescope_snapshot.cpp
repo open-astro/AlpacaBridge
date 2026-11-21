@@ -18,7 +18,9 @@
 #ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -1412,6 +1414,20 @@ TEST_CASE("SynScan Link - a cable pulled during the connect fails the Connect wi
           "[synscan][telescope][unit][fake][link-lost]") {
     const bool sync_time = GENERATE(false, true);  // with the time write, set_time() would meet the released port
     CAPTURE(sync_time);
+    // The connect writes the time only while the host clock is trusted (open-astro#2419): forced here, so the time
+    // write runs on every host, not only an NTP-synchronised one. Declared before the rig, so it outlives the driver.
+    struct TrustedHostClock {
+        TrustedHostClock() {
+            alpacacore::util::HostClockTrust::reset_for_testing();
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        }
+        ~TrustedHostClock() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+            alpacacore::util::HostClockTrust::reset_for_testing();
+        }
+        TrustedHostClock(const TrustedHostClock&) = delete;
+        TrustedHostClock& operator=(const TrustedHostClock&) = delete;
+    } trusted;
     SerialRig rig(sync_time);
     ReleasePort release_port{rig.driver()};
     auto& driver = rig.driver();

@@ -117,6 +117,20 @@ void set_pulse_guide_gap_hook_for_testing(TelescopeDriver& driver, std::function
 /// must not call the driver. Pass an empty function to clear it.
 void set_move_axis_resend_before_send_hook_for_testing(TelescopeDriver& driver, std::function<bool()> hook);
 
+/// Test seams of the host clock re-sync (open-astro#2419). `hook` runs at the start of each re-sync body, with no
+/// driver lock held, so a case can land a client command between the host clock change and the re-sync's write.
+/// Pass an empty function to clear it. `driver` must come from the factories above; anything else is ignored.
+void set_clock_resync_before_lock_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// True while the current re-sync body has not returned.
+bool clock_resync_running_for_testing(const TelescopeDriver& driver);
+/// Test seam: `hook` runs in set_connected() between its pre-lock link check and the operation lock, with only the
+/// transition lock held, so a case can land a link loss the pre-lock check missed. Pass an empty function to clear it.
+void set_connect_before_state_lock_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Test seam: `hook` runs as set_connected() returns, after the rest of the call and just before it releases the
+/// transition lock, which it still holds (#2419): a case lands a host clock change there, from another thread. Pass an
+/// empty function to clear it.
+void set_connected_before_transition_unlock_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 namespace detail {
 // open-astro#521 / #1241: how long the serial link may be gone before motion
 // that outlived the outage is stopped at relink rather than left running
