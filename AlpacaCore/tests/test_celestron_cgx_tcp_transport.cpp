@@ -177,13 +177,11 @@ TEST_CASE("Celestron CGX AUX TCP - never re-sends a motion or write command", "[
         std::uint8_t command;
         std::vector<std::uint8_t> payload;
     };
-    const std::vector<Write> writes = {{"MC_GOTO_FAST", 0x02, {0x01, 0x02, 0x03}},
-                                       {"MC_GOTO_SLOW", 0x17, {0x01, 0x02, 0x03}},
-                                       {"MC_SET_POSITION", 0x04, {0x01, 0x02, 0x03}},
-                                       {"MC_LEVEL_START", 0x0b, {}},
-                                       {"MC_AUX_GUIDE", 0x26, {0x32, 0x0a}},
-                                       {"MC_MOVE_POS (stop)", 0x24, {0x00}},
-                                       {"MC_SET_POS_GUIDERATE (rate zero)", 0x06, {0x00, 0x00, 0x00}}};
+    const std::vector<Write> writes = {
+        {"MC_GOTO_FAST", 0x02, {0x01, 0x02, 0x03}},    {"MC_GOTO_SLOW", 0x17, {0x01, 0x02, 0x03}},
+        {"MC_SET_POSITION", 0x04, {0x01, 0x02, 0x03}}, {"MC_LEVEL_START", 0x0b, {}},
+        {"MC_AUX_GUIDE", 0x26, {0x32, 0x0a}},          {"MC_SET_POS_GUIDERATE (rate zero)", 0x06, {0x00, 0x00, 0x00}}};
+    // The stop (0x24 {0}) is in the confirmation cases below: on this idle mount the status shows a still axis.
     for (const auto& write : writes) {
         CAPTURE(write.name);
         FakeCelestronAuxTcpAdapter adapter;
@@ -194,6 +192,234 @@ TEST_CASE("Celestron CGX AUX TCP - never re-sends a motion or write command", "[
             [&] { (void)protocol.exchange(request(kDec, write.command, write.payload), milliseconds(450)); },
             AlpacaError::DriverException);
         CHECK(adapter.count(kDec, write.command) == 1);
+    }
+}
+
+namespace {
+
+// A motion command over TCP whose reply has not come in 300 ms is confirmed through the axis status (slice 3).
+// `started`: it returned as acknowledged, the session kept and the recovery counted. Otherwise it failed as a lost
+// reply does: desynchronized and a new session. Either way it went out exactly once.
+void check_confirmed(const CelestronCgxProtocol& protocol, std::uint64_t session,
+                     std::chrono::steady_clock::time_point started) {
+    CHECK(since(started) >= milliseconds(300));
+    CHECK(protocol.is_healthy());
+    CHECK(protocol.session_generation() == session);
+    CHECK(protocol.recovered_retries() == 1);
+}
+
+void check_not_confirmed(const CelestronCgxProtocol& protocol, std::uint64_t session) {
+    CHECK_FALSE(protocol.is_healthy());
+    CHECK(protocol.session_generation() != session);
+    CHECK(protocol.recovered_retries() == 0);
+    CHECK(protocol.link_alive());
+}
+
+}  // namespace
+
+TEST_CASE("Celestron CGX AUX TCP - a lost LEVEL_START reply is confirmed by LEVEL_DONE searching",
+          "[celestron][cgx][protocol][tcp][motion-confirm]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_home_duration(milliseconds(3000));
+    CelestronCgxProtocol protocol;
+    SECTION("the search started: the reply alone was lost") {
+        adapter.script(kRa, 0x0b, 1, Fault::DropReply);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        const auto started = std::chrono::steady_clock::now();
+        protocol.start_axis_home(CgxAxis::RightAscension);
+        check_confirmed(protocol, session, started);
+        CHECK(adapter.count(kRa, 0x12) == 1);
+    }
+    SECTION("the request was lost: LEVEL_DONE reads done, which a search never started reads too") {
+        adapter.script(kRa, 0x0b, 1, Fault::Drop);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        require_alpaca_error([&] { protocol.start_axis_home(CgxAxis::RightAscension); }, AlpacaError::DriverException);
+        check_not_confirmed(protocol, session);
+    }
+    CHECK(adapter.count(kRa, 0x0b) == 1);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a lost GOTO reply is confirmed by SLEW_DONE and progress toward the target",
+          "[celestron][cgx][protocol][tcp][motion-confirm]") {
+    for (const std::uint8_t command : {std::uint8_t{0x02}, std::uint8_t{0x17}}) {
+        CAPTURE(command);
+        const auto send = [command](CelestronCgxProtocol& protocol, std::uint32_t target) {
+            if (command == 0x02)
+                protocol.goto_axis_fast(CgxAxis::Declination, target);
+            else
+                protocol.goto_axis_slow(CgxAxis::Declination, target);
+        };
+        {
+            INFO("the GOTO runs: the reply alone was lost");
+            FakeCelestronAuxTcpAdapter adapter;
+            adapter.set_position(kDec, 0x100000);
+            adapter.set_goto_duration(milliseconds(3000));
+            adapter.script(kDec, command, 1, Fault::DropReply);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            const auto started = std::chrono::steady_clock::now();
+            send(protocol, 0x300000);
+            check_confirmed(protocol, session, started);
+            CHECK(adapter.count(kDec, command) == 1);
+            CHECK(adapter.count(kDec, 0x13) == 1);
+        }
+        {
+            INFO("the request was lost: the axis is done where it was");
+            FakeCelestronAuxTcpAdapter adapter;
+            adapter.set_position(kDec, 0x100000);
+            adapter.set_goto_duration(milliseconds(3000));
+            adapter.script(kDec, command, 1, Fault::Drop);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            require_alpaca_error([&] { send(protocol, 0x300000); }, AlpacaError::DriverException);
+            check_not_confirmed(protocol, session);
+            CHECK(adapter.count(kDec, command) == 1);
+        }
+        {
+            INFO("the request was lost while the axis runs elsewhere: busy, but moving away from the target");
+            FakeCelestronAuxTcpAdapter adapter;
+            adapter.set_position(kDec, 0x400000);
+            adapter.start_goto(kDec, 0x200000, milliseconds(5000));
+            adapter.script(kDec, command, 1, Fault::Drop);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            require_alpaca_error([&] { send(protocol, 0x600000); }, AlpacaError::DriverException);
+            check_not_confirmed(protocol, session);
+            CHECK(adapter.count(kDec, command) == 1);
+        }
+        {
+            INFO("a GOTO with nowhere to go: done at its target");
+            FakeCelestronAuxTcpAdapter adapter;
+            adapter.set_position(kDec, 0x123456);
+            adapter.script(kDec, command, 1, Fault::DropReply);
+            CelestronCgxProtocol protocol;
+            connect(protocol, adapter);
+            const auto session = protocol.session_generation();
+            const auto started = std::chrono::steady_clock::now();
+            send(protocol, 0x123456);
+            check_confirmed(protocol, session, started);
+        }
+    }
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a lost SET_POSITION reply is confirmed by the label readback",
+          "[celestron][cgx][protocol][tcp][motion-confirm]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kRa, 0x000100);
+    CelestronCgxProtocol protocol;
+    SECTION("the label was written: the reply alone was lost") {
+        adapter.script(kRa, 0x04, 1, Fault::DropReply);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        const auto started = std::chrono::steady_clock::now();
+        protocol.set_axis_position(CgxAxis::RightAscension, 0x654321);
+        check_confirmed(protocol, session, started);
+        CHECK(adapter.position(kRa) == 0x654321);
+    }
+    SECTION("the request was lost: the readback is the old label") {
+        adapter.script(kRa, 0x04, 1, Fault::Drop);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        require_alpaca_error([&] { protocol.set_axis_position(CgxAxis::RightAscension, 0x654321); },
+                             AlpacaError::DriverException);
+        check_not_confirmed(protocol, session);
+    }
+    CHECK(adapter.count(kRa, 0x04) == 1);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a lost AUX_GUIDE reply is confirmed by AUX_GUIDE_ACTIVE",
+          "[celestron][cgx][protocol][tcp][motion-confirm]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    CelestronCgxProtocol protocol;
+    SECTION("the pulse runs: the reply alone was lost") {
+        adapter.script(kDec, 0x26, 1, Fault::DropReply);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        const auto started = std::chrono::steady_clock::now();
+        protocol.pulse_guide_axis(CgxAxis::Declination, 50, 150);  // 1.5 s: still active when the status is read
+        check_confirmed(protocol, session, started);
+        CHECK(adapter.count(kDec, 0x27) == 1);
+    }
+    SECTION("the request was lost: no pulse is active") {
+        adapter.script(kDec, 0x26, 1, Fault::Drop);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        require_alpaca_error([&] { protocol.pulse_guide_axis(CgxAxis::Declination, 50, 150); },
+                             AlpacaError::DriverException);
+        check_not_confirmed(protocol, session);
+    }
+    CHECK(adapter.count(kDec, 0x26) == 1);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a lost stop reply is confirmed by SLEW_DONE and still encoders",
+          "[celestron][cgx][protocol][tcp][motion-confirm]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kDec, 0x200000);
+    CelestronCgxProtocol protocol;
+    SECTION("the stop took: the reply alone was lost") {
+        // A drift reads done on SLEW_DONE while the axis moves, so only the encoders tell the two cases apart.
+        adapter.set_drift(kDec, 1.0e6);
+        adapter.script(kDec, 0x24, 1, Fault::DropReply);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        const auto started = std::chrono::steady_clock::now();
+        (void)protocol.exchange(request(kDec, 0x24, {0x00}));
+        check_confirmed(protocol, session, started);
+        CHECK(adapter.count(kDec, 0x01) == 2);
+    }
+    SECTION("the request was lost: the axis still moves") {
+        adapter.set_drift(kDec, 1.0e6);
+        adapter.script(kDec, 0x24, 1, Fault::Drop);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        require_alpaca_error([&] { (void)protocol.exchange(request(kDec, 0x24, {0x00})); },
+                             AlpacaError::DriverException);
+        check_not_confirmed(protocol, session);
+    }
+    SECTION("the request was lost on an idle axis: still, which is what a stop is for") {
+        adapter.script(kDec, 0x24, 1, Fault::Drop);
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        const auto started = std::chrono::steady_clock::now();
+        (void)protocol.exchange(request(kDec, 0x24, {0x00}));
+        check_confirmed(protocol, session, started);
+    }
+    CHECK(adapter.count(kDec, 0x24) == 1);
+}
+
+TEST_CASE("Celestron CGX AUX link - a lost USB motion reply reads no status",
+          "[celestron][cgx][protocol][integration]") {
+    struct Motion {
+        const char* name;
+        std::uint8_t command;
+        std::vector<std::uint8_t> payload;
+    };
+    const std::vector<Motion> motions = {{"MC_GOTO_FAST", 0x02, {0x01, 0x02, 0x03}},
+                                         {"MC_SET_POSITION", 0x04, {0x01, 0x02, 0x03}},
+                                         {"MC_LEVEL_START", 0x0b, {}},
+                                         {"MC_AUX_GUIDE", 0x26, {0x32, 0x96}},
+                                         {"MC_MOVE_POS (stop)", 0x24, {0x00}}};
+    for (const auto& motion : motions) {
+        CAPTURE(motion.name);
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        CelestronCgxProtocol protocol;
+        protocol.connect_serial(mount.slave_path());
+        // The command reaches the motor and runs; only its reply is lost, so a status read would confirm it.
+        mount.drop_next_reply(kRa, motion.command, true);
+        const auto before = mount.requests().size();
+        require_alpaca_error([&] { (void)protocol.exchange(request(kRa, motion.command, motion.payload)); },
+                             AlpacaError::DriverException);
+        const auto frames = mount.requests();
+        REQUIRE(frames.size() == before + 1);
+        CHECK(frames.back().command == motion.command);
+        CHECK_FALSE(protocol.is_healthy());
+        protocol.disconnect();
     }
 }
 

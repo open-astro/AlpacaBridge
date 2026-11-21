@@ -41,17 +41,25 @@ namespace alpacacore::test {
 
 // KNOWN PARITY GAPS: a loopback stand-in for the SkyPortal WiFi adapter in front of the CGX motors (source 0x20,
 // one TCP client at a time), modelled on the 2026-11-20 rig evidence and the scratch fake_aux_adapter.py. It answers
-// at once and never moves an axis: positions change only through set_position(). It reports every axis idle and
-// home-done, every guide inactive, and ACKs every write except a client's ACK of a motor report (0x50, 0x51), which
-// it does not answer. Motor reports are sent only when a case injects them. It does not simulate the bus, the switch
-// boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The Gen4 startup backlog is
-// replayed as one scripted burst; the real one was 216 frames of an earlier session (October progress log).
+// at once. Its motor model is the smallest that tells a command that ran from one that did not (slice 3): a GOTO
+// (0x02, 0x17) moves the axis linearly over set_goto_duration() (default 0: it lands at once), a home search (0x0b)
+// reads searching for set_home_duration() (default 0: done at once) and moves nothing, a guide pulse (0x26) reads
+// active for its payload's duration and moves nothing, a stop (0x24 {0}) freezes a GOTO, a home search and a drift
+// where they are, a set position (0x04) relabels the axis, and a drift (set_drift()) moves an axis while SLEW_DONE
+// reads done (a tracking axis, or a status that reads done too early). Real motors accelerate and decelerate; this one
+// does not, except that set_stop_settle_reads() makes SLEW_DONE read busy for a number of reads after a stop. Rate
+// commands (0x06, 0x07) are ACKed and change nothing. It ACKs every write except a client's ACK of a motor report
+// (0x50, 0x51), which it does not answer. Motor reports are sent only when a case injects them. It does not simulate
+// the bus, the switch boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The
+// Gen4 startup backlog is replayed as one scripted burst; the real one was 216 frames of an earlier session (October
+// progress log).
 
 /// Loopback fake of a SkyPortal WiFi adapter on the AUX bus.
 class FakeCelestronAuxTcpAdapter {
 public:
     enum class Fault {
-        Drop,           ///< take the request, never answer it (the adapter TCP-acks and loses it)
+        Drop,           ///< take the request and lose it: never executed, never answered (the adapter TCP-acks it)
+        DropReply,      ///< execute the request, never answer it (the request reached the bus; the reply was lost)
         BadChecksum,    ///< answer with a corrupted checksum byte
         Debris,         ///< send the collision-debris byte 0xac just before the reply
         HoldUntilNext,  ///< hold the reply until the next request, then send both replies in one segment (late reply)
@@ -94,7 +102,39 @@ public:
 
     void set_position(std::uint8_t axis, std::uint32_t position) {
         std::lock_guard<std::mutex> lock(mutex_);
-        positions_[axis] = position;
+        axes_[axis] = Axis{.position = position & kCountMask};
+    }
+    /// How long a GOTO takes from where the axis is to its target (default 0: it lands at once).
+    void set_goto_duration(std::chrono::milliseconds duration) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_duration_ = duration;
+    }
+    /// How long a home search reads searching (default 0: done at once).
+    void set_home_duration(std::chrono::milliseconds duration) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        home_duration_ = duration;
+    }
+    /// A GOTO another client started: `axis` moves to `target` over `duration`.
+    void start_goto(std::uint8_t axis, std::uint32_t target, std::chrono::milliseconds duration) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        begin_goto_locked(axes_[axis], target, duration);
+    }
+    /// `axis` moves at `counts_per_second` while SLEW_DONE reads done, until a stop.
+    void set_drift(std::uint8_t axis, double counts_per_second) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& state = axes_[axis];
+        settle_locked(state);
+        state.drift = counts_per_second;
+        state.drift_since = std::chrono::steady_clock::now();
+    }
+    /// After a stop, SLEW_DONE on that axis reads busy for its next `reads` reads (a deceleration).
+    void set_stop_settle_reads(int reads) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_settle_reads_ = reads;
+    }
+    std::uint32_t position(std::uint8_t axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return position_locked(axes_[axis]);
     }
     /// Echo each request back before its reply, as the AMW006 adapter did.
     void set_echo(bool enabled) {
@@ -226,7 +266,7 @@ private:
         std::optional<Fault> fault;
         bool echo = false;
         bool foreign = false;
-        std::uint32_t position = 0;
+        std::vector<std::uint8_t> payload;
         std::vector<std::uint8_t> before_bytes;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -238,7 +278,9 @@ private:
             if (before != before_reply_.end()) before_bytes = before->second;
             echo = echo_;
             foreign = foreign_;
-            position = positions_[request.destination];
+            // A swallowed request never reaches the motor; a closed connection takes nothing either.
+            if (fault != Fault::Drop && fault != Fault::Close && fault != Fault::Reset)
+                payload = execute_locked(request);
         }
         std::vector<std::uint8_t> out = std::move(held);
         held.clear();
@@ -250,28 +292,6 @@ private:
             return true;
         }
         out.insert(out.end(), before_bytes.begin(), before_bytes.end());
-        std::vector<std::uint8_t> payload;
-        switch (request.command) {
-            case 0x01:
-                payload = {static_cast<std::uint8_t>(position >> 16), static_cast<std::uint8_t>(position >> 8),
-                           static_cast<std::uint8_t>(position)};
-                break;
-            case 0x05:
-                payload = {0x17, 0x88};
-                break;
-            case 0x12:
-            case 0x13:
-                payload = {0xff};
-                break;
-            case 0x27:
-                payload = {0x00};
-                break;
-            case 0xfe:
-                payload = {7, 18, 0x08, 0xa6};
-                break;
-            default:
-                break;  // every write and motion command is ACKed with no payload
-        }
         if (foreign) {
             const auto chatter = frame(0x31, 0x11, 0x09, {0x00, 0x00});
             out.insert(out.end(), chatter.begin(), chatter.end());
@@ -281,7 +301,7 @@ private:
             out.insert(out.end(), to_hand_control.begin(), to_hand_control.end());
         }
         auto reply = frame(request.destination, request.source, request.command, payload);
-        if (fault == Fault::Drop) {
+        if (fault == Fault::Drop || fault == Fault::DropReply) {
             send_bytes(fd, out);
             return true;
         }
@@ -314,13 +334,130 @@ private:
         return true;
     }
 
+    static constexpr std::uint32_t kCountMask = 0xffffff;  // 24-bit encoder counts
+
+    struct Axis {
+        std::uint32_t position = 0;  // at rest, or where a GOTO or a drift started
+        bool going = false;
+        std::int64_t goto_delta = 0;
+        std::chrono::steady_clock::time_point goto_started{};
+        std::chrono::milliseconds goto_duration{0};
+        std::chrono::steady_clock::time_point home_until{};
+        std::chrono::steady_clock::time_point guide_until{};
+        double drift = 0.0;
+        std::chrono::steady_clock::time_point drift_since{};
+        int settle_reads = 0;
+    };
+
+    static std::int64_t signed_delta(std::uint32_t to, std::uint32_t from) {
+        std::int64_t delta = static_cast<std::int64_t>(to & kCountMask) - static_cast<std::int64_t>(from & kCountMask);
+        if (delta >= 0x800000) delta -= 0x1000000;
+        if (delta < -0x800000) delta += 0x1000000;
+        return delta;
+    }
+
+    static std::uint32_t position_locked(const Axis& axis) {
+        const auto now = std::chrono::steady_clock::now();
+        std::int64_t moved = 0;
+        if (axis.going) {
+            const auto elapsed = now - axis.goto_started;
+            moved = elapsed >= axis.goto_duration
+                        ? axis.goto_delta
+                        : static_cast<std::int64_t>(static_cast<double>(axis.goto_delta) *
+                                                    std::chrono::duration<double>(elapsed).count() /
+                                                    std::chrono::duration<double>(axis.goto_duration).count());
+        } else if (axis.drift != 0.0) {
+            moved =
+                static_cast<std::int64_t>(axis.drift * std::chrono::duration<double>(now - axis.drift_since).count());
+        }
+        return static_cast<std::uint32_t>((static_cast<std::int64_t>(axis.position) + moved) & kCountMask);
+    }
+
+    // Folds a GOTO or a drift into a resting position where it is now.
+    static void settle_locked(Axis& axis) {
+        axis.position = position_locked(axis);
+        axis.going = false;
+        axis.drift = 0.0;
+    }
+
+    static void begin_goto_locked(Axis& axis, std::uint32_t target, std::chrono::milliseconds duration) {
+        settle_locked(axis);
+        axis.goto_delta = signed_delta(target, axis.position);
+        axis.goto_started = std::chrono::steady_clock::now();
+        axis.goto_duration = duration;
+        axis.going = duration.count() > 0;
+        if (!axis.going) axis.position = target & kCountMask;
+    }
+
+    static std::uint32_t u24(const std::vector<std::uint8_t>& payload) {
+        return payload.size() == 3 ? (static_cast<std::uint32_t>(payload[0]) << 16) |
+                                         (static_cast<std::uint32_t>(payload[1]) << 8) | payload[2]
+                                   : 0;
+    }
+
+    // What the motor does with `request`, and the payload of its reply. Called under mutex_.
+    std::vector<std::uint8_t> execute_locked(const vendor::celestron::AuxFrame& request) {
+        if (request.destination != 0x10 && request.destination != 0x11) return {};
+        auto& axis = axes_[request.destination];
+        const auto now = std::chrono::steady_clock::now();
+        if (axis.going && now - axis.goto_started >= axis.goto_duration) settle_locked(axis);
+        switch (request.command) {
+            case 0x01: {
+                const auto position = position_locked(axis);
+                return {static_cast<std::uint8_t>(position >> 16), static_cast<std::uint8_t>(position >> 8),
+                        static_cast<std::uint8_t>(position)};
+            }
+            case 0x02:
+            case 0x17:
+                begin_goto_locked(axis, u24(request.payload), goto_duration_);
+                return {};
+            case 0x04:
+                settle_locked(axis);
+                axis.position = u24(request.payload);
+                return {};
+            case 0x05:
+                return {0x17, 0x88};
+            case 0x0b:
+                axis.home_until = now + home_duration_;
+                return {};
+            case 0x12:
+                return {static_cast<std::uint8_t>(now < axis.home_until ? 0x00 : 0xff)};
+            case 0x13:
+                if (axis.settle_reads > 0) {
+                    --axis.settle_reads;
+                    return {0x00};
+                }
+                return {static_cast<std::uint8_t>(axis.going ? 0x00 : 0xff)};
+            case 0x24:
+                if (request.payload == std::vector<std::uint8_t>{0x00}) {
+                    settle_locked(axis);
+                    axis.home_until = now;
+                    axis.settle_reads = stop_settle_reads_;
+                }
+                return {};
+            case 0x26:
+                if (request.payload.size() == 2)
+                    axis.guide_until = now + std::chrono::milliseconds(10 * request.payload[1]);
+                return {};
+            case 0x27:
+                return {static_cast<std::uint8_t>(now < axis.guide_until ? 0x01 : 0x00)};
+            case 0xfe:
+                return {7, 18, 0x08, 0xa6};
+            default:
+                return {};  // every other write is ACKed with no payload
+        }
+    }
+
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};
     std::atomic<int> connections_{0};
     std::atomic<bool> serving_{false};
     mutable std::mutex mutex_;
-    std::map<std::uint8_t, std::uint32_t> positions_;
+    std::map<std::uint8_t, Axis> axes_;
+    std::chrono::milliseconds goto_duration_{0};
+    std::chrono::milliseconds home_duration_{0};
+    int stop_settle_reads_ = 0;
     bool echo_ = false;
     bool foreign_ = false;
     std::vector<std::uint8_t> backlog_;

@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -31,6 +32,7 @@
 #include "cgx_clock_cleanup.h"
 #include "driver_rig.h"
 #include "fake_celestron_aux_tcp_adapter.h"
+#include "fake_celestron_cgx_mount.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -110,7 +112,7 @@ TEST_CASE("Celestron CGX TCP driver - a lost identity reply is recovered and cou
     CHECK(rig.adapter.count(kRa, 0xfe) == 2);
     CHECK(rig.adapter.count(kDec, 0x05) == 2);
     CHECK(rig.driver->get_link_fault().empty());
-    CHECK(rig.driver->get_description().find("lost replies recovered by a re-send: 2") != std::string::npos);
+    CHECK(rig.driver->get_description().find("lost replies recovered: 2") != std::string::npos);
 }
 
 TEST_CASE("Celestron CGX TCP driver - Disconnect closes the socket and the reference goes with it",
@@ -135,20 +137,100 @@ TEST_CASE("Celestron CGX TCP driver - Disconnect closes the socket and the refer
     require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
 }
 
-TEST_CASE("Celestron CGX TCP driver - a stop nobody acknowledges ends with send-only stops",
-          "[celestron][cgx][telescope][tcp]") {
+TEST_CASE("Celestron CGX TCP driver - a stop not confirmed on a moving axis gets the send-only stop at once",
+          "[celestron][cgx][telescope][tcp][motion-confirm]") {
     TcpRig rig;
+    // Another client left RA moving; the takeover stop's first RA stop is lost on its way to the bus, so the status
+    // cannot confirm it (the axis still moves) and the ACK-checked round fails on RA.
+    rig.adapter.set_drift(kRa, 1.0e6);
+    rig.adapter.script(kRa, 0x24, 1, Fault::Drop);
     rig.set_connected(true);
-    REQUIRE(rig.adapter.count(kRa, 0x24) == 1);  // the connect's takeover stop
-    // Every ACK-checked RA stop of the disconnect is lost (three rounds, real 1000 ms each).
-    for (int nth = 2; nth <= 4; ++nth) rig.adapter.script(kRa, 0x24, nth, Fault::Drop);
-    rig.set_connected(false);
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (rig.adapter.count(kDec, 0x06) == 0 && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(5ms);  // real time: the fake reads the last frames
-    CHECK(rig.adapter.count(kRa, 0x24) == 5);
-    CHECK(rig.adapter.count(kRa, 0x06) == 1);
-    CHECK(rig.adapter.count(kDec, 0x06) == 1);
+    REQUIRE(rig.driver->get_connected());
+    const auto frames = rig.adapter.received();
+    const auto first = [&](std::uint8_t destination, std::uint8_t command) {
+        for (std::size_t i = 0; i < frames.size(); ++i)
+            if (frames[i].destination == destination && frames[i].command == command) return i;
+        return frames.size();
+    };
+    // The send-only stop (0x24 then a zero rate) goes to RA before the Dec stop, not after three rounds.
+    REQUIRE(first(kRa, 0x06) < frames.size());
+    CHECK(first(kRa, 0x06) < first(kDec, 0x24));
+    const auto stopped_at = rig.adapter.position(kRa);
+    std::this_thread::sleep_for(5ms);  // real time: a drifting axis would move ~5,000 counts
+    CHECK(rig.adapter.position(kRa) == stopped_at);
+}
+
+TEST_CASE("Celestron CGX TCP driver - the cleanup stop budget fits a TCP status poll",
+          "[celestron][cgx][telescope][tcp][motion-confirm]") {
+    TcpRig rig;
+    SECTION("an axis that reads busy for 800 ms after the stop verifies") {
+        // 40 busy SLEW_DONE reads per axis, one per 20 ms poll: past USB's 500 ms, inside TCP's budget.
+        rig.adapter.set_stop_settle_reads(40);
+        rig.set_connected(true);
+        CHECK(rig.driver->get_connected());
+    }
+    SECTION("an axis that stays busy still fails the stop") {
+        rig.adapter.set_stop_settle_reads(200);  // 4 s of busy reads
+        try {
+            rig.set_connected(true);
+            FAIL("a stop the status never confirmed was taken as verified");
+        } catch (const alpacacore::AlpacaException& error) {
+            CHECK(error.error_code() == AlpacaError::DriverException);
+            CHECK(std::string(error.what()).find("did not confirm that both motor axes stopped") != std::string::npos);
+        }
+        CHECK_FALSE(rig.driver->get_connected());
+    }
+}
+
+TEST_CASE("Celestron CGX TCP driver - FindHome over a lost LEVEL_START reply",
+          "[celestron][cgx][telescope][tcp][motion-confirm]") {
+    TcpRig rig;
+    rig.adapter.set_home_duration(800ms);
+    SECTION("the search started: FindHome completes with the reference") {
+        rig.adapter.script(kRa, 0x0b, 1, Fault::DropReply);
+        rig.set_connected(true);
+        auto task = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+        alpacacore::test::drain_cgx_clock_task(task, rig.clock);
+        task.get();
+        // The home body waits on the fake clock between LEVEL_DONE polls; the search itself takes 800 ms real time.
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+            if (rig.clock.wait_for_waiters(1, 1ms)) rig.clock.advance(20ms);
+            std::this_thread::sleep_for(1ms);
+        }
+        CHECK(rig.driver->get_at_home());
+        CHECK(rig.driver->get_declination() > 89.99);
+        CHECK(rig.driver->get_link_fault().empty());
+        CHECK(rig.driver->get_description().find("lost replies recovered: 1") != std::string::npos);
+    }
+    SECTION("the request was lost: FindHome fails and sends no second LEVEL_START") {
+        rig.adapter.script(kRa, 0x0b, 1, Fault::Drop);
+        rig.set_connected(true);
+        auto task = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+        alpacacore::test::drain_cgx_clock_task(task, rig.clock);
+        require_alpaca_error([&] { task.get(); }, AlpacaError::DriverException);
+        CHECK_FALSE(rig.driver->get_at_home());
+        CHECK_FALSE(rig.driver->get_slewing());
+        CHECK(rig.adapter.count(kDec, 0x0b) == 0);
+    }
+    CHECK(rig.adapter.count(kRa, 0x0b) == 1);
+}
+
+TEST_CASE("Celestron CGX USB driver - a cleanup stop keeps its 500 ms budget",
+          "[celestron][cgx][telescope][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    cgx::CelestronCgxConnectionInfo info;
+    info.port_path = mount.slave_path();
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    // 40 busy reads per axis, 20 ms apart in real time: past 500 ms, so the Disconnect's stop is not verified.
+    mount.set_stop_completion_reads(40);
+    require_alpaca_error([&] { driver->set_connected(false); }, AlpacaError::DriverException);
+    mount.set_stop_completion_reads(0);
 }
 
 TEST_CASE("Celestron CGX TCP driver - a motor fault report costs the reference", "[celestron][cgx][telescope][tcp]") {
