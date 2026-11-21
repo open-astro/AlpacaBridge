@@ -71,6 +71,7 @@
 #include "../core/catalog_json.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "persisted_config_store.h"
 #include "router_helpers.h"
 #include "thread_join.h"
 
@@ -80,8 +81,6 @@ using alpacacore::logging::LogLevel;
 using alpacahttp::find_json_value;
 using alpacahttp::get_form_value;
 using alpacahttp::to_lower_copy;
-
-const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
 
 // An exception's text, made safe for a log line (issue #2087). Every log call
 // in this file passes `what()` through here: a message that quotes a decoded
@@ -368,70 +367,6 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         text += '\n';
     }
     return write_config_file(config_path, text, error_message);
-}
-
-// The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
-// through typed guards rather than value() (#388): a hand-edited file can
-// carry "deviceNumber": "3", and that entry stays in persisted_devices_ (only
-// its registration fails), so every walk over the list must step past it
-// instead of throwing type_error on a PUT or POST aimed at a different,
-// valid device. Absent or wrong-typed type/number yields no key; vendor is
-// "" when missing. deviceType is lowercased, since the web UI and the tests
-// post it lowercase while the registry answers "Telescope".
-struct PersistedKey {
-    std::string vendor{};
-    std::string device_type{};  // lowercase
-    int device_number = -1;
-};
-
-// Decision 0018: the persisted UniqueID of a configured device. A stored or
-// client-sent value is kept when it is a keepable ID (a version 4 UUID or a
-// long non-slot string such as ZWO_UID_<hex>) that no other entry holds (the
-// web UI edits a device by removing and re-adding it, sending the ID back);
-// only an entry with none, a device-number ID or a duplicate gets a fresh GUID.
-std::string stored_unique_id(const nlohmann::json& entry) {
-    const auto it = entry.find("uniqueId");
-    if (it == entry.end() || !it->is_string()) return {};
-    const std::string value = it->get<std::string>();
-    return alpacacore::util::is_keepable_unique_id(value) ? value : std::string();
-}
-
-std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
-    std::string value = stored_unique_id(entry);
-    while (value.empty() || taken.count(value) != 0) {
-        value = alpacacore::util::generate_unique_id();
-    }
-    return value;
-}
-
-using alpacahttp::catalog_json::whole_json_int;
-
-std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
-    if (!entry.is_object()) {
-        return std::nullopt;
-    }
-    const auto type_it = entry.find("deviceType");
-    const auto number_it = entry.find("deviceNumber");
-    // The numbers catalog_json::get_int() accepts at registration (whole_json_int):
-    // a hand-written 3.0 registers as device 3, so the walks over the
-    // persisted list must find that same entry or removedevice would drop it
-    // from the registry and leave it in the file. A number registration
-    // refuses (4294967299, 3.5) has no key, like a wrong-typed one.
-    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end()) {
-        return std::nullopt;
-    }
-    const auto number = whole_json_int(*number_it);
-    if (!number) {
-        return std::nullopt;
-    }
-    PersistedKey key;
-    key.device_type = to_lower_copy(type_it->get<std::string>());
-    key.device_number = *number;
-    const auto vendor_it = entry.find("vendor");
-    if (vendor_it != entry.end() && vendor_it->is_string()) {
-        key.vendor = vendor_it->get<std::string>();
-    }
-    return key;
 }
 
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
@@ -949,10 +884,6 @@ namespace {
 // path today is under 100 bytes; 2048 stays far below the crash depth.
 constexpr std::size_t kMaxRequestPathBytes = 2048;
 
-// open-astro#2292 (ADR 0007 rule 10): the most entries configuredevice keeps.
-// A new entry past it is refused; replacing an entry is not. A rig has tens.
-constexpr std::size_t kMaxConfiguredDevices = 128;
-
 // open-astro#392: the host part of a Host header or an http.allowed_hosts
 // entry: port removed, lowercased, one trailing dot removed. A bracketed IPv6
 // literal keeps its brackets. std::nullopt when the value cannot name a host:
@@ -1195,7 +1126,8 @@ Router::Router() : Router(CatalogExtension{}) {}
 Router::Router(const CatalogExtension& extend_catalog) : Router(extend_catalog, 0) {}
 
 Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port)
-    : machine_hostname_(read_machine_hostname()) {
+    : machine_hostname_(read_machine_hostname()),
+      persisted_store_(std::make_unique<PersistedConfigStore>(std::filesystem::path("config"))) {
     listen_port_->store(listen_port, std::memory_order_release);
     learned_sink_->router = this;
     alpacacore::catalog::register_builtin_schemas(catalog_);
@@ -1216,28 +1148,19 @@ void Router::store_learned_config(const nlohmann::json& entry, const nlohmann::j
                                   const std::string& unique_id) {
     const auto wanted = persisted_key(entry);
     if (!wanted.has_value()) return;
-    bool stored = false;
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        for (auto& saved : persisted_devices_) {
-            const auto key = persisted_key(saved);
-            if (!key.has_value() || key->vendor != wanted->vendor || key->device_type != wanted->device_type ||
-                key->device_number != wanted->device_number) {
-                continue;
+    const auto merge = [&](nlohmann::json& saved) {
+        // The number now names another device.
+        if (!unique_id.empty() && stored_unique_id(saved) != unique_id) return false;
+        for (const auto& [field, value] : learned.items()) {
+            if (value.is_null()) {
+                saved.erase(field);
+            } else {
+                saved[field] = value;
             }
-            if (!unique_id.empty() && stored_unique_id(saved) != unique_id) break;  // the number now names another
-            for (const auto& [field, value] : learned.items()) {
-                if (value.is_null()) {
-                    saved.erase(field);
-                } else {
-                    saved[field] = value;
-                }
-            }
-            stored = true;
-            break;
         }
-    }
-    if (stored) save_persisted_devices();
+        return true;
+    };
+    persisted_store_->edit_by_vendor_type_and_number(wanted->vendor, wanted->device_type, wanted->device_number, merge);
 }
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
@@ -2190,22 +2113,14 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     try {
         load_persisted_devices();
 
-        // Snapshot under the mutex so the iteration below (which calls into
-        // the device registry) never races configure/remove handlers.
-        std::vector<nlohmann::json> persisted_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            persisted_snapshot = persisted_devices_;
-        }
+        // A snapshot, so the iteration below (which calls into the device
+        // registry) never races configure/remove handlers.
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
 
         auto find_config = [&persisted_snapshot](const std::string& device_type,
                                                  int device_number) -> const nlohmann::json* {
-            std::string target_type = device_type;
-            std::transform(target_type.begin(), target_type.end(), target_type.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             for (const auto& entry : persisted_snapshot) {
-                const auto key = persisted_key(entry);
-                if (key && key->device_type == target_type && key->device_number == device_number) {
+                if (PersistedConfigStore::matches_type_and_number(entry, device_type, device_number)) {
                     return &entry;
                 }
             }
@@ -2354,11 +2269,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
     try {
         load_persisted_devices();
 
-        std::vector<nlohmann::json> persisted_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            persisted_snapshot = persisted_devices_;
-        }
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
         auto capabilities = alpacacore::management::DeviceRegistry::instance().get_all_device_capabilities();
 
         nlohmann::json devices = nlohmann::json::array();
@@ -2368,13 +2279,8 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
             int pnum = pkey ? pkey->device_number : -1;
             bool already_listed = false;
             for (const auto& cap : capabilities) {
-                std::string cap_type = alpacacore::device_type_to_string(cap.type);
-                std::transform(cap_type.begin(), cap_type.end(), cap_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                std::string entry_type = ptype;
-                std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (cap_type == entry_type && cap.device_number == pnum) {
+                if (PersistedConfigStore::matches_type_and_number(entry, alpacacore::device_type_to_string(cap.type),
+                                                                  cap.device_number)) {
                     already_listed = true;
                     break;
                 }
@@ -3514,11 +3420,7 @@ Response Router::handle_attached_devices(const Request& request, std::uint32_t s
 
     try {
         load_persisted_devices();
-        std::vector<nlohmann::json> persisted_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            persisted_snapshot = persisted_devices_;
-        }
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
         // The configured devices as the catalog reads them. An entry the
         // catalog cannot read (unknown type, wrong-typed field) cannot hold a
         // port this listing could match, so it is skipped.
@@ -3942,49 +3844,16 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a stored ID the client sends back (the web UI's edit
-        // removes the entry first, so its own ID is free again) unless another
-        // entry holds it, or another configuredevice call chose it and has not
-        // stored its entry yet; otherwise mint one. The entry this call replaces
-        // (same vendor, type and number, as add_or_replace_persisted_device()
-        // matches) is not another entry. The choice is reserved until this call
-        // stores its entry or fails.
-        // open-astro#2292: a call that adds an entry counts against
-        // kMaxConfiguredDevices with the adding calls still in flight
-        // (pending_new_entries_), so concurrent calls cannot pass it together.
-        bool adds_entry = true;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            std::set<std::string> taken = reserved_unique_ids_;
-            const auto replaced = persisted_key(config);
-            for (const auto& entry : persisted_devices_) {
-                const auto key = persisted_key(entry);
-                if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
-                    key->device_number == replaced->device_number) {
-                    adds_entry = false;
-                    continue;
-                }
-                if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
-            }
-            if (adds_entry && persisted_devices_.size() + pending_new_entries_ >= kMaxConfiguredDevices) {
-                response.set_body(make_error_response(
-                    client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                    "The server holds " + std::to_string(kMaxConfiguredDevices) +
-                        " configured devices, the most it keeps; remove one before adding another"));
-                return response;
-            }
-            config["uniqueId"] = choose_unique_id(config, taken);
-            reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
-            if (adds_entry) ++pending_new_entries_;
+        // Decision 0018 and open-astro#2292: the uniqueId this call keeps or mints,
+        // and its slot under the entry cap, held until this call returns.
+        const auto reservation = persisted_store_->reserve_unique_id(config);
+        if (!reservation) {
+            response.set_body(
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                    "The server holds " + std::to_string(PersistedConfigStore::kMaxEntries) +
+                                        " configured devices, the most it keeps; remove one before adding another"));
+            return response;
         }
-        struct UniqueIdReservation {
-            std::function<void()> release;
-            ~UniqueIdReservation() { release(); }
-        } reservation{[this, adds_entry, unique_id = config["uniqueId"].get<std::string>()] {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            reserved_unique_ids_.erase(unique_id);
-            if (adds_entry) --pending_new_entries_;
-        }};
 
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
@@ -4012,8 +3881,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
 
         nlohmann::json stored_config = config;
         stored_config.update(learned_config);
-        add_or_replace_persisted_device(sanitize_device_config(stored_config));
-        save_persisted_devices();
+        persisted_store_->add_or_replace(sanitize_device_config(stored_config));
+        persisted_store_->save();
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         // #1969: the web UI shows the text after "Warning: " (configureWarning() in format.js).
@@ -4140,12 +4009,12 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             was_registered = registry.unregister_device(device_type, device_number);
         }
 
-        bool was_persisted = remove_persisted_device(vendor, device_type_str, device_number);
+        bool was_persisted = persisted_store_->remove(vendor, device_type_str, device_number);
         set_registration_warning(device_type, device_number, {});
 
         if (was_registered || was_persisted) {
             if (was_persisted) {
-                save_persisted_devices();
+                persisted_store_->save();
             }
             AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             alpaca_response.value = std::string("Device removed successfully");
@@ -4255,14 +4124,9 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
             }
         }
         // Not gated by learnSiteFromClient: that opt-out protects a surveyed site, not optics.
-        bool changed = false;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            for (auto& entry : persisted_devices_) {
-                const auto pkey = persisted_key(entry);
-                if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
-                    continue;
-                }
+        const auto edit =
+            persisted_store_->edit_by_type_and_number("telescope", device_number, [&updates](nlohmann::json& entry) {
+                bool changed = false;
                 for (const auto& [key, value] : updates) {
                     const auto current = entry.find(key);
                     if (current == entry.end() || !current->is_number() || current->get<double>() != value) {
@@ -4270,10 +4134,9 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
                         changed = true;
                     }
                 }
-                break;
-            }
-        }
-        if (changed && !save_persisted_devices()) {
+                return changed;
+            });
+        if (edit.changed && !edit.saved) {
             util::log_warning("Telescope " + std::to_string(device_number) +
                               " optics are in use for this session but could NOT be written to "
                               "config/registered_devices.json (see the error above)");
@@ -5407,14 +5270,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                 return false;
             }
             // A factory with a bind hook sees the other stored entries of its key
-            // (copied under the mutex, which is released before the hook runs: it may
+            // (read from a snapshot, so no store lock is held when the hook runs: it may
             // enumerate the SDK) and may hand learned config back. Any other factory
             // gets no peers and learns nothing.
             std::vector<alpacacore::catalog::PeerEntry> peers;
             if (catalog_.has_bind(key)) {
                 const std::string wanted_type = to_lower_copy(device_type_str);
-                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-                for (const auto& other : persisted_devices_) {
+                for (const auto& other : persisted_store_->snapshot()) {
                     const auto other_key = persisted_key(other);
                     if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
                         continue;
@@ -5592,59 +5454,51 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
         return;
     }
     const int device_number = device.get_device_number();
-    bool changed = false;
     bool declined = false;
     std::string vendor{};
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        for (auto& entry : persisted_devices_) {
-            // Typed reads (persisted_key), never value(): a malformed
-            // neighbour in the list is simply not a match.
-            const auto pkey = persisted_key(entry);
-            if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
-                continue;
-            }
-            vendor = pkey->vendor;
-            // The opt-out: an operator with a surveyed pier position does not
-            // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
-            // on, because the value the mount is using RIGHT NOW is the one
-            // the client set, and a restart should start from the same site
-            // the last session ended on rather than an older one.
-            // Typed, not value(): a hand-edited file can carry "false" or 0
-            // here, and nlohmann's value() throws on that, which would turn
-            // every site PUT into an error. Only a boolean false is the
-            // opt-out; the API path refuses any other type at registration.
-            const auto flag = entry.find("learnSiteFromClient");
-            if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
-                declined = true;
-                break;
-            }
-            // Unchanged: no file write on a client that re-sends its site on
-            // every connect (most do).
-            const auto current = entry.find(key);
-            if (current != entry.end() && current->is_number() && current->get<double>() == value) {
-                break;
-            }
-            entry[key] = value;
-            changed = true;
-            break;
+    // Typed reads (persisted_key), never value(): a malformed neighbour in
+    // the list is simply not a match. The store saves a change, outside its
+    // list lock; the file I/O is on a PUT setter, not on a getter or
+    // DeviceState, so a polling client never waits on it (the lock-free
+    // get_connected() rule in alpaca-http-conformance.instructions.md is
+    // unaffected); it runs once per changed value.
+    const auto edit = persisted_store_->edit_by_type_and_number("telescope", device_number, [&](nlohmann::json& entry) {
+        if (const auto pkey = persisted_key(entry)) vendor = pkey->vendor;
+        // The opt-out: an operator with a surveyed pier position does not
+        // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
+        // on, because the value the mount is using RIGHT NOW is the one
+        // the client set, and a restart should start from the same site
+        // the last session ended on rather than an older one.
+        // Typed, not value(): a hand-edited file can carry "false" or 0
+        // here, and nlohmann's value() throws on that, which would turn
+        // every site PUT into an error. Only a boolean false is the
+        // opt-out; the API path refuses any other type at registration.
+        const auto flag = entry.find("learnSiteFromClient");
+        if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
+            declined = true;
+            return false;
         }
-    }
+        // Unchanged: no file write on a client that re-sends its site on
+        // every connect (most do).
+        const auto current = entry.find(key);
+        if (current != entry.end() && current->is_number() && current->get<double>() == value) {
+            return false;
+        }
+        entry[key] = value;
+        return true;
+    });
     if (declined) {
         util::log_debug("Telescope " + std::to_string(device_number) + ": client " + key +
                         " not persisted (learnSiteFromClient is false)");
         return;
     }
-    if (!changed) {
+    if (!edit.changed) {
         return;  // no persisted entry (a device registered for this process only), or same value
     }
-    // File I/O on a PUT setter, not on a getter or DeviceState, so a polling client never waits on it
-    // (the lock-free get_connected() rule in alpaca-http-conformance.instructions.md is unaffected);
-    // it runs once per changed value.
     std::ostringstream msg;
     msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed
         << std::setprecision(6) << value;
-    if (save_persisted_devices()) {
+    if (edit.saved) {
         util::log_info(msg.str() + " persisted to config/registered_devices.json");
     } else {
         // The entry in memory holds the value (the driver is using it), so
@@ -5656,166 +5510,25 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     }
 }
 
-void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
-    if (!catalog_json::has_value(config, "deviceType") || !catalog_json::has_value(config, "vendor") ||
-        !catalog_json::has_value(config, "deviceNumber")) {
+void Router::load_persisted_devices() {
+    // The store reads the file and keeps the list; the loaded devices register
+    // afterwards, with no store lock held, since driver-registry calls may
+    // block on hardware.
+    PersistedConfigStore::LoadResult loaded =
+        persisted_store_->load([this](const nlohmann::json& entry) { return sanitize_device_config(entry); });
+    if (!loaded.first) {
         return;
     }
-
-    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    const std::string vendor = catalog_json::get_string(config, "vendor");
-    const std::string device_type = to_lower_copy(catalog_json::get_string(config, "deviceType"));
-    const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
-    for (auto& existing : persisted_devices_) {
-        const auto key = persisted_key(existing);
-        if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {
-            existing = config;
-            return;
-        }
+    // Decision 0021: once per start, whatever the file holds, so the boot ID
+    // is recorded even before the first device is configured.
+    const bool new_boot = alpacacore::util::PowerPortStateStore::begin_server_start();
+    if (!loaded.parsed) {
+        return;
     }
-
-    persisted_devices_.push_back(config);
-}
-
-bool Router::remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number) {
-    if (device_type.empty() || device_number < 0) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    std::size_t before = persisted_devices_.size();
-    persisted_devices_.erase(std::remove_if(persisted_devices_.begin(), persisted_devices_.end(),
-                                            [&](const nlohmann::json& entry) {
-                                                const auto key = persisted_key(entry);
-                                                if (!key || key->device_type != to_lower_copy(device_type) ||
-                                                    key->device_number != device_number) {
-                                                    return false;
-                                                }
-                                                return vendor.empty() || key->vendor == vendor;
-                                            }),
-                             persisted_devices_.end());
-    return persisted_devices_.size() < before;
-}
-
-bool Router::save_persisted_devices() const {
-    try {
-        if (kPersistedDevicesFile.has_parent_path()) {
-            std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
-        }
-
-        // One writer at a time, and never in place: site PUTs from two
-        // clients run on two workers (#444), and two truncate-and-write
-        // passes on the same file end as one dump's head plus the other's
-        // tail, which the next start cannot parse and so loads NO devices.
-        // Writing a sibling temp file and renaming it over the real one
-        // makes each save atomic for a concurrent reader: the file is always
-        // a complete dump. write_file_atomic also fsyncs the temp file and the
-        // directory, so a crash or a full disk keeps the previous file (#1688).
-        //
-        // The file lock is taken BEFORE the snapshot (lock order: file, then
-        // list, the same everywhere). Snapshotting first let worker A copy
-        // the list, lose the CPU, and rename its older copy over the newer
-        // dump worker B had just written: memory right, disk one revision
-        // stale until the next changed PUT, lost across a restart.
-        std::lock_guard<std::mutex> file_lock(persisted_file_mutex_);
-        nlohmann::json payload;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            payload = persisted_devices_;
-        }
-        alpacacore::util::write_file_atomic(kPersistedDevicesFile, payload.dump(4));
-        return true;
-    } catch (const std::exception& e) {
-        util::log_error("Failed to persist registered devices: " + log_what(e));
-        return false;
-    }
-}
-
-void Router::load_persisted_devices() {
-    // Read the file and populate persisted_devices_ under the mutex; register
-    // the loaded devices afterwards so the lock is never held across
-    // driver-registry calls (which may block on hardware).
-    nlohmann::json payload = nlohmann::json::array();
-    bool assigned_unique_ids = false;
-    std::set<std::string> live_unique_ids;
+    const std::set<std::string>& live_unique_ids = loaded.live_unique_ids;
     // Entries this start gives their first GUID (the upgrade, or a hand-edited
     // file): only their drivers adopt state saved under a driver-built ID.
-    std::set<std::string> first_unique_ids;
-    bool new_boot = false;
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        if (persisted_devices_loaded_) {
-            return;
-        }
-
-        persisted_devices_loaded_ = true;
-        // Decision 0021: once per start, whatever the file holds, so the boot ID
-        // is recorded even before the first device is configured.
-        new_boot = alpacacore::util::PowerPortStateStore::begin_server_start();
-
-        try {
-            if (!std::filesystem::exists(kPersistedDevicesFile)) {
-                persisted_devices_.clear();
-                return;
-            }
-
-            std::ifstream in(kPersistedDevicesFile);
-            if (!in) {
-                throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for reading");
-            }
-
-            try {
-                in >> payload;
-                if (!payload.is_array()) {
-                    throw std::runtime_error("Persisted device file must contain a JSON array");
-                }
-            } catch (const std::exception& parse_error) {
-                // Set the file aside: the next save would otherwise overwrite the only copy (#1688).
-                const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
-                                       std::chrono::system_clock::now().time_since_epoch())
-                                       .count();
-                const std::filesystem::path aside =
-                    kPersistedDevicesFile.string() + ".corrupt-" + std::to_string(stamp);
-                std::error_code rename_ec;
-                std::filesystem::rename(kPersistedDevicesFile, aside, rename_ec);
-                util::log_error(
-                    "Registered devices file is unreadable (" + log_what(parse_error) + "); " +
-                    (rename_ec ? "could not set it aside: " + rename_ec.message() : "kept as " + aside.string()));
-                persisted_devices_.clear();
-                return;
-            }
-
-            persisted_devices_.clear();
-            // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
-            // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
-            std::set<std::string> taken;
-            for (auto& entry : payload) {
-                nlohmann::json sanitized = sanitize_device_config(entry);
-                const std::string unique_id = choose_unique_id(sanitized, taken);
-                if (stored_unique_id(sanitized).empty()) first_unique_ids.insert(unique_id);
-                if (stored_unique_id(sanitized) != unique_id) {
-                    assigned_unique_ids = true;
-                    if (entry.is_object()) entry["uniqueId"] = unique_id;
-                    sanitized["uniqueId"] = unique_id;
-                }
-                taken.insert(unique_id);
-                persisted_devices_.push_back(std::move(sanitized));
-            }
-            live_unique_ids = std::move(taken);
-        } catch (const std::exception& e) {
-            util::log_error("Failed to load registered devices: " + log_what(e));
-            return;
-        }
-    }
-    if (assigned_unique_ids) {
-        util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
-        if (!save_persisted_devices() && !first_unique_ids.empty()) {
-            // The next start would mint other GUIDs and prune whatever moved onto
-            // these, so nothing moves until the file can keep them.
-            util::log_warning("Could not store the new UniqueIDs; saved rotator offsets stay under their old IDs");
-            first_unique_ids.clear();
-        }
-    }
+    const std::set<std::string>& first_unique_ids = loaded.first_unique_ids;
     // A removed rotator's offset goes here, not at removal: the web UI's edit
     // removes and re-adds the entry with the same stored ID (decisions 0008, 0018).
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
@@ -5828,7 +5541,7 @@ void Router::load_persisted_devices() {
                        " saved power port state(s) of devices no longer configured");
     }
 
-    for (const auto& entry : payload) {
+    for (const auto& entry : loaded.entries) {
         std::string error_message;
         try {
             nlohmann::json learned_config = nlohmann::json::object();
