@@ -77,6 +77,19 @@ void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<
 /// removes it.
 void set_closing_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seams of the host clock re-sync (open-astro#2419): `hook` runs as each re-sync body ends, with no driver lock
+/// held, and is told whether the body wrote the mount clock; an empty function removes it.
+/// clock_resync_starts_for_testing() counts the re-sync bodies started so far. `driver` must come from the factories
+/// above; anything else is ignored (and counts 0).
+void set_clock_resync_done_hook_for_testing(TelescopeDriver& driver, std::function<void(bool wrote)> hook);
+int clock_resync_starts_for_testing(const TelescopeDriver& driver);
+/// Runs `hook` as a connect begins a new session, before the connect drops a host clock change left pending
+/// (open-astro#2419), so a case can leave one there. It runs under the driver's transition lock and, on a relink (a
+/// Connected=true after the link was lost), its motion initiator lock too; never under its state lock or a wire turn.
+/// `hook` runs on the connecting thread and must not call the driver on it (it may on another thread, but must not
+/// wait there for a call that takes either lock). An empty function removes it.
+void set_connect_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
 /// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
 /// the factories above.

@@ -12,12 +12,14 @@
 
 #pragma once
 
-#include <string>
-#include <memory>
 #include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
-#include <cstdint>
 
 namespace alpacacore::vendor::celestron {
 
@@ -203,6 +205,22 @@ public:
     void set_location(const LocationInfo& info);
     TimeInfo get_time();
     void set_time(const TimeInfo& info);
+    /// Calls `prepare` under the per-link I/O lock and writes the time it returns in that same exchange, so no
+    /// other command (a motion command included) reaches the mount between the caller's check and the write.
+    /// Returns false, with nothing sent, when `prepare` returns nullopt. `prepare` must not call this wrapper.
+    bool set_time_if(const std::function<std::optional<TimeInfo>()>& prepare);
+
+    /// The hand controller's answer to `J`, read inside set_time_if_alignment_checked()'s exchange.
+    struct AlignmentAnswer {
+        bool answered = false;  // false: `J` threw or came back empty, and `error` says why
+        bool aligned = false;   // meaningful only when answered
+        std::string error;
+    };
+    /// set_time_if() with the alignment query first: sends `J` under the same per-link I/O lock, then calls
+    /// `prepare` with the answer, so no command (a client's alignment or a motion) reaches the mount between the
+    /// query, the caller's checks and the write. A failed `J` does not throw; `prepare` gets answered == false.
+    /// Returns false, with no time write sent, when `prepare` returns nullopt. `prepare` must not call this wrapper.
+    bool set_time_if_alignment_checked(const std::function<std::optional<TimeInfo>(const AlignmentAnswer&)>& prepare);
 
 private:
     CelestronProtocolWrapper();

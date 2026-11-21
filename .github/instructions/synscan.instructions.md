@@ -10,6 +10,7 @@ Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required
 
 Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol versions V3 (older) and V4 (current).
 
+- With `syncTimeOnConnect` on, the connect writes `H` only while `util::HostClockTrust::trusted()`; otherwise it logs one WARN and keeps the `W` site write and the `h` sample. `on_host_clock_changed()` starts a re-sync on the `clock_resync_` slot, started and reaped under `transition_mutex_`; the body takes `config_write_mutex_`, then the wire turn, then `mutex_`, and checks driver motion (slew slot, park, refine, MoveAxis, a fresh `L`, pulses) at its own turn before the `H`; in that same turn it asks `J` and skips the `H` for a star-aligned handset (or when the `J` fails), since a clock change shifts its pointing model, while the connect and a client `UTCDate` write still set an aligned handset's clock (ascom-contract host clock rule). Tests: `test_synscan_clock_trust.cpp`.
 - The connect samples the handset's binary `h` clock once unless a successful configured time write already established UTC. A failed sample leaves `UTCDate` unavailable (`InvalidOperation`) until a successful client write or reconnect; the getter performs no device exchange.
 
 - Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount.

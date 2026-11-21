@@ -13,6 +13,7 @@
 #ifndef _WIN32
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -1110,6 +1111,7 @@ TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount 
 }
 
 TEST_CASE("ZWO connect samples mount UTC when configured sync fails", "[zwo][telescope][unit][utcdate]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the host clock (#2419)
     Rig rig(1000, 0, true);
     rig.set_mount_time(20, 3);
     rig.mount.override_reply(":SMTI", "e1");
@@ -1162,6 +1164,7 @@ TEST_CASE("ZWO redundant connect retries an unavailable mount clock only while U
 // clock.
 TEST_CASE("ZWO a client UTCDate write during connect wins over the host-time sync",
           "[zwo][telescope][utc][connect][timing]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the host clock (#2419)
     Rig rig(500, 0, /*sync_time=*/true);
     REQUIRE(rig.mount.ok());
     rig.mount.hold_reply(":Ggr");
@@ -1359,6 +1362,7 @@ TEST_CASE("ZWO UTC refuses a lost link and starts fresh on explicit reconnect",
 
 TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored",
           "[zwo][telescope][utc][issue1522][stress]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     Rig rig(1000, 0, true);
     rig.connect();
     rig.mount.hold_reply(":SMTI");
@@ -1379,6 +1383,7 @@ TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored
 
 TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before GOTO",
           "[zwo][telescope][utc][issue1522]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     const bool sync_time = GENERATE(false, true);
     Rig rig(1000, 0, sync_time);
     const auto before_connect = std::chrono::system_clock::now();
@@ -1472,13 +1477,20 @@ TEST_CASE("ZWO pier side follows a client's UTCDate", "[zwo][telescope][utc]") {
 
 namespace {
 // Pins the host-discipline probe and counts the driver's unsynchronized-host-clock WARNs; restores both on exit.
+// An unsynchronized host is still trusted here (the HostClockTrust latch, as after a client confirmed the clock):
+// an untrusted one writes no host time at all (#2419), so the warning is for a trusted, unsynchronized clock.
 struct HostClockWarnings {
     std::atomic<int> count{0};  // first, so the sink below is restored before it dies
     struct ProbeGuard {
         explicit ProbeGuard(bool synced) {
+            util::HostClockTrust::reset_for_testing();
             util::ClientUtcWarning::set_host_synchronized_probe([synced] { return synced; });
+            if (!synced) util::HostClockTrust::mark_set("test: trusted, not synchronized");
         }
-        ~ProbeGuard() { util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+        ~ProbeGuard() {
+            util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+            util::HostClockTrust::reset_for_testing();
+        }
     } probe;
     struct SinkGuard {
         logging::LogSink previous = logging::get_log_sink();

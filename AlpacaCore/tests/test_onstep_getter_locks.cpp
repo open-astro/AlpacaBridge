@@ -687,6 +687,9 @@ private:
 // refused it connected on its own clock with nothing logged.
 TEST_CASE("OnStep connect - a time sync the mount refuses is logged and the connect still succeeds",
           "[onstep][getter-locks]") {
+    // The connect writes the host clock only while it is trusted (#2419): forced, so a CI runner with no NTP still
+    // sends the :SL# the mount refuses here.
+    alpacacore::test::HostClockTrustGuard trusted(true);
     WarnLog warnings("Time sync");
     Rig rig;
     REQUIRE(rig.server.ok());

@@ -440,14 +440,22 @@ public:
         // io_mutex_ from its first state write to its end. Every exchange below goes through Wire, so mutex_ is
         // free while the handshake, the post-connect reads and the close are on the wire: a getter meanwhile
         // reads NotConnected (check_connected()), its cache or its identity instead of waiting for them.
-        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Issue #2419: a host clock change the server's timer saw while this call held transition_mutex_
-        // (on_host_clock_changed()) starts its re-sync on the way out, still under transition_mutex_ and after
-        // every other driver lock is released. Declared before the StateLock below, so destroyed after it.
-        struct PendingResync {
+        // (on_host_clock_changed() stores it as pending before it tries the lock) starts its re-sync on the way
+        // out. Declared before the transition lock, so it drains after that lock is released: a change stored
+        // after a check made under the lock would otherwise wait for the next set_connected().
+        struct DrainPendingResync {
             iOptronTelescopeDriver& self;
-            ~PendingResync() { self.start_pending_resync_transition_locked(); }
-        } pending_resync{*this};
+            ~DrainPendingResync() { self.drain_pending_resync("Host clock changed during a connect or disconnect"); }
+        } drain_pending_resync_on_exit{*this};
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        // Test seam: the last thing before transition_mutex_ is released, with no other driver lock held.
+        struct ExitHook {
+            const std::function<void()>& hook;
+            ~ExitHook() {
+                if (hook) hook();
+            }
+        } exit_hook{set_connected_exit_hook_};
         if (set_connected_entry_hook_) set_connected_entry_hook_();  // test seam: transition_mutex_ held
         const Wire protocol = wire();
         if (!connected || (connected_ && link_lost())) {
@@ -3327,8 +3335,9 @@ private:
         localtime_s(&local_tm, &now);
         gmtime_s(&utc_tm, &now);
 #else
-        local_tm = *std::localtime(&now);
-        utc_tm = *std::gmtime(&now);
+        // Reentrant: the clock-sync body runs on its own thread (std::localtime / std::gmtime share one buffer).
+        localtime_r(&now, &local_tm);
+        gmtime_r(&now, &utc_tm);
 #endif
         std::time_t local_time = std::mktime(&local_tm);
         std::time_t utc_interpreted_as_local = std::mktime(&utc_tm);
@@ -3350,11 +3359,12 @@ private:
     // ITelescopeV4 has no completion property for it, so a body that throws is kept by the slot
     // (clock_sync_failure()) and logged, until the next start().
     // `resync_why` is empty for the connect's own pass; otherwise it says what the host clock did after the
-    // connect (#2419), and the body first checks the mount's clock against the host's.
-    void start_clock_sync(std::string resync_why = {}) {
-        clock_sync_.start([this, why = std::move(resync_why)](util::OperationContext& ctx) {
+    // connect (#2419), and the body first checks the mount's clock against the host's. `decided_generation` is
+    // utc_write_generation_ when a re-sync was decided (the connect's own pass ignores it).
+    void start_clock_sync(std::string resync_why = {}, uint64_t decided_generation = 0) {
+        clock_sync_.start([this, why = std::move(resync_why), decided_generation](util::OperationContext& ctx) {
             try {
-                run_clock_sync(ctx, why);
+                run_clock_sync(ctx, why, decided_generation);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("iOptron", std::string("Clock sync failed: ") + e.what());
                 throw;
@@ -3364,43 +3374,53 @@ private:
 
     // Issue #2419: the server's timer saw the host clock step or become trusted. Re-syncs the mount clock on the
     // clock-sync slot. The timer thread calls this with no lock held. It does no I/O and joins nothing, and it does not
-    // wait for transition_mutex_: a connect or a disconnect holding it leaves a pending flag that set_connected() acts
-    // on as it returns. AsyncOperation::start() itself can wait up to kStaleReapTimeout (2 s) when three replaced
-    // bodies are still running, for example on a blocked link (#2432).
+    // wait for transition_mutex_: it stores the change as pending first, and a connect or a disconnect holding the lock
+    // drains it after letting go (drain_pending_resync()), so a change that arrives as set_connected() returns is not
+    // lost. AsyncOperation::start() itself can wait up to kStaleReapTimeout (2 s) when three replaced bodies are still
+    // running, for example on a blocked link (#2432).
     void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
         // sync_time_on_connect_ is fixed at construction; published_connected_ is lock-free.
         if (!sync_time_on_connect_ || !published_connected_.load()) return;
         try {
-            std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
-            if (!transition.owns_lock()) {
-                resync_pending_.store(true);
-                return;
-            }
-            start_resync_transition_locked(event.kind == util::HostClockEvent::Kind::Stepped
-                                               ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                               : std::string("Host clock became trusted"));
+            resync_pending_.store(true);
+            drain_pending_resync(event.kind == util::HostClockEvent::Kind::Stepped
+                                     ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
+                                     : std::string("Host clock became trusted"));
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
+        }
+    }
+
+    // Starts the re-sync a host clock change left pending, unless another thread holds transition_mutex_: every
+    // holder (set_connected()) calls this after letting go, so a change stored while the lock was held is never lost.
+    // A change seen while disconnected is dropped. Call with no driver lock held.
+    void drain_pending_resync(const std::string& why) noexcept {
+        try {
+            while (resync_pending_.load()) {
+                std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
+                if (!transition.owns_lock()) {
+                    if (host_clock_busy_hook_) host_clock_busy_hook_();  // test seam: no driver lock held
+                    return;                                              // its holder drains as it lets go
+                }
+                if (!resync_pending_.exchange(false)) return;
+                start_resync_transition_locked(why);
+            }
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
         }
     }
 
     // Under transition_mutex_ and no other driver lock: starts a re-sync when the mount is still connected. A
     // refused start() (a slot still draining, a refused thread, earlier bodies stuck on a blocked link) is logged;
-    // the next host clock change tries again.
-    void start_resync_transition_locked(std::string why) noexcept {
+    // the next host clock change tries again. The re-sync is decided here: a client UTCDate write after this point is
+    // newer, so the re-sync's :SUT does not go out over it.
+    void start_resync_transition_locked(const std::string& why) noexcept {
         try {
             if (!published_connected_.load() || link_lost()) return;
-            start_clock_sync(std::move(why));
+            start_clock_sync(why, utc_write_generation_.load());
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", std::string("Could not start the mount clock re-sync: ") + e.what());
         } catch (...) {
             ALPACA_LOG_WARN("iOptron", "Could not start the mount clock re-sync");
         }
-    }
-
-    // set_connected()'s exit path for a change on_host_clock_changed() could not act on (#2419).
-    void start_pending_resync_transition_locked() noexcept {
-        if (!resync_pending_.exchange(false)) return;
-        start_resync_transition_locked("Host clock changed during a connect or disconnect");
     }
 
     // Host UTC now: system_clock, or the test seam (set before connect).
@@ -3430,9 +3450,12 @@ private:
     }
 
     // Issue #2419: a re-sync never changes the mount clock under motion the driver started, since the firmware aims
-    // a GOTO by it. Waits through `ctx` (a disconnect or a newer start ends the wait) until the motion ends. False
-    // when stopped or disconnected.
-    bool wait_for_driver_motion_to_end(util::OperationContext& ctx) {
+    // a GOTO by it. Waits through `ctx` (a disconnect or a newer start ends the wait) until the motion ends, looking
+    // again every util::kHostClockResyncMotionPoll on the task clock. False when stopped or disconnected, or when the
+    // mount still moves at `give_up_at` (one deadline per re-sync, util::kHostClockResyncMotionBound after it
+    // started): that sets `gave_up`, and the re-sync leaves the mount clock for the next host clock change.
+    bool wait_for_driver_motion_to_end(util::OperationContext& ctx, util::TaskClock::clock::time_point give_up_at,
+                                       bool& gave_up) {
         bool logged = false;
         while (true) {
             {
@@ -3440,15 +3463,23 @@ private:
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) return false;
                 if (!driver_motion_active_locked()) return true;
             }
+            if (clock_.now() >= give_up_at) {
+                ALPACA_LOG_WARN("iOptron", "The mount was still moving after " +
+                                               std::to_string(util::kHostClockResyncMotionBound.count()) +
+                                               " min; the mount clock re-sync gives up until the next host clock "
+                                               "change");
+                gave_up = true;
+                return false;
+            }
             if (!logged) {
                 ALPACA_LOG_INFO("iOptron", "The mount is moving; the mount clock re-sync waits for the motion to end");
                 logged = true;
             }
-            if (!ctx.wait_for(std::chrono::seconds(1))) return false;
+            if (!ctx.wait_for(util::kHostClockResyncMotionPoll)) return false;
         }
     }
 
-    void run_clock_sync(util::OperationContext& ctx, const std::string& resync_why) {
+    void run_clock_sync(util::OperationContext& ctx, const std::string& resync_why, uint64_t decided_generation) {
         if (!ctx.wait_for(std::chrono::milliseconds(250))) {
             return;
         }
@@ -3513,8 +3544,12 @@ private:
         // write. A write that finds motion waits for it to end and checks again; a stop or a disconnect during that
         // wait sends nothing (fail closed). Any host clock re-sync checks, one that runs as the connect pass
         // included; the connect's own pass writes as before.
+        // A re-sync waits out motion for at most kHostClockResyncMotionBound in all (#2419); once it gave up, no
+        // later write goes out and the body ends without publishing.
+        const auto motion_give_up_at = clock_.now() + util::kHostClockResyncMotionBound;
+        bool motion_gave_up = false;
         auto gated_write = [&](auto&& send) {
-            while (true) {
+            while (!motion_gave_up) {
                 {
                     StateLock lock(lock_gate_);
                     if (!connected_ || ctx.stop_reason() != util::StopReason::None) return;
@@ -3523,7 +3558,7 @@ private:
                         return;
                     }
                 }
-                if (!wait_for_driver_motion_to_end(ctx)) return;
+                if (!wait_for_driver_motion_to_end(ctx, motion_give_up_at, motion_gave_up)) return;
             }
         };
         // The mount's own clock, fresh from :GUT#; nullopt when it cannot say.
@@ -3539,7 +3574,7 @@ private:
 
         std::optional<std::chrono::system_clock::time_point> old_mount_utc;
         if (host_clock_resync) {
-            if (!wait_for_driver_motion_to_end(ctx)) return;
+            if (!wait_for_driver_motion_to_end(ctx, motion_give_up_at, motion_gave_up)) return;
             if (clock_sync_resync_hook_) clock_sync_resync_hook_();  // test seam: no driver lock held
         }
         if (resync) {
@@ -3585,6 +3620,7 @@ private:
 
         util::UtcOffset synced_time;
         uint64_t synced_generation = 0;
+        bool client_utc_kept = false;
         LocalTimeInfo tz_info;
         if (do_clock_sync) {
             tz_info = compute_local_timezone_info(std::chrono::system_clock::to_time_t(host_utc_now()));
@@ -3596,7 +3632,21 @@ private:
             retry_mount_command(
                 "UTC clock",
                 [&]() {
+                    if (clock_sync_before_utc_exchange_hook_) clock_sync_before_utc_exchange_hook_();  // no lock held
                     gated_write([&] {
+                        // A client UTCDate write after the re-sync was decided (while it waited out a GOTO, say) is
+                        // newer and keeps the mount clock. Checked here, under the operation lock that write takes
+                        // too, so it cannot land between the check and the :SUT. The connect's own pass compares at
+                        // publication only (#1780).
+                        if (host_clock_resync && utc_write_generation_.load() != decided_generation) {
+                            if (!client_utc_kept) {
+                                ALPACA_LOG_INFO(
+                                    "iOptron",
+                                    resync_why + "; a client wrote UTCDate since, so the mount keeps that time");
+                            }
+                            client_utc_kept = true;
+                            return;
+                        }
                         if (clock_sync_utc_hook_) clock_sync_utc_hook_(false);
                         // Fresh host time for each send attempt: a retry must not send the first attempt's time.
                         const auto now_utc = host_utc_now();
@@ -3608,6 +3658,7 @@ private:
                 },
                 &ctx);
         }
+        if (motion_gave_up) return;
         if (resync && synced_time.valid()) {
             const auto new_mount_utc = read_mount_utc();
             ALPACA_LOG_INFO("iOptron", resync_why + "; mount UTC " +
@@ -3745,6 +3796,11 @@ public:
     void set_connected_entry_hook_for_testing(std::function<void()> hook) {
         set_connected_entry_hook_ = std::move(hook);
     }
+    void set_host_clock_busy_hook_for_testing(std::function<void()> hook) { host_clock_busy_hook_ = std::move(hook); }
+    void set_clock_sync_before_utc_exchange_hook_for_testing(std::function<void()> hook) {
+        clock_sync_before_utc_exchange_hook_ = std::move(hook);
+    }
+    void set_connected_exit_hook_for_testing(std::function<void()> hook) { set_connected_exit_hook_ = std::move(hook); }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
 private:
@@ -4047,13 +4103,23 @@ private:
     // the mount still, and at the start of set_connected() with transition_mutex_ held.
     std::function<void()> clock_sync_resync_hook_;
     std::function<void()> set_connected_entry_hook_;
-    // Issue #2419: a host clock change on_host_clock_changed() saw while set_connected() held transition_mutex_.
+    // Test seams (issue #2419): run when on_host_clock_changed() finds transition_mutex_ held (no driver lock held),
+    // and as set_connected()'s last step before it releases transition_mutex_.
+    std::function<void()> host_clock_busy_hook_;
+    std::function<void()> set_connected_exit_hook_;
+    // Test seam (issue #2419): runs before each attempt of the clock sync's UTC write, before its exchange, with no
+    // driver lock held.
+    std::function<void()> clock_sync_before_utc_exchange_hook_;
+    // Issue #2419: a host clock change not acted on yet: stored before on_host_clock_changed() tries
+    // transition_mutex_, drained by whoever holds that lock as it lets go.
     std::atomic<bool> resync_pending_{false};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
     // re-sync that superseded the connect's pass runs that pass in its place.
     bool clock_sync_connect_pass_done_ = false;
-    // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication.
-    uint64_t utc_write_generation_ = 0;
+    // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication,
+    // and a host clock re-sync also at its :SUT against the value it was decided with (read under transition_mutex_
+    // only, hence atomic).
+    std::atomic<uint64_t> utc_write_generation_{0};
     // Bumped by each client site write (under mutex_), compared like utc_write_generation_; one per field.
     uint64_t site_latitude_write_generation_ = 0;
     uint64_t site_longitude_write_generation_ = 0;
@@ -4299,6 +4365,24 @@ void set_clock_sync_resync_hook_for_testing(TelescopeDriver& driver, std::functi
 void set_connected_entry_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_connected_entry_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_host_clock_busy_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_host_clock_busy_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_connected_exit_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_connected_exit_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_clock_sync_before_utc_exchange_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_before_utc_exchange_hook_for_testing(std::move(hook));
     }
 }
 
