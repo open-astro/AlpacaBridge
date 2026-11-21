@@ -66,8 +66,9 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - **Trusted host clock**: a host clock good enough to write into a mount that keeps its
   own clock (`util::HostClockTrust`, #2419). It is trusted when it is synchronized, or
   once something has set or confirmed it since the server started: a client's `UTCDate`
-  write, the web UI's Sync Time, or a clock step the server observed. Trust is never
-  withdrawn while the server runs.
+  write, the web UI's Sync Time, or a clock step the server observed. Trust from a set
+  or confirmed clock lasts until the server stops; trust from synchronization alone ends
+  when the kernel stops reporting the clock synchronized.
 - A clock the kernel loaded from a hardware RTC at boot is neither: nothing on a host
   without NTP verifies the RTC, and a board with no RTC boots on the time of its last
   shutdown.
