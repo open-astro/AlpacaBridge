@@ -94,6 +94,46 @@ bool retryable_query(const AuxFrame& request) {
     }
 }
 
+// The motion and label commands whose lost TCP reply the axis status can settle (slice 3): home start, GOTO fast and
+// slow, set position, guide pulse and the stop (MC_MOVE_POS 0). They are never re-sent; the rate writes (0x06, 0x07)
+// have no readback and are not here.
+bool confirmable(const AuxFrame& request) {
+    if (request.destination != 0x10 && request.destination != 0x11) return false;
+    switch (request.command) {
+        case 0x0b:
+            return request.payload.empty();
+        case 0x02:
+        case 0x17:
+        case 0x04:
+            return request.payload.size() == 3;
+        case 0x26:
+            return request.payload.size() == 2;
+        case 0x24:
+            return request.payload == std::vector<std::uint8_t>{0x00};
+        default:
+            return false;
+    }
+}
+
+// Encoder counts within which two readings are the same place: the driver's two-count label tolerance.
+constexpr std::int64_t kConfirmCounts = 2;
+
+std::uint32_t u24(const std::vector<std::uint8_t>& bytes) {
+    return (static_cast<std::uint32_t>(bytes[0]) << 16) | (static_cast<std::uint32_t>(bytes[1]) << 8) | bytes[2];
+}
+
+// The distance between two 24-bit encoder positions, the short way round.
+std::int64_t count_distance(std::uint32_t a, std::uint32_t b) {
+    const std::int64_t delta =
+        (static_cast<std::int64_t>(a) - static_cast<std::int64_t>(b)) & (kAuxPositionModulus - 1);
+    return std::min<std::int64_t>(delta, kAuxPositionModulus - delta);
+}
+
+// A status query to the axis `wire` addressed, from the same source.
+AuxFrame status_query(const AuxFrame& wire, std::uint8_t command) {
+    return AuxFrame{.source = wire.source, .destination = wire.destination, .command = command, .payload = {}};
+}
+
 // The bytes after the start byte sum to zero with their checksum.
 bool checksum_valid(const std::vector<std::uint8_t>& bytes, std::size_t frame_size) {
     unsigned int sum = 0;
@@ -126,6 +166,20 @@ bool decode_axis_completion(bool tcp, const AuxFrame& response, const char* oper
         throw_link_error(tcp, std::string(operation) + " returned an invalid completion status");
     }
     return response.payload[0] == 0xff;
+}
+
+std::uint32_t decode_position(bool tcp, const AuxFrame& response) {
+    if (response.payload.size() != 3) {
+        throw_link_error(tcp, "MC_GET_POSITION returned a payload that is not 24 bits");
+    }
+    return u24(response.payload);
+}
+
+bool decode_guide_active(bool tcp, const AuxFrame& response) {
+    if (response.payload.size() != 1 || response.payload[0] > 1) {
+        throw_link_error(tcp, "MC_AUX_GUIDE_ACTIVE returned an invalid status");
+    }
+    return response.payload[0] == 1;
 }
 
 int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) {
@@ -460,41 +514,30 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, Timeout request
     try {
         request_started = true;
         if (tcp) drain_input_locked(deadline);
+        // A motion or label command over TCP is never re-sent: AUX has no transaction id, so a second copy could act
+        // twice. When its reply has not come in 300 ms, the axis status says whether it took effect (slice 3).
+        const bool confirm = tcp && confirmable(wire) && started + kTcpRetryAfter < deadline;
+        std::optional<std::uint32_t> before;  // a GOTO's progress is measured from here
+        if (confirm && (wire.command == 0x02 || wire.command == 0x17))
+            before = decode_position(true, query_locked(status_query(wire, 0x01), deadline));
+        const auto sent = std::chrono::steady_clock::now();
         write_frame_locked(request_bytes, deadline);
-        // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to
-        // 2,900, rig 2026-11-20); one re-send of a read-only query at 300 ms recovered every one. A motion or write
-        // command is never re-sent: AUX has no transaction id, so a second copy could act twice.
-        bool resend = tcp && retryable_query(wire) && started + kTcpRetryAfter < deadline;
-        auto wait_until = resend ? started + kTcpRetryAfter : deadline;
-        bool resent = false;
-
-        while (true) {
-            std::vector<std::uint8_t> bytes;
-            try {
-                bytes = read_frame_locked(wait_until);
-            } catch (const AuxTimeout&) {
-                if (!resend) throw;
-                resend = false;
-                resent = true;
-                wait_until = deadline;
-                ALPACA_LOG_WARN("Celestron CGX",
-                                "no reply over TCP in 300 ms: destination=" + std::to_string(wire.destination) +
-                                    " command=" + std::to_string(wire.command) + "; re-sent once");
-                write_frame_locked(request_bytes, deadline);
-                continue;
+        if (!confirm) return await_reply_locked(wire, request_bytes, started, deadline);
+        try {
+            return await_reply_locked(wire, request_bytes, sent, std::min(sent + kTcpRetryAfter, deadline));
+        } catch (const AuxTimeout&) {
+            if (!took_effect_locked(wire, before, deadline)) {
+                throw AuxTimeout(
+                    "Celestron CGX TCP: AUX transaction timed out, and the axis status shows the command "
+                    "did not take effect",
+                    AlpacaError::DriverException);
             }
-            const AuxFrame response = decode_aux_frame(bytes);
-            if (tcp && take_report_locked(response, deadline)) continue;
-            // The reply swaps our addresses: a request echo (AMW006) and traffic for other devices never match.
-            if (response.source == wire.destination && response.destination == wire.source &&
-                response.command == wire.command) {
-                if (resent) ++recovered_retries_;  // a counter, not a fault (user decision 5)
-                healthy_.store(true);
-                return response;
-            }
-            // AUX carries no transaction id. Discard traffic for another address or
-            // command while preserving the one deadline for this exchange.
         }
+        ALPACA_LOG_WARN("Celestron CGX",
+                        "no reply over TCP in 300 ms: destination=" + std::to_string(wire.destination) +
+                            " command=" + std::to_string(wire.command) + "; the axis status shows it took effect");
+        ++recovered_retries_;  // a counter, not a fault (user decision 5)
+        return AuxFrame{.source = wire.destination, .destination = wire.source, .command = wire.command, .payload = {}};
     } catch (const std::invalid_argument& error) {
         if (request_started) {
             log_failure(error.what());
@@ -520,14 +563,94 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, Timeout request
     }
 }
 
-std::uint32_t CelestronCgxProtocol::get_axis_position(CgxAxis axis, Timeout timeout) {
-    const AuxFrame response =
-        exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x01, .payload = {}}, timeout);
-    if (response.payload.size() != 3) {
-        throw_link_error(tcp_.load(), "MC_GET_POSITION returned a payload that is not 24 bits");
+// Reads the reply to `wire`, written at `sent`, until `deadline`. A read-only query over TCP whose reply has not come
+// 300 ms after it went out is written once more, when the deadline is later.
+AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const std::vector<std::uint8_t>& bytes,
+                                                  std::chrono::steady_clock::time_point sent,
+                                                  std::chrono::steady_clock::time_point deadline) {
+    const bool tcp = tcp_.load();
+    // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to 2,900, rig
+    // 2026-11-20); one re-send of a read-only query at 300 ms recovered every one.
+    bool resend = tcp && retryable_query(wire) && sent + kTcpRetryAfter < deadline;
+    auto wait_until = resend ? sent + kTcpRetryAfter : deadline;
+    bool resent = false;
+    while (true) {
+        std::vector<std::uint8_t> frame;
+        try {
+            frame = read_frame_locked(wait_until);
+        } catch (const AuxTimeout&) {
+            if (!resend) throw;
+            resend = false;
+            resent = true;
+            wait_until = deadline;
+            ALPACA_LOG_WARN("Celestron CGX",
+                            "no reply over TCP in 300 ms: destination=" + std::to_string(wire.destination) +
+                                " command=" + std::to_string(wire.command) + "; re-sent once");
+            write_frame_locked(bytes, deadline);
+            continue;
+        }
+        const AuxFrame response = decode_aux_frame(frame);
+        if (tcp && take_report_locked(response, deadline)) continue;
+        // The reply swaps our addresses: a request echo (AMW006) and traffic for other devices never match.
+        if (response.source == wire.destination && response.destination == wire.source &&
+            response.command == wire.command) {
+            if (resent) ++recovered_retries_;  // a counter, not a fault (user decision 5)
+            healthy_.store(true);
+            return response;
+        }
+        // AUX carries no transaction id. Discard traffic for another address or
+        // command while preserving the one deadline for this exchange.
     }
-    return (static_cast<std::uint32_t>(response.payload[0]) << 16) |
-           (static_cast<std::uint32_t>(response.payload[1]) << 8) | static_cast<std::uint32_t>(response.payload[2]);
+}
+
+// TCP only, inside an exchange: one status query to the axis `wire` addressed, within the exchange's deadline.
+AuxFrame CelestronCgxProtocol::query_locked(const AuxFrame& query, std::chrono::steady_clock::time_point deadline) {
+    const auto bytes = encode_aux_frame(query);
+    drain_input_locked(deadline);  // a late reply to the command is dropped here, never taken for this one
+    const auto sent = std::chrono::steady_clock::now();
+    write_frame_locked(bytes, deadline);
+    return await_reply_locked(query, bytes, sent, deadline);
+}
+
+// Whether the axis status shows that `wire`, whose reply was lost, took effect (slice 3, user decision 3). `before`
+// is a GOTO axis's position read just before the GOTO went out.
+bool CelestronCgxProtocol::took_effect_locked(const AuxFrame& wire, std::optional<std::uint32_t> before,
+                                              std::chrono::steady_clock::time_point deadline) {
+    const auto position = [&] { return decode_position(true, query_locked(status_query(wire, 0x01), deadline)); };
+    const auto done = [&](std::uint8_t command, const char* operation) {
+        return decode_axis_completion(true, query_locked(status_query(wire, command), deadline), operation);
+    };
+    switch (wire.command) {
+        case 0x0b:  // searching is proof; done is not, since a mount homed earlier reads done without a new search
+            return !done(0x12, "MC_LEVEL_DONE");
+        case 0x02:
+        case 0x17: {
+            // Closer to the target than before is proof; done at the target covers a GOTO with nowhere to go.
+            const bool finished = done(0x13, "MC_SLEW_DONE");
+            const auto target = u24(wire.payload);
+            const auto remaining = count_distance(position(), target);
+            return (before && remaining + kConfirmCounts < count_distance(*before, target)) ||
+                   (finished && remaining <= kConfirmCounts);
+        }
+        case 0x04:
+            return count_distance(position(), u24(wire.payload)) <= kConfirmCounts;
+        case 0x26:
+            return decode_guide_active(true, query_locked(status_query(wire, 0x27), deadline));
+        case 0x24: {
+            // Still is what a stop is for: done, and two positions a round trip apart agree (an idle axis counts).
+            const auto first = position();
+            const bool finished = done(0x13, "MC_SLEW_DONE");
+            return finished && count_distance(position(), first) <= kConfirmCounts;
+        }
+        default:
+            return false;
+    }
+}
+
+std::uint32_t CelestronCgxProtocol::get_axis_position(CgxAxis axis, Timeout timeout) {
+    return decode_position(
+        tcp_.load(),
+        exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x01, .payload = {}}, timeout));
 }
 
 void CelestronCgxProtocol::set_axis_position(CgxAxis axis, std::uint32_t position, Timeout timeout) {
@@ -598,12 +721,9 @@ void CelestronCgxProtocol::pulse_guide_axis(CgxAxis axis, int velocity_percent, 
 }
 
 bool CelestronCgxProtocol::is_aux_guide_active(CgxAxis axis, Timeout timeout) {
-    const AuxFrame response =
-        exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x27, .payload = {}}, timeout);
-    if (response.payload.size() != 1 || response.payload[0] > 1) {
-        throw_link_error(tcp_.load(), "MC_AUX_GUIDE_ACTIVE returned an invalid status");
-    }
-    return response.payload[0] == 1;
+    return decode_guide_active(
+        tcp_.load(),
+        exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x27, .payload = {}}, timeout));
 }
 
 // A motor controller's unsolicited report to this client (0x20) or to every client (0x00), forwarded by the adapter:

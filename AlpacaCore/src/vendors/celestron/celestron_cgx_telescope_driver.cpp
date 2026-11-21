@@ -77,6 +77,9 @@ constexpr std::chrono::milliseconds kGuideEndMargin{500};
 // A home search not done by then missed the sensor (#2213): on the rig a normal search ended within about 30 s, and a
 // missed one fell back to a crawl that needed about 420 s, so the axis is stopped and re-homed once from where it is.
 constexpr std::chrono::seconds kHomeSearchBound{60};
+// Added to every stop verification budget over TCP (slice 3): one WiFi status poll of both axes with a recovered
+// re-send. USB keeps its 500 ms cleanup and 3 s AbortSlew budgets.
+constexpr std::chrono::milliseconds kTcpStopVerifyAllowance{600};
 
 // The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
 // computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
@@ -177,7 +180,7 @@ public:
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
     std::string get_description() const override {
         if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
-        return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered by a re-send: " +
+        return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: " +
                std::to_string(protocol_.recovered_retries());
     }
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
@@ -2157,21 +2160,20 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
                 } catch (...) {
                     ALPACA_LOG_WARN("Celestron CGX", "Could not resynchronize AUX before retrying the axis stop");
                 }
+                if (tcp_) {
+                    // Over TCP the status could not confirm this stop: the stop and a zero rate go out at once,
+                    // without waiting for replies, before the other axis and the next round (they cost no wait).
+                    try {
+                        protocol_.send_stop(axis);
+                    } catch (const std::exception& error) {
+                        ALPACA_LOG_WARN("Celestron CGX", std::string("Send-only TCP stop failed: ") + error.what());
+                    }
+                }
             }
         }
         if (!acknowledgement_failure) {
             stop_acknowledged = true;
             break;
-        }
-    }
-    if (!stop_acknowledged && tcp_) {
-        // Last resort over TCP: the stop and a zero rate, sent without waiting for replies, then verified below.
-        for (const auto axis : axes) {
-            try {
-                protocol_.send_stop(axis);
-            } catch (const std::exception& error) {
-                ALPACA_LOG_WARN("Celestron CGX", std::string("Send-only TCP stop failed: ") + error.what());
-            }
         }
     }
     {
@@ -2180,7 +2182,10 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
         tracking_state_valid_ = stop_acknowledged;
     }
     std::exception_ptr verification_failure;
-    const auto stop_deadline = clock_.now() + verification_budget;
+    // Over TCP one status poll of both axes can take one recovered re-send (6-8 exchanges at the WiFi p99 of 33 ms plus
+    // the 300 ms re-send point), so the budget grows by that much; it never verifies a status that reads busy.
+    const auto stop_deadline =
+        clock_.now() + verification_budget + (tcp_ ? kTcpStopVerifyAllowance : std::chrono::milliseconds{0});
     // A status can read done while an axis still moves (#2411). Each axis's angle is taken from its first read, so the
     // check never meets the encoder wrap.
     util::StillnessCheck still(clock_.now());

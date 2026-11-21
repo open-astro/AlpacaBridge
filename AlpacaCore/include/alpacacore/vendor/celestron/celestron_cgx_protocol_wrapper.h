@@ -53,7 +53,10 @@ public:
     /// Input that arrives before the socket has been quiet for 200 ms (the adapter's startup backlog) is discarded.
     /// Unlike the serial link, a read-only motor query (position, model, home and slew status, guide status,
     /// version) whose reply is lost is re-sent once, 300 ms after it went out, when the exchange's deadline is
-    /// later; nothing else is ever re-sent. The adapter closing the connection is a lost link (link_alive()).
+    /// later; nothing else is ever re-sent. A motion or label command (LEVEL_START, GOTO, SET_POSITION, AUX_GUIDE, the
+    /// stop) whose reply has not come in 300 ms is settled by the axis status within the same deadline: one that took
+    /// effect returns as acknowledged, without a desync; one that did not times out as before. The adapter closing the
+    /// connection is a lost link (link_alive()).
     /// The link owns `host`:`port` process-wide until it closes: a second link to it is refused with InvalidOperation
     /// naming the holder. A motor controller's unsolicited report (0x50, 0x51) is acknowledged; anything but a
     /// low-battery warning fails the exchange as a session error.
@@ -74,7 +77,8 @@ public:
     /// Why the link was lost, empty while it is alive. Never waits on an exchange.
     std::string link_fault() const;
     std::uint64_t session_generation() const { return session_generation_.load(); }
-    /// Lost replies recovered by the one TCP re-send since the last connect (a counter, not a fault). Lock-free.
+    /// Lost replies recovered since the last connect (a counter, not a fault): a read-only query's by its one TCP
+    /// re-send, a motion or label command's by the axis status. Lock-free.
     std::uint64_t recovered_retries() const { return recovered_retries_.load(); }
     /// A last-resort stop: MC_MOVE_POS(0) and a zero rate written to `axis` without waiting for a reply, also while
     /// the stream is desynchronized. Not proof of a stop. Throws NotConnected on a closed link.
@@ -96,6 +100,12 @@ public:
 
 private:
     void goto_axis(CgxAxis axis, std::uint32_t position, std::uint8_t command, const char* operation, Timeout timeout);
+    AuxFrame await_reply_locked(const AuxFrame& wire, const std::vector<std::uint8_t>& bytes,
+                                std::chrono::steady_clock::time_point sent,
+                                std::chrono::steady_clock::time_point deadline);
+    AuxFrame query_locked(const AuxFrame& query, std::chrono::steady_clock::time_point deadline);
+    bool took_effect_locked(const AuxFrame& wire, std::optional<std::uint32_t> before,
+                            std::chrono::steady_clock::time_point deadline);
     void disconnect_locked();
     bool take_report_locked(const AuxFrame& frame, std::chrono::steady_clock::time_point deadline);
     void read_available_locked();
