@@ -26,6 +26,9 @@ namespace alpacacore::vendor::celestron {
 
 struct CelestronCgxConnectionInfo {
     std::string port_path;
+    /// SkyPortal WiFi: a numeric IPv4 or IPv6 adapter address selects AUX over TCP, and port_path is then unused.
+    std::string host;
+    int tcp_port = 2000;
     std::optional<double> site_latitude_degrees;
     std::optional<double> site_longitude_degrees;
     std::optional<double> site_elevation_meters;

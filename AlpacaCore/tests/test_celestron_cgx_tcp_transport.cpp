@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -351,4 +352,201 @@ TEST_CASE("Celestron CGX AUX link - a USB connect after a TCP session speaks USB
     } catch (const alpacacore::AlpacaException& error) {
         CHECK(std::string(error.what()) == "Celestron CGX USB is not connected");
     }
+}
+
+namespace {
+
+// The ACKs the client sent the adapter for motor reports: frames of command 0x50 or 0x51.
+std::vector<AuxFrame> report_acks(const FakeCelestronAuxTcpAdapter& adapter) {
+    std::vector<AuxFrame> acks;
+    for (const auto& frame : adapter.received())
+        if (frame.command == 0x50 || frame.command == 0x51) acks.push_back(frame);
+    return acks;
+}
+
+}  // namespace
+
+TEST_CASE("Celestron CGX AUX TCP - an exchange without a timeout gets 1000 ms, room for the re-send",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kRa, 0x0abcde);
+    // Lost, re-sent at 300 ms, and the re-send answered 250 ms late: past 500 ms, inside 1000 ms.
+    adapter.script(kRa, 0x01, 1, Fault::Drop);
+    adapter.script(kRa, 0x01, 2, Fault::Late);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0x0abcde);
+    CHECK(adapter.count(kRa, 0x01) == 2);
+    CHECK(protocol.is_healthy());
+}
+
+TEST_CASE("Celestron CGX AUX link - a USB exchange without a timeout still gets 500 ms",
+          "[celestron][cgx][protocol][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    mount.set_muted(true);
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension); },
+                         AlpacaError::DriverException);
+    CHECK(since(started) >= milliseconds(450));
+    CHECK(since(started) < milliseconds(900));
+    protocol.disconnect();
+}
+
+TEST_CASE("Celestron CGX AUX TCP - counts the lost replies a re-send recovered, per session",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.script(kDec, 0x13, 1, Fault::Drop);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    CHECK(protocol.recovered_retries() == 0);
+    CHECK(protocol.is_axis_slew_done(CgxAxis::Declination));
+    CHECK(protocol.recovered_retries() == 1);
+    CHECK(protocol.is_axis_slew_done(CgxAxis::Declination));
+    CHECK(protocol.recovered_retries() == 1);
+    connect(protocol, adapter);
+    CHECK(protocol.recovered_retries() == 0);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - one link per adapter endpoint, released on every close",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    CelestronCgxProtocol first;
+    connect(first, adapter);
+    CelestronCgxProtocol second("Celestron CGX second mount");
+    try {
+        second.connect_tcp("127.0.0.1", adapter.port());
+        FAIL("a second link to the same adapter was accepted");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == AlpacaError::InvalidOperation);
+        CHECK(std::string(error.what()).find("Celestron CGX mount") != std::string::npos);
+    }
+    CHECK_FALSE(second.is_connected());
+    CHECK(adapter.connections() == 1);
+
+    first.disconnect();
+    connect(second, adapter);
+    CHECK(second.get_axis_position(CgxAxis::RightAscension) == 0);
+
+    // A lost link releases the endpoint too.
+    adapter.script(kRa, 0x01, 2, Fault::Close);
+    require_alpaca_error([&] { (void)second.get_axis_position(CgxAxis::RightAscension); }, AlpacaError::NotConnected);
+    connect(first, adapter);
+    CHECK(first.get_axis_position(CgxAxis::RightAscension) == 0);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a low-battery report is acknowledged and the exchange goes on",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kRa, 0x000321);
+    adapter.inject_before_reply(kRa, 0x01, 1, FakeCelestronAuxTcpAdapter::frame(kRa, 0x20, 0x50, {0x00}));
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    const auto session = protocol.session_generation();
+    CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0x000321);
+    CHECK(protocol.is_healthy());
+    CHECK(protocol.session_generation() == session);
+    const auto acks = report_acks(adapter);
+    REQUIRE(acks.size() == 1);
+    CHECK(acks[0].source == 0x20);
+    CHECK(acks[0].destination == kRa);
+    CHECK(acks[0].command == 0x50);
+    CHECK(acks[0].payload.empty());
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a motor fault report is acknowledged and fails the session",
+          "[celestron][cgx][protocol][tcp]") {
+    struct Report {
+        std::uint8_t source;
+        std::uint8_t destination;
+        std::uint8_t command;
+        std::vector<std::uint8_t> payload;
+    };
+    const Report reports[] = {
+        {kDec, 0x20, 0x51, {0x82}}, {kRa, 0x00, 0x51, {0x7f}}, {kRa, 0x00, 0x50, {0x01}}, {kDec, 0x20, 0x50, {}}};
+    for (const auto& report : reports) {
+        CAPTURE(report.source, report.destination, report.command, report.payload.size());
+        FakeCelestronAuxTcpAdapter adapter;
+        adapter.inject_before_reply(
+            kRa, 0x01, 1,
+            FakeCelestronAuxTcpAdapter::frame(report.source, report.destination, report.command, report.payload));
+        CelestronCgxProtocol protocol;
+        connect(protocol, adapter);
+        const auto session = protocol.session_generation();
+        require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension); },
+                             AlpacaError::DriverException);
+        CHECK_FALSE(protocol.is_healthy());
+        CHECK(protocol.session_generation() != session);
+        CHECK(protocol.link_alive());
+        const auto acks = report_acks(adapter);
+        REQUIRE(acks.size() == 1);
+        CHECK(acks[0].source == report.destination);
+        CHECK(acks[0].destination == report.source);
+        CHECK(acks[0].command == report.command);
+        CHECK(acks[0].payload.empty());
+    }
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a report between exchanges is handled by the next one, never dropped",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0);
+
+    adapter.inject(FakeCelestronAuxTcpAdapter::frame(kDec, 0x20, 0x50, {0x00}));
+    std::this_thread::sleep_for(milliseconds(100));  // real time: the fake's serve slice sends it
+    CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0);
+    CHECK(report_acks(adapter).size() == 1);
+
+    const auto session = protocol.session_generation();
+    adapter.inject(FakeCelestronAuxTcpAdapter::frame(kDec, 0x20, 0x51, {0x01}));
+    std::this_thread::sleep_for(milliseconds(100));
+    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::Declination); },
+                         AlpacaError::DriverException);
+    CHECK(report_acks(adapter).size() == 2);
+    CHECK(protocol.session_generation() != session);
+    protocol.resync();
+    CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - reports from other devices or for other clients get no ACK",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    std::vector<std::uint8_t> chatter = FakeCelestronAuxTcpAdapter::frame(0x12, 0x20, 0x51, {0x01});
+    const auto for_hand_control = FakeCelestronAuxTcpAdapter::frame(kRa, 0x0d, 0x51, {0x01});
+    chatter.insert(chatter.end(), for_hand_control.begin(), for_hand_control.end());
+    adapter.inject_before_reply(kRa, 0x01, 1, chatter);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0);
+    CHECK(protocol.is_healthy());
+    CHECK(report_acks(adapter).empty());
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a send-only stop goes out on a desynchronized stream",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.script(kRa, 0x01, 1, Fault::Drop);
+    adapter.script(kRa, 0x01, 2, Fault::Drop);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension); },
+                         AlpacaError::DriverException);
+    REQUIRE_FALSE(protocol.is_healthy());
+
+    protocol.send_stop(CgxAxis::RightAscension);
+    const auto deadline = std::chrono::steady_clock::now() + milliseconds(1000);
+    while (adapter.count(kRa, 0x06) == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(milliseconds(5));  // real time: the fake reads the frames
+    CHECK(adapter.count(kRa, 0x24) == 1);
+    CHECK(adapter.count(kRa, 0x06) == 1);
+    for (const auto& frame : adapter.received()) {
+        if (frame.command == 0x24) CHECK(frame.payload == std::vector<std::uint8_t>{0x00});
+        if (frame.command == 0x06) CHECK(frame.payload == std::vector<std::uint8_t>{0x00, 0x00, 0x00});
+    }
+    protocol.disconnect();
+    require_alpaca_error([&] { protocol.send_stop(CgxAxis::Declination); }, AlpacaError::NotConnected);
 }

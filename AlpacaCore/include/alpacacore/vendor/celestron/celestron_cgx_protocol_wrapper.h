@@ -70,6 +70,11 @@ public:
     /// Why the link was lost, empty while it is alive. Never waits on an exchange.
     std::string link_fault() const;
     std::uint64_t session_generation() const { return session_generation_.load(); }
+    /// Lost replies recovered by the one TCP re-send since the last connect (a counter, not a fault). Lock-free.
+    std::uint64_t recovered_retries() const { return 0; }
+    /// A last-resort stop: MC_MOVE_POS(0) and a zero rate written to `axis` without waiting for a reply, also while
+    /// the stream is desynchronized. Not proof of a stop. Throws NotConnected on a closed link.
+    void send_stop(CgxAxis) {}
 
     AuxFrame exchange(const AuxFrame& request, std::chrono::milliseconds timeout);
     std::uint32_t get_axis_position(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));

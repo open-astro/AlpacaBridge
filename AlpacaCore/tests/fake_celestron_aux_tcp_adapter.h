@@ -42,7 +42,8 @@ namespace alpacacore::test {
 // KNOWN PARITY GAPS: a loopback stand-in for the SkyPortal WiFi adapter in front of the CGX motors (source 0x20,
 // one TCP client at a time), modelled on the 2026-11-20 rig evidence and the scratch fake_aux_adapter.py. It answers
 // at once and never moves an axis: positions change only through set_position(). It reports every axis idle and
-// home-done, every guide inactive, and ACKs every write. It does not simulate the bus, the switch boards' timing or
+// home-done, every guide inactive, and ACKs every write except a client's ACK of a motor report (0x50, 0x51), which
+// it does not answer. Motor reports are sent only when a case injects them. It does not simulate the bus, the switch boards' timing or
 // the adapter's real loss mechanism; the faults are scripted per request. The Gen4 startup backlog is replayed as one
 // scripted burst; the real one was 216 frames of an earlier session (October progress log).
 
@@ -57,6 +58,7 @@ public:
         Split,          ///< send the reply in two TCP segments 30 ms apart
         Close,          ///< close the connection (FIN) instead of answering
         Reset,          ///< reset the connection (RST) instead of answering
+        Late,           ///< answer 250 ms late
     };
 
     FakeCelestronAuxTcpAdapter() {
@@ -116,6 +118,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         faults_[{destination, command, nth}] = fault;
     }
+    /// Sends `bytes` (an unsolicited motor report) within one 20 ms serve slice, between requests.
+    void inject(std::vector<std::uint8_t> bytes) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.insert(pending_.end(), bytes.begin(), bytes.end());
+    }
+    /// Sends `bytes` just before the reply to the `nth` (1-based) request to (`destination`, `command`).
+    void inject_before_reply(std::uint8_t destination, std::uint8_t command, int nth, std::vector<std::uint8_t> bytes) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        before_reply_[{destination, command, nth}] = std::move(bytes);
+    }
     int count(std::uint8_t destination, std::uint8_t command) const {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = counts_.find({destination, command});
@@ -172,6 +184,14 @@ private:
         std::vector<std::uint8_t> buffer;
         std::vector<std::uint8_t> held;  // a HoldUntilNext reply, sent with the next one
         while (!stop_.load()) {
+            {
+                std::vector<std::uint8_t> pending;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pending.swap(pending_);
+                }
+                send_bytes(fd, pending);
+            }
             pollfd descriptor{fd, POLLIN, 0};
             if (::poll(&descriptor, 1, 20) <= 0) continue;  // 20 ms slices, so a stopping fake is noticed
             std::array<std::uint8_t, 256> incoming{};
@@ -203,12 +223,15 @@ private:
         bool echo = false;
         bool foreign = false;
         std::uint32_t position = 0;
+        std::vector<std::uint8_t> before_bytes;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             received_.push_back(request);
             const int nth = ++counts_[{request.destination, request.command}];
             const auto it = faults_.find({request.destination, request.command, nth});
             if (it != faults_.end()) fault = it->second;
+            const auto before = before_reply_.find({request.destination, request.command, nth});
+            if (before != before_reply_.end()) before_bytes = before->second;
             echo = echo_;
             foreign = foreign_;
             position = positions_[request.destination];
@@ -216,10 +239,13 @@ private:
         std::vector<std::uint8_t> out = std::move(held);
         held.clear();
         if (echo) out.insert(out.end(), raw.begin(), raw.end());
-        if (request.destination != 0x10 && request.destination != 0x11) {
+        // Only the two motor controllers answer, and never the client's ACK of their own report (0x50, 0x51).
+        if ((request.destination != 0x10 && request.destination != 0x11) || request.command == 0x50 ||
+            request.command == 0x51) {
             send_bytes(fd, out);
-            return true;  // only the two motor controllers answer
+            return true;
         }
+        out.insert(out.end(), before_bytes.begin(), before_bytes.end());
         std::vector<std::uint8_t> payload;
         switch (request.command) {
             case 0x01:
@@ -264,6 +290,12 @@ private:
             held = std::move(reply);
             return true;
         }
+        if (fault == Fault::Late) {
+            send_bytes(fd, out);
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            send_bytes(fd, reply);
+            return true;
+        }
         if (fault == Fault::BadChecksum) reply.back() = static_cast<std::uint8_t>(reply.back() ^ 0x55);
         if (fault == Fault::Debris) out.push_back(0xac);
         if (fault == Fault::Split) {
@@ -289,6 +321,8 @@ private:
     std::vector<std::uint8_t> backlog_;
     std::chrono::milliseconds backlog_delay_{0};
     std::map<std::tuple<std::uint8_t, std::uint8_t, int>, Fault> faults_;
+    std::map<std::tuple<std::uint8_t, std::uint8_t, int>, std::vector<std::uint8_t>> before_reply_;
+    std::vector<std::uint8_t> pending_;
     std::map<std::pair<std::uint8_t, std::uint8_t>, int> counts_;
     std::vector<vendor::celestron::AuxFrame> received_;
     std::thread worker_;  // last: started after every member it reads
