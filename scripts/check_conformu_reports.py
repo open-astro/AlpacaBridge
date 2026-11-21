@@ -34,7 +34,7 @@ Pass criteria (the first two bullets match `/submit-pr`; the Fake* rule is check
     "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" or
     "took longer than its target response time", AND MUST contain one of the
     SUCCESS_PATTERNS strings.
-  - A report under a path part starting "Fake" (a run against a test double, never
+  - A report in a folder named "Fake" or a file named "Fake-*" (a run against a test double, never
     hardware validation) must be a .txt file whose first line starts with FAKE_MARKER.
     This rule is not in `/submit-pr`; this script is its only description.
 """
@@ -55,8 +55,8 @@ SUCCESS_PATTERNS = (
 )
 
 
-# A report made against a test double, not a device, lives in a path component
-# that starts with "Fake" (AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt)
+# A report made against a test double, not a device, lives in a folder named
+# "Fake" or a file named "Fake-*" (AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt)
 # and says so on its first line, so no reader takes it for hardware validation
 # (SUPPORTED-DRIVERS.md keeps hardware rows apart). A JSON report has no first
 # line to carry the marker, so a Fake* path cannot be JSON.
@@ -64,7 +64,10 @@ FAKE_MARKER = "FAKE REPORT:"
 
 
 def is_fake_report(path):
-    return any(part.startswith("Fake") for part in path.replace("\\", "/").split("/"))
+    # A folder named exactly "Fake" or a file named "Fake-*"; a vendor folder
+    # such as FakeTec is hardware (issue #2089).
+    parts = path.replace("\\", "/").split("/")
+    return "Fake" in parts[:-1] or parts[-1].startswith("Fake-")
 
 
 def check_fake_marker(path, text):
@@ -325,11 +328,22 @@ def self_test():
         found = check_text(text_file("Fake/late.txt", "header\n" + good_fake))
         check("check_text FAILS a Fake* report whose marker is not the first line",
               len(found) == 1 and "must start with" in found[0])
-        found = check_text(text_file("FakeName.txt", "%s\n" % SUCCESS_PATTERNS[0]))
-        check("check_text FAILS a Fake* file name without the marker",
+        found = check_text(text_file("Fake-Name.txt", "%s\n" % SUCCESS_PATTERNS[0]))
+        check("check_text FAILS a Fake-* file name without the marker",
               len(found) == 1 and "must start with" in found[0])
         check("check_text does not ask a hardware report for the marker",
               check_text(text_file("hw.txt", "%s\n" % SUCCESS_PATTERNS[0])) == [])
+        # Only a folder named exactly "Fake" or a file named "Fake-*" is a fake
+        # report; a vendor folder such as FakeTec is hardware (issue #2089).
+        os.mkdir(os.path.join(tmp, "FakeTec"))
+        check("check_text does not ask a FakeTec/ hardware report for the marker",
+              check_text(text_file("FakeTec/Linux-arm64.txt", "%s\n" % SUCCESS_PATTERNS[0])) == [])
+        check("is_fake_report: Sky-Watcher/Fake/Fake-Linux-arm64.txt is fake",
+              is_fake_report("AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt"))
+        check("is_fake_report: FakeTec/Linux-arm64.txt is not fake",
+              not is_fake_report("AlpacaCore/conformu/FakeTec/Linux-arm64.txt"))
+        check("is_fake_report: FakeTec/Fake-Linux-arm64.txt is fake by file name",
+              is_fake_report("AlpacaCore/conformu/FakeTec/Fake-Linux-arm64.txt"))
         found = check_json(json_file("Fake/report.json",
                                      '{"ErrorCount": 0, "IssueCount": 0, "TimingIssuesCount": 0}'))
         check("check_json FAILS a Fake* JSON report",

@@ -18,8 +18,11 @@
 // gemini_schema.cpp), so the vendor headers are fine here.
 
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
+#include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
+#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "gemini_fields.h"
@@ -81,6 +84,15 @@ void register_gemini_factory(DeviceCatalog& catalog) {
                                                                  static_cast<int>(config.get(kGeminiHubIndex)));
     };
     catalog.add(std::move(hub));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"gemini", DeviceType::Focuser}, vendor::gemini::gemini_focuser_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"gemini", DeviceType::CoverCalibrator}, vendor::gemini::gemini_flatpanel_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"gemini", DeviceType::Switch}, vendor::gemini::gemini_pdh_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

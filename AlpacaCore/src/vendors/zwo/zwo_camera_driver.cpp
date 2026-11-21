@@ -12,7 +12,9 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/link_epoch.h>
@@ -63,10 +65,6 @@ std::pair<int, int> bayer_offsets(ZWOBayerPattern pattern) {
 
 bool supports_format(const std::vector<ZWOImageType>& formats, ZWOImageType type) {
     return std::find(formats.begin(), formats.end(), type) != formats.end();
-}
-
-bool supports_bin(const std::vector<int>& bins, int bin) {
-    return std::find(bins.begin(), bins.end(), bin) != bins.end();
 }
 
 // CWE-117: the serial and SDK error texts are device text; control characters never reach the log or a client.
@@ -137,11 +135,11 @@ public:
         const_cast<ZWOCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.name.empty()) {
-            return camera_info_.name;
+            return util::branded_name("ZWO", camera_info_.name);
         }
         // Never read from the SDK: the model the entry is bound to (issue #1958).
         const std::string expected = expected_model();
-        return expected.empty() ? "ZWO Camera" : expected;
+        return expected.empty() ? "ZWO Camera" : util::branded_name("ZWO", expected);
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
@@ -183,11 +181,7 @@ public:
         return lost_reason_;
     }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override { apply_connected(connected); }
 
@@ -369,27 +363,8 @@ public:
         lost_reason_.clear();
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
     int get_bayer_offset_x() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -398,6 +373,7 @@ public:
     }
 
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -504,11 +480,13 @@ public:
     }
 
     double get_exposure_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
         return static_cast<double>(caps.max_value) / 1'000'000.0;
     }
 
     double get_exposure_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
         return static_cast<double>(caps.min_value) / 1'000'000.0;
     }
@@ -550,16 +528,19 @@ public:
     }
 
     int get_gain_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Gain);
         return static_cast<int>(caps.max_value);
     }
 
     int get_gain_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Gain);
         return static_cast<int>(caps.min_value);
     }
 
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -577,7 +558,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
-            if (exposure_starting_) {
+            if (session_.starting()) {
                 throw AlpacaException::asked_too_early("Exposure start is in progress");
             }
             image = session_.image();
@@ -591,7 +572,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        if (exposure_starting_) {
+        if (session_.starting()) {
             return false;  // the new start discards the previous frame
         }
         return session_.image_ready();
@@ -670,16 +651,19 @@ public:
     }
 
     int get_offset_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Offset);
         return static_cast<int>(caps.max_value);
     }
 
     int get_offset_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Offset);
         return static_cast<int>(caps.min_value);
     }
 
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -705,6 +689,7 @@ public:
     void set_readout_mode(int mode) override {
         if (!can_get_control(ZWOControlType::HighSpeedMode)) {
             if (mode != 0) {
+                ensure_connected();  // the caps are empty while disconnected (#1919)
                 throw AlpacaException("Readout mode not supported", AlpacaError::NotImplemented);
             }
             return;
@@ -761,10 +746,12 @@ public:
     void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
@@ -781,6 +768,10 @@ public:
         }
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
+        }
+        if (duration > kDefaultMaxPulseGuideMs) {  // #2292
+            throw AlpacaException("Pulse guide duration must be <= " + std::to_string(kDefaultMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
         }
 
         ZWOGuideDirection guide_direction = ZWOGuideDirection::North;
@@ -839,19 +830,18 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        if (!std::isfinite(duration) || duration <= 0.0) {
-            throw AlpacaException("Exposure duration must be positive", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h): a duration invalid whatever the camera is, then the
+        // connection, then the camera's own range. 0 (a bias frame) and anything below the SDK minimum run at the
+        // minimum (ExposureMin).
+        const double requested_us = util::check_exposure_duration(duration);
         ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
-        const double exposure_us_value = duration * 1'000'000.0;
-        if (!std::isfinite(exposure_us_value) || exposure_us_value < static_cast<double>(caps.min_value) ||
-            exposure_us_value > static_cast<double>(caps.max_value)) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
-        const long exposure_us = static_cast<long>(std::lround(exposure_us_value));
+        const long exposure_us = util::exposure_microseconds(requested_us, caps.min_value, caps.max_value);
 
         ExposureRequest request;
+        // Decision 0020 rule 9: reserved under mutex_ with the frame snapshot, so a geometry write cannot slip in
+        // before session_.start() has published Exposing; a second start or an exposure running is refused.
+        util::CaptureReservation reservation;
         request.exposure_us = exposure_us;
         request.is_dark = !light;
         {
@@ -863,9 +853,7 @@ public:
             if (!camera_id_.has_value()) {
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
-            if (exposure_starting_) {
-                throw AlpacaException("An exposure start is already in progress", AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             request.camera_id = camera_id_.value();
             request.frame = ExposureFrame{num_x_,
                                           num_y_,
@@ -879,17 +867,7 @@ public:
                                           image_type_};
             request.formats = camera_info_.supported_formats;
             request.usb3 = camera_info_valid_ && camera_info_.is_usb3;
-            // Holds the geometry setters (ensure_frame_geometry_mutable_locked) from this snapshot until
-            // session_.start() has published Exposing.
-            exposure_starting_ = true;
         }
-        struct StartingDone {
-            ZWOCameraDriver& driver;
-            ~StartingDone() {
-                std::lock_guard<std::mutex> lock(driver.mutex_);
-                driver.exposure_starting_ = false;
-            }
-        } starting_done{*this};
 
         const double exposure_s = static_cast<double>(exposure_us) / 1'000'000.0;
         // Decision 0020 rule 4: the deadline holds the first attempt, both retries, their pacing, the USB 2.0 settle
@@ -897,7 +875,12 @@ public:
         const auto margin = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::duration<double>(kExposureRetries * exposure_s)) +
                             kWatchdogGrace;
-        session_.start(exposure_s, [this, request](util::CaptureControl& c) { run_exposure(c, request); }, margin);
+        // An AbortExposure recorded while the start was reserved ends it here, before any body runs (rule 9).
+        if (session_.start(
+                std::move(reservation), exposure_s,
+                [this, request](util::CaptureControl& c) { run_exposure(c, request); }, margin)) {
+            ALPACA_LOG_DEBUG("ZWO", "StartExposure ended by an AbortExposure that arrived while it started");
+        }
     }
 
     void stop_exposure() override { stop_exposure_impl(false); }
@@ -958,35 +941,49 @@ private:
                     throw AlpacaException("exposure status read failed: " + std::string(e.what()),
                                           AlpacaError::DriverException);
                 }
-                if (status == ZWOExposureStatus::Success) {
+                // Issue #2414: a frame the SDK reports ready before this attempt's exposure could have ended began
+                // before the trigger (an ASI120MM Mini started inside ~0.3 s of the previous download delivers a frame
+                // the camera began itself, ready a fixed time after that download), so it predates the client's
+                // request. It is never published: it is discarded and the exposure restarted, under the same retry
+                // count and budget as a failed attempt. Measured from attempt_started, taken before the trigger, so
+                // the SDK's own start latency only makes a fresh frame later.
+                const auto exposure = std::chrono::microseconds(request.exposure_us);
+                const bool early = status == ZWOExposureStatus::Success &&
+                                   clock_.now() - attempt_started < exposure - early_frame_tolerance(exposure);
+                if (status == ZWOExposureStatus::Success && !early) {
                     break;
                 }
-                if (status == ZWOExposureStatus::Failed) {
+                if (status == ZWOExposureStatus::Failed || early) {
                     // The transient ASI_EXP_FAILED class (USB timing hiccups, the INDI ASI driver's policy): re-trigger
                     // up to kExposureRetries times before the failure is kept. Found by ConformU 4.4 on an ASI2600MM
-                    // Pro. The retries are paced so a transient USB condition has a chance to clear.
+                    // Pro. The retries are paced so a transient USB condition has a chance to clear. An early frame
+                    // (#2414) is retaken the same way: the retry's stop drops it in the SDK, so it is never read.
+                    // TODO(#2414): confirm on an ASI120MM Mini rig that ASIStopExposure after Success drops the stale
+                    // frame and that the next ASIStartExposure gives a fresh frame (no repeated early Success).
+                    const std::string what = early ? "camera delivered a frame that began before the exposure started"
+                                                   : "camera exposure failed";
+                    const auto failed_at = clock_.now();
+                    const auto attempt_took = failed_at - attempt_started;
+                    const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
+                    const std::string cause =
+                        early ? "frame ready " + std::to_string(took_ms) + " ms after the trigger of a " +
+                                    std::to_string(request.exposure_us / 1000) + " ms exposure (stale frame discarded)"
+                              : "exposure failed (transient SDK/USB error)";
                     if (retries_left <= 0) {
-                        ALPACA_LOG_ERROR("ZWO", "exposure failed after " + std::to_string(kExposureRetries) +
+                        ALPACA_LOG_ERROR("ZWO", cause + "; no retry left after " + std::to_string(kExposureRetries) +
                                                     " retries; reporting failure to the client");
-                        throw AlpacaException("camera exposure failed after SDK retries", AlpacaError::DriverException);
+                        throw AlpacaException(what + " after SDK retries", AlpacaError::DriverException);
                     }
                     // A retry is at least a full exposure, and takes as long as the attempt that just failed when
                     // the failure came late (the SDK reports it after the exposure's end on the rig).
-                    const auto failed_at = clock_.now();
-                    const auto attempt_took = failed_at - attempt_started;
-                    const auto retry_length = std::max<util::TaskClock::clock::duration>(
-                        attempt_took, std::chrono::microseconds(request.exposure_us));
+                    const auto retry_length = std::max<util::TaskClock::clock::duration>(attempt_took, exposure);
                     if (failed_at + kExposureRetryInterval + retry_length > retry_ends_by) {
-                        const auto took_ms =
-                            std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
-                        ALPACA_LOG_ERROR("ZWO",
-                                         "exposure failed (transient SDK/USB error); a retry would not end within " +
-                                             std::to_string(kRetryBudget.count()) +
-                                             " s of the exposure's end (this attempt took " + std::to_string(took_ms) +
-                                             " ms); reporting failure to the client");
-                        throw AlpacaException(
-                            "camera exposure failed; a retry would run past the client's exposure wait",
-                            AlpacaError::DriverException);
+                        ALPACA_LOG_ERROR("ZWO", cause + "; a retry would not end within " +
+                                                    std::to_string(kRetryBudget.count()) +
+                                                    " s of the exposure's end (this attempt took " +
+                                                    std::to_string(took_ms) + " ms); reporting failure to the client");
+                        throw AlpacaException(what + "; a retry would run past the client's exposure wait",
+                                              AlpacaError::DriverException);
                     }
                     if (last_retry.has_value()) {
                         const auto since = clock_.now() - *last_retry;
@@ -997,8 +994,7 @@ private:
                     }
                     last_retry = clock_.now();
                     --retries_left;
-                    ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
-                                               std::to_string(retries_left) + " retries left");
+                    ALPACA_LOG_WARN("ZWO", cause + "; retrying, " + std::to_string(retries_left) + " retries left");
                     bool retried = false;
                     try {
                         attempt_started = clock_.now();
@@ -1054,8 +1050,9 @@ private:
     // kUsb2SettleMinExposure waits, until kUsb2PostDownloadSettle after the download, and a guide
     // loop of short exposures restarts at once. Below 0.3 s the camera also delivers every other
     // frame early: the next frame becomes ready a fixed time after the previous download whatever the
-    // start time, so it looks started by the camera itself; the wait avoids that for long exposures
-    // and leaves short ones as they were. USB 3.0 cameras show neither.
+    // start time, so it looks started by the camera itself; the wait avoids that for long exposures,
+    // and for short ones the status poll refuses such a frame and retakes it (#2414). USB 3.0 cameras
+    // show neither.
     // The wait runs in the body (decision 0020 rule 4), so StartExposure returns at once. False when the body must
     // stop.
     bool settle_after_usb2_download(util::CaptureControl& c, const ExposureRequest& request) {
@@ -1144,6 +1141,13 @@ private:
             }
             stop_id = camera_id_.value();
         }
+        // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that start
+        // publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran. Recorded before the
+        // state is read: a start that publishes Exposing in between makes record_abort() false and the read below
+        // sees that exposure, where a read first saw Idle and the abort was dropped.
+        if (abort && session_.record_abort()) {
+            return;
+        }
         const CameraState state = session_.camera_state();
         if (state == CameraState::Download) {
             if (abort) {
@@ -1153,7 +1157,7 @@ private:
             return;  // StopExposure is ignored once readout is in progress.
         }
         if (state != CameraState::Exposing) {
-            return;
+            return;  // nothing running and no start reserved (an abort in a start window was recorded above)
         }
         {
             std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
@@ -1233,8 +1237,6 @@ private:
     int start_x_;
     int start_y_;
 
-    // True from a StartExposure's settings snapshot until session_.start() has published Exposing (under mutex_).
-    bool exposure_starting_{false};
     static constexpr int kExposureRetries = 2;
     // See settle_after_usb2_download(): the body waits up to this long before the trigger.
     static constexpr std::chrono::milliseconds kUsb2PostDownloadSettle{600};
@@ -1255,6 +1257,17 @@ private:
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).
     static constexpr std::chrono::milliseconds kStatusPollInterval{50};
     static constexpr long kFormatWriteExposureUs = 10'000;  // under the SDK's 100 ms slow-clock threshold
+    // Issue #2414: how much earlier than its trigger plus the exposure a frame may be reported ready and still count
+    // as fresh. A fresh frame cannot be ready before then except by the sensor rounding the exposure to whole lines
+    // (well under 1 ms) and the camera's clock running fast against the host's (crystals hold 50-100 ppm; the 0.1 %
+    // term is ten times that). The fixed 20 ms absorbs scheduling and SDK call jitter around the stamp. On the rig the
+    // client had the stale frames 0.92-0.95 s after a 1 s StartExposure, download included; any frame seen 21 ms or
+    // more early in a 1 s exposure is refused, and with the 50 ms status poll one ready 71 ms or more early always is.
+    static constexpr std::chrono::milliseconds kEarlyFrameTolerance{20};
+    static constexpr long kEarlyFrameToleranceDivisor = 1000;  // the 0.1 % term
+    static std::chrono::microseconds early_frame_tolerance(std::chrono::microseconds exposure) {
+        return kEarlyFrameTolerance + exposure / kEarlyFrameToleranceDivisor;
+    }
     static constexpr std::chrono::seconds kWatchdogGrace{15};
     // A leaf of the exposure path, never held with mutex_: orders the body's trigger with the driver's SDK stop, so an
     // exposure the driver stopped is never triggered after it, and a stopped one is not stopped twice. Lock order:
@@ -1497,19 +1510,9 @@ private:
     // Decision 0020 rule 8: geometry is refused while an exposure starts, exposes or downloads, and while a cancelled
     // or failed body is still returning (it may still be in the SDK); a Ready frame is dropped by the write
     // (session_.discard_image(), which keeps LastExposure*). Caller holds mutex_.
-    void ensure_frame_geometry_mutable_locked() const {
-        const CameraState state = session_.camera_state();
-        bool frame_ready = false;
-        try {
-            frame_ready = session_.image_ready();
-        } catch (const AlpacaException&) {
-            frame_ready = false;  // a kept failure: not ready
-        }
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
-            (session_.busy() && !frame_ready)) {
-            throw AlpacaException("Cannot change camera ROI during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Decision 0020 rule 9: the session answers for the reservation, Exposing, Download and a failed or cancelled
+    // body still returning with no frame ready. Called by the geometry setters only (ZWO's narrower scope).
+    void ensure_frame_geometry_mutable_locked() const { session_.ensure_settings_unlocked(); }
 
     // The SDK's ROI and start readback must match the exposure's frame. Takes no driver lock (the body calls it).
     void validate_frame_format(int camera_id, const ExposureFrame& frame, const std::vector<ZWOImageType>& formats) {
@@ -1528,37 +1531,24 @@ private:
 
     void reset_exposure_state_locked() {
         last_download_ns_.store(kNoDownload);
-        exposure_starting_ = false;
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
         pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
     }
 
+    // Whether the frame fits (#2261): the shared sensor check, then the ZWO alignment (width%8, height%2 after
+    // binning) must leave a frame. StartExposure refuses a frame that does not with one ZWO text; a setter only
+    // leaves the SDK window as it was.
     bool is_roi_valid_locked(int width, int height, int start_x, int start_y) const {
-        if (!camera_info_valid_) {
-            return false;
-        }
-        if (width <= 0 || height <= 0) {
-            return false;
-        }
-        int max_width = camera_info_.max_width / bin_x_;
-        int max_height = camera_info_.max_height / bin_y_;
-        if (width > max_width || height > max_height) {
-            return false;
-        }
-        if (start_x < 0 || start_y < 0) {
-            return false;
-        }
-        if (start_x + width > max_width || start_y + height > max_height) {
+        if (!camera_info_valid_ ||
+            util::frame_sensor_misfit(util::CameraFrame{bin_x_, bin_y_, width, height, start_x, start_y},
+                                      camera_info_.max_width / bin_x_, camera_info_.max_height / bin_y_) != nullptr) {
             return false;
         }
         int adjusted_width = 0;
         int adjusted_height = 0;
-        if (!adjust_roi_size_locked(width, height, adjusted_width, adjusted_height)) {
-            return false;
-        }
-        return true;
+        return adjust_roi_size_locked(width, height, adjusted_width, adjusted_height);
     }
 
     // Align UP to the SDK divisor (pad), per the ascom-contract.instructions.md "Camera ROI
@@ -1907,20 +1897,23 @@ private:
         return fn(camera_id_.value());
     }
 
+    // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
+    // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
+        util::check_bin(bin_x);
+        util::check_bin(bin_y);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
+        util::check_bin_supported(
+            bin_x, camera_info_valid_ ? std::span<const int>(camera_info_.supported_bins) : std::span<const int>());
         ensure_frame_geometry_mutable_locked();
         const int active_camera_id = camera_id_.value();
-        if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
         bin_x_ = bin_x;
         bin_y_ = bin_y;
         int max_width = camera_info_.max_width / bin_x_;
@@ -1949,6 +1942,8 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
+        if (width_opt) util::check_frame_size(*width_opt);
+        if (height_opt) util::check_frame_size(*height_opt);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
@@ -1958,9 +1953,8 @@ private:
         const int active_camera_id = camera_id_.value();
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width);
+        util::check_frame_size(height);
         int adjusted_width = 0;
         int adjusted_height = 0;
         bool valid = adjust_roi_size_locked(width, height, adjusted_width, adjusted_height);
@@ -1980,6 +1974,8 @@ private:
     }
 
     void set_start_pos_locked(std::optional<int> start_x_opt, std::optional<int> start_y_opt) {
+        if (start_x_opt) util::check_frame_start(*start_x_opt);
+        if (start_y_opt) util::check_frame_start(*start_y_opt);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
@@ -1989,9 +1985,8 @@ private:
         const int active_camera_id = camera_id_.value();
         const int start_x = start_x_opt.value_or(start_x_);
         const int start_y = start_y_opt.value_or(start_y_);
-        if (start_x < 0 || start_y < 0) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(start_x);
+        util::check_frame_start(start_y);
         bool valid = is_roi_valid_locked(num_x_, num_y_, start_x, start_y);
         start_x_ = start_x;
         start_y_ = start_y;

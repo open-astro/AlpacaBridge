@@ -20,7 +20,9 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -275,6 +277,8 @@ TEST_CASE("ZWO USB Limit readback mismatches warn only for the implicit default"
 TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zwo][camera][unit][last-exposure]") {
     FakeZWOSDK sdk;
     sdk.auto_complete_exposure = false;
+    // The driver runs on the real clock here: a completed exposure takes its length on it, as on a camera (#2414).
+    sdk.exposure_clock = &alpacacore::util::default_task_clock();
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     const auto expect_unset = [&](int code) {
         CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) == code);
@@ -383,6 +387,10 @@ TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][
     clock.advance(std::chrono::milliseconds(500));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     CHECK(camera->get_percent_completed() == Catch::Approx(50.0 / 2.000001));  // from the retry's trigger
+    // The retry's frame is ready once its 2 s have passed: one ready earlier began before the retry (#2414).
+    clock.advance(std::chrono::milliseconds(1500));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
     REQUIRE(camera->get_image_ready());
@@ -509,6 +517,143 @@ TEST_CASE("ZWO fake SDK - a retry of a long exposure counts a full exposure howe
         CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
         camera->abort_exposure();
     }
+}
+
+namespace {
+
+// Issue #2414: a camera whose exposures take their length on the case's clock, connected at virtual time 1 s.
+struct TimedExposureRig {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    std::unique_ptr<alpacacore::CameraDriver> camera;
+
+    TimedExposureRig() {
+        sdk.exposure_clock = &clock;
+        clock.advance(std::chrono::seconds(1));
+        camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+        connect_camera(*camera);
+    }
+};
+
+// Steps the clock by `step` (the 50 ms status poll by default) each time the exposure body waits on it. Returns the
+// clock time at which ImageReady first read true, or nothing when the exposure ended without a frame (a kept failure)
+// or did not end within 20 s of real time.
+std::optional<alpacacore::util::TaskClock::clock::time_point> step_until_image_ready(
+    TimedExposureRig& rig, std::chrono::milliseconds step = std::chrono::milliseconds(50)) {
+    const auto ended_at =
+        alpacacore::test::step_until_exposure_end(*rig.camera, rig.clock, step, std::chrono::seconds(20));
+    if (!ended_at.has_value()) return std::nullopt;
+    try {
+        if (rig.camera->get_image_ready()) return ended_at;
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+// Issue #2414: an ASI120MM Mini started soon after the previous download delivers a frame the camera began itself, so
+// ImageReady went true 0.92-0.95 s after a 1 s StartExposure. A frame the SDK reports ready 800 ms into a 1 s
+// exposure is never downloaded or served: the body stops it and triggers again at once, and ImageReady first reads
+// true a full exposure after that new trigger. Light and dark frames take the same path.
+TEST_CASE("ZWO fake SDK - a frame ready before its exposure could end is discarded and the exposure retaken",
+          "[zwo][camera][unit][capture-session][stale-frame]") {
+    TimedExposureRig rig;
+    bool light = true;
+    SECTION("light frame") {}
+    SECTION("dark frame") { light = false; }
+    rig.sdk.script_frame_ready_after({std::chrono::milliseconds(800)});
+    const auto start = rig.clock.now();
+    rig.camera->start_exposure(1.0, light);
+
+    const auto ready_at = step_until_image_ready(rig);
+    REQUIRE(ready_at.has_value());
+    CHECK(*ready_at - start >= std::chrono::milliseconds(1800));  // the retake: triggered at 800 ms, plus 1 s
+    CHECK(*ready_at - start <= std::chrono::milliseconds(1850));  // with no pacing wait before the first retake
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    CHECK(rig.sdk.call_count("stop_exposure") == 1);            // the stale frame is dropped in the SDK
+    CHECK(rig.sdk.call_count("get_data_after_exposure") == 1);  // only the retake's frame is read
+    CHECK(rig.camera->get_last_exposure_duration() == 1.0);
+    CHECK_FALSE(rig.camera->get_image_array().data.empty());
+}
+
+// Issue #2414: the guard refuses only frames that cannot be fresh. A frame ready at its exposure's end, one 10 ms
+// early in a 1.01 s exposure (inside the 20 ms fixed term) and one 100 ms early in a 100 s exposure (inside the 0.1 %
+// term) are each served from the first trigger, with no stop and no second exposure.
+TEST_CASE("ZWO fake SDK - a frame ready at its exposure's end is served with no extra exposure",
+          "[zwo][camera][unit][capture-session][stale-frame]") {
+    TimedExposureRig rig;
+    double duration = 1.0;
+    std::chrono::milliseconds expected_ready{1000};
+    std::chrono::milliseconds step{50};
+    SECTION("ready at the end") {}
+    SECTION("ready 10 ms early in a 1.01 s exposure") {
+        duration = 1.01;
+        expected_ready = std::chrono::milliseconds(1000);
+        rig.sdk.script_frame_ready_after({expected_ready});
+    }
+    SECTION("ready 100 ms early in a 100 s exposure") {
+        duration = 100.0;
+        expected_ready = std::chrono::milliseconds(99'900);
+        step = std::chrono::milliseconds(100);  // fewer steps; the body still polls at 99.9 s
+        rig.sdk.script_frame_ready_after({expected_ready});
+    }
+    const auto start = rig.clock.now();
+    rig.camera->start_exposure(duration, true);
+
+    const auto ready_at = step_until_image_ready(rig, step);
+    REQUIRE(ready_at.has_value());
+    CHECK(*ready_at - start >= expected_ready);
+    CHECK(*ready_at - start < expected_ready + step);  // the poll that found it
+    CHECK(rig.sdk.call_count("start_exposure") == 1);
+    CHECK(rig.sdk.call_count("stop_exposure") == 0);
+    CHECK(rig.sdk.call_count("get_data_after_exposure") == 1);
+    CHECK(rig.camera->get_last_exposure_duration() == Catch::Approx(duration));
+}
+
+// Issue #2414: the retakes share the retry count and budget of a failed exposure, so a camera that keeps delivering
+// early frames cannot loop. Three frames each ready 800 ms into a 1 s exposure: two retakes, then the failure is kept
+// (decision 0020 rule 3) and raised by ImageReady and ImageArray; no stale frame is ever read or served.
+TEST_CASE("ZWO fake SDK - a camera that keeps delivering early frames fails the exposure after the retries",
+          "[zwo][camera][unit][capture-session][stale-frame]") {
+    TimedExposureRig rig;
+    rig.sdk.script_frame_ready_after(
+        {std::chrono::milliseconds(800), std::chrono::milliseconds(800), std::chrono::milliseconds(800)});
+    rig.camera->start_exposure(1.0, true);
+
+    CHECK_FALSE(step_until_image_ready(rig).has_value());
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
+    CHECK(rig.sdk.call_count("start_exposure") == 3);
+    CHECK(rig.sdk.call_count("get_data_after_exposure") == 0);
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    const std::string message = kept_failure(*rig.camera);
+    CHECK(message.find("began before the exposure started after SDK retries") != std::string::npos);
+    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
+
+    // The next StartExposure clears the kept failure, and an on-time frame is served.
+    rig.camera->start_exposure(0.5, true);
+    REQUIRE(step_until_image_ready(rig).has_value());
+    CHECK(rig.sdk.call_count("start_exposure") == 4);
+}
+
+// Issue #2414 with #2187: a retake is a retry, so it starts only when it can end within 10 s of the exposure's own
+// end. A frame ready 15 s into a 20 s exposure is refused, and its retake would end at ~35 s, past 20 + 10 s: the
+// failure is kept at once, and the stale frame is neither retaken nor read.
+TEST_CASE("ZWO fake SDK - an early frame with no time left for a retake fails the exposure at once",
+          "[zwo][camera][unit][capture-session][stale-frame][retry-budget]") {
+    TimedExposureRig rig;
+    rig.sdk.script_frame_ready_after({std::chrono::seconds(15)});
+    rig.camera->start_exposure(20.0, true);
+
+    CHECK_FALSE(step_until_image_ready(rig, std::chrono::milliseconds(500)).has_value());
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
+    CHECK(rig.sdk.call_count("start_exposure") == 1);
+    CHECK(rig.sdk.call_count("get_data_after_exposure") == 0);
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    const std::string message = kept_failure(*rig.camera);
+    CHECK(message.find("began before the exposure started; a retry would run past the client's exposure wait") !=
+          std::string::npos);
+    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
 }
 
 TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "[zwo][camera][unit][last-exposure]") {
@@ -1638,4 +1783,26 @@ TEST_CASE("ZWO fake SDK - a geometry write is refused while exposing and drops a
     CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
     CHECK(camera->get_last_exposure_duration() == 0.001);
     CHECK(camera->get_last_exposure_start_time() == start);
+}
+
+// Issue #2259: a duration of 0 (a bias frame) and one below the camera's shortest exposure are accepted and run at
+// ExposureMin, as on the other cameras; ZWO refused both with InvalidValue. The exposure register the body writes is
+// the minimum.
+TEST_CASE("ZWO Camera Driver - StartExposure below ExposureMin runs at the minimum", "[zwo][camera][unit][fakesdk]") {
+    FakeZWOSDK sdk;
+    double duration = 0.0;
+    SECTION("duration 0 at the SDK's 1 us minimum") {}
+    SECTION("duration 0 on a camera whose minimum is 32 us") { sdk.exposure_min_us = 32; }
+    SECTION("a duration below a 32 us minimum") {
+        sdk.exposure_min_us = 32;
+        duration = 0.00001;
+    }
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    CHECK(camera->get_exposure_min() == static_cast<double>(sdk.exposure_min_us) / 1'000'000.0);
+    CHECK(error_code([&] { camera->start_exposure(duration, true); }) == -1);
+    REQUIRE(alpacacore::test::wait_exposure_end(*camera));
+    REQUIRE(camera->get_image_ready());
+    CHECK(sdk.control_value(FakeZWOSDK::ControlType::Exposure) == sdk.exposure_min_us);
+    camera->set_connected(false);
 }

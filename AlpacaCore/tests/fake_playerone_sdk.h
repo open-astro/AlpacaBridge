@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // KNOWN PARITY GAPS: one fully modelled camera. add_listed_camera() adds more
@@ -88,7 +90,7 @@ public:
     }
     void open_camera(int camera_id) override {
         if (before_call) before_call("open_camera");
-        std::this_thread::sleep_for(open_delay_);
+        alpacacore::test::connect_hold(open_delay_);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         if (auto* listed = find_listed_locked(camera_id)) {
             ++listed->open_refs;

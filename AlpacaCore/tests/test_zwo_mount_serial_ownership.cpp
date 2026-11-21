@@ -16,13 +16,18 @@
 // another program retunes cannot hang a command or disconnect.
 #ifndef _WIN32
 
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <memory>
 #include <string>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
+#include "fake_pty_write.h"
 #include "mount_serial_ownership_cases.h"
 #include "pty_responder.h"
 
@@ -87,6 +92,38 @@ TEST_CASE("ZWO mount serial - independent links retain their own exclusive port 
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(a.slave_path()));
     CHECK(alpacacore::util::is_serial_port_in_use(b.slave_path()));
     CHECK(second.send_command(":GVP") == "AM5");
+}
+
+// Issue #2262: over serial the ZWO mount's errno verdict is the shared util::SerialLink one, so EBADF on the mount's
+// own fd is a lost link (the wrapper already counted it in its own list, now gone): link_lost(), which the driver's
+// Connected reads, latches on the command that meets it, whether its write or its reply read does, and only the next
+// connect clears it.
+TEST_CASE("ZWO mount serial - EBADF on the mount's fd is a lost link until the next connect",
+          "[zwo][mount][unit][link-lost][issue2262]") {
+    alpacacore::test::PtyResponder device([](const std::string&) { return std::string("AM5#"); }, "ZWO mount");
+    ZWOMountProtocolWrapper wrapper;
+    const auto info = serial_info(device.slave_path());
+    const auto before = alpacacore::test::fds_open_on(device.slave_path());
+    REQUIRE(wrapper.connect(info));
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(device.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(wrapper.send_command(":GVP") == "AM5");
+    REQUIRE_FALSE(wrapper.link_lost());
+
+    // On the command's write the call reports its own failed send, as for EIO; on its reply read, the lost transport.
+    const bool on_write = GENERATE(true, false);
+    INFO((on_write ? "EBADF on the command's write" : "EBADF on the reply read"));
+    REQUIRE(alpacacore::test::replace_fd_on_tty(fd, device.slave_path(), on_write ? O_RDONLY : O_WRONLY));
+    alpacacore::test::require_alpaca_error(
+        [&] { (void)wrapper.send_command(":GVP"); },
+        on_write ? alpacacore::AlpacaError::DriverException : alpacacore::AlpacaError::NotConnected);
+    CHECK(wrapper.link_lost());
+
+    wrapper.disconnect();
+    REQUIRE(wrapper.connect(info));
+    CHECK_FALSE(wrapper.link_lost());
+    CHECK(wrapper.send_command(":GVP") == "AM5");
+    wrapper.disconnect();
 }
 
 #endif  // _WIN32

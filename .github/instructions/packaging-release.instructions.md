@@ -26,6 +26,8 @@ the matching shared file, not in a vendor file.
 
 Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` if the SDK provides one, for consistency — but the camera rule is non-negotiable.
 
+Why the SDK binaries are committed, shipped on the system linker path and kept without written vendor permission: [decision 0026](../../docs/decisions/0026-vendored-sdk-binaries.md).
+
 ### Mandatory Checklist — New Vendor SDK with `.so`
 
 Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (step 1), break CI / clean clones (step 2), or break runtime loading on installed systems (steps 3–4).
@@ -45,7 +47,7 @@ The `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpa
 
 ### SDK Version Bumps
 
-When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`). If the vendor's SDK path is versioned (e.g. ToupTek's `toupcamsdk.20260519/`), update the path reference in `debian/rules`, `scripts/host_setup.sh` (the library loop and, for QHY, its SDK directory; `build_and_run.sh` and `install_alpaca_service.sh` both source it), AND `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` in the same commit. Then run `python3 scripts/dependency_snapshot.py --pin` and check the entry's `version` in `scripts/dependency_sdk_versions.json`: `--check` (the `static-checks` CI job) fails while the vendored files differ from their `sha256` pin, and the release SBOM refuses any file under `/usr/lib/alpacabridge/` or `/usr/lib/firmware/` in the `.deb` that matches no git-tracked vendored file (`/usr/sbin/fxload`, the udev rules and the libgphoto2 bundle under `/usr/lib/alpacabridge/libgphoto2/`, which is built from a vendored tarball, are outside that check; see [Bundled library built from a vendored tarball](#bundled-library-built-from-a-vendored-tarball-libgphoto2)).
+When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`). SDK folders carry no version, so replace the folder's contents as the vendor ships them, versioned `.so` names included. Then run `python3 scripts/dependency_snapshot.py --pin` and check the entry's `version` in `scripts/dependency_sdk_versions.json`: `--check` (the `static-checks` CI job) fails while the vendored files differ from their `sha256` pin, and the release SBOM refuses any file under `/usr/lib/alpacabridge/` or `/usr/lib/firmware/` in the `.deb` that matches no git-tracked vendored file (`/usr/sbin/fxload`, the udev rules and the libgphoto2 bundle under `/usr/lib/alpacabridge/libgphoto2/`, which is built from a vendored tarball, are outside that check; see [Bundled library built from a vendored tarball](#bundled-library-built-from-a-vendored-tarball-libgphoto2)).
 
 ### Driver version (DriverVersion)
 
@@ -72,7 +74,7 @@ Failing this check means guiding will fail at runtime, no matter how green the A
   - `/usr/lib/alpacabridge/` — vendor shared libraries (e.g. `libqhyccd.so`, `libASICamera2.so`).
   - `/usr/share/alpacabridge/web/` — web UI static files.
   - `/lib/firmware/qhy/` — QHY camera firmware files.
-  - `/lib/udev/rules.d/` — udev rules for USB device permissions.
+  - `/usr/lib/udev/rules.d/` — udev rules for USB device permissions. `debian/rules` runs `scripts/tighten_udev_rules.sh` over them after the last install, so a vendor `MODE="0666"` ships as `GROUP="plugdev", MODE="0660"`; never edit the vendor files under `external/` for this (docs-drift check 31, issue #2290). A new rule install goes before that call.
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
@@ -128,7 +130,8 @@ apart from such corrections only `/bump-release` writes `CHANGELOG.md`, through 
 The service runs as the `alpacabridge` user with `NoNewPrivileges=true`, so
 `sudo`, setuid helpers and `pkexec` cannot work from inside it, and the project
 policy is no subprocesses in the daemon. Three mechanisms exist; pick by what
-the operation needs, never add a fourth without a decision record:
+the operation needs, never add a fourth without changing
+[decision 0025](../../docs/decisions/0025-daemon-privilege.md):
 
 - **An ambient capability** for an in-process syscall (`CAP_SYS_TIME` for
   `clock_settime`, `CAP_NET_ADMIN` for nl80211). Granted in

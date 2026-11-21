@@ -1,0 +1,2 @@
+### Added (tests)
+- **Contract sweep: exemption rows must name the id list of their state** (AlpacaCore tests, issue #2360): the sweep guard now checks that a disconnected row names a registry entry, that a connected, parked or exposing row names a tier-2 host, and that a parked row's host can reach AtPark. It also rejects a second row with the same id, state and probe, in both exemption tables. Before this, such a row passed the guard and silently matched no probe.

@@ -32,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -47,8 +48,8 @@ namespace alpacacore::test {
 // explicit completion; guide expiry still uses real time unless held by a test.
 // Guide pulses do not advance encoders; the polarity case applies an explicit
 // signed encoder step to check the hardware-verified direction convention.
-// Stop-completion delay, label-readback transients and post-rate-off encoder drift are scripted fault hooks,
-// not a simulation of the controller's deceleration or settling dynamics.
+// Stop-completion delay, post-stop motion behind a done status, label-readback transients and post-rate-off encoder
+// drift are scripted fault hooks, not a simulation of the controller's deceleration or settling dynamics.
 // Per-read RA drift is a legacy Sync fault hook, not the elapsed-time model.
 // A crawling home search never reports done and does not move the encoder; it is not the controller's fallback path.
 // Hardware qualification must replace assumptions before they become claims.
@@ -87,6 +88,12 @@ public:
     }
     void set_cgx_switches_present(bool present) { cgx_switches_present_.store(present); }
     void set_stop_completion_reads(int reads) { stop_completion_reads_.store(reads); }
+    // After each zero-rate stop of `axis`, its status reads done at once, yet each of its next `reads` position reads
+    // moves it `counts_per_read` further (#2411): a status that reports the stop before the axis is still.
+    void set_post_stop_motion_reads(std::uint8_t axis, int reads, std::int32_t counts_per_read) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        post_stop_motion_[axis_index(axis)] = {reads, counts_per_read};
+    }
     void set_ra_stop_drift_reads(int reads) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         ra_stop_drift_reads_ = reads;
@@ -260,6 +267,8 @@ private:
         int post_stop_drift_remaining = 0;
         int crawling_home_searches = 0;
         std::vector<int> stops_before_home_starts;
+        int post_stop_motion_remaining = 0;
+        std::int32_t post_stop_motion_step = 0;
         std::deque<std::int32_t> label_read_offsets;
         std::chrono::steady_clock::time_point guide_deadline{};
         std::uint8_t autoguide_rate = 128;
@@ -467,6 +476,11 @@ private:
                     axis.physical_position = (axis.physical_position + 4) & 0x00ffffffU;
                     --axis.post_stop_drift_remaining;
                 }
+                if (axis.post_stop_motion_remaining > 0) {
+                    axis.physical_position = static_cast<std::uint32_t>(
+                        (static_cast<std::int64_t>(axis.physical_position) + axis.post_stop_motion_step) & 0x00ffffff);
+                    --axis.post_stop_motion_remaining;
+                }
                 if (request.destination == 0x10 && axis.tracking) {
                     axis.physical_position =
                         (axis.physical_position + ra_tracking_drift_per_read_.load()) & 0x00ffffffU;
@@ -530,6 +544,8 @@ private:
                 axis.motion_remainder = 0;
                 if (request.payload[0] == 0) {
                     axis.stop_reads_remaining = stop_completion_reads_.load();
+                    std::tie(axis.post_stop_motion_remaining, axis.post_stop_motion_step) =
+                        post_stop_motion_[axis_index(request.destination)];
                     axis.slewing = false;
                     axis.homing = false;
                     axis.manual_motion = false;
@@ -604,6 +620,7 @@ private:
     std::optional<std::pair<std::uint8_t, std::uint8_t>> fragment_filter_;
     std::array<AxisState, 2> axes_{};
     int ra_stop_drift_reads_ = 0;
+    std::array<std::pair<int, std::int32_t>, 2> post_stop_motion_{};
     std::array<std::vector<std::int32_t>, 2> label_read_offsets_;
     std::array<std::vector<std::uint8_t>, 2> motor_versions_{{{7, 18}, {7, 18}}};
     std::array<std::vector<std::uint8_t>, 2> motor_models_{{{0x17, 0x88}, {0x17, 0x88}}};

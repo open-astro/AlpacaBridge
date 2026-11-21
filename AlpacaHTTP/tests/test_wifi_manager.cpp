@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/wifi_manager.h>
 #include <unistd.h>
 
@@ -22,6 +23,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,7 @@ namespace {
 using alpacahttp::util::WifiError;
 using alpacahttp::util::WifiManager;
 using alpacahttp::util::WifiManagerTestAccess;
+using alpacahttp::util::detail::WifiAdapter;
 using alpacahttp::util::detail::WifiDeviceRoles;
 using alpacahttp::util::detail::WifiProfileBackend;
 using alpacahttp::util::detail::WifiSettings;
@@ -55,6 +58,7 @@ public:
     int update_calls = 0;
     int patch_calls = 0;
     WifiSettings patched_overrides;
+    std::vector<std::string> patched_paths;
     std::string updated_path;
     bool add_pinned = false;
     bool update_pinned = false;
@@ -84,6 +88,7 @@ public:
 
     void patch_connection(const std::string& path, const WifiSettings& overrides) override {
         ++patch_calls;
+        patched_paths.push_back(path);
         updated_path = path;
         patched_overrides = overrides;
         for (const auto& [section, entries] : overrides) {
@@ -131,11 +136,29 @@ private:
     std::string path_;
 };
 
+// Issue #856: a built-in radio (wlan0) carrying a hotspot on its virtual ap0,
+// which reports the same permanent MAC, plus a USB adapter (wlan1).
+constexpr const char* kBuiltinMac = "aa:aa:aa:aa:aa:01";
+constexpr const char* kUsbMac = "bb:bb:bb:bb:bb:02";
+WifiDeviceRoles dual_radio_roles() {
+    WifiDeviceRoles roles{"/client", "wlan0", "/ap", "ap0", 3, {}};
+    roles.adapters = {WifiAdapter{"/client", "wlan0", kBuiltinMac, false}, WifiAdapter{"/ap", "ap0", kBuiltinMac, true},
+                      WifiAdapter{"/usb", "wlan1", kUsbMac, false}};
+    return roles;
+}
+
 nlohmann::json saved_profile(const std::string& ssid, const std::string& mode = "infrastructure",
                              std::optional<std::string> id = std::string("Saved"), std::string uuid = "uuid-1") {
     nlohmann::json connection = {{"uuid", std::move(uuid)}};
     if (id) connection["id"] = *id;
     return {{"connection", std::move(connection)}, {"802-11-wireless", {{"ssid", ssid}, {"mode", mode}}}};
+}
+
+nlohmann::json pinned_profile(const std::string& ssid, const std::string& uuid, const std::string& interface_name,
+                              const std::string& mode = "infrastructure") {
+    auto profile = saved_profile(ssid, mode, std::string(ssid), uuid);
+    if (!interface_name.empty()) profile["connection"]["interface-name"] = interface_name;
+    return profile;
 }
 
 const WifiSettingValue& setting(const WifiSettings& settings, const std::string& section, const std::string& key) {
@@ -397,7 +420,9 @@ int main() {
                  {"", "", "Ssid must be 1-32 bytes"},
                  {std::string(33, 'x'), "", "Ssid must be 1-32 bytes"},
                  {"Home", "1234567", "Passphrase must be 8-63 characters (or empty for open networks)"},
-                 {"Home", std::string(64, 'p'), "Passphrase must be 8-63 characters (or empty for open networks)"}}) {
+                 {"Home", std::string(64, 'p'), "Passphrase must be 8-63 characters (or empty for open networks)"},
+                 // #2292: a NUL inside a passphrase of valid length would reach NetworkManager cut short.
+                 {"Home", std::string("pass\0word", 9), "Passphrase must not contain a NUL byte"}}) {
             FakeWifiProfileBackend backend;
             WifiManager manager("unused", backend);
             bool rejected = false;
@@ -505,6 +530,20 @@ int main() {
     }
 
     {
+        // case: set_ap refuses a NUL in the passphrase before backend access (#2292)
+        FakeWifiProfileBackend backend;
+        WifiManager manager("unused", backend);
+        std::string message;
+        try {
+            manager.set_ap("Hotspot", std::string("pass\0word", 9), "bg", 0, true);
+        } catch (const WifiError& e) {
+            message = e.what();
+        }
+        EXPECT(message == "Passphrase must not contain a NUL byte");
+        EXPECT(backend.connection_reads == 0 && backend.add_calls == 0 && backend.update_calls == 0);
+    }
+
+    {
         // case: set_ap refuses an empty passphrase unless a secured hotspot profile exists (#1715)
         // {open profile, enabled}: no profile refuses even a disabled hotspot; an open one refuses to start.
         for (const auto& [has_open_profile, enabled] :
@@ -553,6 +592,173 @@ int main() {
         }
         EXPECT(message.find("Passphrase") == std::string::npos);
         EXPECT(message.find("injected") != std::string::npos);
+    }
+
+    {
+        // case: WifiManager pins a new profile to the preferred client adapter and keeps the choice (#856)
+        TemporaryDirectory dir;
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        {
+            WifiManager manager(dir.path(), backend);
+            const auto set = manager.set_client_adapter("BB:BB:BB:BB:BB:02");
+            EXPECT(set.value("PreferredMac", "") == kUsbMac);
+            EXPECT(set.value("Device", "") == "wlan1");
+            manager.save_profile("Home", "", true, 0);
+            EXPECT(setting(backend.added_settings, "connection", "interface-name").string_value == "wlan1");
+        }
+        // A new manager (a restart) reads the stored MAC, never an interface name.
+        WifiManager restarted(dir.path(), backend);
+        backend.roles.adapters[2].interface = "wlan7";  // a udev rename of the same dongle
+        restarted.save_profile("Cabin", "", true, 0);
+        EXPECT(setting(backend.added_settings, "connection", "interface-name").string_value == "wlan7");
+    }
+
+    {
+        // case: WifiManager falls back to the automatic pick when the preferred adapter is absent (#856)
+        TemporaryDirectory dir;
+        { std::ofstream(dir.path() + "/wifi_client_adapter") << "cc:cc:cc:cc:cc:03\n"; }
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        WifiManager manager(dir.path(), backend);
+        manager.save_profile("Home", "", true, 0);
+        EXPECT(setting(backend.added_settings, "connection", "interface-name").string_value == "wlan0");
+        std::string note;
+        const auto roles =
+            alpacahttp::util::detail::apply_client_preference(dual_radio_roles(), "cc:cc:cc:cc:cc:03", note);
+        EXPECT(roles.client_if == "wlan0");
+        EXPECT(note.find("cc:cc:cc:cc:cc:03") != std::string::npos);
+        EXPECT(note.find("wlan0") != std::string::npos);
+        // The built-in radio's MAC is shared by its hotspot interface; the client is never the hotspot one,
+        // even when NetworkManager lists the hotspot interface first.
+        auto ap_first = dual_radio_roles();
+        std::swap(ap_first.adapters[0], ap_first.adapters[1]);
+        const auto builtin = alpacahttp::util::detail::apply_client_preference(ap_first, kBuiltinMac, note);
+        EXPECT(builtin.client_if == "wlan0" && note.empty());
+    }
+
+    {
+        // case: an absent preferred adapter is logged once at INFO, not on every lookup (#856)
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> captured;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                captured.emplace_back(level, std::string(message));
+            });
+        TemporaryDirectory dir;
+        { std::ofstream(dir.path() + "/wifi_client_adapter") << "cc:cc:cc:cc:cc:03\n"; }
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        WifiManager manager(dir.path(), backend);
+        manager.save_profile("Home", "", true, 0);
+        manager.save_profile("Cabin", "", true, 0);
+        int info_notes = 0;
+        for (const auto& [level, message] : captured) {
+            if (message.find("cc:cc:cc:cc:cc:03") == std::string::npos) continue;
+            EXPECT(level == alpacacore::logging::LogLevel::Info);
+            ++info_notes;
+        }
+        EXPECT(info_notes == 1);
+        for (const auto& [level, message] : captured) {
+            EXPECT(level != alpacacore::logging::LogLevel::Warn && level != alpacacore::logging::LogLevel::Error);
+        }
+    }
+
+    {
+        // case: setting the client adapter re-pins saved client profiles and leaves the hotspot profile alone (#856)
+        TemporaryDirectory dir;
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        backend.connections.emplace_back("/saved/home", pinned_profile("Home", "uuid-home", "wlan0"));
+        backend.connections.emplace_back("/saved/cabin", pinned_profile("Cabin", "uuid-cabin", ""));
+        backend.connections.emplace_back("/saved/moved", pinned_profile("Moved", "uuid-moved", "wlan1"));
+        backend.connections.emplace_back("/saved/ap", pinned_profile("Hotspot", "uuid-ap", "ap0", "ap"));
+        WifiManager manager(dir.path(), backend);
+        manager.set_client_adapter(kUsbMac);
+        EXPECT((backend.patched_paths == std::vector<std::string>{"/saved/home", "/saved/cabin"}));
+        // Only interface-name is written: every other key of the profile stays as stored (issue #1690).
+        EXPECT(backend.patched_overrides.size() == 1 && backend.patched_overrides[0].first == "connection" &&
+               backend.patched_overrides[0].second.size() == 1);
+        EXPECT(setting(backend.patched_overrides, "connection", "interface-name").string_value == "wlan1");
+        EXPECT(backend.add_calls == 0 && backend.update_calls == 0);
+    }
+
+    {
+        // case: the client adapter refuses a malformed MAC, an unlisted MAC and the hotspot's own interface (#856)
+        TemporaryDirectory dir;
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        backend.roles.adapters[1].mac = "dd:dd:dd:dd:dd:04";  // a hotspot interface with a MAC of its own
+        WifiManager manager(dir.path(), backend);
+        const auto refused = [&](const std::string& mac) {
+            try {
+                manager.set_client_adapter(mac);
+            } catch (const WifiError& e) {
+                return std::string(e.what());
+            }
+            return std::string();
+        };
+        for (const char* malformed : {"bb:bb:bb:bb:bb", "bb-bb-bb-bb-bb-02", "bb:bb:bb:bb:bb:0g", "wlan1"}) {
+            EXPECT(refused(malformed).find("six hex pairs") != std::string::npos);
+        }
+        EXPECT(backend.role_reads == 0);  // refused before NetworkManager is asked
+        EXPECT(refused("ee:ee:ee:ee:ee:05").find("no Wi-Fi adapter") != std::string::npos);
+        EXPECT(refused("dd:dd:dd:dd:dd:04").find("hotspot") != std::string::npos);
+        EXPECT(!std::filesystem::exists(dir.path() + "/wifi_client_adapter"));
+        EXPECT(backend.patch_calls == 0);
+    }
+
+    {
+        // case: clearing the client adapter returns saved and new profiles to the automatic pick (#856)
+        TemporaryDirectory dir;
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        backend.connections.emplace_back("/saved/home", pinned_profile("Home", "uuid-home", "wlan1"));
+        WifiManager manager(dir.path(), backend);
+        manager.set_client_adapter(kUsbMac);
+        EXPECT(std::filesystem::exists(dir.path() + "/wifi_client_adapter"));
+        const auto cleared = manager.set_client_adapter("");
+        EXPECT(cleared.value("PreferredMac", "x").empty() && cleared.value("Device", "") == "wlan0");
+        EXPECT(!std::filesystem::exists(dir.path() + "/wifi_client_adapter"));
+        EXPECT(backend.updated_path == "/saved/home");
+        EXPECT(setting(backend.patched_overrides, "connection", "interface-name").string_value == "wlan0");
+        manager.save_profile("Cabin", "", true, 0);
+        EXPECT(setting(backend.added_settings, "connection", "interface-name").string_value == "wlan0");
+    }
+
+    {
+        // case: connecting a saved profile re-pins a stale interface name on a dual-radio board only (#856)
+        FakeWifiProfileBackend dual;
+        dual.roles = dual_radio_roles();
+        dual.connections.emplace_back("/saved/home", pinned_profile("Home", "uuid-home", "wlan9"));
+        WifiManager dual_manager("unused", dual);
+        std::string message;
+        try {
+            dual_manager.connect_profile("uuid-home");
+        } catch (const WifiError& e) {
+            message = e.what();
+        }
+        EXPECT(message.find("injected") != std::string::npos);  // activation needs the real bus
+        EXPECT(dual.patched_paths == std::vector<std::string>{"/saved/home"});
+        EXPECT(setting(dual.patched_overrides, "connection", "interface-name").string_value == "wlan0");
+
+        FakeWifiProfileBackend single;
+        single.roles = {"/client", "wlan0", "/client", "wlan0", 1, {}};
+        single.connections.emplace_back("/saved/home", pinned_profile("Home", "uuid-home", "wlan9"));
+        WifiManager single_manager("unused", single);
+        try {
+            single_manager.connect_profile("uuid-home");
+        } catch (const WifiError&) {
+        }
+        EXPECT(single.patch_calls == 0);
     }
 
     std::cout << "Wi-Fi profile backend tests passed\n";

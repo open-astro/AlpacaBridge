@@ -1,0 +1,3 @@
+### Changed
+
+- **Fourteen drivers now disconnect asynchronously, like every other driver**, issue #1757. `Disconnect` used to join the connect thread and close the port before it returned (commit 3ded11bd, March 2026), so a `Disconnect` sent during a slow connect blocked the HTTP thread until that connect finished. It now returns at once: `Connecting` reads true until the disconnect is done, and the HTTP `PUT Connected=false` handler still waits on `Connecting` before it replies, as before. Drivers: Astroasis Oasis focuser, Celestron focus motor, Gemini Cover Lite flat panel, Gemini focuser, Gemini PDH, iOptron iEAF, iOptron iFR focuser and rotator, QHY CFW3, QHY Q-Focuser, and the WandererAstro box, cover, filter wheel and rotator.

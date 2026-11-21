@@ -173,7 +173,9 @@ bool Discovery::is_discovery_probe(const std::string& datagram) {
 
 void Discovery::handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port) {
     // Alpaca discovery protocol: respond to "alpacadiscovery1" probe
-    util::log_info("Discovery: Received probe from " + sender_address + ":" + std::to_string(sender_port));
+    // DEBUG: any LAN host can send datagrams here, so an INFO line per packet would
+    // let it fill the log (#1741); a real probe still logs its reply below.
+    util::log_debug("Discovery: Received probe from " + sender_address + ":" + std::to_string(sender_port));
 
     if (is_discovery_probe(probe_data)) {
         // With http_port 0 the port is unknown until the embedder hands over

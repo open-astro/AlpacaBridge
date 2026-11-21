@@ -165,46 +165,50 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009, issue #1988): once the
+    // wrapper has lost the link (a hangup, or a fault standing past
+    // util::kLinkStalenessBound) it has released the port. Both reads are
+    // lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
 
+    // Decision 0009 point 5: the fault text while faulted, the loss reason
+    // after a loss until the next Connect or Disconnect.
     std::string get_link_fault() const override {
         const auto fault = protocol_.link_fault();
         return fault ? *fault : std::string{};
     }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        // Disconnect synchronously — closing the port + joining the reader
-        // is quick and ASCOM clients expect Connected to be false immediately.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("WandererAstro", "WandererBox disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize the whole connect/disconnect transition (see the cover
         // driver for the race this prevents).
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = get_connected();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
+        // newer pending disconnect by staying down. The disconnect gate reads
+        // the raw flag, so a lost link still runs the teardown; the connect
+        // gate reads the link-aware value, so Connect over a lost link
+        // reconnects (decision 0009 point 4).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                teardown();  // a lost link: drop it before reconnecting, never reopen it as it was
+            }
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration: enumerate the ports and pick the
             // requested match. A local copy keeps config_ as the durable intent
@@ -243,33 +247,19 @@ public:
                     c.reset();
                 }
             }
+            if (!protocol_.link_alive()) {
+                // The port died before the session was published: fail this
+                // connect. disconnect() also clears the loss reason, so a
+                // connect that never completed leaves get_link_fault() empty.
+                protocol_.disconnect();
+                throw AlpacaException("WandererBox link lost during connect", AlpacaError::NotConnected);
+            }
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "WandererBox connected");
         } else {
-            protocol_.disconnect();  // joins the reader, clears cached firmware
-            connected_.store(false);
+            teardown();
             ALPACA_LOG_INFO("WandererAstro", "WandererBox disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- Switch interface ---
@@ -405,10 +395,24 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the link is lost (decision
+    // 0009 point 3), before the fault check or the state cache is reached.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("WandererBox not connected", AlpacaError::NotConnected);
         }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("WandererBox link lost; Connect again once the box is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Driver state first, then the wrapper teardown (joins the reader, clears
+    // the cached state, firmware date and loss reason, closes the port if the
+    // loss has not already released it). Caller holds transition_mutex_.
+    void teardown() {
+        connected_.store(false);
+        protocol_.disconnect();
     }
 
     // Issue #237: reads are served from the reader thread's cache, so a dead
@@ -418,6 +422,10 @@ private:
     // frames resume. Static metadata keeps answering.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
+            // A loss that latched after ensure_connected() passed: the wrapper
+            // stores its reason and link_lost_ under one lock, so link_alive()
+            // is already false and this is NotConnected (decision 0009 point 3).
+            ensure_connected();
             throw AlpacaException("WandererBox communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }

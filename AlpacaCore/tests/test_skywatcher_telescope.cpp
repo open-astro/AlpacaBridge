@@ -62,7 +62,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE(driver->get_device_type() == DeviceType::Telescope);
     REQUIRE_FALSE(driver->get_connected());
     // Disconnected: no ":e" mount code has been read yet, so the name is generic.
-    CHECK(driver->get_name() == "Sky-Watcher Mount (EQMOD)");
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
 
     REQUIRE(driver->get_can_slew());
     REQUIRE(driver->get_can_slew_async());
@@ -86,7 +86,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Device metadata", "[skywatcher][telesco
     auto driver = make_driver(3);
 
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_description() == "Sky-Watcher EQMOD Direct Mount Driver");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount");
     CHECK(driver->get_driver_info() == "AlpacaCore EQMOD Direct Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
@@ -122,13 +122,13 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported actions", "[skywatcher][tel
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][telescope][unit]") {
+TEST_CASE("SkyWatcher Telescope Driver - Target and site members while disconnected", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
     // open-astro#391: the target getters answer NotConnected before
@@ -153,9 +153,10 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
     driver->set_site_elevation(35.0);
     CHECK(driver->get_site_elevation() == 35.0);
 
-    CHECK(driver->get_slew_settle_time() == 0);
-    driver->set_slew_settle_time(2);
-    CHECK(driver->get_slew_settle_time() == 2);
+    // SlewSettleTime is an ASCOM member: NotConnected while disconnected (the optics too).
+    require_alpaca_error([&] { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_slew_settle_time(2); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_focal_length(); }, alpacacore::AlpacaError::NotConnected);
 
     CHECK_FALSE(driver->get_tracking_rates().empty());
     require_alpaca_error([&] { (void)driver->get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
@@ -263,11 +264,12 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
     // FindHome is supported (goto to the power-on index); unconnected it
     // must raise NotConnected like every other motion method.
     require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
-                         alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // Unsupported members check the connection first (#1919); their connected answer is pinned in
+    // "connected unsupported members keep their NotImplemented answers".
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
     // Rate offsets are supported; like every motion method they raise
     // NotConnected when unconnected.
     require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
@@ -312,6 +314,19 @@ TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
     require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// #2287: the rate-offset setters refuse a non-finite rate before the connection
+// check. The sweep probes NaN; this pins +/-Inf, which the same isfinite check refuses.
+TEST_CASE("SkyWatcher Telescope Driver - infinite rate offsets are rejected before NotConnected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+
+    const double inf = std::numeric_limits<double>::infinity();
+    for (double bad : {inf, -inf}) {
+        require_alpaca_error([&] { driver->set_right_ascension_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_declination_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
 }
 
 // open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
@@ -417,10 +432,30 @@ TEST_CASE("SkyWatcher Telescope Driver spec audit - DestinationSideOfPier reject
 TEST_CASE("SkyWatcher Telescope Driver spec audit - DoesRefraction is not implemented",
           "[skywatcher][telescope][unit][spec-audit]") {
     auto driver = make_driver(0);
-    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write. While
+    // disconnected the connection check answers first (#1919); the connected answer is pinned below.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Sky-Watcher Telescope Driver - connected unsupported members keep their NotImplemented answers",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
+
+    // Falsified by: skywatcher_telescope_driver.cpp sync_to_alt_az() without its MethodNotImplemented throw.
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - CanMoveAxis connected (#1869)", "[skywatcher][telescope][unit]") {

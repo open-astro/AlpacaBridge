@@ -450,7 +450,7 @@ private:
         std::size_t discarded = 0;
         while (true) {
             // MSG_DONTWAIT: never waits, so holding mutex_ here is fine.
-            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): MSG_DONTWAIT never waits
             const ssize_t n = recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);
             if (n <= 0) {
                 break;  // empty (EAGAIN) or closed; a closed peer fails the read that follows

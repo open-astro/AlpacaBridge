@@ -67,26 +67,27 @@ TEST_CASE("FakeToupTekSDK - next image hold survives restart and resets its rend
           "[touptek][camera][unit][fakesdk][last-exposure]") {
     auto fake = make_fake_with_camera();
     const auto handle = fake.open_camera_by_id("fake-cam-0");
-    fake.deliver_frame = true;
+    static std::atomic<int> events{0};
+    events = 0;
+    const auto on_event = [](unsigned event, void*) {
+        if (event == alpacacore::vendor::touptek::kToupEventImage) ++events;
+    };
     for (int acquisition = 0; acquisition < 2; ++acquisition) {
+        fake.start_pull_mode(handle, on_event, nullptr);
         fake.hold_next_wait_image();
         CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
-        fake.stop(handle);  // the driver's format restart happens before WaitImage
+        fake.stop(handle);  // the driver's format restart happens before the trigger
+        fake.start_pull_mode(handle, on_event, nullptr);
         CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
-        bool delivered = false;
-        std::thread worker([&] {
-            unsigned width = 0;
-            unsigned height = 0;
-            delivered = fake.wait_image(handle, 2000, nullptr, 8, 1920, width, height);
-        });
-        const bool entered = fake.wait_for_held_image(std::chrono::seconds(1));
-        // Always release and join before an assertion can unwind the test.
-        fake.stop(handle);  // an actual active abort must still release WaitImage
-        worker.join();
-        REQUIRE(entered);
-        CHECK(delivered);
+        fake.trigger(handle, 1);
+        CHECK(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        CHECK(events.load() == acquisition);  // held: no frame event yet
+        fake.stop(handle);                    // an abort's stop raises the held frame
+        CHECK(events.load() == acquisition + 1);
         CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
     }
+    fake.trigger(handle, 1);  // a stopped stream raises no event
+    CHECK(events.load() == 2);
     fake.close_camera(handle);
 }
 
@@ -96,7 +97,7 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
     alpacacore::test::FakeTaskClock clock;
     std::atomic<bool> fail_wait{false};
     fake.before_call = [&](const std::string& call) {
-        if (call == "wait_image" && fail_wait.load()) {
+        if (call == "pull_image" && fail_wait.load()) {
             throw AlpacaException("injected image wait failure", alpacacore::AlpacaError::DriverException);
         }
     };
@@ -276,7 +277,7 @@ TEST_CASE("ToupTek camera - connect-path failure releases the shared open (r18 #
     fake.throw_from.insert("put_trigger_mode");
 
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     // The open must be balanced — a leaked ref here means the NEXT connect
     // returns the same stale handle with open_count 2 and Close never fires.
@@ -361,7 +362,7 @@ TEST_CASE("ToupTek thermal switch - failed connect releases the shared open", "[
     fake.throw_from.insert("get_heat_max");
 
     auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
-    CHECK_THROWS_AS(thermal->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { thermal->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(thermal->get_connected() == false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
@@ -459,7 +460,7 @@ TEST_CASE("ToupTek focuser - connect-path failure releases the shared open", "[t
     fake.throw_from.insert("aaf_range");
 
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     CHECK(fake.ref_count("fake-aaf-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
@@ -576,7 +577,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // (2) Hold the frame so the exposure stays in flight across two poll intervals.
     fake.hold_wait_image(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(wait_until([&] { return fake.call_count("wait_image") >= 1; }, std::chrono::milliseconds(2000)));
+    REQUIRE(wait_until([&] { return fake.call_count("trigger") >= 1; }, std::chrono::milliseconds(2000)));
     const int temp_calls = fake.call_count("get_temperature_deciC");
     const int tec_calls = fake.call_count("get_tec_voltage_deciV");
     // Two poll intervals pass on the task clock; each tick is skipped.
@@ -970,7 +971,7 @@ TEST_CASE("ToupTek camera - a frame arriving after the watchdog fails both image
     bool wait_image_entered = false;
     bool release_wait_image = false;
     fake.before_call = [&](const std::string& method) {
-        if (method != "wait_image") return;
+        if (method != "pull_image") return;
         std::unique_lock<std::mutex> lock(gate_mutex);
         wait_image_entered = true;
         gate_cv.notify_all();
@@ -1033,7 +1034,7 @@ TEST_CASE("ToupTek camera - aborting a held image wait leaves ImageReady false w
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
     driver->start_exposure(0.01, true);
-    REQUIRE(eventually([&] { return fake.call_count("wait_image") > 0; }));
+    REQUIRE(eventually([&] { return fake.call_count("trigger") > 0; }));
 
     driver->abort_exposure();
     CHECK_FALSE(driver->get_image_ready());
@@ -1118,7 +1119,7 @@ std::chrono::microseconds time_of(Fn&& fn) {
     return alpacacore::test::timed([&] {
         try {
             fn();
-        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the latency matters
         }
     });
 }
@@ -1394,7 +1395,7 @@ TEST_CASE("ToupTek camera - Name and Connected do not wait for a disconnect held
     REQUIRE(entered);
     CHECK(returned);
     const auto [name, connected] = future.get();
-    CHECK(name == "FakeCam One");
+    CHECK(name == "ToupTek FakeCam One");
     CHECK_FALSE(connected);
     CHECK(fake.ref_count("fake-cam-0") == 0);
 }
@@ -1424,10 +1425,10 @@ TEST_CASE("ToupTek camera - Name does not wait for a second ToupTek camera held 
 
     REQUIRE(entered);
     CHECK(returned);
-    CHECK(future.get() == "FakeCam One");
+    CHECK(future.get() == "ToupTek FakeCam One");
     other->set_connected(false);
     // Name keeps the identity after a disconnect, without asking the SDK again.
-    CHECK(other->get_name() == "FakeCam Two");
+    CHECK(other->get_name() == "ToupTek FakeCam Two");
 }
 
 TEST_CASE("ToupTek camera - identity getters keep the start-up values after a connect and disconnect (#1844)",

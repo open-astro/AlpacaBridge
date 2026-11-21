@@ -97,7 +97,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACAHTTP_BUILD_TESTS "Build test suite" ON)
-option(ALPACAHTTP_ENABLE_DISCOVERY "Enable Alpaca Discovery" ON)
 
 # Find dependencies
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -144,6 +143,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     endif()
     if(TARGET alpacacore_weewx)
         add_definitions(-DALPACACORE_ENABLE_WEEWX)
+    endif()
+    if(TARGET alpacacore_remotealpaca)
+        add_definitions(-DALPACACORE_ENABLE_REMOTEALPACA)
     endif()
     if(TARGET alpacacore_gemini)
         add_definitions(-DALPACACORE_ENABLE_GEMINI)
@@ -211,6 +213,9 @@ else()
     if(TARGET alpacacore_weewx)
         add_definitions(-DALPACACORE_ENABLE_WEEWX)
     endif()
+    if(TARGET alpacacore_remotealpaca)
+        add_definitions(-DALPACACORE_ENABLE_REMOTEALPACA)
+    endif()
     if(TARGET alpacacore_gemini)
         add_definitions(-DALPACACORE_ENABLE_GEMINI)
     endif()
@@ -259,22 +264,27 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/core/catalog_json.cpp
     src/http/router.cpp
+    src/http/routes/camera_routes.cpp
+    src/http/routes/covercalibrator_routes.cpp
+    src/http/routes/dome_routes.cpp
+    src/http/routes/filterwheel_routes.cpp
+    src/http/routes/focuser_routes.cpp
+    src/http/routes/observingconditions_routes.cpp
+    src/http/routes/rotator_routes.cpp
+    src/http/routes/safetymonitor_routes.cpp
+    src/http/routes/switch_routes.cpp
+    src/http/routes/telescope_routes.cpp
     src/http/device_call.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
-    src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
     src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
     src/util/software_update.cpp
+    src/discovery/discovery.cpp
 )
-
-if(ALPACAHTTP_ENABLE_DISCOVERY)
-    list(APPEND ALPACAHTTP_SOURCES src/discovery/discovery.cpp)
-    add_definitions(-DALPACAHTTP_ENABLE_DISCOVERY)
-endif()
 
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacahttp-clean-all
@@ -379,21 +389,81 @@ if(ALPACAHTTP_BUILD_TESTS)
     set(TEST_ROUTING_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_routing_cwd)
     file(MAKE_DIRECTORY ${TEST_ROUTING_DIR})
     add_test(NAME test_routing COMMAND test_routing WORKING_DIRECTORY ${TEST_ROUTING_DIR})
+    # The attacheddevices case (#2312) builds its fake by-id/sysfs tree with
+    # AlpacaCore/tests/fake_usb_serial_tree.h, the one copy both suites use.
+    target_include_directories(test_routing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
     # open-astro#664: the devicecatalog endpoint case reads the committed
     # fixture tests/fixtures/devicecatalog.json, located from the source tree
     # the same way test_route_table finds its type-name fixture.
     target_compile_definitions(test_routing PRIVATE
         ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-    # Test-only server for the hardware-free ConformU job: a test catalog
-    # descriptor over FakeSkyWatcherMount. Not installed and not linked into
-    # alpacabridge or alpacahttp_server. The fake header lives under
-    # AlpacaCore/tests, so that directory is on this target's include path only.
+    # Test-only server for the hardware-free ConformU job (#2078): a test catalog
+    # descriptor over the fake of one scripts/conformu_fake_runs.tsv row. Not
+    # installed and not linked into alpacabridge or alpacahttp_server. The fake
+    # headers live under AlpacaCore/tests, so that directory is on this target's
+    # include path only. Each vendor that is built adds its hosts: the server
+    # links it and gets FAKE_CONFORMU_<VENDOR>, which guards that vendor's
+    # factories (one vendor per CI matrix job, conformu-fake.yml).
+    add_executable(fake_conformu_server tests/fake_conformu_server.cpp)
+    target_link_libraries(fake_conformu_server alpacahttp)
+    target_include_directories(fake_conformu_server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
     if(TARGET alpacacore_skywatcher)
-        add_executable(fake_skywatcher_server tests/fake_skywatcher_server.cpp)
-        target_link_libraries(fake_skywatcher_server alpacahttp alpacacore_skywatcher)
-        target_include_directories(fake_skywatcher_server PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
+        target_link_libraries(fake_conformu_server alpacacore_skywatcher)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_SKYWATCHER)
+    endif()
+    if(TARGET alpacacore_zwo)
+        target_link_libraries(fake_conformu_server alpacacore_zwo)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ZWO)
+    endif()
+    if(TARGET alpacacore_celestron)
+        target_link_libraries(fake_conformu_server alpacacore_celestron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_CELESTRON)
+    endif()
+    if(TARGET alpacacore_onstep)
+        target_link_libraries(fake_conformu_server alpacacore_onstep)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ONSTEP)
+    endif()
+    if(TARGET alpacacore_ioptron)
+        target_link_libraries(fake_conformu_server alpacacore_ioptron)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_IOPTRON)
+    endif()
+    if(TARGET alpacacore_astroasis)
+        target_link_libraries(fake_conformu_server alpacacore_astroasis)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ASTROASIS)
+    endif()
+    if(TARGET alpacacore_gemini)
+        target_link_libraries(fake_conformu_server alpacacore_gemini)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GEMINI)
+    endif()
+    if(TARGET alpacacore_qhy)
+        target_link_libraries(fake_conformu_server alpacacore_qhy)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_QHY)
+    endif()
+    if(TARGET alpacacore_playerone)
+        target_link_libraries(fake_conformu_server alpacacore_playerone)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_PLAYERONE)
+    endif()
+    if(TARGET alpacacore_wandererastro)
+        target_link_libraries(fake_conformu_server alpacacore_wandererastro)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_WANDERERASTRO)
+    endif()
+    if(TARGET alpacacore_touptek)
+        target_link_libraries(fake_conformu_server alpacacore_touptek)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_TOUPTEK)
+    endif()
+    if(TARGET alpacacore_altair)
+        target_link_libraries(fake_conformu_server alpacacore_altair)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ALTAIR)
+    endif()
+    if(TARGET alpacacore_svbony)
+        target_link_libraries(fake_conformu_server alpacacore_svbony)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_SVBONY)
+    endif()
+    if(TARGET alpacacore_gphoto)
+        target_link_libraries(fake_conformu_server alpacacore_gphoto)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GPHOTO)
     endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
@@ -480,11 +550,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_json alpacahttp)
     add_test(NAME test_json COMMAND test_json)
     
-    if(ALPACAHTTP_ENABLE_DISCOVERY)
-        add_executable(test_discovery tests/test_discovery.cpp)
-        target_link_libraries(test_discovery alpacahttp)
-        add_test(NAME test_discovery COMMAND test_discovery)
-    endif()
+    add_executable(test_discovery tests/test_discovery.cpp)
+    target_link_libraries(test_discovery alpacahttp)
+    add_test(NAME test_discovery COMMAND test_discovery)
     
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config alpacahttp)
@@ -583,5 +651,13 @@ test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
     add_test(NAME server_cli_missing_config
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
             ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
+    # Issue #2088: a stop nobody asked for (here the first bind failing) exits 1 for systemd.
+    find_program(ALPACAHTTP_PYTHON3 python3)
+    if(ALPACAHTTP_PYTHON3)
+        add_test(NAME server_exit_status_unrequested_stop
+            COMMAND ${ALPACAHTTP_PYTHON3} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/server_exit_status.py
+                $<TARGET_FILE:alpacahttp_server>)
+        set_tests_properties(server_exit_status_unrequested_stop PROPERTIES TIMEOUT 30)
+    endif()
     set_tests_properties(server_cli_unknown_option server_cli_extra_argument server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()

@@ -96,10 +96,10 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Unsupported actions", "[zwo][switch][u
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->command_string("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("ZWO Dew Heater Switch Driver - ASCOM Error Codes", "[zwo][switch][unit]") {
@@ -129,13 +129,15 @@ namespace {
 
 using FakeDewSdk = alpacacore::test::FakeDewHeaterSdk;
 
-void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+// Past the driver's 100 ms heater read TTL on the fake clock.
+void advance_past_status_ttl(alpacacore::test::FakeTaskClock& clock) { clock.advance(std::chrono::milliseconds(150)); }
 
 }  // namespace
 
 TEST_CASE("ZWO Dew Heater Switch Driver - DeviceState reads the camera once per status frame", "[zwo][switch][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeDewSdk sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
@@ -148,9 +150,21 @@ TEST_CASE("ZWO Dew Heater Switch Driver - DeviceState reads the camera once per 
     CHECK_FALSE(state.empty());
     CHECK(sdk.reads == 1);
 
-    wait_past_status_ttl();
+    advance_past_status_ttl(clock);
     (void)driver->get_device_state();
     CHECK(sdk.reads == 2);
+}
+
+// Decision 0024: two cameras' heaters are told apart by the camera model. Falsified by: zwo_switch_driver.cpp
+// get_name() returning "ZWO Dew Heater" while connected.
+TEST_CASE("ZWO Dew Heater Switch Driver - the Name is the camera model and Dew Heater", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    sdk.info_name = "ZWO ASI2600MC Pro";
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    CHECK(driver->get_name() == "ZWO Dew Heater");
+    driver->set_connected(true);
+    CHECK(driver->get_name() == "ZWO ASI2600MC Pro Dew Heater");
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Dew Heater Switch Driver - static members cost no camera reads", "[zwo][switch][unit]") {
@@ -187,15 +201,17 @@ TEST_CASE("ZWO Dew Heater Switch Driver - a write and a reconnect drop the cache
 }
 
 TEST_CASE("ZWO Dew Heater Switch Driver - a dead link is not served from the cache", "[zwo][switch][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeDewSdk sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk, clock);
     driver->set_connected(true);
     CHECK(driver->get_switch_value(0) == 40.0);
 
     sdk.fail_reads = true;
-    wait_past_status_ttl();
+    advance_past_status_ttl(clock);
     for (int i = 0; i < 3; ++i) {
-        CHECK_THROWS_AS(driver->get_switch_value(0), alpacacore::AlpacaException);
+        // Two failed reads ("Failed to read dew heater value"), then the latch: all DriverException.
+        require_alpaca_error([&] { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
     }
     try {
         (void)driver->get_switch_value(0);
@@ -266,6 +282,17 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without to
     const auto touched = sdk.touched_ids();
     CHECK(touched.count(7) == 0);
     CHECK(touched.count(9) == 1);
+}
+
+// Decision 0016 rule 3 and decision 0024 rule 3: the camera an index picked names the switch only once the connect
+// completes. Falsified by: zwo_switch_driver.cpp resolve_camera_id() writing camera_name_ when it picks the camera.
+TEST_CASE("ZWO Dew Heater Switch Driver - a failed connect does not name the camera it picked", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, false);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);  // the Mini, no heater
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_name() == "ZWO Dew Heater");
 }
 
 // Falsified by: zwo_switch_driver.cpp find_dew_caps, skip the lazy listing for an id-only binding

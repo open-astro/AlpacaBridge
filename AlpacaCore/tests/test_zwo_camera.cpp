@@ -91,21 +91,6 @@ TEST_CASE("ZWO Camera Driver - DeviceState is empty when disconnected", "[zwo][c
     CHECK(driver->get_device_state().empty());
 }
 
-TEST_CASE("ZWO Camera Driver - Not connected throws", "[zwo][camera][unit]") {
-    auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
-
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_ready(), alpacacore::AlpacaException);
-}
-
 TEST_CASE("ZWO Camera Driver - Disconnected state", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
@@ -121,17 +106,62 @@ TEST_CASE("ZWO Camera Driver - Unsupported actions", "[zwo][camera][unit]") {
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
+// Issue #1919: while disconnected NotConnected comes before the capability answer; once connected the member keeps
+// its NotImplemented code. The fake camera is mono, so it has no Bayer offsets.
 TEST_CASE("ZWO Camera Driver - Sub-exposure not supported", "[zwo][camera][unit]") {
-    auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO Camera Driver - unsupported and caps members answer NotConnected before the capability",
+          "[zwo][camera][unit]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gain_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gain_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offset_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offset_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_readout_mode(1); }, AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, AlpacaError::PropertyNotImplemented);
+    // The fake's caps: Exposure 1..3'600'000'000 us, Gain 0..500, Offset 0..100.
+    CHECK(driver->get_exposure_max() == 3600.0);
+    CHECK(driver->get_exposure_min() == 0.000001);
+    CHECK(driver->get_gain_max() == 500);
+    CHECK(driver->get_gain_min() == 0);
+    CHECK(driver->get_offset_max() == 100);
+    CHECK(driver->get_offset_min() == 0);
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Camera Driver - ASCOM Error Codes", "[zwo][camera][unit]") {
@@ -360,7 +390,7 @@ TEST_CASE("ZWO Camera Driver - Name and identity getters answer while a connect 
     release_open = true;
     connector.join();
     CHECK(camera->get_connected());
-    CHECK(camera->get_name() == sdk.camera.name);
+    CHECK(camera->get_name() == "ZWO " + sdk.camera.name);  // the fake's name has no brand
     camera->set_connected(false);
 }
 
@@ -399,7 +429,7 @@ TEST_CASE("ZWO Camera Driver - A name refresh that overlapped a connect does not
     release_refresh = true;
     refresher.join();
 
-    CHECK(camera->get_name() == connect_name);
+    CHECK(camera->get_name() == "ZWO " + connect_name);
     camera->set_connected(false);
 }
 

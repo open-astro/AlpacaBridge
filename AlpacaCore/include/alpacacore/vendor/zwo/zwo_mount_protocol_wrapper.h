@@ -29,7 +29,7 @@ enum class ConnectionType {
     Auto
 };
 
-/// A model this driver can name. Display only (#2204): an unlisted model still connects, as "ZWO Mount".
+/// A model this driver can name. Display only (#2204): an unlisted model still connects, as "ZWO Telescope".
 bool is_zwo_mount_model(std::string_view model);
 
 // A ZWO mount discovered by enumerate_zwo_mounts(): any model that answers :GVP# with a valid :GMA# serial,
