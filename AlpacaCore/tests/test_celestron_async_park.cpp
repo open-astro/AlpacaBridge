@@ -1436,7 +1436,8 @@ TEST_CASE("Celestron motion owner - MoveAxis on one axis leaves a pulse on the o
 
 namespace {
 
-// Rate-0 moves (fixed 36/37 or variable 6/7, both data bytes zero) sent to the RA (axis 0) or DEC (axis 1) motor.
+// Rate-0 frames (fixed 36/37 or variable 6/7, both data bytes zero) sent to the RA (axis 0) or DEC (axis 1) motor. One
+// stop can send more than one frame (a variable-rate stop zeroes both directions), so cases compare against a baseline.
 int zero_rate_stops(FakeCelestronHandset& st, int axis) {
     const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
     std::lock_guard<std::mutex> lock(st.command_mutex);
@@ -1466,8 +1467,8 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both 
     const int dec_stops = zero_rate_stops(*rig.st, 1);
     rig.driver->move_axis(axis, 0.0);
     CHECK(rig.st->cancel_goto_count.load() == cancels + 1);
-    CHECK(zero_rate_stops(*rig.st, 0) == ra_stops + 1);
-    CHECK(zero_rate_stops(*rig.st, 1) == dec_stops + 1);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*rig.st, 1) > dec_stops);
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1477,10 +1478,11 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop with no slew running leaves a jo
     SupersedeRig rig;
     rig.driver->move_axis(1, 0.5);
     const int cancels = rig.st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*rig.st, 0);
     const int dec_stops = zero_rate_stops(*rig.st, 1);
     rig.driver->move_axis(0, 0.0);
     CHECK(rig.st->cancel_goto_count.load() == cancels);
-    CHECK(zero_rate_stops(*rig.st, 0) == 1);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
     CHECK(zero_rate_stops(*rig.st, 1) == dec_stops);
     CHECK(rig.driver->get_slewing());  // the DEC jog still runs
     rig.driver->move_axis(1, 0.0);
