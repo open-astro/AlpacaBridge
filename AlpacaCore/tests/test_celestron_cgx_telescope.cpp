@@ -4479,4 +4479,165 @@ TEST_CASE(
     CHECK(one_stop_before_last_home_start(mount.stops_before_home_starts(0x10)));
     CHECK(mount.count_command(0x11, 0x0b) == 2);
 }
+
+namespace {
+
+using HomeLeg = alpacacore::test::FakeCelestronCgxMount::HomeLeg;
+// The #2213 rig capture (2026-11-12, the bare northern CGX): a missed-sensor search's fast leg moved 1,479,041 counts
+// in 10 s (3.17 deg/s) and its crawl 12,640 counts/s (0.27 deg/s).
+constexpr std::uint32_t kFastHomeRate = 147904;
+constexpr std::uint32_t kCrawlHomeRate = 12640;
+constexpr double kCountsPerDegree = 16777216.0 / 360.0;
+constexpr const char* kTravelGuardText = "Celestron CGX home travel guard";
+
+// step_until(), with the fake mount's motion advanced by the same step just before each clock step.
+bool step_motion_until(alpacacore::test::FakeTaskClock& clock, alpacacore::test::FakeCelestronCgxMount& mount,
+                       const std::function<bool()>& done) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (!clock.wait_for_waiters(1, 1ms)) continue;
+        mount.advance_motion(1s);
+        clock.advance(1s);
+        if (!clock.wait_for_woken_settled(2s)) return false;
+    }
+    return true;
+}
+
+// How far `axis` went from `start` in the + direction, one way round, in degrees.
+double degrees_forward(const alpacacore::test::FakeCelestronCgxMount& mount, std::uint8_t axis, std::uint32_t start) {
+    return static_cast<double>((mount.axis_physical_position(axis) - start) & 0x00ffffffU) / kCountsPerDegree;
+}
+
+}  // namespace
+
+// The 2026-10-28 incident (docs/failures/0016-cgx-home-travel.md): a home search that never finds its switch and
+// drives away. Under #2213 alone it was stopped at 60 s (about 190 deg) and searched again for 60 s more (about 380 deg).
+TEST_CASE("Celestron CGX USB Telescope Driver - a runaway home search is stopped at the re-home point, not searched again",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    const int route = GENERATE(0, 1, 2);  // FindHome, Park, the meridian home route
+    INFO("route=" << route);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const auto now = [] { return std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)}; };
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    if (route == 2) {
+        driver->find_home();
+        REQUIRE(step_until(clock, [&] { return motion_ended(*driver); }));
+        REQUIRE(driver->get_at_home());
+        driver->set_tracking(true);
+    } else {
+        mount.set_physical_position(0x10, static_cast<std::uint32_t>(82.5 * kCountsPerDegree));  // BeyondPole HA -0.5 h
+    }
+    // The RA switch is never found: every search drives away at the fast home rate.
+    for (int search = 0; search < 2; ++search) mount.script_home_search(0x10, {HomeLeg{1, kFastHomeRate, 0}});
+    const auto start = mount.axis_physical_position(0x10);
+    const int homes = mount.count_command(0x10, 0x0b);
+    const int stops = mount.count_command(0x10, 0x24);
+    const int dec_stops = mount.count_command(0x11, 0x24);
+
+    if (route == 0) driver->find_home();
+    if (route == 1) driver->park();
+    if (route == 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 6.0, 24.0), 30.0);
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(mount.count_command(0x10, 0x0b) == homes + 1);  // never searched again
+    CHECK(mount.count_command(0x10, 0x24) > stops);
+    CHECK(mount.count_command(0x11, 0x24) > dec_stops);
+    const double travelled = degrees_forward(mount, 0x10, start);
+    CHECK(travelled > 180.0);  // the 60 s point at 3.17 deg/s
+    CHECK(travelled < 270.0);
+    const auto stopped_at = mount.axis_physical_position(0x10);
+    for (int second = 0; second < 30; ++second) {
+        mount.advance_motion(1s);
+        clock.advance(1s);
+    }
+    CHECK(mount.axis_physical_position(0x10) == stopped_at);
+    CHECK(slewing_failure(*driver) == failure);  // kept until the next command
+    // FindHome and Park dropped the reference; the meridian route keeps its labels (no rebase), as on a timeout.
+    if (route != 2)
+        require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a re-home's travel counts toward the same home travel bound",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    // The first search goes the wrong way fast for 25 s (79.4 deg), then crawls: 88.8 deg at the 60 s point, inside
+    // the 90 deg a re-home may start from. The re-home then runs away.
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, kFastHomeRate * 25}, HomeLeg{1, kCrawlHomeRate, 0}});
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, 0}});
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    const auto start = clock.now();
+    driver->find_home();
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(mount.count_command(0x10, 0x0b) == 2);
+    // 88.8 deg by 60 s, then 3.17 deg/s: the sum passes 270 deg 58 s into the re-home, before its own 60 s point.
+    const auto failed_after = clock.now() - start;
+    CHECK(failed_after >= 115s);
+    CHECK(failed_after < 120s);
+    const auto stopped_at = mount.axis_physical_position(0x10);
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x10) == stopped_at);
+}
+
+// The longest legitimate homes the guard must allow: RA in the #2213 capture's shape (from 51.8 deg, the wrong way
+// fast to the 115 deg reversal, a crawl back, the 60 s re-home at 74 deg and straight home: 179 deg in all), and Dec
+// straight home from the farthest start a slew allows (180 deg, Dec -90 on the Normal side).
+TEST_CASE("Celestron CGX USB Telescope Driver - the longest legitimate homes pass the travel guard",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    const bool park = GENERATE(false, true);
+    INFO("park=" << park);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    constexpr std::int32_t kRaStart = -2414046;  // 51.8 deg from home: 3,893,087 counts short at the capture's 10 s
+    mount.set_physical_position(0x10, static_cast<std::uint32_t>(kRaStart) & 0x00ffffffU);
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, 2958082}, HomeLeg{1, kCrawlHomeRate, 0}});
+    mount.script_home_search(0x10, {HomeLeg{0, kFastHomeRate, 0}});
+    mount.set_physical_position(0x11, 8388608);
+    mount.script_home_search(0x11, {HomeLeg{0, kFastHomeRate, 0}});
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    if (park)
+        driver->park();
+    else
+        driver->find_home();
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    INFO("Slewing failure: " << slewing_failure(*driver));
+    CHECK(slewing_failure(*driver).empty());
+    CHECK(driver->get_at_home());
+    CHECK(driver->get_at_park() == park);
+    CHECK(mount.count_command(0x10, 0x0b) == 2);  // the #2213 re-home
+    CHECK(mount.count_command(0x11, 0x0b) == 1);
+    CHECK(mount.axis_physical_position(0x10) == 0U);
+    CHECK(mount.axis_physical_position(0x11) == 0U);
+}
 #endif

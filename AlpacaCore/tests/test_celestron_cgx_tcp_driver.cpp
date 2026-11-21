@@ -234,6 +234,37 @@ TEST_CASE("Celestron CGX USB driver - a cleanup stop keeps its 500 ms budget",
     mount.set_stop_completion_reads(0);
 }
 
+// The home travel guard reads the encoders through the same AUX link over TCP (docs/failures/0016-cgx-home-travel.md).
+TEST_CASE("Celestron CGX TCP driver - a runaway home search is stopped by the travel guard",
+          "[celestron][cgx][telescope][tcp][home-search][travel-guard]") {
+    TcpRig rig;
+    rig.set_connected(true);
+    // About 172 deg per real second: the sum passes 270 deg in under 2 s, long before 60 s of task-clock time.
+    rig.adapter.set_home_runaway(kRa, 8'000'000.0);
+    const int stops = rig.adapter.count(kRa, 0x24);
+    rig.driver->find_home();
+    std::string failure;
+    const auto ended = [&] {
+        try {
+            return !rig.driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& error) {
+            failure = error.what();
+            return true;
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (!ended() && std::chrono::steady_clock::now() < deadline) {
+        if (rig.clock.wait_for_waiters(1, 1ms)) rig.clock.advance(20ms);
+    }
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find("Celestron CGX home travel guard") != std::string::npos);
+    CHECK(rig.adapter.count(kRa, 0x0b) == 1);
+    CHECK(rig.adapter.count(kRa, 0x24) > stops);
+    const auto stopped_at = rig.adapter.position(kRa);
+    std::this_thread::sleep_for(200ms);  // real time: the fake's runaway drifts in real time
+    CHECK(rig.adapter.position(kRa) == stopped_at);
+}
+
 TEST_CASE("Celestron CGX TCP driver - a motor fault report costs the reference", "[celestron][cgx][telescope][tcp]") {
     TcpRig rig;
     rig.set_connected(true);

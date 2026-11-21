@@ -47,7 +47,9 @@ namespace alpacacore::test {
 // active for its payload's duration and moves nothing, a stop (0x24 {0}) freezes a GOTO, a home search and a drift
 // where they are, a set position (0x04) relabels the axis, and a drift (set_drift()) moves an axis while SLEW_DONE
 // reads done (a tracking axis, or a status that reads done too early). Real motors accelerate and decelerate; this one
-// does not, except that set_stop_settle_reads() makes SLEW_DONE read busy for a number of reads after a stop. Rate
+// does not, except that set_stop_settle_reads() makes SLEW_DONE read busy for a number of reads after a stop. A home
+// search on an axis given set_home_runaway() reads searching and drifts at that rate until a stop: a switch never
+// found (the Oct-28 incident shape), with no limit sensor or hard stop. Rate
 // commands (0x06, 0x07) are ACKed and change nothing. It ACKs every write except a client's ACK of a motor report
 // (0x50, 0x51), which it does not answer. Motor reports are sent only when a case injects them. It does not simulate
 // the bus, the switch boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The
@@ -126,6 +128,11 @@ public:
         settle_locked(state);
         state.drift = counts_per_second;
         state.drift_since = std::chrono::steady_clock::now();
+    }
+    /// Every home search on `axis` from now on reads searching and drifts at `counts_per_second` until a stop.
+    void set_home_runaway(std::uint8_t axis, double counts_per_second) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        home_runaway_[axis] = counts_per_second;
     }
     /// After a stop, SLEW_DONE on that axis reads busy for its next `reads` reads (a deceleration).
     void set_stop_settle_reads(int reads) {
@@ -425,6 +432,12 @@ private:
                 return {0x17, 0x88};
             case 0x0b:
                 axis.home_until = now + home_duration_;
+                if (const auto runaway = home_runaway_.find(request.destination); runaway != home_runaway_.end()) {
+                    settle_locked(axis);
+                    axis.home_until = now + std::chrono::hours(1);
+                    axis.drift = runaway->second;
+                    axis.drift_since = now;
+                }
                 return {};
             case 0x12:
                 return {static_cast<std::uint8_t>(now < axis.home_until ? 0x00 : 0xff)};
@@ -463,6 +476,7 @@ private:
     std::map<std::uint8_t, Axis> axes_;
     std::chrono::milliseconds goto_duration_{0};
     std::chrono::milliseconds home_duration_{0};
+    std::map<std::uint8_t, double> home_runaway_;
     int stop_settle_reads_ = 0;
     bool echo_ = false;
     bool foreign_ = false;
