@@ -1434,6 +1434,80 @@ TEST_CASE("Celestron motion owner - MoveAxis on one axis leaves a pulse on the o
     rig.driver->move_axis(0, 0.0);
 }
 
+namespace {
+
+// Rate-0 frames (fixed 36/37 or variable 6/7, both data bytes zero) sent to the RA (axis 0) or DEC (axis 1) motor. One
+// stop can send more than one frame (a variable-rate stop zeroes both directions), so cases compare against a baseline.
+int zero_rate_stops(FakeCelestronHandset& st, int axis) {
+    const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
+    std::lock_guard<std::mutex> lock(st.command_mutex);
+    int n = 0;
+    for (const auto& c : st.commands) {
+        if (c.size() < 6 || c[0] != 'P' || static_cast<unsigned char>(c[2]) != device) continue;
+        const auto op = static_cast<unsigned char>(c[3]);
+        if ((op == 6 || op == 7 || op == 36 || op == 37) && c[4] == '\0' && c[5] == '\0') ++n;
+    }
+    return n;
+}
+
+}  // namespace
+
+// #2458: the mount's GOTO drives both axes, so MoveAxis(axis, 0) during an async slew stops both, as AbortSlew does.
+// A rate 0 on its own axis alone left the other axis under the GOTO while Slewing read false.
+TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both axes (#2458)",
+          "[celestron][telescope][motion-owner]") {
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    SupersedeRig rig;
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(rig.driver->get_slewing());
+    const int cancels = rig.st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*rig.st, 0);
+    const int dec_stops = zero_rate_stops(*rig.st, 1);
+    rig.driver->move_axis(axis, 0.0);
+    CHECK(rig.st->cancel_goto_count.load() == cancels + 1);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*rig.st, 1) > dec_stops);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// With no GOTO running, a stop is still its own axis's: a jog on the other axis keeps running.
+TEST_CASE("Celestron MoveAxis - a one-axis stop with no slew running leaves a jog on the other axis alone (#2458)",
+          "[celestron][telescope][motion-owner]") {
+    SupersedeRig rig;
+    rig.driver->move_axis(1, 0.5);
+    const int cancels = rig.st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*rig.st, 0);
+    const int dec_stops = zero_rate_stops(*rig.st, 1);
+    rig.driver->move_axis(0, 0.0);
+    CHECK(rig.st->cancel_goto_count.load() == cancels);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*rig.st, 1) == dec_stops);
+    CHECK(rig.driver->get_slewing());  // the DEC jog still runs
+    rig.driver->move_axis(1, 0.0);
+}
+
+// A stop that fails may leave the GOTO running on either axis: the MoveAxis reports the failure, and Slewing raises it
+// (as after a failed AbortSlew) rather than reading false.
+TEST_CASE("Celestron MoveAxis - a failed one-axis stop during an async slew never reads Slewing false (#2458)",
+          "[celestron][telescope][motion-owner]") {
+    SupersedeRig rig(500);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    rig.st->reject_stop.store(true);
+    require_alpaca_error([&] { rig.driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.st->cancel_goto_count.load() == 0);
+    try {
+        const bool slewing = rig.driver->get_slewing();
+        CHECK(slewing);  // a completion value is acceptable only while it still says moving
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).rfind("MoveAxis stop failed: ", 0) == 0);
+    }
+    rig.st->reject_stop.store(false);
+    rig.driver->abort_slew();
+}
+
 // A refused command changes nothing (decision 0006 rule 2): a Park or async slew that the slew-safety gate refuses
 // (unaligned, no Sync this session) leaves the running pulse alone. IsPulseGuiding and the chain agree: the window
 // stays open and the chain sends its next chunk.

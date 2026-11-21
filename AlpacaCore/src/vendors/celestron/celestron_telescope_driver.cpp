@@ -2198,6 +2198,9 @@ public:
         }
         std::unique_lock<std::mutex> lock(mutex_);
         util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
+        // #2458: the mount's GOTO drives both axes, so a stop during a slew or FindHome stops both, as AbortSlew does.
+        // A rate 0 on one axis alone would leave the other moving after Slewing reads false.
+        const bool stop_goto = !moving && motion_owner_.slew_running();
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
         // #2263: a moving MoveAxis takes its own axis, superseding the slew, Park or FindHome (they own both axes) and
         // the pulse on this axis; that pulse body is woken, not joined, and sends this axis nothing more (it checks its
@@ -2208,7 +2211,21 @@ public:
             mine = motion_owner_.claim(util::MotionCommand::MoveAxis, axis);
             pulse_ops_[axis].cancel();
         } else {
-            motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+            motion_owner_.cancel(stop_goto ? util::MotionOwner::kBothAxes
+                                           : util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+        }
+        if (stop_goto) {
+            // The initiator lock keeps every other command out until the stops are sent, so the gate needs no claim.
+            const std::string stop_error = stop_park_slew(lock, [] { return true; });
+            if (!stop_error.empty()) {
+                last_home_error_.clear();
+                last_slew_error_ = "MoveAxis stop failed: " + stop_error;
+                // The mount may still be moving: leave Slewing and the slew state as they were.
+                throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
+            }
+            homing_ = false;
+            slew_aborted_ = true;
+            manual_axis_slewing_[1 - axis] = false;
         }
 
         set_slewing_locked(false);
@@ -2227,9 +2244,11 @@ public:
             parked_ = false;
             at_home_ = false;
         }
-        send_motion_locked(
-            lock, [this, &mine] { return !lost_locked(mine); },
-            [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+        if (!stop_goto) {  // the stops above already sent rate 0 to both axes
+            send_motion_locked(
+                lock, [this, &mine] { return !lost_locked(mine); },
+                [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+        }
         clear_motion_errors_locked();
     }
 
