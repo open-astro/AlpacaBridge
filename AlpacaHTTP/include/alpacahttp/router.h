@@ -60,6 +60,7 @@
 namespace alpacahttp {
 
 class DeviceCall;  // src/http/device_call.h: one Device API call, built per request
+class PersistedConfigStore;  // src/http/persisted_config_store.h: config/registered_devices.json
 
 struct RouteMatch {
     std::string device_type;
@@ -426,10 +427,8 @@ private:
                                      std::string* warning = nullptr);
 
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
-    void add_or_replace_persisted_device(const nlohmann::json& config);
-    bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
-    // True when the file was written; false is already logged at ERROR.
-    bool save_persisted_devices() const;
+    // Loads persisted_store_ once, then registers its entries, prunes the
+    // stores keyed by uniqueId, adopts legacy state and applies power-on state.
     void load_persisted_devices();
 
     nlohmann::json build_description_payload() const;
@@ -527,9 +526,8 @@ private:
         return std::chrono::steady_clock::now();
     };
 
-    // Guards persisted_devices_ and persisted_devices_loaded_. Never held
-    // together with server_info_mutex_ or across driver-registry calls.
-    mutable std::mutex persisted_devices_mutex_;
+    // config/registered_devices.json (issue #2481); src/http/persisted_config_store.h.
+    std::unique_ptr<PersistedConfigStore> persisted_store_;
     // A driver can outlive this Router in the device registry, so its connect-time store goes through this.
     struct LearnedConfigSink {
         std::mutex mutex;
@@ -538,24 +536,6 @@ private:
     std::shared_ptr<LearnedConfigSink> learned_sink_ = std::make_shared<LearnedConfigSink>();
     // Merges @p learned into the stored entry @p entry names, then saves. An empty @p unique_id matches any ID.
     void store_learned_config(const nlohmann::json& entry, const nlohmann::json& learned, const std::string& unique_id);
-    // Serialises the file write in save_persisted_devices(): request workers
-    // reach it concurrently through persist_client_site() (#444), and two
-    // truncate-and-write passes interleave into invalid JSON. Lock order:
-    // this one FIRST, then persisted_devices_mutex_ inside it for the
-    // snapshot, so a save can never rename an older snapshot over a newer
-    // dump. Consequently save_persisted_devices() must never be called while
-    // persisted_devices_mutex_ is held (it would self-deadlock).
-    mutable std::mutex persisted_file_mutex_;
-    std::vector<nlohmann::json> persisted_devices_;
-    bool persisted_devices_loaded_ = false;
-    // Decision 0018: IDs a configuredevice call has chosen and not stored yet,
-    // so two concurrent calls sending one ID cannot both keep it. Guarded by
-    // persisted_devices_mutex_.
-    std::set<std::string> reserved_unique_ids_;
-    // open-astro#2292: configuredevice calls that add an entry and have not
-    // stored it yet, counted against the entry cap. Guarded by
-    // persisted_devices_mutex_.
-    std::size_t pending_new_entries_ = 0;
 
     // #1969: what the bind hook said about a device that did register (a ZWO
     // camera that learned no identity), keyed by type and number, shown as

@@ -275,6 +275,7 @@ set(ALPACAHTTP_SOURCES
     src/http/routes/switch_routes.cpp
     src/http/routes/telescope_routes.cpp
     src/http/device_call.cpp
+    src/http/persisted_config_store.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
@@ -490,7 +491,7 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_image_payload alpacahttp)
     add_test(NAME test_image_payload COMMAND test_image_payload)
 
-    # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
+    # Threaded storm over the router's persisted device list (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,
     # mirroring the per-request server threads. Most valuable under TSan, but
     # a pre-mutex router crashes/corrupts here even without it.
@@ -500,6 +501,14 @@ if(ALPACAHTTP_BUILD_TESTS)
     file(MAKE_DIRECTORY ${TEST_PERSISTED_DIR})
     add_test(NAME test_persisted_devices_concurrency COMMAND test_persisted_devices_concurrency
              WORKING_DIRECTORY ${TEST_PERSISTED_DIR})
+
+    # open-astro#2481: the persisted config store on its own, over a temp
+    # directory (src/http/persisted_config_store.h is an internal seam, hence
+    # src/ on the include path): no Router, no catalog, no shared config file.
+    add_executable(test_persisted_config_store tests/test_persisted_config_store.cpp)
+    target_link_libraries(test_persisted_config_store alpacahttp)
+    target_include_directories(test_persisted_config_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_persisted_config_store COMMAND test_persisted_config_store)
     
     # Socket-level tests for the Server request-read path (read_request), which
     # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).
