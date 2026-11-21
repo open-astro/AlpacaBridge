@@ -204,6 +204,12 @@ public:
         // Cancel + join the background slew/pulse task threads before any
         // member they touch is destroyed. Must run WITHOUT mutex_ held (the
         // slew task tail re-acquires mutex_).
+        {
+            // Under the gate every re-sync starter holds, so a host clock hook that runs now cannot start a body
+            // after this join (SynScan joins under transition_mutex_ the same way).
+            std::lock_guard<std::mutex> resync_gate(clock_resync_gate_mutex_);
+            clock_resync_.cancel_all_and_join();
+        }
         cancel_async_tasks();
         if (connected_) {
             // Qualify the call so it binds statically (we want this class's

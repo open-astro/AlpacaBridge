@@ -113,8 +113,6 @@ private:
     std::chrono::steady_clock::time_point last_mono_{};
 };
 
-/// What the server's timer saw happen to the host clock (open-astro#2419),
-/// handed to TelescopeDriver::on_host_clock_changed().
 /**
  * How a host clock re-sync waits out driver motion (open-astro#2419): it looks
  * again every kHostClockResyncMotionPoll on the driver's task clock, and gives
@@ -125,6 +123,8 @@ private:
 inline constexpr std::chrono::seconds kHostClockResyncMotionPoll{1};
 inline constexpr std::chrono::minutes kHostClockResyncMotionBound{15};
 
+/// What the server's timer saw happen to the host clock (open-astro#2419),
+/// handed to TelescopeDriver::on_host_clock_changed().
 struct HostClockEvent {
     enum class Kind : std::uint8_t {
         Stepped,        // realtime jumped by `step` against monotonic time
