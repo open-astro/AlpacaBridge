@@ -1197,9 +1197,11 @@ private:
                 return;
             }
             if (outcome == Outcome::AlignmentUnknown) {
-                ALPACA_LOG_WARN("Celestron", why + "; the hand controller's alignment query (J) failed (" +
-                                                 alignment_error +
-                                                 "), so the mount clock re-sync leaves the mount clock alone");
+                std::string message = why;
+                message += "; the hand controller's alignment query (J) failed (";
+                message += alignment_error;
+                message += "), so the mount clock re-sync leaves the mount clock alone";
+                ALPACA_LOG_WARN("Celestron", message);
                 return;
             }
             if (outcome == Outcome::ClientWrote) {

@@ -3100,7 +3100,8 @@ private:
     // again.
     void start_clock_resync_locked(std::string why) noexcept {
         try {
-            if (!get_connected() || !util::HostClockTrust::trusted()) return;
+            // Qualified: this also runs from the destructor's set_connected(false), where virtual dispatch is off.
+            if (!ZWOTelescopeDriver::get_connected() || !util::HostClockTrust::trusted()) return;
             clock_resync_slot_.start(
                 [this, why = std::move(why)](util::OperationContext& ctx) { run_clock_resync(ctx, why); });
         } catch (const std::exception& e) {
@@ -3171,7 +3172,7 @@ private:
         std::chrono::system_clock::time_point sent_utc{};
         util::TaskClock::clock::time_point sent_at{};
         while (true) {
-            enum class Outcome { Busy, Moving, Superseded, Sent } outcome = Outcome::Busy;
+            enum class Outcome : std::uint8_t { Busy, Moving, Superseded, Sent } outcome = Outcome::Busy;
             try {
                 std::unique_lock<std::mutex> initiator(initiator_mutex_, std::try_to_lock);
                 if (initiator.owns_lock()) {

@@ -4011,7 +4011,7 @@ private:
                             if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
                             if (!clock_resync_motion_locked()) {
                                 apply_utc_date(std::chrono::system_clock::now(), lock, true);
-                                wrote = true;
+                                wrote = true;  // NOLINT(clang-analyzer-deadcode.DeadStores): `done` reads it
                                 ALPACA_LOG_INFO("SynScan", why + "; the mount clock was set from the host clock");
                                 return;
                             }

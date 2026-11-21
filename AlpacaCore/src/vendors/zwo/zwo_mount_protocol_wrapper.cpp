@@ -897,7 +897,10 @@ public:
     std::string send_command(const std::string& command,
                              bool require_hash_terminator,
                              int timeout_ms_override) {
-        return *exchange(command, nullptr, require_hash_terminator, timeout_ms_override);
+        auto reply = exchange(command, nullptr, require_hash_terminator, timeout_ms_override);
+        // A null `build` always sends, so exchange() returns a reply or throws.
+        if (!reply) throw AlpacaException("ZWO mount sent no reply to " + command, AlpacaError::DriverException);
+        return *reply;
     }
 
     // open-astro#2419 follow-up: `build` runs under the I/O lock just before the write, on a settled line, and
