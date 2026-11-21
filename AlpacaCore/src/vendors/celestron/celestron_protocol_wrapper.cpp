@@ -33,6 +33,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <mutex>
@@ -442,6 +443,12 @@ public:
                              int timeout_ms_override,
                              int binary_bytes = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
+        return send_command_locked(command, require_hash_terminator, timeout_ms_override, binary_bytes);
+    }
+
+    // One exchange. Caller holds mutex_.
+    std::string send_command_locked(const std::string& command, bool require_hash_terminator, int timeout_ms_override,
+                                    int binary_bytes) {
         if (!connected_) {
             throw AlpacaException("Not connected to Celestron mount");
         }
@@ -503,6 +510,11 @@ public:
         return model_id_to_name(id);
     }
 
+    // Aligned is chr(1) on most firmware, ASCII '1' on some. Anything else
+    // (chr(0), ASCII '0', garbage) means NOT aligned; treating ASCII '0'
+    // (0x30) as "non-zero → aligned" would bypass the slew-safety gate.
+    static bool aligned_reply(unsigned char ch) { return ch == 1 || ch == '1'; }
+
     bool is_aligned() {
         // NexStar "J" command: chr(1) if aligned, chr(0) if not
         std::string response = send_command("J", true, 0, 1);
@@ -511,10 +523,7 @@ public:
             return false;
         }
         unsigned char ch = static_cast<unsigned char>(response[0]);
-        // Aligned is chr(1) on most firmware, ASCII '1' on some. Anything else
-        // (chr(0), ASCII '0', garbage) means NOT aligned — treating ASCII '0'
-        // (0x30) as "non-zero → aligned" would bypass the slew-safety gate.
-        bool aligned = (ch == 1) || (ch == '1');
+        bool aligned = aligned_reply(ch);
         {
             char buf[96];
             std::snprintf(buf, sizeof(buf),
@@ -1424,7 +1433,51 @@ public:
         return info;
     }
 
-    void set_time(const TimeInfo& info) {
+    void set_time(const TimeInfo& info) { (void)send_command(time_command(info), true, 0); }
+
+    // The check and the write in one exchange: nothing else reaches the mount between them.
+    bool set_time_if(const std::function<std::optional<TimeInfo>()>& prepare) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::optional<TimeInfo> info = prepare();
+        if (!info) {
+            return false;
+        }
+        (void)send_command_locked(time_command(*info), true, 0, 0);
+        return true;
+    }
+
+    // `J`, the caller's checks and the write in one exchange. A failed, empty or unrecognised `J` reaches `prepare`
+    // unanswered.
+    bool set_time_if_alignment_checked(
+        const std::function<std::optional<TimeInfo>(const CelestronProtocolWrapper::AlignmentAnswer&)>& prepare) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        CelestronProtocolWrapper::AlignmentAnswer answer;
+        try {
+            // Strict, unlike is_aligned(): only 0/1 (binary or ASCII) is an answer; any other byte is unknown.
+            const std::string response = send_command_locked("J", true, 0, 1);
+            const unsigned char ch = response.empty() ? 0xFF : static_cast<unsigned char>(response[0]);
+            if (response.empty()) {
+                answer.error = "empty reply to J";
+            } else if (ch == 0 || ch == 1 || ch == '0' || ch == '1') {
+                answer.answered = true;
+                answer.aligned = aligned_reply(ch);
+            } else {
+                char buf[48];
+                std::snprintf(buf, sizeof(buf), "unexpected reply byte 0x%02X to J", ch);
+                answer.error = buf;
+            }
+        } catch (const std::exception& e) {
+            answer.error = e.what();
+        }
+        const std::optional<TimeInfo> info = prepare(answer);
+        if (!info) {
+            return false;
+        }
+        (void)send_command_locked(time_command(*info), true, 0, 0);
+        return true;
+    }
+
+    static std::string time_command(const TimeInfo& info) {
         // NexStar "H" to set time
         int tz_hours = info.timezone_offset_minutes / 60;
         int tz_byte = tz_hours;
@@ -1443,7 +1496,7 @@ public:
         cmd.push_back(static_cast<char>(info.year));
         cmd.push_back(static_cast<char>(tz_byte));
         cmd.push_back(static_cast<char>(info.dst_enabled ? 1 : 0));
-        (void)send_command(cmd, true, 0);
+        return cmd;
     }
 
 private:
@@ -1919,6 +1972,15 @@ TimeInfo CelestronProtocolWrapper::get_time() {
 
 void CelestronProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+bool CelestronProtocolWrapper::set_time_if(const std::function<std::optional<TimeInfo>()>& prepare) {
+    return pimpl_->set_time_if(prepare);
+}
+
+bool CelestronProtocolWrapper::set_time_if_alignment_checked(
+    const std::function<std::optional<TimeInfo>(const AlignmentAnswer&)>& prepare) {
+    return pimpl_->set_time_if_alignment_checked(prepare);
 }
 
 } // namespace alpacacore::vendor::celestron

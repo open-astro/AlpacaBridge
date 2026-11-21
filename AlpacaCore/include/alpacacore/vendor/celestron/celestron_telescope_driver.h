@@ -73,6 +73,27 @@ void set_slew_body_hook_for_testing(TelescopeDriver& driver, SlewBodyHook hook);
 /// released (a blocking slew still holds its initiator lock); null clears it.
 void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// The steps of a host clock re-sync (open-astro#2419) a test hook sees. In the body, each with no driver lock held:
+/// Decided once it has read the client write generation and before its first time write, Exchange right before each
+/// try at the time write's own exchange (its motion check), Written after the write and before its publish, Finished
+/// as the body returns, whatever it did. Around it: ClientWriting and ClientWritten just before and after a client
+/// UTCDate write's exchange (under transition_mutex_ only), ExitChecked at each pass of set_connected()'s exit with
+/// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its state is published (under
+/// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held).
+enum class ClockResyncStep : std::uint8_t {
+    Decided,
+    Exchange,
+    Written,
+    Finished,
+    ClientWriting,
+    ClientWritten,
+    ExitChecked,
+    PulseSent,
+    Gated,
+};
+/// Runs at each step of a re-sync body; null clears it.
+void set_clock_resync_hook_for_testing(TelescopeDriver& driver, std::function<void(ClockResyncStep)> hook);
+
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(

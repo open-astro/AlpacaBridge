@@ -44,6 +44,15 @@ void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(
 /// connecting).
 void set_initiator_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
+/// Test-only: the host clock re-sync body (open-astro#2419) calls it with no driver state lock held: "started" on
+/// entry, "decided" once it has read the client UTCDate write generation, "exchange" each time it holds the motion
+/// initiators off (initiator_mutex_) and is about to enter its ":SMTI" exchange, "waiting" each time it finds motion
+/// (or a motion command starting) and waits, "sent" after its ":SMTI" was acknowledged and before it publishes, and
+/// "done" on every way out, after the publish. on_host_clock_changed() calls it with "deferred" between a failed
+/// try_lock of the transition lock and setting the pending flag, and set_connected() with "released" once it has
+/// released that lock, before it looks for the flag (call before connecting).
+void set_clock_resync_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
+
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock = util::default_task_clock());
 

@@ -138,6 +138,21 @@ void set_clock_sync_resync_hook_for_testing(TelescopeDriver& driver, std::functi
 /// not from the factories is ignored.
 void set_connected_entry_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam (issue #2419): `hook` runs when on_host_clock_changed() has stored a change as pending and found
+/// transition_mutex_ held, before it returns, with no driver lock held (it may block). Set it while no host clock
+/// change is delivered. A driver not from the factories is ignored.
+void set_host_clock_busy_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam (issue #2419): `hook` runs as the last step of every set_connected(), with transition_mutex_ still held
+/// and no other driver lock (it may block). Set it while no set_connected() runs. A driver not from the factories is
+/// ignored.
+void set_connected_exit_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam (issue #2419): `hook` runs before each attempt of the clock sync's UTC write (:SUT), before that write's
+/// exchange takes the operation lock, with no driver lock held (it may start a GOTO). Set it while no clock-sync body
+/// runs. A driver not from the factories is ignored.
+void set_clock_sync_before_utc_exchange_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Test seam: the kept failure of the clock-sync slot, until its next start.
 std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver);
 

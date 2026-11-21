@@ -13,6 +13,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -200,6 +201,11 @@ public:
 
     TimeInfo get_time_info();
     void set_time_info(const TimeInfo& info);
+    /// open-astro#2419 follow-up: a ":SMTI" whose time and go-ahead are decided inside the exchange. `decide` runs
+    /// under the I/O lock, on a settled line just before the write; it may take the driver's state lock but never
+    /// calls this wrapper. It returns the time to send, or nullopt to send nothing. Returns whether it was sent (and
+    /// acknowledged: a refused write throws like set_time_info()).
+    bool set_time_info_if(const std::function<std::optional<TimeInfo>()>& decide);
 
     double get_sidereal_time_hours();
 
