@@ -635,7 +635,7 @@ private:
             }
             {
                 std::lock_guard<std::mutex> lock(outcome->mutex);
-                outcome->error = error;
+                outcome->error = std::move(error);  // the caller becomes the error's only owner
                 outcome->done = true;
             }
             outcome->done_cv.notify_all();
@@ -646,7 +646,8 @@ private:
             outcome->done_cv.wait(lock, [&outcome] { return outcome->done; });
         }
         if (command_done_hook_) command_done_hook_();
-        if (outcome->error) std::rethrow_exception(outcome->error);
+        // Taken out of the shared outcome, so the body thread never frees the exception the caller is reading.
+        if (auto error = std::move(outcome->error)) std::rethrow_exception(error);
     }
 
     // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under transition_mutex_, so a start never
