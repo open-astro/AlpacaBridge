@@ -4,4 +4,4 @@
 
 ### Fixed (tests)
 
-- **A SynScan pulse case waits on the event it checks** (issue #2431): "SynScan PulseGuide - a second pulse on an axis supersedes the first without a join or a stop (#2263)" now waits for the replacement pulse's end command on the handset log, because IsPulseGuiding turns false when the pulse window closes, before the woken body sends that command. The other three cases of this fix (the Sky-Watcher "#1706" duty-stop case, the iGuider dropped-frame wait and the CGX disconnect pulse case) are listed with the 6.0 flaky-test fixes, which carry them to the 6.0 release.
+- **A SynScan pulse case waits on the event it checks** (issue #2431): "SynScan PulseGuide - a second pulse on an axis supersedes the first without a join or a stop (#2263)" now waits for the replacement pulse's end command on the handset log, because IsPulseGuiding turns false when the pulse window closes, before the woken body sends that command.
