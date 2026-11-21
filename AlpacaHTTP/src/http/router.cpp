@@ -3891,10 +3891,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -4062,10 +4059,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -4695,11 +4689,8 @@ Response Router::handle_log_file_item(const Request& request,
     // A wrong verb is answered before the name is checked, so the answer does not depend on the name (#2484).
     if (request.method() != HttpMethod::GET && request.method() != HttpMethod::DELETE_) {
         response.set_content_type("application/json");
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Unsupported HTTP method for log file endpoint"
-        );
+        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                                 "Unsupported HTTP method for log file endpoint");
         response.set_body(err);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "GET, DELETE");
@@ -4755,11 +4746,8 @@ Response Router::handle_log_file_item(const Request& request,
         return response;
     } catch (const std::exception& e) {
         response.set_content_type("application/json");
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::DRIVER_ERROR,
-            std::string("Failed to delete log file: ") + e.what()
-        );
+        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                 std::string("Failed to delete log file: ") + e.what());
         response.set_body(err);
         return response;
     }
@@ -4789,10 +4777,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -5262,10 +5247,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
 
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
