@@ -3892,7 +3892,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
+            util::ErrorCode::INVALID_OPERATION,
             "Method not allowed. Use POST or PUT."
         );
         response.set_body(alpaca_response);
@@ -4063,7 +4063,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
+            util::ErrorCode::INVALID_OPERATION,
             "Method not allowed. Use POST or PUT."
         );
         response.set_body(alpaca_response);
@@ -4195,7 +4195,7 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
         return *rejected;
     }
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
                                               "Method not allowed. Use POST or PUT."));
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -4415,6 +4415,8 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             "Unsupported HTTP method for log level endpoint"
         );
         response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, POST, PUT");
         return response;
     } catch (const std::exception& e) {
         AlpacaResponse err = make_error_response(
@@ -4443,6 +4445,8 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
             "Unsupported HTTP method for logs endpoint"
         );
         response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -4566,6 +4570,8 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             "Unsupported HTTP method for log files endpoint"
         );
         response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, DELETE");
         return response;
     }
 
@@ -4753,6 +4759,8 @@ Response Router::handle_log_file_item(const Request& request,
         "Unsupported HTTP method for log file endpoint"
     );
     response.set_body(err);
+    response.set_status(405, "Method Not Allowed");
+    response.set_header("Allow", "GET, DELETE");
     return response;
 }
 
@@ -4781,7 +4789,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
+            util::ErrorCode::INVALID_OPERATION,
             "Method not allowed. Use POST or PUT."
         );
         response.set_body(alpaca_response);
@@ -4926,7 +4934,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // Only POST or PUT may set the clock.
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
                                 "Method not allowed. GET reads the server time; POST or PUT sets it.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
@@ -5254,7 +5262,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
+            util::ErrorCode::INVALID_OPERATION,
             "Method not allowed. Use POST or PUT."
         );
         response.set_body(alpaca_response);

@@ -219,7 +219,8 @@ anything unrecognised, which the server treats as an unknown method and the
 guard refuses before the endpoint's own method check runs -- with one
 exception: on the `logfiles` collection the guard sits inside the `DELETE`
 branch, so a cross-origin `PUT /management/v1/logfiles` is answered by the
-method check (200 with `INVALID_OPERATION`) rather than 403, while
+method check (405 with `Allow: GET, DELETE` and `INVALID_OPERATION`)
+rather than 403, while
 `PUT /management/v1/logfiles/<name>` is refused at 403. Neither mutates
 anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
