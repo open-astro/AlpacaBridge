@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/park_slew.h>
@@ -183,8 +184,10 @@ LocalTimeInfo compute_local_timezone_info(std::time_t base_time) {
     localtime_s(&local_tm, &base_time);
     gmtime_s(&utc_tm, &base_time);
 #else
-    local_tm = *std::localtime(&base_time);
-    utc_tm = *std::gmtime(&base_time);
+    // Reentrant forms: the re-sync body (open-astro#2419) runs this off the client's thread, and any other thread of
+    // the process (another driver, the server) may be in localtime/gmtime, whose shared std::tm it would overwrite.
+    localtime_r(&base_time, &local_tm);
+    gmtime_r(&base_time, &utc_tm);
 #endif
     std::time_t local_time = std::mktime(&local_tm);
     std::time_t utc_as_local = std::mktime(&utc_tm);
@@ -278,6 +281,11 @@ public:
         // mutex_ held (the task threads take mutex_). closing_ first: a probe waiting on the hunt's hold ends at once.
         set_closing(true);
         cancel_async_tasks();
+        {
+            // Under transition_mutex_, as every other reaper and starter of the clock slot (open-astro#2419).
+            std::lock_guard<std::mutex> transition(transition_mutex_);
+            clock_resync_.cancel_all_and_join();
+        }
         polled_.stop_and_join();
         if (connected_) {
             try {
@@ -370,6 +378,12 @@ public:
         // only to publish each result, never across an exchange (decision 0016). Lock order: transition_mutex_,
         // initiator_mutex_, the wire turn, the wrapper's lock; mutex_ is a leaf. A sync disconnect that arrives during
         // a sync connect waits here for the rest of the handshake; the async disconnect() the router uses never does.
+        // Declared before the transition lock, so it runs after the lock is released: a host clock change that
+        // on_host_clock_changed() could not act on while this call held the lock is acted on here (open-astro#2419).
+        struct DrainPendingResync {
+            SynScanTelescopeDriver& driver;
+            ~DrainPendingResync() { driver.drain_pending_resync(); }
+        } drain_pending_resync_on_exit{*this};
         std::lock_guard<std::mutex> transition(transition_mutex_);
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
         ClosingScope closing(*this);
@@ -390,6 +404,8 @@ public:
             // and send on the shared wrapper, so joining under the lock would deadlock and leaving them running
             // across the protocol disconnect would race the wrapper.
             cancel_async_tasks();
+            // The host clock re-sync body takes no lock above config_write_mutex_, so it is joined here as well.
+            clock_resync_.cancel_all_and_join();
             polled_.stop_and_join();
             if (relink) {
                 teardown_session();
@@ -413,6 +429,10 @@ public:
             teardown_session();
             return;
         }
+        // A host clock change seen before this connect is covered by the connect's own trust check: a reconnect never
+        // inherits a pending re-sync (open-astro#2419).
+        notify_connect_start_for_testing();
+        resync_pending_.store(false);
         auto& protocol = SynScanProtocolWrapper::instance();
         try {
             connect_session(protocol);
@@ -932,6 +952,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         apply_utc_date(utc, lock, true);
+        ++utc_write_generation_;  // a host clock re-sync decided before this write does not write over it (#2419)
     }
 
 private:
@@ -947,7 +968,7 @@ private:
 #ifdef _WIN32
         localtime_s(&local_tm, &utc_time_t);
 #else
-        local_tm = *std::localtime(&utc_time_t);
+        localtime_r(&utc_time_t, &local_tm);  // reentrant, as in compute_local_timezone_info()
 #endif
 
         TimeInfo info;
@@ -2168,8 +2189,18 @@ private:
             site_elevation_m_ = pending_site_elevation_;
         }
         if (sync_time_on_connect_) {
-            fail_if_link_released(protocol);  // set_time() on a released port would throw a plain DriverException
-            sync_mount_time(lock);
+            // open-astro#2419: the host clock goes into the handset only while it is trusted (NTP-synchronised, or set
+            // or confirmed in this process). A Pi with no RTC boots on the time of its last shutdown, and the handset
+            // aims every GOTO by its clock. The site write above does not depend on it, and the mount clock is still
+            // read below for UTCDate. on_host_clock_changed() writes it once the host clock is trusted.
+            if (without_lock(lock, [] { return util::HostClockTrust::trusted(); })) {
+                fail_if_link_released(protocol);  // set_time() on a released port would throw a plain DriverException
+                sync_mount_time(lock);
+            } else {
+                ALPACA_LOG_WARN("SynScan",
+                                "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
+                                "leaving the mount clock alone until the host clock is set or a client writes UTCDate");
+            }
         }
         ensure_utc_cached(lock);
         try {
@@ -3832,6 +3863,221 @@ private:
         apply_utc_date(std::chrono::system_clock::now(), lock, false);
     }
 
+public:
+    // open-astro#2419: the server's 1 s timer saw the host clock step or become trusted. The timer thread calls this
+    // with no lock held: it does no I/O, joins nothing and never waits for transition_mutex_. It records the change
+    // and starts the re-sync body on the clock slot when it can take transition_mutex_ at once; otherwise the holder
+    // (a connect or a disconnect) starts it as it lets go (drain_pending_resync()). AsyncOperation::start() itself can
+    // wait up to kStaleReapTimeout when earlier bodies are stuck on a blocked link (#2432).
+    void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
+        if (!sync_time_on_connect_) return;  // fixed at construction
+        resync_stepped_.store(event.kind == util::HostClockEvent::Kind::Stepped);
+        resync_step_ms_.store(static_cast<int64_t>(event.step.count()));
+        resync_pending_.store(true);
+        drain_pending_resync();
+    }
+
+private:
+    // Starts the re-sync a host clock change left pending, unless another thread holds transition_mutex_: every
+    // holder calls this after letting go, so a change recorded while the lock was held is never lost. A change seen
+    // while disconnected is dropped. Call with no driver lock held.
+    void drain_pending_resync() noexcept {
+        try {
+            while (resync_pending_.load()) {
+                std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
+                if (!transition.owns_lock()) return;  // its holder drains as it lets go
+                if (!resync_pending_.exchange(false)) return;
+                start_clock_resync_transition_locked();
+            }
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
+        }
+    }
+
+    // Under transition_mutex_ and no other driver lock. A refused start() (a slot still draining, a refused thread,
+    // earlier bodies stuck on a blocked link) is logged; the next host clock change tries again.
+    void start_clock_resync_transition_locked() noexcept {
+        try {
+            if (!connected_.load() || link_lost()) return;
+            const std::string why = resync_stepped_.load()
+                                        ? "Host clock stepped by " + std::to_string(resync_step_ms_.load()) + " ms"
+                                        : std::string("Host clock became trusted");
+            // A client UTCDate write after this point is newer than the re-sync and keeps the mount clock.
+            const uint64_t decided_generation = utc_write_generation_.load();
+            ++clock_resync_starts_;
+            clock_resync_.start([this, why, decided_generation](util::OperationContext& ctx) {
+                run_clock_resync(ctx, why, decided_generation);
+            });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("SynScan", std::string("Could not start the mount clock re-sync: ") + e.what());
+        } catch (...) {
+            ALPACA_LOG_WARN("SynScan", "Could not start the mount clock re-sync");
+        }
+    }
+
+    // Under mutex_: motion the driver started is under way: a GOTO, Park or landing body, a MoveAxis, or a pulse guide
+    // (its stop body included, which sends with no wire turn). slewing_cached_ is not read here: on a V3 handset an
+    // async GOTO body ends at the `R` and nothing clears the flag after the landing, so the handset is asked instead
+    // (clock_resync_handset_slewing_locked()).
+    bool clock_resync_motion_locked() const {
+        if (slew_.running() || slewing_by_driver_state_locked()) return true;
+        const auto now = clock_.now();
+        for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
+            if ((pulse_guiding_active_[axis] && now < pulse_guide_end_time_[axis]) || pulse_ops_[axis].running()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Under the re-sync's wire turn and mutex_ (released for the `L`): the handset's own slewing answer, as the
+    // PulseGuide gate asks it, so a landed V3 GOTO (or a keypad GOTO) is read as it is now. A motion initiator that
+    // claims the axes during the `L` bumps motion_generation_, and the answer is then not written over its slewing
+    // flag. A failed `L` keeps the last flag.
+    bool clock_resync_handset_slewing_locked(std::unique_lock<std::mutex>& lock) const {
+        const uint64_t generation = motion_generation_;
+        return poll_hardware_slewing_locked(lock, false, false, [&] { return motion_generation_ != generation; });
+    }
+
+    // Under the re-sync's wire turn and mutex_ (released for the `J`): true only when the handset answers that it
+    // holds no star alignment. An aligned handset aims by a pointing model built on its clock, so changing the clock
+    // shifts the model by the size of the change: the re-sync leaves it alone (a client UTCDate write or a reconnect
+    // still sets it). A failed `J` leaves it alone too, since an aligned handset cannot be ruled out.
+    bool clock_resync_handset_unaligned_locked(std::unique_lock<std::mutex>& lock, const std::string& why) const {
+        try {
+            if (!without_lock(lock, [] { return SynScanProtocolWrapper::instance().is_aligned(); })) return true;
+            ALPACA_LOG_INFO("SynScan", why +
+                                           "; the hand controller is star aligned, so the re-sync leaves its clock "
+                                           "alone; a client UTCDate write or a reconnect still sets it");
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("SynScan", why +
+                                           "; the hand controller's alignment query failed, so the re-sync leaves "
+                                           "the mount clock alone: " +
+                                           e.what());
+        }
+        return false;
+    }
+
+    // Under config_write_mutex_ and mutex_: the re-sync may still write. False once disconnected, stopped, or a client
+    // UTCDate write landed after the re-sync was decided (that write keeps the mount clock).
+    bool clock_resync_may_write_locked(const util::OperationContext& ctx, uint64_t decided_generation) const {
+        if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None) return false;
+        if (utc_write_generation_.load() != decided_generation) {
+            ALPACA_LOG_INFO("SynScan", "A client UTCDate write after the host clock change keeps the mount clock");
+            return false;
+        }
+        return true;
+    }
+
+    // The re-sync body (open-astro#2419), on the clock slot: writes the host clock into the handset, as the connect
+    // does with syncTimeOnConnect on, once it is trusted. It never writes under driver motion, since the handset aims
+    // a GOTO by its clock: the motion check runs at the write's own wire turn, which every motion command takes
+    // (WireTurn), and asks the handset (`L`) there, so no motion command can go out between the check and the `H`;
+    // in the same turn it asks `J` and leaves a star-aligned handset's clock alone (or one whose `J` fails);
+    // the pulse stop body takes no turn, and is checked as running. A re-sync that finds motion WAITS for it to end,
+    // looking again every util::kHostClockResyncMotionPoll on the task clock and giving up (logged) after
+    // util::kHostClockResyncMotionBound; a disconnect or a newer re-sync ends the wait. It holds no lock while it
+    // waits. config_write_mutex_ is held across the check, the `H` and the publish, so
+    // a client UTCDate or site write is either before it (and a UTCDate write ends it) or after it on the wire. A
+    // failed `H` is logged and leaves the mount clock: it feeds no fault latch (only the poll does).
+    void run_clock_resync(util::OperationContext& ctx, const std::string& why, uint64_t decided_generation) {
+        bool wrote = false;
+        struct Done {
+            SynScanTelescopeDriver& driver;
+            const bool& wrote;
+            ~Done() { driver.notify_clock_resync_done_for_testing(wrote); }
+        } done{*this, wrote};
+        try {
+            if (!util::HostClockTrust::trusted()) {
+                ALPACA_LOG_DEBUG("SynScan", why + "; the host clock is not trusted yet, the mount clock is left alone");
+                return;
+            }
+            const auto give_up_at = clock_.now() + util::kHostClockResyncMotionBound;
+            bool logged_wait = false;
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> config(config_write_mutex_);
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
+                    if (!clock_resync_motion_locked()) {
+                        WireTurn turn(*this, lock);
+                        if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
+                        const bool moving = clock_resync_motion_locked() || clock_resync_handset_slewing_locked(lock);
+                        // The `L` released mutex_, so everything is checked again after it.
+                        // cppcheck-suppress identicalConditionAfterEarlyExit
+                        if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
+                        if (!moving && !clock_resync_motion_locked()) {
+                            if (!clock_resync_handset_unaligned_locked(lock, why)) return;
+                            // The `J` released mutex_ too.
+                            if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
+                            if (!clock_resync_motion_locked()) {
+                                apply_utc_date(std::chrono::system_clock::now(), lock, true);
+                                wrote = true;  // NOLINT(clang-analyzer-deadcode.DeadStores): `done` reads it
+                                ALPACA_LOG_INFO("SynScan", why + "; the mount clock was set from the host clock");
+                                return;
+                            }
+                        }
+                    }
+                }
+                if (!logged_wait) {
+                    ALPACA_LOG_INFO("SynScan", why +
+                                                   "; the mount is moving, the mount clock re-sync waits for the "
+                                                   "motion to end");
+                    logged_wait = true;
+                }
+                if (clock_.now() >= give_up_at) {
+                    ALPACA_LOG_WARN("SynScan", why + "; the mount was still moving after " +
+                                                   std::to_string(util::kHostClockResyncMotionBound.count()) +
+                                                   " minutes, so the re-sync gives up; the next host clock change or "
+                                                   "a client UTCDate write sets the hand controller clock");
+                    return;
+                }
+                if (!ctx.wait_for(util::kHostClockResyncMotionPoll)) return;
+            }
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("SynScan",
+                            why + "; the mount clock re-sync failed, the mount clock is left as it was: " + e.what());
+        } catch (...) {
+            ALPACA_LOG_WARN("SynScan", why + "; the mount clock re-sync failed, the mount clock is left as it was");
+        }
+    }
+
+    void notify_clock_resync_done_for_testing(bool wrote) noexcept {
+        try {
+            std::function<void(bool)> hook;
+            {
+                std::lock_guard<std::mutex> lock(clock_resync_hook_mutex_);
+                hook = clock_resync_done_hook_;
+            }
+            if (hook) hook(wrote);
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a test hook must not escape the body
+        }
+    }
+
+public:
+    void set_clock_resync_done_hook_for_testing(std::function<void(bool)> hook) {
+        std::lock_guard<std::mutex> lock(clock_resync_hook_mutex_);
+        clock_resync_done_hook_ = std::move(hook);
+    }
+
+    int clock_resync_starts_for_testing() const { return clock_resync_starts_.load(); }
+
+    void set_connect_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(clock_resync_hook_mutex_);
+        connect_start_hook_ = std::move(hook);
+    }
+
+private:
+    // Runs the connect-start test hook, under transition_mutex_ and, on a relink, initiator_mutex_ too; never under
+    // mutex_ or a wire turn (see set_connect_start_hook_for_testing()).
+    void notify_connect_start_for_testing() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(clock_resync_hook_mutex_);
+            hook = connect_start_hook_;
+        }
+        if (hook) hook();
+    }
+
     int device_number_;
     ConnectionInfo connection_info_;
     // Set by the auto-detect factory; empty for an explicit port or host.
@@ -3934,7 +4180,18 @@ private:
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
-    bool sync_time_on_connect_;
+    const bool sync_time_on_connect_;
+    // open-astro#2419: the host clock re-sync. A change on_host_clock_changed() has not acted on yet, and what it was.
+    std::atomic<bool> resync_pending_{false};
+    std::atomic<bool> resync_stepped_{false};
+    std::atomic<int64_t> resync_step_ms_{0};
+    // Bumped by each successful client UTCDate write (under config_write_mutex_ and mutex_); a re-sync decided at an
+    // older value writes nothing.
+    std::atomic<uint64_t> utc_write_generation_{0};
+    std::atomic<int> clock_resync_starts_{0};           // test seam, see clock_resync_starts_for_testing()
+    std::mutex clock_resync_hook_mutex_;                // a leaf
+    std::function<void(bool)> clock_resync_done_hook_;  // test seam, see set_clock_resync_done_hook_for_testing()
+    std::function<void()> connect_start_hook_;          // test seam, see set_connect_start_hook_for_testing()
     const SynScanAlignmentSetting alignment_setting_;  // AZ-EQ geometry from the device config (#860)
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guiding_active_{};
@@ -4004,6 +4261,11 @@ private:
         {kStatusPollPeriod, kPositionLinkFailureThreshold, kSnapshotMaxAge, "SynScan mount"},
         [this] { return probe(); },
         [] { SynScanProtocolWrapper::instance().disconnect(); }};
+    // The host clock re-sync body (open-astro#2419). Started under transition_mutex_ (on_host_clock_changed(),
+    // set_connected()'s exit) and reaped under it (disconnect, relink, the destructor), so its reapers never overlap
+    // (docs/failures/0011). Declared after polled_, so it joins first: its body reads the poll's loss latch.
+    util::OperationGeneration clock_resync_generation_;
+    util::AsyncOperation clock_resync_{"SynScan clock re-sync", clock_resync_generation_, clock_};
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
@@ -4051,6 +4313,25 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_wire_turn_wait_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_clock_resync_done_hook_for_testing(TelescopeDriver& driver, std::function<void(bool wrote)> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_clock_resync_done_hook_for_testing(std::move(hook));
+    }
+}
+
+int clock_resync_starts_for_testing(const TelescopeDriver& driver) {
+    if (const auto* synscan = dynamic_cast<const SynScanTelescopeDriver*>(&driver)) {
+        return synscan->clock_resync_starts_for_testing();
+    }
+    return 0;
+}
+
+void set_connect_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_connect_start_hook_for_testing(std::move(hook));
     }
 }
 

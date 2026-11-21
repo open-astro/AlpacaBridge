@@ -104,6 +104,8 @@ public:
 
     std::string get_handset_firmware_version();
     int get_model_id();
+    /// `J`: true when the handset holds a star alignment. Throws on a timeout or on a reply that is neither
+    /// chr(0)/'0' nor chr(1)/'1'.
     bool is_aligned();
     bool is_goto_in_progress();
     void cancel_goto();

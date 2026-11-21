@@ -1075,6 +1075,7 @@ TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount 
 }
 
 TEST_CASE("ZWO connect samples mount UTC when configured sync fails", "[zwo][telescope][unit][utcdate]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect writes the host clock (#2419)
     Rig rig(1000, 0, true);
     rig.set_mount_time(20, 3);
     rig.mount.override_reply(":SMTI", "e1");
@@ -1300,6 +1301,7 @@ TEST_CASE("ZWO UTC refuses a lost link and starts fresh on explicit reconnect",
 
 TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored",
           "[zwo][telescope][utc][issue1522][stress]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     Rig rig(1000, 0, true);
     rig.connect();
     rig.mount.hold_reply(":SMTI");
@@ -1320,6 +1322,7 @@ TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored
 
 TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before GOTO",
           "[zwo][telescope][utc][issue1522]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     const bool sync_time = GENERATE(false, true);
     Rig rig(1000, 0, sync_time);
     const auto before_connect = std::chrono::system_clock::now();

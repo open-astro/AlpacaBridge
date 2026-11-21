@@ -15,6 +15,7 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -232,6 +233,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
         fence_goto();
         goto_slot_.cancel_all_and_join();
+        clock_resync_slot_.cancel_all_and_join();
         teardown_slot_.cancel_all_and_join();
         stop_pulse_drain();
         stop_poll_thread();
@@ -314,7 +316,18 @@ public:
         // slot from two threads and re-clear poll_stop_ under the other
         // side's join -- a permanent wedge (found by the [stress] telescope
         // suite; failure 0011). No body takes this mutex.
+        // open-astro#2419: a host clock change on_host_clock_changed() saw while this call held set_connected_mutex_
+        // starts its re-sync once the call has released the lock (pick_up_pending_clock_resync()); a disconnect, or a
+        // connect that failed, drops it. Declared before lifecycle_lock, so destroyed after it.
+        struct PendingClockResync {
+            ZWOTelescopeDriver& self;
+            ~PendingClockResync() { self.pick_up_pending_clock_resync(true); }
+        } pending_clock_resync{*this};
         std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
+        // A change seen before this call took the lock is this call's to cover: a connect (or the redundant refresh)
+        // reads the trust and writes the host time itself, and a disconnect drops it. So a reconnect never inherits a
+        // change seen during an earlier disconnect whose own pick-up lost the lock to it.
+        clock_resync_pending_.store(false);
 
         if (!connected) {
             connected_.store(false);
@@ -335,6 +348,8 @@ public:
             // stop path, so it also reaps the body (decision 0006 rule 3).
             fence_goto();
             goto_slot_.cancel_all_and_join();
+            // A host clock re-sync sends nothing once connected_ is false; join it before the link closes.
+            clock_resync_slot_.cancel_all_and_join();
 
             // The teardown runs in its own slot, never detached: the destructor
             // (and the next connect) reaps it, so it can never touch a destroyed
@@ -530,11 +545,17 @@ public:
                 site_elevation_m_ = pending_site_elevation_.value();
             }
         };
-        auto sync_mount_time_if_configured = [&]() {
+        // `fresh_connect` is false for the redundant Connected=true refresh, which logs the untrusted skip at DEBUG.
+        auto sync_mount_time_if_configured = [&](bool fresh_connect) {
             if (!sync_time_on_connect_) {
                 return;
             }
 
+            // open-astro#2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set
+            // or confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
+            // shutdown. Read before any driver lock: the probe asks the kernel. The site write below does not
+            // depend on it, and the connect still seeds UTCDate from the mount clock (refresh_mount_time()).
+            const bool host_clock_trusted = util::HostClockTrust::trusted();
             const auto now = std::chrono::system_clock::now();
             {
                 // Snapshot and send under the site write lock, so a concurrent setter's value is not re-sent stale.
@@ -551,6 +572,18 @@ public:
                 if (site.has_value()) {
                     protocol.set_site_info(site.value());
                 }
+            }
+
+            if (!host_clock_trusted) {
+                const std::string text =
+                    "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); leaving the "
+                    "mount clock alone until the host clock is set or a client writes UTCDate";
+                if (fresh_connect) {
+                    ALPACA_LOG_WARN("ZWO", text);
+                } else {
+                    ALPACA_LOG_DEBUG("ZWO", text);
+                }
+                return;
             }
 
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
@@ -580,7 +613,7 @@ public:
             apply_or_load_site_info();
             apply_pending_elevation();
             try {
-                sync_mount_time_if_configured();
+                sync_mount_time_if_configured(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
@@ -600,6 +633,7 @@ public:
             stop_pulse_drain();
             fence_goto();
             goto_slot_.cancel_all_and_join();
+            clock_resync_slot_.cancel_all_and_join();  // a re-sync of the lost session never reaches this one
             reset_session_state_for_connect();
             if (!protocol.connect(connection_info_)) {
                 // The wrapper's reason (a port another device holds, #1202)
@@ -676,7 +710,7 @@ public:
                 }
 
                 try {
-                    sync_mount_time_if_configured();
+                    sync_mount_time_if_configured(true);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
@@ -711,6 +745,31 @@ public:
                 protocol.disconnect();
                 throw;
             }
+        }
+    }
+
+    // open-astro#2419: the server's 1 s timer saw the host clock step or become trusted. With syncTimeOnConnect on,
+    // a connected mount gets the host time again, the way the connect writes it, on the re-sync slot. The timer thread
+    // calls this with no lock held: no I/O, no join, and no wait for set_connected_mutex_ (a connect or a disconnect
+    // holding it leaves a pending flag that its exit, or this hook's second look, acts on). AsyncOperation::start()
+    // itself can wait up to kStaleReapTimeout (2 s) when three replaced bodies are still running, as on a blocked link
+    // (#2432).
+    void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
+        if (!sync_time_on_connect_) return;  // fixed at construction
+        try {
+            std::unique_lock<std::mutex> transition(set_connected_mutex_, std::try_to_lock);
+            if (!transition.owns_lock()) {
+                if (clock_resync_hook_) clock_resync_hook_("deferred");  // test seam: between the try_lock and the flag
+                clock_resync_pending_.store(true);
+                // The holder may have looked for the flag and released the lock before the store: look again here,
+                // so the change is never lost (and, while disconnected, is dropped now, not left for a reconnect).
+                pick_up_pending_clock_resync(false);
+                return;
+            }
+            start_clock_resync_locked(event.kind == util::HostClockEvent::Kind::Stepped
+                                          ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
+                                          : std::string("Host clock became trusted"));
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
 
@@ -1008,17 +1067,19 @@ public:
         // this HA-based approach correctly.
         double longitude = 0.0;
         bool has_longitude = false;
+        std::chrono::system_clock::time_point sidereal_at;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (site_coords_valid_) {
                 longitude = site_longitude_deg_;
                 has_longitude = true;
             }
+            sidereal_at = sidereal_instant_locked();
         }
 
         if (has_longitude) {
             const double current_ra = get_right_ascension();
-            const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+            const double lst_hours = util::local_sidereal_hours(sidereal_at, longitude);
             const double ha = util::wrap_hour_angle(lst_hours - current_ra);
             // HA >= 0 → target west of meridian → pierEast (0)
             // HA <  0 → target east of meridian → pierWest (1)
@@ -1033,19 +1094,21 @@ public:
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         double longitude = 0.0;
         bool has_longitude = false;
+        std::chrono::system_clock::time_point sidereal_at;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (site_coords_valid_) {
                 longitude = site_longitude_deg_;
                 has_longitude = true;
             }
+            sidereal_at = sidereal_instant_locked();
         }
         check_connected();
         if (!has_longitude) {
             return get_side_of_pier();
         }
 
-        const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+        const double lst_hours = util::local_sidereal_hours(sidereal_at, longitude);
         const double hour_angle = util::wrap_hour_angle(lst_hours - ra);
 
         // German equatorial: target west of meridian (hour angle >= 0) -> pier side East.
@@ -1086,17 +1149,29 @@ public:
         check_connected();
         double longitude = 0.0;
         bool has_longitude = false;
+        std::chrono::system_clock::time_point sidereal_at;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (site_coords_valid_) {
                 longitude = site_longitude_deg_;
                 has_longitude = true;
             }
+            sidereal_at = sidereal_instant_locked();
         }
         if (!has_longitude) {
             throw AlpacaException("SiteLongitude is not available for SiderealTime", AlpacaError::DriverException);
         }
-        return util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+        return util::local_sidereal_hours(sidereal_at, longitude);
+    }
+
+    // Under mutex_: the instant SiderealTime, SideOfPier and DestinationSideOfPier take local sidereal time at. The
+    // mount's clock (the UTCDate anchor: a time write, or ":GMTI" at connect and every 30 s in the poll) while it is
+    // known, so they agree with UTCDate and with the RA the mount reports by its own clock; the host clock only
+    // before it is. open-astro#2419: an untrusted connect or GOTO no longer writes the host clock into the mount, so
+    // the two can differ by the host's stale boot time.
+    std::chrono::system_clock::time_point sidereal_instant_locked() const {
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        return std::chrono::system_clock::now();
     }
 
     double get_site_elevation() const override {
@@ -1504,6 +1579,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             session = utc_session_;
+            ++utc_write_generation_;  // a host clock re-sync decided before this write sends and publishes nothing
         }
         // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
         const int offset_minutes = 0;
@@ -2465,6 +2541,10 @@ private:
     // call goes through the send gate, and the site and UTC caches are written only while the body holds its claim.
     bool synchronize_mount_time_and_site_for_goto(util::OperationContext& ctx, std::uint64_t claim) {
         auto& protocol = protocol_;
+        // open-astro#2419: the host clock goes into the mount only once it is trusted; untrusted, the GOTO keeps the
+        // mount clock (the connect's, or a client's UTCDate) and still sends the site. Read before mutex_: the probe
+        // asks the kernel.
+        const bool host_clock_trusted = util::HostClockTrust::trusted();
         std::unique_lock<std::mutex> lock(mutex_);
 
         std::optional<SiteInfo> site_to_write;
@@ -2505,6 +2585,7 @@ private:
             }
         }
 
+        if (!host_clock_trusted) return true;
         const auto now = std::chrono::system_clock::now();
         const int offset_minutes = 0;
         const TimeInfo info = from_utc_time_point(now, offset_minutes);
@@ -2579,6 +2660,7 @@ private:
         // link and so before any newer connect. The connect or teardown that follows clears the pulse queue.
         pulse_slot_.cancel();
         goto_slot_.cancel();
+        clock_resync_slot_.cancel();
         protocol_.cancel_pending_io();
         lock.unlock();
         // A GOTO body waiting at the send gate re-reads connected_ and leaves.
@@ -3012,7 +3094,143 @@ private:
         goto_send_cv_.wait(lock, [this] { return goto_sends_in_flight_ == 0; });
     }
 
+    // Under set_connected_mutex_ and no other driver lock: starts a host clock re-sync for a connected mount with a
+    // trusted host clock (syncTimeOnConnect is on: on_host_clock_changed() is the only way here). A refused start() (a
+    // slot draining, a refused thread, stale bodies on a blocked link) is logged; the next host clock change tries
+    // again.
+    void start_clock_resync_locked(std::string why) noexcept {
+        try {
+            // Qualified: this also runs from the destructor's set_connected(false), where virtual dispatch is off.
+            if (!ZWOTelescopeDriver::get_connected() || !util::HostClockTrust::trusted()) return;
+            clock_resync_slot_.start(
+                [this, why = std::move(why)](util::OperationContext& ctx) { run_clock_resync(ctx, why); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", std::string("Could not start the mount clock re-sync: ") + e.what());
+        } catch (...) {
+            ALPACA_LOG_WARN("ZWO", "Could not start the mount clock re-sync");
+        }
+    }
+
+    // With no driver lock held: starts the re-sync for a change on_host_clock_changed() could not act on (#2419),
+    // from set_connected()'s exit once it released set_connected_mutex_, and from the hook right after it set the
+    // flag. Whoever touches the lock last sees the flag: a failed try_lock means a newer holder, whose own exit looks
+    // again. Never waits for the lock. `from_set_connected` only feeds the test seam.
+    void pick_up_pending_clock_resync(bool from_set_connected) noexcept {
+        try {
+            if (from_set_connected && clock_resync_hook_) clock_resync_hook_("released");  // test seam, no lock held
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a test seam must not escape a destructor
+        }
+        if (!clock_resync_pending_.load()) return;
+        std::unique_lock<std::mutex> transition(set_connected_mutex_, std::try_to_lock);
+        if (!transition.owns_lock()) return;
+        if (!clock_resync_pending_.exchange(false)) return;
+        start_clock_resync_locked("Host clock changed during a connect or disconnect");
+    }
+
+    // Under mutex_: motion the driver tracks -- a jog, a GOTO it started (until a status read shows it stopped or it
+    // failed), a Park, a FindHome or GOTO force window, a pulse (queued or running, plus its hold), or a polled
+    // ":GU" that says the mount slews (the same view as Slewing, which covers a FindHome past its force window).
+    bool driver_motion_active_locked() const {
+        const auto now = clock_.now();
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || own_goto_in_flight_locked() || park_command_active_ ||
+            slew_force_until_ > now || pulse_guiding_end_ > now)
+            return true;
+        const auto reading = snapshot_.read();
+        return reading && reading->value.status && !reading->value.parked.value_or(false) &&
+               !reading->value.status->stop_or_tracking;
+    }
+
+    // open-astro#2419: the re-sync body. It writes the host time into the mount the way the connect does (":SMTI",
+    // UTC offset 0), and only when, inside that one exchange, the link is still this session's, no client UTCDate
+    // write landed since the body started, and no driver motion is under way. The motion check runs under the I/O
+    // lock (set_time_info_if()) with initiator_mutex_ held: a pulse marks itself before its ":Mg" waits for the I/O
+    // lock, and Park, FindHome, MoveAxis, AbortSlew and SlewAsync hold initiator_mutex_ from before their command
+    // until they publish their motion, so no motion starts between the check and the write. Motion is waited out:
+    // the body looks again every util::kHostClockResyncMotionPoll on the task clock, cancellable (a disconnect, a newer
+    // start, a link loss), for at most util::kHostClockResyncMotionBound; past that it gives up and the next host clock
+    // change tries again.
+    // A failed write is logged and leaves the mount clock and the UTCDate anchor as they were; it latches nothing.
+    void run_clock_resync(util::OperationContext& ctx, const std::string& why) {
+        struct Done {  // test seam: "done" on every way out, after the publish
+            const std::function<void(std::string_view)>& hook;
+            ~Done() {
+                if (hook) hook("done");
+            }
+        } done{clock_resync_hook_};
+        if (clock_resync_hook_) clock_resync_hook_("started");
+        std::uint64_t generation = 0;
+        std::uint64_t session = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;
+            generation = utc_write_generation_;
+            session = utc_session_;
+        }
+        if (clock_resync_hook_) clock_resync_hook_("decided");  // test seam: no driver lock held
+        const auto give_up_at = clock_.now() + util::kHostClockResyncMotionBound;
+        bool wait_logged = false;
+        std::chrono::system_clock::time_point sent_utc{};
+        util::TaskClock::clock::time_point sent_at{};
+        while (true) {
+            enum class Outcome : std::uint8_t { Busy, Moving, Superseded, Sent } outcome = Outcome::Busy;
+            try {
+                std::unique_lock<std::mutex> initiator(initiator_mutex_, std::try_to_lock);
+                if (initiator.owns_lock()) {
+                    // Test seam: past every check made before the exchange; the motion check below runs inside it.
+                    if (clock_resync_hook_) clock_resync_hook_("exchange");
+                    outcome = Outcome::Superseded;
+                    protocol_.set_time_info_if([&]() -> std::optional<TimeInfo> {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (!connected_.load() || ctx.stop_reason() != util::StopReason::None ||
+                            session != utc_session_ || generation != utc_write_generation_) {
+                            outcome = Outcome::Superseded;
+                            return std::nullopt;
+                        }
+                        if (driver_motion_active_locked()) {
+                            outcome = Outcome::Moving;
+                            return std::nullopt;
+                        }
+                        outcome = Outcome::Sent;
+                        sent_utc = std::chrono::system_clock::now();
+                        sent_at = clock_.now();
+                        return from_utc_time_point(sent_utc, 0);
+                    });
+                }
+            } catch (const std::exception& e) {
+                if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;  // a disconnect, quiet
+                ALPACA_LOG_WARN("ZWO", why + "; the mount clock re-sync failed, leaving the mount clock as it was: " +
+                                           std::string(e.what()));
+                return;
+            }
+            if (outcome == Outcome::Sent) break;
+            if (outcome == Outcome::Superseded) return;
+            if (clock_resync_hook_) clock_resync_hook_("waiting");  // test seam: no driver lock held
+            if (!wait_logged) {
+                ALPACA_LOG_INFO("ZWO", why + "; the mount is moving, so the mount clock re-sync waits for it to stop");
+                wait_logged = true;
+            }
+            if (clock_.now() >= give_up_at) {
+                ALPACA_LOG_WARN("ZWO", why +
+                                           "; the mount kept moving, so the mount clock was not re-synced (the next "
+                                           "host clock change tries again)");
+                return;
+            }
+            if (!ctx.wait_for(util::kHostClockResyncMotionPoll)) return;
+        }
+        if (clock_resync_hook_) clock_resync_hook_("sent");  // test seam: no driver lock held
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A client UTCDate write after ours is later on the wire, so it keeps the anchor.
+        if (!connected_.load() || session != utc_session_ || generation != utc_write_generation_) return;
+        utc_offset_.set(sent_utc, sent_at);
+        timezone_offset_minutes_ = 0;
+        timezone_valid_ = true;
+        ALPACA_LOG_INFO("ZWO", why + "; the mount clock is re-synced from the host clock");
+    }
+
 public:
+    void set_clock_resync_hook_for_testing(std::function<void(std::string_view)> hook) {
+        clock_resync_hook_ = std::move(hook);
+    }
     void set_goto_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         goto_slot_.set_spawn_for_testing(std::move(spawn));
     }
@@ -3097,6 +3315,9 @@ private:
 
     mutable util::UtcOffset utc_offset_;
     mutable std::uint64_t utc_session_ = 0;
+    // open-astro#2419: bumped under mutex_ by every client UTCDate write, so a host clock re-sync decided before it
+    // neither sends nor publishes over it (run_clock_resync()).
+    std::uint64_t utc_write_generation_ = 0;
 
     mutable int timezone_offset_minutes_;
     mutable bool timezone_valid_;
@@ -3165,18 +3386,25 @@ private:
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
     // Lock order: first, then pulse_start_mutex_, target_write_mutex_, pulse_mutex_, the protocol mutex and mutex_
     // last. Not a state lock: no getter takes it, so it may be held across wire I/O. Never taken by a body,
-    // fence_goto(), a getter or set_connected().
+    // fence_goto(), a getter or set_connected(), except the host clock re-sync body, which only try_locks it
+    // (run_clock_resync()) and so never waits for it.
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
     util::OperationGeneration goto_generation_;
     util::OperationGeneration pulse_generation_;
     util::OperationGeneration teardown_generation_;
+    util::OperationGeneration clock_resync_generation_;
+    // open-astro#2419: a host clock change on_host_clock_changed() saw while set_connected_mutex_ was held.
+    std::atomic<bool> clock_resync_pending_{false};
+    std::function<void(std::string_view)> clock_resync_hook_;  // test seam; set before connecting
     // Declared last, so they are destroyed (and join) before any member their bodies touch; the teardown slot
     // first, because its body joins the pulse slot.
     mutable util::AsyncOperation goto_slot_{"ZWO SlewToTargetAsync", goto_generation_, clock_};
     mutable util::AsyncOperation pulse_slot_{"ZWO PulseGuide", pulse_generation_, clock_};
     util::AsyncOperation teardown_slot_{"ZWO disconnect", teardown_generation_, clock_};
+    // open-astro#2419: the host clock re-sync (run_clock_resync()); started and joined under set_connected_mutex_.
+    mutable util::AsyncOperation clock_resync_slot_{"ZWO clock re-sync", clock_resync_generation_, clock_};
 };
 
 std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {
@@ -3205,6 +3433,12 @@ void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(
 void set_initiator_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook) {
     if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
         zwo->set_initiator_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_clock_resync_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_clock_resync_hook_for_testing(std::move(hook));
     }
 }
 

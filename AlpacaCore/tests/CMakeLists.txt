@@ -95,6 +95,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_mount_network_isolation.cpp)
     list(APPEND TEST_SOURCES test_zwo_mount_identity.cpp)
     list(APPEND TEST_SOURCES test_zwo_mount_identity_claim.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_clock_trust.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
@@ -124,6 +125,7 @@ if(TARGET alpacacore_qhy)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
+    list(APPEND TEST_SOURCES test_synscan_clock_trust.cpp)
     # Telescope lifecycle storm over the FakeMountServer seam (audit 3.0.1
     # follow-up): async slew / pulse-guide threads racing disconnect and
     # destruction; run under the sanitizers-tsan CI job (issue #101).
@@ -200,6 +202,7 @@ if(TARGET alpacacore_ioptron)
 endif()
 if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope.cpp)
+    list(APPEND TEST_SOURCES test_onstep_clock_trust.cpp)
     # Same telescope [stress] coverage as SynScan/iOptron (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
@@ -266,6 +269,7 @@ if(TARGET alpacacore_celestron)
          test_celestron_cgx_link_loss.cpp
          test_celestron_cgx_getter_wait.cpp
          test_celestron_cgx_concurrency_stress.cpp)
+    list(APPEND TEST_SOURCES test_celestron_clock_trust.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)

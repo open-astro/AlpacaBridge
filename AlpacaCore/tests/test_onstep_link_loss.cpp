@@ -37,6 +37,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -1470,5 +1471,68 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps
     CHECK(replugged.received(":Qs#"));
     CHECK(replugged.received(":Qe#"));
     CHECK(replugged.received(":Qw#"));
+    driver->set_connected(false);
+}
+
+// open-astro#2419: a relink whose loss the pre-lock link check missed (the adapter re-enumerated while
+// Connected=true waited for the operation lock) skips set_connected()'s drain. The host clock re-sync the old
+// session left waiting out a slew must end with that session, not write into the new one: the relink's own
+// connect is the only time write.
+TEST_CASE("OnStep host clock - a relink the pre-lock link check missed ends the old session's re-sync",
+          "[onstep][serial][clock]") {
+    WrapperReset reset;
+    LossHookReset hook_reset;
+    alpacacore::test::HostClockTrustGuard trusted(true);
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope_with_site(
+        0, serial_info(link), std::nullopt, std::nullopt, std::nullopt, true, clock);
+    pause_poll(*driver);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto time_writes = [&] {
+        const auto all = mount.commands();
+        return std::count_if(all.begin(), all.end(), [](const std::string& c) { return c.rfind(":SL", 0) == 0; });
+    };
+    REQUIRE(time_writes() == 1);  // the trusted connect's own
+
+    // The mount slews, and a host clock step arrives: the re-sync waits out the motion on the task clock.
+    mount.set_reply(":GU#", "npHEo190#");
+    REQUIRE(tick(*driver));
+    REQUIRE(driver->get_slewing());
+    driver->on_host_clock_changed({alpacacore::util::HostClockEvent::Kind::Stepped, std::chrono::milliseconds(5000)});
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(5000)));
+    REQUIRE(alpacacore::vendor::onstep::clock_resync_running_for_testing(*driver));
+    mount.set_reply(":GU#", "nNpHEo190#");  // the slew has ended by the relink's seed
+
+    // Connected=true finds the link alive before the lock and lost under it; the node is back by the reopen.
+    std::atomic<bool> removed{false};
+    std::atomic<bool> repointed{false};
+    alpacacore::vendor::onstep::set_connect_before_state_lock_hook_for_testing(*driver, [&] {
+        if (!removed.exchange(true)) {
+            link.remove();
+        }
+    });
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeClose && !repointed.exchange(true)) {
+            link.repoint(mount.slave_path());
+        }
+    });
+    driver->set_connected(true);
+    alpacacore::vendor::onstep::set_connect_before_state_lock_hook_for_testing(*driver, nullptr);
+    REQUIRE(repointed.load());  // the relink branch ran
+    REQUIRE(driver->get_connected());
+    REQUIRE(time_writes() == 2);  // the relink's own trusted write
+
+    // A stale body would wake on this step and write the host clock into the new session.
+    clock.advance(std::chrono::seconds(1));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (alpacacore::vendor::onstep::clock_resync_running_for_testing(*driver) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    CHECK_FALSE(alpacacore::vendor::onstep::clock_resync_running_for_testing(*driver));
+    CHECK(time_writes() == 2);
     driver->set_connected(false);
 }

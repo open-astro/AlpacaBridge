@@ -562,6 +562,7 @@ TEST_CASE("ZWO GOTO stays incomplete when Connected refresh polls during setup",
 }
 
 TEST_CASE("ZWO blocking slew cannot return success during a delayed setup retry", "[zwo][telescope][goto-setup]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     const bool use_target = GENERATE(false, true);
     CAPTURE(use_target);
     // ":SMTI" stays held across real-time rendezvous below. Past a 250 ms reply timeout ":Sr", ":Sd" and ":MS" time
@@ -957,6 +958,7 @@ TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#7
 // before or after Connected=false returns.
 TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no target (#720)",
           "[zwo][telescope][async][slewfailure]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the connect and the GOTO write the host clock (#2419)
     Rig rig;
     auto& mount = rig.mount;
     auto& driver = rig.driver;

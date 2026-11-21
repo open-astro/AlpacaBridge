@@ -629,13 +629,16 @@ public:
         // "J" returns chr(1)/chr(0) (ASCII '1'/'0' on some firmware) & "#".
         std::string response = send_command("J", true, 0, 1);
         if (response.empty()) {
-            return false;
+            throw AlpacaException("Empty reply to SynScan alignment query", AlpacaError::DriverException);
         }
-        unsigned char ch = static_cast<unsigned char>(response[0]);
-        // Aligned is chr(1) or ASCII '1'. Anything else (chr(0), ASCII '0',
-        // garbage) means NOT aligned — treating ASCII '0' (0x30) as
-        // "non-zero → aligned" would bypass the slew-safety gate.
-        return (ch == 1) || (ch == '1');
+        const unsigned char ch = static_cast<unsigned char>(response[0]);
+        // Aligned is chr(1) or ASCII '1', not aligned chr(0) or ASCII '0'.
+        // Any other byte is no answer, not "not aligned": the host clock
+        // re-sync only writes the clock once the handset says it is NOT
+        // aligned (open-astro#2419), so a garbled reply must not read as that.
+        if (ch == 1 || ch == '1') return true;
+        if (ch == 0 || ch == '0') return false;
+        throw AlpacaException("Invalid reply to SynScan alignment query", AlpacaError::DriverException);
     }
 
     bool is_goto_in_progress() {

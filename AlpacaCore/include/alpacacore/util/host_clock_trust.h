@@ -113,6 +113,16 @@ private:
     std::chrono::steady_clock::time_point last_mono_{};
 };
 
+/**
+ * How a host clock re-sync waits out driver motion (open-astro#2419): it looks
+ * again every kHostClockResyncMotionPoll on the driver's task clock, and gives
+ * up after kHostClockResyncMotionBound (a MoveAxis held that long, a stuck
+ * slewing frame), leaving the mount clock for the next host clock change or a
+ * client UTCDate write. One pair for every mount that re-syncs, so they agree.
+ */
+inline constexpr std::chrono::seconds kHostClockResyncMotionPoll{1};
+inline constexpr std::chrono::minutes kHostClockResyncMotionBound{15};
+
 /// What the server's timer saw happen to the host clock (open-astro#2419),
 /// handed to TelescopeDriver::on_host_clock_changed().
 struct HostClockEvent {
