@@ -394,7 +394,7 @@ TEST_CASE("ZWO motion owner - PulseGuide between a slew's claim and its own stat
 
 // #2263: a slew, park or home whose call throws between its claim and its own state gives the claim up, so the next
 // PulseGuide is accepted.
-// Falsified by: zwo_telescope_driver.cpp PendingSlewCommand ending only when its call returns (not on a throw), so
+// Falsified by: zwo_telescope_driver.cpp PendingCommand ending only when its call returns (not on a throw), so
 // every later PulseGuide is refused.
 TEST_CASE("ZWO motion owner - a slew that throws after its claim leaves PulseGuide accepted (#2263)",
           "[zwo][telescope][unit][clock][motion-owner]") {
@@ -446,6 +446,112 @@ TEST_CASE("ZWO motion owner - PulseGuide is accepted once the slew, park or home
     CHECK(rig.driver->get_is_pulse_guiding());
     // The stop's tracking restore waits on the clock for the Dec pulse; the Rig advances until it returns.
     if (exit == "jog") rig.call([&] { rig.driver->move_axis(0, 0.0); });
+}
+
+// #2459: a jog that lands between a SlewAsync's claim and its initiator_mutex_ takes an axis from the slew claim. The
+// pulse on the other axis is still refused there, and for the whole flight of the GOTO that call then starts (which
+// holds no slew claim at all): the refusal reads the driver's own record, not only the claim.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): dropping the slew_commands_pending_ term from the refusal (the
+// gap leg) or the own_goto_in_flight_locked() term (the flight leg).
+TEST_CASE("ZWO motion owner - a jog in a GOTO's claim gap leaves PulseGuide refused while that GOTO runs (#2459)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const int jog_axis = GENERATE(0, 1);
+    CAPTURE(jog_axis);
+    const int direction = jog_axis == 0 ? 0 : 2;  // North during an RA jog, East during a Dec one
+    Rig rig("AM5");
+    bool ran = false;  // the hook runs on the slew's own thread, after its claim
+    bool jogged = false;
+    int code = 0;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name != "SlewToTargetAsync" || ran) return;
+        ran = true;
+        rig.driver->move_axis(jog_axis, 1.0);  // initiator_mutex_ is free: the slew takes it after this hook
+        jogged = true;
+        try {
+            rig.driver->pulse_guide(direction, 1000);
+        } catch (const AlpacaException& ex) {
+            code = ex.error_code();
+        }
+    });
+    rig.connect();
+    rig.mount.set_slew_duration(30s);
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);
+    REQUIRE(ran);
+    REQUIRE(jogged);
+    CHECK(code == AlpacaError::InvalidOperation);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();
+    REQUIRE(rig.driver->get_slewing());
+    const auto before = rig.mount.commands().size();
+    require_alpaca_error([&] { rig.driver->pulse_guide(direction, 1000); }, AlpacaError::InvalidOperation);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    for (int i = 0; i < 8; ++i) rig.advance(250ms);
+    CHECK(rig.driver->get_slewing());
+    CHECK(rig.mount.count(":Mg") == 0);
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = before; i < sent.size(); ++i) {
+        INFO("after the refusal: " << sent[i]);
+        CHECK(sent[i].rfind(":Q", 0) != 0);
+    }
+    rig.driver->abort_slew();
+}
+
+// #2459, #2467 (maintainer, 2026-11-21: "A pulse on the axis that is jogging stays refused"): a PulseGuide on the axis
+// a MoveAxis is driving is refused with InvalidOperation and changes nothing: no ":Mg", no stop, IsPulseGuiding false,
+// the jog still runs. It is refused from the jog's claim, before its ":Rv" and jog command (the "MoveAxis" seam runs
+// the pulse there, on the jog's own thread), not only once the jog's flag is set. A pulse on the other axis is still
+// accepted, and the refusal ends with the jog.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): dropping the jog refusal (every leg), or refusing on
+// manual_axis_slewing_ alone (the claim-gap leg).
+TEST_CASE("ZWO motion owner - PulseGuide on the axis a MoveAxis is driving is refused and changes nothing (#2459)",
+          "[zwo][telescope][unit][clock][motion-owner]") {
+    const int axis = GENERATE(0, 1);
+    const std::string when = GENERATE(as<std::string>{}, "jogging", "claim gap");
+    CAPTURE(axis, when);
+    const int direction = axis == 0 ? 2 : 0;        // East on RA, North on Dec
+    const int other_direction = axis == 0 ? 0 : 2;  // North on Dec, East on RA
+    const std::string guide = axis == 0 ? ":Mge" : ":Mgn";
+    const std::string other_guide = axis == 0 ? ":Mgn" : ":Mge";
+    Rig rig("AM5");
+    bool ran = false;  // the hook runs on the jog's own thread, after its claim
+    int code = 0;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name != "MoveAxis" || when != "claim gap" || ran) return;
+        ran = true;
+        try {
+            rig.driver->pulse_guide(direction, 1000);
+        } catch (const AlpacaException& ex) {
+            code = ex.error_code();
+        }
+    });
+    rig.connect();
+    rig.advance(250ms);
+    rig.driver->move_axis(axis, 1.0);
+    if (when == "jogging") {
+        try {
+            rig.driver->pulse_guide(direction, 1000);
+        } catch (const AlpacaException& ex) {
+            code = ex.error_code();
+        }
+    } else {
+        REQUIRE(ran);
+    }
+    CHECK(code == AlpacaError::InvalidOperation);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    for (int i = 0; i < 8; ++i) rig.advance(250ms);
+    CHECK(rig.mount.count(":Mg") == 0);
+    CHECK(rig.mount.count(":Q") == 0);  // nothing stopped the jog
+    CHECK(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(other_direction, 1000));  // the other axis is not refused
+    CHECK(rig.mount.wait_for_count(other_guide, 1, kReal));
+    CHECK(rig.mount.count(guide) == 0);
+    // The stop's tracking restore waits on the clock for the other axis's pulse; the Rig advances until it returns.
+    auto& stop = rig.call([&] { rig.driver->move_axis(axis, 0.0); });
+    rig.advance_until([&] { return ready(stop, 1ms); }, 250ms, 5s);
+    REQUIRE(ready(stop, kReal));
+    stop.get();
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(direction, 1000));  // the refusal ended with the jog
+    CHECK(rig.mount.wait_for_count(guide, 1, kReal));
 }
 
 TEST_CASE("ZWO telescope clock - Tracking on waits for an in-flight pulse that ends within 1500 ms",
@@ -1286,7 +1392,8 @@ TEST_CASE("ZWO telescope clock - a pulse step is one clock wait, so one advance 
 
 // PIN: an accepted PulseGuide is never dropped because a command superseded the pulse before it. Pulse, a MoveAxis
 // on the same axis mid-step, pulse again: the second pulse still reaches the mount. (Before #2263 the superseding
-// command was a slew; a PulseGuide during a slew is now refused.)
+// command was a slew; a PulseGuide during a slew is now refused. Since #2459 a pulse on the jogging axis is refused
+// too, so the jog is stopped before the second pulse.)
 // Falsified by: pulse_guide() leaving a pulse queued behind a superseded drain body that never sends it.
 TEST_CASE("ZWO telescope clock - a pulse queued after a MoveAxis superseded the previous pulse is still sent (PIN)",
           "[zwo][telescope][unit][clock][operation-slot][motion-owner]") {
@@ -1296,11 +1403,11 @@ TEST_CASE("ZWO telescope clock - a pulse queued after a MoveAxis superseded the 
     REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
     rig.driver->move_axis(1, 1.0);                     // mid-step: supersedes the Dec pulse and clears its queue
     CHECK(rig.mount.wait_for_count(":Mn", 1, kReal));  // the jog reached the mount
+    rig.driver->move_axis(1, 0.0);
     rig.driver->pulse_guide(1, 500);
     // Virtual time only: the superseded body wakes and the new pulse is drained.
     rig.advance_until([&] { return rig.mount.count(":Mg") >= 2; }, 100ms, 10s);
     CHECK(rig.mount.wait_for_count(":Mg", 2, kReal));
-    rig.driver->move_axis(1, 0.0);
 }
 
 // Round 2 finding 3: the flag that says a pulse drain runs is cleared on disconnect and on connect, so a pulse after
