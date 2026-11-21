@@ -15,6 +15,7 @@
 
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <termios.h>
@@ -33,6 +34,7 @@
 #include "fake_pty_write.h"
 #include "stalled_outq_probe.h"
 
+using alpacacore::util::is_serial_loss_errno;
 using alpacacore::util::is_serial_port_in_use;
 using alpacacore::util::make_raw_8n1;
 using alpacacore::util::SerialClaimKind;
@@ -463,4 +465,193 @@ TEST_CASE("Serial link - tty_drain_bounded with a zero timeout polls once and fl
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(100));
     CHECK(alpacacore::test::stalled_outq_probe_calls().load() == 1);
     ::close(fd);
+}
+
+// ---- The lost-link verdict (issue #2262, decision 0009 point 2a) ----
+// Every case below drives a real pty. They fail to compile on the code before #2262: SerialLink had no verdict and
+// each wrapper kept its own latch, text and errno classifier, which disagreed on EBADF.
+
+namespace {
+// A link whose next write fails EBADF while its fd number stays valid (fake_pty_write.h make_fd_unwritable()).
+void break_writes(SerialLink& link) { REQUIRE(alpacacore::test::make_fd_unwritable(link.fd())); }
+}  // namespace
+
+// Falsified by: serial_link.h is_serial_loss_errno() dropping any one of EIO, ENXIO, ENODEV or EBADF, or adding
+// ETIMEDOUT, EAGAIN or EINTR.
+TEST_CASE("Serial link verdict - the one classifier counts EIO, ENXIO, ENODEV and EBADF and nothing else",
+          "[serial][serial_link][link-loss][issue2262]") {
+    CHECK(is_serial_loss_errno(EIO));
+    CHECK(is_serial_loss_errno(ENXIO));
+    CHECK(is_serial_loss_errno(ENODEV));
+    CHECK(is_serial_loss_errno(EBADF));
+    CHECK_FALSE(is_serial_loss_errno(ETIMEDOUT));
+    CHECK_FALSE(is_serial_loss_errno(EAGAIN));
+    CHECK_FALSE(is_serial_loss_errno(EINTR));
+    CHECK_FALSE(is_serial_loss_errno(0));
+    // read_until()'s hangup test is the same rule, not a copy.
+    for (const int e : {EIO, ENXIO, ENODEV, EBADF, ETIMEDOUT, EAGAIN, EINTR}) {
+        CHECK(alpacacore::util::detail::tty_hangup_errno(e) == is_serial_loss_errno(e));
+    }
+}
+
+// Falsified by: serial_link.h SerialLink::read() not calling note_error() on a failed tty_read().
+TEST_CASE("Serial link verdict - a hangup marks the link lost with the EIO text",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-hangup");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    CHECK_FALSE(link.lost());
+    CHECK(link.fault().empty());
+    pty.sever();
+    char ch = 0;
+    CHECK(link.read(&ch, 1, 500) < 0);
+    CHECK(errno == EIO);  // the errno survives the verdict for the wrapper's own message
+    CHECK(link.lost());
+    CHECK(link.fault() == "Serial link lost (errno 5)");
+}
+
+// Falsified by: serial_link.h SerialLink::write_all() not calling note_error(), or is_serial_loss_errno() leaving
+// EBADF out (the Gemini, iOptron, SynScan, Celestron and WandererAstro classifiers before #2262).
+TEST_CASE("Serial link verdict - a write to an fd that can no longer be written is EBADF and a lost link",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-ebadf");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string(":00#")));
+    CHECK(errno == EBADF);
+    CHECK(link.lost());
+    CHECK(link.fault() == "Serial link lost (errno 9)");
+}
+
+// Falsified by: serial_read.h read_until(SerialLink&, ...) not feeding a LinkDead outcome to note_error().
+TEST_CASE("Serial link verdict - read_until on the link feeds a hangup to the verdict",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-read-until");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    pty.sever();
+    alpacacore::util::ReadSpec spec;
+    const auto r = alpacacore::util::read_until(link, spec, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    CHECK(r.outcome == alpacacore::util::ReadOutcome::LinkDead);
+    CHECK(link.lost());
+    CHECK(link.fault() == "Serial link lost (errno 5)");
+}
+
+// Falsified by: serial_link.h SerialLink::close() clearing lost_ or fault_ (the port release after a loss would then
+// erase why the link was lost, decision 0009 rule 5).
+TEST_CASE("Serial link verdict - the port release after a loss keeps the latch and the fault text",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-release");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    pty.sever();
+    char ch = 0;
+    (void)link.read(&ch, 1, 500);
+    REQUIRE(link.lost());
+    link.close();
+    CHECK_FALSE(link.is_open());
+    CHECK(link.lost());
+    CHECK(link.fault() == "Serial link lost (errno 5)");
+}
+
+// Falsified by: serial_link.h note_error() overwriting fault_ on every loss errno instead of keeping the first.
+TEST_CASE("Serial link verdict - the text that set the latch is kept after a second error",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-first-text");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string("x")));
+    REQUIRE(link.fault() == "Serial link lost (errno 9)");
+    char ch = 0;
+    CHECK(link.read(&ch, 1, 200) < 0);  // the read-only stand-in reads end-of-file: EIO
+    CHECK(errno == EIO);
+    CHECK(link.lost());
+    CHECK(link.fault() == "Serial link lost (errno 9)");
+}
+
+// Falsified by: serial_link.h SerialLink::clear_loss() leaving lost_ set or fault_ filled.
+TEST_CASE("Serial link verdict - a Disconnect after a loss clears the latch and the text",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-disconnect");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string("x")));
+    REQUIRE(link.lost());
+    link.close();       // the wrapper's port release
+    link.clear_loss();  // then the client's Disconnect
+    CHECK_FALSE(link.lost());
+    CHECK(link.fault().empty());
+}
+
+// Falsified by: serial_link.h SerialLink::operator=(SerialLink&&) keeping the old link's verdict instead of taking
+// the newly opened link's clear one.
+TEST_CASE("Serial link verdict - a relink on the same link object clears the latch and the text",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-relink");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string("x")));
+    REQUIRE(link.lost());
+    link.close();
+    link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    CHECK_FALSE(link.lost());
+    CHECK(link.fault().empty());
+    CHECK(link.write_all(std::string("x")));
+}
+
+// Falsified by: serial_link.h note_error() latching without checking is_open() (a stale thread's EBADF after the
+// wrapper closed the link would then read as a new loss).
+TEST_CASE("Serial link verdict - an EBADF after the link's own close is not a new loss",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-stale");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    link.close();
+    CHECK_FALSE(link.write_all(std::string("x")));
+    CHECK(errno == EBADF);
+    CHECK_FALSE(link.note_error(EBADF));
+    CHECK_FALSE(link.lost());
+    CHECK(link.fault().empty());
+}
+
+// Falsified by: serial_link.h SerialLink's move constructor or take_verdict() dropping lost_ or fault_.
+TEST_CASE("Serial link verdict - a move carries the verdict and leaves the source clear",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-move");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string("x")));
+    REQUIRE(link.lost());
+    SerialLink moved(std::move(link));
+    CHECK(moved.lost());
+    CHECK(moved.fault() == "Serial link lost (errno 9)");
+    CHECK_FALSE(link.lost());     // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move): moved-from is clear
+    CHECK(link.fault().empty());  // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move): moved-from is clear
+}
+
+// Falsified by: serial_link.h lost_ as a plain bool (the TSan job reports the getter thread's read racing the latch).
+TEST_CASE("Serial link verdict - a getter thread reads the verdict while an exchange sets it",
+          "[serial][serial_link][link-loss][issue2262]") {
+    alpacacore::test::PtyPair pty("verdict-lockfree");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    // lost() and fault() are read from getter threads with no wrapper lock; hammer both while the latch is set.
+    std::atomic<bool> stop{false};
+    std::thread reader([&] {
+        while (!stop.load()) {
+            (void)link.lost();
+            (void)link.fault();
+        }
+    });
+    break_writes(link);
+    CHECK_FALSE(link.write_all(std::string("x")));
+    stop.store(true);
+    reader.join();
+    CHECK(link.lost());
 }

@@ -65,10 +65,6 @@ inline int socket_recv(SocketHandle handle, char* buffer, int length) {
     return static_cast<int>(recv(handle, buffer, static_cast<size_t>(length), 0));
 }
 
-inline int socket_send(SocketHandle handle, const char* buffer, int length) {
-    return static_cast<int>(send(handle, buffer, static_cast<size_t>(length), 0));
-}
-
 // Set receive and send timeouts on an accepted client socket so a slow or
 // stalled peer (slowloris) cannot pin a worker thread indefinitely. Returns
 // false if either setsockopt fails.
@@ -79,16 +75,6 @@ inline bool socket_set_timeouts(SocketHandle handle, int seconds) {
     bool ok = setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
     ok = setsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 && ok;
     return ok;
-}
-
-// Bound only the receive side. Used between keep-alive requests, where the
-// peer may legitimately go quiet for a while but must not pin a worker
-// thread indefinitely; the send timeout set by socket_set_timeouts is kept.
-inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
-    struct timeval tv {};
-    tv.tv_sec = seconds;
-    tv.tv_usec = 0;
-    return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
 }
 
 // Time budget for sending `bytes`: `base`, or the time `bytes` take at

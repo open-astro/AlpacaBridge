@@ -498,14 +498,15 @@ void SVBSDKWrapper::stop_video_capture(int camera_id) {
 
 SVBVideoDataResult SVBSDKWrapper::get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) {
     // Do NOT hold the wrapper mutex — SVBGetVideoData can block for the full
-    // wait_ms (the exposure worker polls with 500 ms waits), and holding the
+    // wait_ms (the exposure body polls with 500 ms waits), and holding the
     // singleton lock across it would stall every other SVBONY SDK call
     // (status polls and the disconnect's SVBStopVideoCapture). The SDK header
     // does not promise StopVideoCapture interrupts this wait, so callers use
     // a finite iWaitms and still join before close. Safe without the lock
-    // because the only caller is the exposure worker, which the driver joins (under
-    // exposure_lifecycle_mutex_) before SVBCloseCamera can run (driver-lifecycle.instructions.md
-    // blocking-call exemption; matches ToupTek/Player One).
+    // because the only caller is the exposure body, which the driver joins
+    // (CaptureSession::disconnect_and_join, decision 0020) before SVBCloseCamera
+    // can run; after a lost link the body closes the handle itself on its way out
+    // (driver-lifecycle.instructions.md blocking-call exemption; matches ToupTek/Player One).
     const auto result = SVBGetVideoData(camera_id, buffer, buffer_size, wait_ms);
     if (result == SVB_ERROR_TIMEOUT) {
         return SVBVideoDataResult::Timeout;

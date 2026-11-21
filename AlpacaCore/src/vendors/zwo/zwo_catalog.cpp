@@ -52,7 +52,7 @@ std::unique_ptr<AlpacaDriver> create_telescope(const DeviceConfig& config, int d
     } else if (type == "network") {
         info.type = vendor::zwo::ConnectionType::Network;
         info.host = config.get(kZwoHost);
-        info.tcp_port = static_cast<int>(config.get(kZwoTcpPort));
+        info.tcp_port = network_port_or_zero(config.get(kZwoTcpPort));
     } else {
         info.type = vendor::zwo::ConnectionType::Serial;
         info.port_path = config.get(kZwoPortPath);
@@ -113,7 +113,8 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
     if (type == "asiair" || type == "asiair-plus-picm4") {
         auto asiair_config = vendor::zwo::default_asiair_pro_config();
         if (type == "asiair-plus-picm4") {
-            asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
+            asiair_config.model_name = "ASIAIR Plus";
+            asiair_config.board = "Pi CM4";
         }
         asiair_config.gpio_chip_path = config.get(kZwoGpioChip);
         if (const auto hz = config.find(kZwoPwmFrequencyHz)) {

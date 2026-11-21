@@ -15,6 +15,9 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 
+#include <chrono>
+#include <optional>
+
 namespace alpacacore {
 
 /**
@@ -35,6 +38,9 @@ public:
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the
+        // TimeStamp names when it was measured (decision 0010).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
         // One allocation for every field: GCC 14 -O2 reports -Werror=stringop-overflow in std::variant when the
         // vector grows by push_back (the rotator build, #1668; the filter wheel and focuser bases reserve too).
@@ -42,7 +48,7 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
@@ -50,7 +56,11 @@ public:
         add("MechanicalPosition", [this] { return get_mechanical_position(); });
         add("Position", [this] { return get_position(); });
         if (!state.empty()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
         }
         return state;
     }
@@ -136,6 +146,12 @@ public:
      * @param position Position in degrees
      */
     virtual void sync(double position) = 0;
+
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves
+    /// it from a snapshot (decision 0010): the TimeStamp is then the time the
+    /// state was measured. nullopt (the default) stamps the request time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
 };
 
 } // namespace alpacacore

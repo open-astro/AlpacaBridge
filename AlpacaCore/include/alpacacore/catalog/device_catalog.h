@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::catalog {
@@ -45,11 +46,32 @@ struct AttachedCamera {
     std::string serial;  // empty when the camera reports none or it was not read
 };
 
+// A USB-serial adapter a catalog entry can appear as (#2312), for the
+// attacheddevices listing. `tokens` are usb_tty_descriptor_matches() patterns
+// (a vendor id, or a manufacturer, product or by-id name substring). The
+// vendor's catalog file passes the list its raw-node scan filter uses, from
+// the wrapper's <x>_usb_tokens(), so the listing and the connect-time scan
+// cannot disagree (docs-drift check 29). `config` holds the fixed values a
+// configuredevice call needs beyond the port (QHY CFW3: wheelType=cfw3-usb).
+struct UsbSerialIdentity {
+    DeviceKey key;
+    std::vector<std::string> tokens;
+    std::vector<std::pair<std::string, std::string>> config;
+};
+
+// One HID device a vendor's HID lister found by enumeration, without opening it.
+struct AttachedHidDevice {
+    std::string path;  // the hidapi path a configuredevice call names
+    std::string name;  // display name
+};
+
 class DeviceCatalog {
 public:
     // Every key with a schema, in insertion order. available means "a factory is
     // registered for this key", so a build with a vendor off still names it.
     std::vector<DescriptorView> describe() const;
+    // The view of one key, or nullopt when the key has no schema.
+    std::optional<DescriptorView> describe(const DeviceKey& key) const;
 
     // Every key with a factory, in insertion order, schema or not: a factory whose
     // schema was never added is unreachable, and describe() cannot show it.
@@ -113,6 +135,19 @@ public:
     void add_camera_lister(std::string vendor, CameraLister lister);  // replaces the vendor's
     // nullopt when no lister is registered for the vendor; otherwise the lister's result.
     std::optional<std::vector<AttachedCamera>> list_cameras(std::string_view vendor) const;
+    // The vendors with a camera lister, in registration order (attacheddevices, #2312).
+    std::vector<std::string> camera_lister_vendors() const;
+
+    // The attacheddevices listing (#2312). A USB identity is registered by the
+    // vendor's factory file, so only a built vendor's devices are listed; an
+    // identity for a key that is already registered adds its tokens as another
+    // identity, never replaces it. A HID lister enumerates without opening a
+    // device and may throw; registered only when the vendor is built.
+    void add_usb_serial_identity(UsbSerialIdentity identity);
+    const std::vector<UsbSerialIdentity>& usb_serial_identities() const { return usb_serial_identities_; }
+    using HidLister = std::function<std::vector<AttachedHidDevice>()>;
+    void add_hid_lister(DeviceKey key, HidLister lister);  // replaces the key's
+    const std::vector<std::pair<DeviceKey, HidLister>>& hid_listers() const { return hid_listers_; }
 
 private:
     const Schema* find_schema(const DeviceKey& key) const;
@@ -121,6 +156,8 @@ private:
     std::vector<Factory> factories_;
     std::vector<std::pair<std::string, ThermalCameraLister>> thermal_camera_listers_;
     std::vector<std::pair<std::string, CameraLister>> camera_listers_;
+    std::vector<UsbSerialIdentity> usb_serial_identities_;
+    std::vector<std::pair<DeviceKey, HidLister>> hid_listers_;
 };
 
 // Formats a range bound for a message: an Int field without a fraction, a

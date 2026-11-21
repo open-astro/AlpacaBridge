@@ -16,16 +16,20 @@ Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
   word, the brand list and a paste-ready README headline, all computed by
   the same functions check 15 gates with, so the /bump-release recount step
   has one command and no second copy of the row filter (#689).
-Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
-  -- prints the authored-line count, the rounded figure and the paste-ready
-  README badge line, computed by the functions check 25 gates with, so the
-  /bump-release badge step has one command (#1465).
+Badge (check 25's endpoint): python3 scripts/check_docs_drift.py --badge
+  -- prints the authored-line count, the endpoint JSON the badge reads and the
+  README badge line check 25 requires (#1465, #2079).
+Badge JSON: python3 scripts/check_docs_drift.py --badge-json
+  -- prints only the shields.io endpoint JSON for the authored-line badge;
+  .github/workflows/authored-lines-badge.yml publishes it on every push to
+  main. Exits 1 when the count is below the floor or the JSON is not a valid
+  endpoint document.
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
      docs/development.md build-options table.
-  2. The zizmor pinned version + sha256 are identical between ci.yml and
-     ci_preflight.sh.
+  2. The zizmor and PMD pinned versions + sha256 are identical between ci.yml
+     and ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
      ci_preflight.sh (ci-gates instructions, Docs drift bullet: "keep the
      cppcheck --suppress lists identical").
@@ -40,7 +44,15 @@ Checks:
      stated anywhere the globs below reach: a number is a second source of
      truth for a list that is already gated by name, and it is what went
      stale before. CHANGELOG.md is exempt -- its entries describe what was
-     true when they were written.
+     true when they were written. A driver class shared by several vendors
+     (SHARED_DRIVER_HEADERS, today PowerPortSwitchDriver) is scanned through
+     the vendor directories its tuple lists, so the check also holds each
+     tuple to the vendor directories under AlpacaCore/src/vendors and
+     AlpacaCore/include/alpacacore/vendor that instantiate the header's class
+     template: SHARED DRIVER VENDOR UNLISTED for an instantiating vendor the
+     tuple misses (its is_open() would go unread), STALE SHARED DRIVER VENDOR
+     for a listed vendor that no longer instantiates it, and SHARED DRIVER
+     CLASS NOT FOUND when the header defines no class template to look for.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
      shared mutex through the one-argument locked() -- except two: cancel_exposure(),
@@ -109,13 +121,15 @@ Checks:
      follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
      fakes that are not a driver's connect path, each with a reason, and a
      helper that has since been given a roster row is itself a finding.
- 14. Every std::regex in AlpacaHTTP/src/http/router.cpp is a static object
-     (issue #657, from #646). Router::route once built a std::regex per
+ 14. Every std::regex in AlpacaHTTP/src/http/router.cpp and in each per-type
+     routes source, AlpacaHTTP/src/http/routes/*.cpp (issue #2081), is a static
+     object (issue #657, from #646). Router::route once built a std::regex per
      request, which made a device-path request about 14x a management request
      (30x under ASan). This replaces a wall-clock ratio test, which was coarse
      in Release and flaky under load. A construction with no `static` in its
      statement, or an unnamed temporary, is a finding, and so is finding no
-     construction at all (the extractor is stale or the regexes moved).
+     construction in any of those files together (the extractor is stale or the
+     regexes moved); a routes source with no regex is not a finding.
  15. The README headline ("N validated devices. <Word> brands. One server."
      plus the brand list) agrees with SUPPORTED-DRIVERS.md (issue #684). N is
      recomputed with the row filter this script owns, count_validated_device_rows
@@ -210,20 +224,70 @@ Checks:
      defaults and the "N-minute budget" prose); the two skills agree with each
      other, and the poll budget is greater than the job timeout (a poll that
      ends first reports a healthy run as a stall).
- 25. The README "Authored code" badge (`NNNk lines`) is within
-     AUTHORED_LINES_TOLERANCE (5%) of the authored-line count computed from
-     the git index (issue #1465). Which tracked files count, and why the
-     rest do not, is written at AUTHORED_LINES_ROOTS and
-     AUTHORED_LINES_EXCLUDED_PREFIXES. The badge shows the count rounded to the
-     nearest 1,000, so an ordinary PR that adds or removes lines never trips the
-     check; only a badge that has fallen behind (or a missing badge) does.
-     /bump-release regenerates it with --badge.
+ 25. The README "Authored code" badge is the shields.io endpoint badge that
+     reads AUTHORED_BADGE_ENDPOINT, and the authored-line count computed from
+     the git index is above its floor (issues #1465, #2079). The number is not
+     in the README: .github/workflows/authored-lines-badge.yml writes it to the
+     `badges` branch on every push to main (--badge-json), so a PR never fails
+     on lines another PR merged. A badge that still carries a static `NNNk
+     lines` figure is a finding. Which tracked files count, and why the rest
+     do not, is written at AUTHORED_LINES_ROOTS and
+     AUTHORED_LINES_EXCLUDED_PREFIXES.
+ 26. Every caller that writes the Celestron CGX state frame is pinned in
+     CGX_FRAME_WRITERS with its call count (issue #2035).
+ 27. Every job in every workflow under .github/workflows/ sets
+     `timeout-minutes` (issues #363, #2059). A `[stress]` regression hangs
+     rather than fails, and GitHub's default is six hours. A job that calls a
+     reusable workflow (`uses:` at job level) cannot set one and is skipped. A
+     workflow whose `jobs:` block yields no job is a finding, so a changed
+     indent cannot pass vacuously.
+ 28. Every NOLINT, NOLINTNEXTLINE and NOLINTBEGIN in first-party C/C++
+     (LICENSE_HEADER_PREFIXES) gives its reason on the same line, after the
+     check list: `// NOLINT(bugprone-empty-catch): the poll retries` (issue
+     #2059). A suppression with no reason cannot be reviewed, and `git grep
+     NOLINT` shows only that line. NOLINTEND is exempt.
+ 29. A serial device's USB identity has one home (issue #2312): the wrapper's
+     `<x>_usb_tokens()`. Under AlpacaCore/src/vendors, no raw-node filter
+     passes a braced token list to usb_tty_descriptor_matches(); every
+     `<x>_usb_tokens()` a wrapper defines is matched by that wrapper's own
+     filter and registered by a *_catalog.cpp through add_usb_serial_identity();
+     and every name a catalog registers is defined. Otherwise the
+     attacheddevices listing and the connect-time scan could disagree about
+     which adapters a device ships with, or the listing could miss a device.
+ 30. The fake ConformU run list, scripts/conformu_fake_runs.tsv, agrees with
+     kFakeConnectableRoster in both directions (issue #2078). Every roster row
+     has one record (vendor, deviceType, fakeHeader) whose status is `run` or
+     `pending`, and every such record has a roster row, so a new fake cannot
+     be left outside the ConformU run unnoticed. A driver with no fake has a
+     `no-fake` record whose fakeHeader is `-`, or `-<backend>` when its
+     (vendor, deviceType) also has a roster row for another backend (the
+     ToupTek thermal switch beside the StellaVita); a bare `-` there is a
+     finding. A `pending` or `no-fake` record names the slice (2 to 6) that
+     runs it, no report, and its reason (the fake's parity gap, the simulator
+     it needs, or that no fake exists; a row runs only when its fake can pass
+     ConformU on merit, never against a known-failures list). A `run` record names its committed report,
+     AlpacaCore/conformu/<Vendor>/Fake/Fake-<deviceType>-<fakeStem>-Linux-arm64.txt
+     (the Sky-Watcher UDP mount keeps Fake-Linux-arm64.txt), and the file
+     exists. The roster is read as text, so a row compiled only under a build
+     option still needs a record.
+ 31. No udev rule the .deb installs lets every local user open a device
+     (issue #2290). The vendor rules under AlpacaCore/external carry
+     MODE="0666" and are regenerated on SDK bumps, so they are never edited:
+     debian/rules runs scripts/tighten_udev_rules.sh over the staged rules
+     directory after the last rule is installed, and that script rewrites a
+     world-accessible MODE to GROUP="plugdev", MODE="0660". The check copies
+     every rule debian/rules installs from the tree, runs the script on the
+     copies, and fails on any MODE whose last digit grants access to others.
+     A missing script, a debian/rules with no call (or a call before a rule is
+     installed), and finding no installed rule at all are findings too.
 """
 
 import glob
 import hashlib
+import json
 import re
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -298,6 +362,30 @@ def check_zizmor_pin_sync():
             "zizmor sha256 mismatch: ci.yml has %s, ci_preflight.sh has %s"
             % (ci_sha.group(1), pf_sha.group(1))
         )
+    failures.extend(_pmd_pin_findings(ci, preflight))
+    return failures
+
+
+def _pmd_pin_findings(ci, preflight):
+    """The PMD pins of the duplication job and ci_preflight.sh agree (#1755). Pure,
+    so --self-test can drive it."""
+    ci_block = _scoped_block(ci, "- name: Install PMD", ("- name:",))
+    if ci_block is None:
+        return ["could not find the 'Install PMD' step in ci.yml"]
+    pins = {
+        "ci.yml version": re.search(r"^\s*ver=([0-9.]+)\s*$", ci_block, re.MULTILINE),
+        "ci.yml sha256": re.search(r"^\s*sha256=([0-9a-f]{64})\s*$", ci_block, re.MULTILINE),
+        "ci_preflight.sh version": re.search(r'^PMD_VER="([0-9.]+)"', preflight, re.MULTILINE),
+        "ci_preflight.sh sha256": re.search(r'^PMD_SHA256="([0-9a-f]{64})"', preflight, re.MULTILINE),
+    }
+    missing = [name for name, m in pins.items() if not m]
+    if missing:
+        return ["could not find the PMD pin(s): %s" % ", ".join(missing)]
+    failures = []
+    for what in ("version", "sha256"):
+        a, b = pins["ci.yml " + what].group(1), pins["ci_preflight.sh " + what].group(1)
+        if a != b:
+            failures.append("PMD %s mismatch: ci.yml has %s, ci_preflight.sh has %s" % (what, a, b))
     return failures
 
 
@@ -452,16 +540,17 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # Only the drivers that CAN be classified as blocking need an entry; the
 # lock-free majority is not named anywhere, by design. Two groups are the
 # exception, and both keep their entries although the header's list is empty:
-# the Bisque and iOptron telescopes (lock-free since #910) and the four
-# wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
-# ASIAIR, ASIAIR Plus; lock-free since #382). The entry is what lets the gate
+# the Bisque and iOptron telescopes (lock-free since #910) and the
+# wrapper-backed switch drivers (PowerPortSwitchDriver, which serves the
+# ASIAIR, ASIAIR Plus, iOptron iMate PowerBox and ToupTek StellaVita since
+# #2264; lock-free since #382). The entry is what lets the gate
 # report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
 # (or a wrapper re-locks is_open()). Do not remove them on the STALE
 # BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
-# header names these in TWO sentences, and one name is a prefix of another
-# across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
-# (switch). A plain `name in header` test therefore answered wrongly in both
+# header names these in TWO sentences, and until #2264 one name was a prefix
+# of another across them -- "iOptron" (telescope) inside "iOptron iMate
+# PowerBox" (switch). A plain `name in header` test therefore answered wrongly in both
 # directions: dropping iOptron from the telescope list still "found" it via the
 # switch entry (the exact drift this check exists to catch, passing green), and
 # a correctly-removed iOptron reported a STALE entry that could not be resolved
@@ -471,10 +560,19 @@ DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
-    "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
-    "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
-    "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),
-    "zwo_asiair_plus_switch_driver.cpp": ("ASIAIR Plus", "switches"),
+    "power_port_switch_driver.h": ("PowerPortSwitchDriver", "switches"),
+}
+
+# A driver class shared by several vendors lives outside AlpacaCore/src/vendors,
+# so check 5 scans it by name: header path -> the vendor directories whose
+# wrappers it is instantiated over (their is_open() bodies decide "wrapper"
+# against "lock-free", as a vendor driver's own directory does). Without the
+# entry, the power-port switches would have left the gate when their
+# get_connected() moved into the shared header (#2264).
+# shared_driver_vendor_findings() holds each tuple to the vendor directories
+# that instantiate the class, in both directions.
+SHARED_DRIVER_HEADERS = {
+    "AlpacaCore/include/alpacacore/util/power_port_switch_driver.h": ("zwo", "ioptron", "touptek"),
 }
 
 # Where each list lives in async_connectable.h, as (start marker, end marker).
@@ -543,10 +641,11 @@ def _strip_comments(text):
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
     as a method signature. Written for the two QHY headers, which hold no raw
-    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
-    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
-    that line; that is harmless only while no std::regex sits on such a line or
-    after a stray /* -- re-check both if the gate ever misses one."""
+    string literals. Check 14 also runs it over router.cpp and routes/*.cpp; the
+    router does hold them (R"(...)" regexes) and "://" (origin.find), so
+    LINE_COMMENT_RE blanks the rest of that line; that is harmless only while no
+    std::regex sits on such a line or after a stray /* -- re-check both if the
+    gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -591,8 +690,101 @@ def _vendor_is_open_locks(vendor_dir):
     return not found
 
 
-def classify_get_connected_bodies():
+def _display_path(path):
+    """The repo-relative path, or the path itself outside the repo (a self-test fixture)."""
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def _get_connected_sources():
+    """[(path, [wrapper dirs])]: every vendor source, then each SHARED_DRIVER_HEADERS entry."""
+    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
+    sources = [(path, [path.parent]) for path in sorted(vendors.rglob("*"))
+               if path.suffix in (".cpp", ".h", ".hpp")]
+    for header, vendor_names in SHARED_DRIVER_HEADERS.items():
+        sources.append((ROOT / header, [vendors / name for name in vendor_names]))
+    return sources
+
+
+SHARED_DRIVER_CLASS_RE = re.compile(r"template\s*<[^>]*>\s*class\s+(\w+)")
+
+
+_CPP_COMMENT_OR_LITERAL_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.S)
+
+
+def _strip_cpp_comments(text):
+    """text without /* */ blocks, // line comments and string or character literals,
+    scanned in one pass so a "//" inside a string does not start a comment (raw
+    string literals are not special-cased)."""
+    return _CPP_COMMENT_OR_LITERAL_RE.sub(" ", text)
+
+
+def shared_driver_vendor_findings(vendor_roots=None, shared=None):
+    """[finding] for each SHARED_DRIVER_HEADERS entry whose vendor tuple disagrees
+    with the vendor sources that instantiate its class.
+
+    Pure over the paths given, so --self-test can drive it. vendor_roots is
+    AlpacaCore/src/vendors and AlpacaCore/include/alpacacore/vendor by default
+    (a vendor alias declared in a wrapper header counts too); the vendor is the
+    first directory under the root. shared is SHARED_DRIVER_HEADERS by default;
+    a relative key resolves against the repo root, an absolute one is used as is.
+    A missing header is skipped: check 5 already reports it as
+    GET_CONNECTED SOURCE MISSING.
+    """
+    if vendor_roots is None:
+        vendor_roots = [ROOT / "AlpacaCore" / "src" / "vendors",
+                        ROOT / "AlpacaCore" / "include" / "alpacacore" / "vendor"]
+    if shared is None:
+        shared = SHARED_DRIVER_HEADERS
+    sources = []
+    for root in vendor_roots:
+        root = Path(root)
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.suffix in (".cpp", ".h", ".hpp"):
+                text = _strip_cpp_comments(path.read_text(encoding="utf-8", errors="replace"))
+                sources.append((path.relative_to(root).parts[0], path, text))
+    findings = []
+    for header, listed in shared.items():
+        header_path = Path(header)
+        if not header_path.is_absolute():
+            header_path = ROOT / header_path
+        if not header_path.is_file():
+            continue
+        shown = _display_path(header_path)
+        classes = SHARED_DRIVER_CLASS_RE.findall(header_path.read_text(encoding="utf-8", errors="replace"))
+        if not classes:
+            findings.append(
+                "SHARED DRIVER CLASS NOT FOUND: %s defines no class template; update "
+                "SHARED_DRIVER_CLASS_RE or the entry" % shown)
+            continue
+        users = {}
+        for cls in classes:
+            use_re = re.compile(r"\b%s\s*<" % re.escape(cls))
+            for vendor, path, text in sources:
+                if vendor not in users and use_re.search(text):
+                    users[vendor] = (path, cls)
+        for vendor in sorted(set(users) - set(listed)):
+            path, cls = users[vendor]
+            findings.append(
+                "SHARED DRIVER VENDOR UNLISTED: %s instantiates %s (%s) but SHARED_DRIVER_HEADERS does not "
+                "list '%s'; add it, or check 5 never reads that vendor's is_open()"
+                % (_display_path(path), cls, shown, vendor))
+        for vendor in sorted(set(listed) - set(users)):
+            findings.append(
+                "STALE SHARED DRIVER VENDOR: '%s' is listed for %s but nothing under its vendor directories "
+                "instantiates %s" % (vendor, shown, ", ".join(classes)))
+    return findings
+
+
+def classify_get_connected_bodies(sources=None):
     """({basename: kind}, [findings]) for every vendor get_connected() override.
+
+    sources is [(path, [wrapper dirs])], _get_connected_sources() by default; a
+    listed path that does not exist is a finding, so a renamed shared header
+    cannot drop out of the scan unnoticed.
 
     kind is "driver-mutex" (takes a lock_guard/unique_lock, so it blocks behind
     the connect sequence that holds the same mutex), "wrapper" (reaches a
@@ -602,9 +794,11 @@ def classify_get_connected_bodies():
     """
     kinds = {}
     failures = []
-    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
-    for path in sorted(vendors.rglob("*")):
-        if path.suffix not in (".cpp", ".h", ".hpp"):
+    for path, wrapper_dirs in (_get_connected_sources() if sources is None else sources):
+        if not path.is_file():
+            failures.append(
+                "GET_CONNECTED SOURCE MISSING: %s is listed in SHARED_DRIVER_HEADERS in %s but does not "
+                "exist. Update the entry to the header's new path." % (_display_path(path), Path(__file__).name))
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in GET_CONNECTED_RE.finditer(text):
@@ -619,7 +813,8 @@ def classify_get_connected_bodies():
                 # re-adding the lock_guard to any is_open() in the vendor's
                 # wrapper turns the driver back into "wrapper" (blocking) and
                 # the empty switch list in async_connectable.h fails.
-                kind = "wrapper" if _vendor_is_open_locks(path.parent) else "lock-free"
+                locks = any(_vendor_is_open_locks(d) for d in wrapper_dirs)
+                kind = "wrapper" if locks else "lock-free"
             elif re.search(r"\bload\s*\(|\breturn\s+connected_\s*;", body):
                 kind = "lock-free"
             else:
@@ -628,7 +823,7 @@ def classify_get_connected_bodies():
                     "wrapper's is_open(), nor reads an atomic. Classify it by hand: if it can block, "
                     "add it to DRIVER_PROSE_NAMES in %s and to the list in async_connectable.h; if it "
                     "cannot, make that visible in the body (an atomic load or a plain return)."
-                    % (path.relative_to(ROOT), Path(__file__).name))
+                    % (_display_path(path), Path(__file__).name))
                 continue
             # A file with two driver classes (gemini_flatpanel_driver.cpp) is
             # only interesting if they disagree, which would mean the file
@@ -637,7 +832,7 @@ def classify_get_connected_bodies():
                 failures.append(
                     "MIXED get_connected() kinds in %s: %s and %s. The prose list names files, not "
                     "classes, so split the drivers or name them individually."
-                    % (path.relative_to(ROOT), kinds[path.name], kind))
+                    % (_display_path(path), kinds[path.name], kind))
             kinds[path.name] = kind
     return kinds, failures
 
@@ -711,6 +906,7 @@ def blocking_list_findings(header, kinds):
 
 def check_blocking_get_connected_list():
     kinds, failures = classify_get_connected_bodies()
+    failures.extend(shared_driver_vendor_findings())
     if not kinds:
         return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
 
@@ -1642,11 +1838,14 @@ ROSTER_ARRAY_RE = re.compile(r"kFakeConnectableRoster\[\]\s*=\s*\{(.*?)\n\};", r
 HELPER_FAKES = {
     "fake_skywatcher_board.h": "transport-free Sky-Watcher axis model and command handler; the UDP fake in fake_skywatcher_mount.h is the transport the roster connects",
     "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
+    "fake_synscan_handset.h": "stateful SynScan handset responder plugged into FakeMountServer for the SynScan async, slot and supersede cases; the SynScan roster row stays on fake_mount_server.h",
+    "fake_celestron_handset.h": "stateful NexStar hand-controller responder plugged into FakeMountServer for the Celestron async cases; the Celestron roster row stays on fake_mount_server.h",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
-    "fake_weewx_fetcher.h": "scripted WeeWxFetcher injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
+    "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
+    "fake_alpaca_server.h": "loopback fake upstream Alpaca server for the remotealpaca client (#1753 slice 2); no driver connects through it yet",
 }
 
 
@@ -1698,11 +1897,103 @@ def check_fake_roster_matches_disk(root=ROOT):
     return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
 
 
+# Check 30 (issue #2078): the fake ConformU run list is data, one record per
+# roster row, kept in step with the roster both ways.
+
+CONFORMU_RUNS_PATH = "scripts/conformu_fake_runs.tsv"
+CONFORMU_RUNS_HEADER = ["vendor", "deviceType", "fakeHeader", "status", "slice", "reportPath", "reason"]
+CONFORMU_RUNS_STATUSES = ("run", "pending", "no-fake")
+# The one report that keeps its name from before the run list (#1621).
+CONFORMU_LEGACY_REPORT = ("skywatcher", "telescope", "fake_skywatcher_mount.h",
+                          "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt")
+CONFORMU_REPORT_RE = re.compile(r"^AlpacaCore/conformu/[^/]+/Fake/(Fake-[^/]+\.txt)$")
+
+
+def _conformu_run_list_findings(header_text, tsv_text, report_exists=lambda path: True):
+    """Check 30 over the roster header and the run list. Pure, so --self-test can drive it."""
+    findings = []
+    m = ROSTER_ARRAY_RE.search(_strip_comments(header_text))
+    roster = ROSTER_ROW_RE.findall(m.group(1)) if m else []
+    if not roster:
+        return ["AlpacaCore/tests/contract_sweep.h has no kFakeConnectableRoster rows (or the array moved): "
+                "the ConformU run list cannot be checked against it"]
+    lines = [ln for ln in tsv_text.splitlines() if ln.strip() and not ln.startswith("#")]
+    if not lines or lines[0].split("\t") != CONFORMU_RUNS_HEADER:
+        return ["%s must start with the tab-separated header %s" % (CONFORMU_RUNS_PATH, "\t".join(CONFORMU_RUNS_HEADER))]
+    roster_keys = set(roster)
+    roster_pairs = {(v, t) for v, t, _ in roster}
+    seen = set()
+    listed = set()
+    for n, line in enumerate(lines[1:], start=2):
+        cells = line.split("\t")
+        where = "%s line %d" % (CONFORMU_RUNS_PATH, n)
+        if len(cells) != len(CONFORMU_RUNS_HEADER):
+            findings.append("%s has %d columns, not %d" % (where, len(cells), len(CONFORMU_RUNS_HEADER)))
+            continue
+        vendor, dtype, fake, status, slice_, report, reason = cells
+        key = (vendor, dtype, fake)
+        if key in seen:
+            findings.append("%s repeats the record {%s, %s, %s}" % (where, vendor, dtype, fake))
+        seen.add(key)
+        if status not in CONFORMU_RUNS_STATUSES:
+            findings.append("%s has status %r, not one of %s" % (where, status, ", ".join(CONFORMU_RUNS_STATUSES)))
+            continue
+        if status == "no-fake":
+            if not fake.startswith("-"):
+                findings.append("%s is no-fake but names a fake header %r: a no-fake record's fakeHeader is - or "
+                                "-<backend>" % (where, fake))
+            elif fake == "-" and (vendor, dtype) in roster_pairs:
+                findings.append("%s is a no-fake record {%s, %s, -} but kFakeConnectableRoster has a %s %s row: name "
+                                "the backend that has no fake (-<backend>), or run that row" % (where, vendor, dtype,
+                                                                                                 vendor, dtype))
+        else:
+            listed.add(key)
+            if key not in roster_keys:
+                findings.append("%s {%s, %s, %s} has no kFakeConnectableRoster row (AlpacaCore/tests/contract_sweep.h): "
+                                "remove the record or add the roster row" % (where, vendor, dtype, fake))
+        if status == "run":
+            if slice_ not in ("1", "2", "3", "4", "5", "6"):
+                findings.append("%s has slice %r: a run record names the slice that started running it" % (where, slice_))
+            rm = CONFORMU_REPORT_RE.match(report)
+            stem = fake[:-2] if fake.endswith(".h") else fake
+            expected = "Fake-%s-%s-Linux-arm64.txt" % (dtype, stem)
+            if (vendor, dtype, fake, report) == CONFORMU_LEGACY_REPORT:
+                pass
+            elif not rm or rm.group(1) != expected:
+                findings.append("%s reportPath %r must be AlpacaCore/conformu/<Vendor>/Fake/%s" % (where, report, expected))
+            if not report_exists(report):
+                findings.append("%s reportPath %s does not exist: commit the fake report the run writes" % (where, report))
+        else:
+            if slice_ not in ("2", "3", "4", "5", "6"):
+                findings.append("%s is %s with slice %r: name the slice (2 to 6) that runs it" % (where, status, slice_))
+            if report != "-":
+                findings.append("%s is %s but names a report %r: a record that does not run has reportPath -" %
+                                (where, status, report))
+            if reason.strip() in ("", "-"):
+                findings.append("%s is %s with no reason: say why it does not run (the fake's parity gap, the "
+                                "simulator it needs, or that no fake exists)" % (where, status))
+    for vendor, dtype, fake in roster:
+        if (vendor, dtype, fake) not in listed:
+            findings.append("kFakeConnectableRoster row {%s, %s, %s} has no run or pending record in %s: add one "
+                            "(issue #2078)" % (vendor, dtype, fake, CONFORMU_RUNS_PATH))
+    return findings
+
+
+def check_conformu_run_list_matches_roster(root=ROOT):
+    return _conformu_run_list_findings(read("AlpacaCore/tests/contract_sweep.h", root), read(CONFORMU_RUNS_PATH, root),
+                                       lambda path: (root / path).is_file())
+
+
 STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
 STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
 
 
-def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
+ROUTER_SOURCE = "AlpacaHTTP/src/http/router.cpp"
+ROUTES_GLOB = "AlpacaHTTP/src/http/routes/*.cpp"
+
+
+def _static_regex_scan(text, path):
+    """(findings, constructions seen) for one source; the floor is the caller's."""
     code = _strip_comments(text)
     findings = []
     seen = 0
@@ -1720,13 +2011,32 @@ def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
             findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
                             "management request (#646); the gate wants the static keyword and does not model "
                             "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
+    return findings, seen
+
+
+def _static_regex_findings(text, path=ROUTER_SOURCE):
+    findings, seen = _static_regex_scan(text, path)
     if seen == 0:
         findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
     return findings
 
 
 def check_router_regexes_static(root=ROOT):
-    return _static_regex_findings(read("AlpacaHTTP/src/http/router.cpp", root))
+    """The router and every per-type routes source (#2081). A routes source with no
+    regex is not a finding: the floor applies to the union, so it still fires when
+    the regexes leave every scanned file."""
+    paths = [ROUTER_SOURCE] + sorted(Path(p).relative_to(root).as_posix()
+                                     for p in glob.glob(str(root / ROUTES_GLOB)))
+    findings = []
+    seen = 0
+    for path in paths:
+        f, n = _static_regex_scan(read(path, root), path)
+        findings.extend(f)
+        seen += n
+    if seen == 0:
+        findings.append("no std::regex construction found in %s or %s: the extractor is stale or the "
+                        "regexes moved" % (ROUTER_SOURCE, ROUTES_GLOB))
+    return findings
 
 # --- check 15: README headline counts vs SUPPORTED-DRIVERS.md (issue #684) --
 #
@@ -2309,10 +2619,17 @@ def _cache_prefix_findings(workflows):
     return failures
 
 
+def _workflow_files(root=ROOT):
+    """{repo-relative path: text} for every workflow file. GitHub runs both
+    `.yml` and `.yaml` files from .github/workflows, so a check that read only
+    one spelling would never see a workflow written with the other."""
+    workflows = Path(root) / ".github/workflows"
+    paths = sorted(p for ext in ("yml", "yaml") for p in glob.glob(str(workflows / ("*." + ext))))
+    return {Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8") for p in paths}
+
+
 def check_cache_restore_prefixes_distinct(root=ROOT):
-    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
-    return _cache_prefix_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
-                                   for p in paths})
+    return _cache_prefix_findings(_workflow_files(root))
 
 
 
@@ -2731,7 +3048,7 @@ def check_review_budget_agrees(root=ROOT):
         return ["could not read %s: %s" % (e.filename, e.strerror)]
 
 
-# --- check 25: README authored-line badge vs the git index (issue #1465) ------
+# --- check 25: README authored-line endpoint badge (issues #1465, #2079) ------
 
 # What counts as authored code. Tracked files only (`git ls-files`), so a local
 # build tree or an ignored file never moves the number. Roots: the two
@@ -2749,13 +3066,24 @@ AUTHORED_LINES_EXTENSIONS = frozenset((
 # the number. Build directories are untracked, so the index already skips them.
 AUTHORED_LINES_EXCLUDED_PREFIXES = ("AlpacaCore/external/",)
 AUTHORED_LINES_ROUND = 1000
-# Fail only when the badge is further than this fraction of the computed count
-# from it. 5% of ~247k lines is ~12k, i.e. months of ordinary churn.
-AUTHORED_LINES_TOLERANCE = 0.05
 MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
 
-AUTHORED_BADGE_RE = re.compile(
-    r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-(?P<k>\d+)k%20lines-[A-Za-z0-9]+\.svg\)\]\([^)]*\)")
+# Where the count lives (#2079): .github/workflows/authored-lines-badge.yml
+# commits the endpoint JSON to the `badges` branch on every push to main, and
+# shields.io reads it from there. A branch of its own, not GitHub Pages: the
+# repository has no Pages site, and the branch holds one file that no PR can
+# write. The README line carries no number, so no PR can fall behind main.
+AUTHORED_BADGE_ENDPOINT = "https://raw.githubusercontent.com/open-astro/AlpacaBridge/badges/authored-lines.json"
+AUTHORED_BADGE_LABEL = "Authored code"
+AUTHORED_BADGE_COLOR = "informational"
+AUTHORED_BADGE_LINE = ("[![Authored code](https://img.shields.io/endpoint?url=%s)](docs/architecture.md#modules)"
+                       % AUTHORED_BADGE_ENDPOINT.replace(":", "%3A").replace("/", "%2F"))
+# The static form #1465 shipped, named in the finding when it comes back.
+AUTHORED_STATIC_BADGE_RE = re.compile(r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-\d+k%20lines")
+# https://shields.io/badges/endpoint-badge: the keys an endpoint document may carry.
+SHIELDS_ENDPOINT_REQUIRED = {"schemaVersion": int, "label": str, "message": str}
+SHIELDS_ENDPOINT_OPTIONAL = {"color": str, "labelColor": str, "isError": bool, "namedLogo": str, "logoSvg": str,
+                             "logoColor": str, "logoWidth": int, "style": str, "cacheSeconds": int}
 
 
 def is_authored_path(path):
@@ -2780,10 +3108,34 @@ def _authored_lines_from_index(root=ROOT):
     return count_authored_lines(files)
 
 
-def authored_badge_line(count):
-    k = int(round(count / AUTHORED_LINES_ROUND))
-    return ("[![Authored code](https://img.shields.io/badge/Authored%%20code-%dk%%20lines-informational.svg)]"
-            "(docs/architecture.md#modules)" % k)
+def authored_badge_json(count):
+    """The shields.io endpoint document for the badge: the count rounded to the nearest 1,000."""
+    return {"schemaVersion": 1, "label": AUTHORED_BADGE_LABEL,
+            "message": "%dk lines" % int(round(count / AUTHORED_LINES_ROUND)), "color": AUTHORED_BADGE_COLOR}
+
+
+def _endpoint_json_findings(doc):
+    """What makes `doc` not a shields.io endpoint document (schemaVersion 1). Pure, for --self-test."""
+    if not isinstance(doc, dict):
+        return ["the endpoint JSON is a %s, not an object" % type(doc).__name__]
+    findings = []
+    for key, kind in SHIELDS_ENDPOINT_REQUIRED.items():
+        # bool is an int in Python; schemaVersion true is not 1.
+        if key not in doc or not isinstance(doc[key], kind) or isinstance(doc[key], bool):
+            findings.append("the endpoint JSON needs `%s` as a %s" % (key, kind.__name__))
+    if doc.get("schemaVersion") != 1:
+        findings.append("the endpoint JSON's schemaVersion must be 1, not %r" % (doc.get("schemaVersion"),))
+    if isinstance(doc.get("message"), str) and not doc["message"].strip():
+        findings.append("the endpoint JSON's message is empty")
+    for key, value in doc.items():
+        if key in SHIELDS_ENDPOINT_REQUIRED:
+            continue
+        kind = SHIELDS_ENDPOINT_OPTIONAL.get(key)
+        if kind is None:
+            findings.append("the endpoint JSON has `%s`, which the endpoint schema does not define" % key)
+        elif not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            findings.append("the endpoint JSON's `%s` must be a %s" % (key, kind.__name__))
+    return findings
 
 
 def _authored_badge_findings(readme, count):
@@ -2791,15 +3143,12 @@ def _authored_badge_findings(readme, count):
     if count < MIN_AUTHORED_LINES:
         return ["authored-line count is %d, below the floor %d: the path filter or `git ls-files` listing is broken"
                 % (count, MIN_AUTHORED_LINES)]
-    m = AUTHORED_BADGE_RE.search(readme)
-    if not m:
-        return ["could not find the Authored code badge in README.md; paste: %s" % authored_badge_line(count)]
-    shown = int(m.group("k")) * AUTHORED_LINES_ROUND
-    if abs(shown - count) > AUTHORED_LINES_TOLERANCE * count:
-        return ["README Authored code badge says %dk lines but %d lines are authored (more than %d%% apart); "
-                "run `python3 scripts/check_docs_drift.py --badge` and paste: %s"
-                % (shown // 1000, count, round(AUTHORED_LINES_TOLERANCE * 100), authored_badge_line(count))]
-    return []
+    if AUTHORED_BADGE_LINE in readme:
+        return []
+    if AUTHORED_STATIC_BADGE_RE.search(readme):
+        return ["README.md's Authored code badge carries a static line count, which falls behind main (#2079); "
+                "replace it with: %s" % AUTHORED_BADGE_LINE]
+    return ["could not find the Authored code endpoint badge in README.md; paste: %s" % AUTHORED_BADGE_LINE]
 
 
 def check_authored_lines_badge(root=ROOT):
@@ -2808,18 +3157,317 @@ def check_authored_lines_badge(root=ROOT):
 
 def print_badge(root=ROOT):
     count = _authored_lines_from_index(root)
-    m = AUTHORED_BADGE_RE.search(read("README.md", root))
     print("authored lines: %d" % count)
-    print("rounded: %dk" % int(round(count / AUTHORED_LINES_ROUND)))
-    print("README.md now: %s" % (m.group(0) if m else "(badge not found)"))
-    print("badge: %s" % authored_badge_line(count))
+    print("endpoint JSON (published by .github/workflows/authored-lines-badge.yml): %s"
+          % json.dumps(authored_badge_json(count)))
+    print("README badge line: %s" % AUTHORED_BADGE_LINE)
     return 0
+
+
+def print_badge_json(root=ROOT):
+    """--badge-json: the endpoint document alone, for the badge workflow."""
+    count = _authored_lines_from_index(root)
+    doc = authored_badge_json(count)
+    findings = _endpoint_json_findings(doc)
+    if count < MIN_AUTHORED_LINES:
+        findings.append("authored-line count is %d, below the floor %d" % (count, MIN_AUTHORED_LINES))
+    if findings:
+        for f in findings:
+            print(f, file=sys.stderr)
+        return 1
+    print(json.dumps(doc, sort_keys=True))
+    return 0
+
+
+# --- check 26: CGX state-frame writers (issue #2035) ---------------------------
+#
+# Every control-path write to the CGX state frame drops the poll in flight and
+# keeps measured_at (decision 0010 rules 2 and 3), so the frame ages by the poll
+# alone. A caller that wrote it in a tight loop would starve the poll and, after
+# util::kLinkStalenessBound, read as a lost link mid-motion. Each caller below
+# was checked to be occasional; a new one fails here until it is checked too.
+# The frame-age bound itself is the stress case "the state frame stays fresh
+# through the arrival-refinement loop" in
+# AlpacaCore/tests/test_celestron_cgx_concurrency_stress.cpp.
+
+CGX_DRIVER = "AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp"
+# (calling function, writer) -> call sites, and why that caller is occasional.
+CGX_FRAME_WRITERS = {
+    ("read_sky_position", "write_frame"): (1, "the control-path read below; each of its callers is pinned"),
+    ("finish_slew_operation", "read_sky_position"): (1, "once per arrival check, at most kMaxSlewCorrections + 1"),
+    ("pulse_guide", "read_sky_position"): (1, "once per PulseGuide, for the polarity"),
+    ("sync_to_coordinates", "read_sky_position"): (1, "once per Sync"),
+    ("sync_to_coordinates", "write_frame"): (1, "once per Sync, the verified labels"),
+    ("run_home_operation", "write_frame"): (1, "once per home, the home labels"),
+    ("start_slew_operation", "read_sky_position"): (1, "once per slew, for planning"),
+    ("run_flip_slew_operation", "write_frame"): (1, "once per meridian home route, the re-home labels"),
+    ("publish_guide_end_frame", "write_frame"): (1, "the guide-end frame below"),
+    ("run_pulse_guide", "publish_guide_end_frame"): (1, "once per pulse, when it ends"),
+}
+CGX_MEMBER_DEF_RE = re.compile(r"^[^\s#][^\n;{}]*?\bCelestronCgxTelescopeDriver::(~?\w+)\(", re.M)
+# A call, not a definition (`Class::name(`) or an in-class declaration (`Type name(`).
+CGX_WRITER_CALL_RE = re.compile(r"(?<![\w:])(?<!void )(?<!CgxSkyPosition )(write_frame|read_sky_position|"
+                                r"publish_guide_end_frame)\(")
+
+
+def _cgx_frame_writer_findings(source, pinned=None):
+    """Check 26 over the driver's text. Pure, so --self-test can drive it."""
+    pinned = CGX_FRAME_WRITERS if pinned is None else pinned
+    code = _strip_comments(source)
+    defs = [(m.start(), m.group(1)) for m in CGX_MEMBER_DEF_RE.finditer(code)]
+    found = {}
+    for m in CGX_WRITER_CALL_RE.finditer(code):
+        callers = [name for start, name in defs if start < m.start()]
+        key = (callers[-1] if callers else "<class body>", m.group(1))
+        found[key] = found.get(key, 0) + 1
+    findings = []
+    for key in sorted(set(found) | set(pinned)):
+        want = pinned.get(key, (0, ""))[0]
+        if found.get(key, 0) != want:
+            findings.append(
+                "%s: %s() calls %s() %d time(s), pinned %d. Each call drops the state poll in flight (decision "
+                "0010 rule 3), so a caller in a tight loop starves it into a false link loss (#2035): check the "
+                "cadence, then update CGX_FRAME_WRITERS in %s"
+                % (CGX_DRIVER, key[0], key[1], found.get(key, 0), want, Path(__file__).name))
+    return findings
+
+
+def check_cgx_frame_writers(root=ROOT):
+    return _cgx_frame_writer_findings(read(CGX_DRIVER, root))
+
+
+# --- check 27: every workflow job has a timeout-minutes (issues #363, #2059) ---
+
+# The block ends at the next top-level key, not at a column-0 comment: YAML
+# allows a `# ----` divider between jobs, and ending there would skip every job
+# after it.
+_WORKFLOW_JOBS_RE = re.compile(r"^jobs:[ \t]*(?:#.*)?\n(.*?)(?=^[^\s#]|\Z)", re.MULTILINE | re.DOTALL)
+_WORKFLOW_JOB_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*(?:#.*)?$", re.MULTILINE)
+_JOB_TIMEOUT_RE = re.compile(r"^    timeout-minutes:[ \t]*\S", re.MULTILINE)
+_JOB_REUSABLE_RE = re.compile(r"^    uses:[ \t]*\S", re.MULTILINE)
+
+
+def _workflow_timeout_findings(workflows):
+    """Check 27 over {workflow path: text}. Pure, so --self-test can drive it."""
+    if not workflows:
+        return ["found no workflow under .github/workflows/: the reader is stale"]
+    findings = []
+    for path, text in sorted(workflows.items()):
+        block = _WORKFLOW_JOBS_RE.search(text)
+        starts = list(_WORKFLOW_JOB_RE.finditer(block.group(1))) if block else []
+        if not starts:
+            findings.append("%s: found no job under `jobs:` (two-space indent): the reader is stale" % path)
+            continue
+        for i, m in enumerate(starts):
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(block.group(1))
+            body = block.group(1)[m.end():end]
+            if _JOB_TIMEOUT_RE.search(body) or _JOB_REUSABLE_RE.search(body):
+                continue
+            findings.append("%s: job `%s` has no `timeout-minutes`; give it a bound sized from its green runtime "
+                            "with wide headroom (ci-gates instructions), or a hang runs for GitHub's six-hour "
+                            "default" % (path, m.group(1)))
+    return findings
+
+
+def check_workflow_job_timeouts(root=ROOT):
+    return _workflow_timeout_findings(_workflow_files(root))
+
+
+# --- check 28: every NOLINT gives its reason on the same line (issue #2059) ----
+
+_NOLINT_RE = re.compile(r"\bNOLINT(?P<kind>NEXTLINE|BEGIN|END)?\b(?:\([^)]*\))?(?P<rest>.*)$")
+# A floor, not a count: the tree has over a hundred suppressions, so a scan that
+# sees a handful means the listing or the prefixes regressed. Deleting
+# suppressions is welcome; lower the floor when it gets close.
+MIN_NOLINT_SITES = 25
+
+
+def _nolint_reason_findings(files, floor=MIN_NOLINT_SITES):
+    """Check 28 over {path: text}. Pure, so --self-test can drive it."""
+    findings = []
+    sites = 0
+    for path, text in sorted(files.items()):
+        for n, line in enumerate(text.splitlines(), 1):
+            m = _NOLINT_RE.search(line)
+            if not m:
+                continue
+            sites += 1
+            if m.group("kind") == "END":
+                continue
+            reason = m.group("rest").replace("*/", "").strip().lstrip(":-").strip()
+            if not re.search(r"[A-Za-z]", reason):
+                findings.append("%s:%d: a NOLINT with no reason; write why on the same line, after the check list: "
+                                "`// NOLINT(check): reason`" % (path, n))
+    if sites < floor:
+        findings.insert(0, "found only %d NOLINT site(s) in first-party C/C++ (floor %d): the file listing or "
+                           "LICENSE_HEADER_PREFIXES regressed" % (sites, floor))
+    return findings
+
+
+def check_nolint_reasons(root=ROOT):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines()
+    files = {}
+    for f in tracked:
+        if f.startswith(LICENSE_HEADER_PREFIXES) and f.endswith(LICENSE_HEADER_EXTENSIONS) \
+                and (Path(root) / f).is_file():
+            files[f] = read(f, root)
+    return _nolint_reason_findings(files)
+
+
+# --- check 29: a serial device's USB identity has one home (issue #2312) ------
+
+USB_TOKENS_DEF_RE = re.compile(r"^const std::vector<std::string>& (\w+_usb_tokens)\(\) \{", re.MULTILINE)
+USB_TOKENS_NAME_RE = re.compile(r"\b(\w+_usb_tokens)\(\)")
+USB_MATCH_CALL_RE = re.compile(r"\busb_tty_descriptor_matches\(")
+USB_IDENTITY_CALL_RE = re.compile(r"\badd_usb_serial_identity\(")
+
+
+def _call_args(code, pattern):
+    """(start, argument text) of each call to `pattern`, the arguments read up
+    to the matching parenthesis, so a call inside an `if (...)` is whole."""
+    calls = []
+    for m in pattern.finditer(code):
+        depth = 0
+        for i in range(m.end() - 1, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append((m.start(), code[m.end():i]))
+                    break
+    return calls
+# A floor, not a count: 17 wrappers define a list today. Lower it when one goes.
+MIN_USB_TOKEN_LISTS = 15
+
+
+def _usb_identity_findings(wrappers, catalogs, floor=MIN_USB_TOKEN_LISTS):
+    """Check 29 over {path: text} maps of wrapper and catalog sources. Pure, so
+    --self-test can drive it."""
+    findings = []
+    defined = {}
+    for path, text in sorted(wrappers.items()):
+        code = _strip_comments(text)
+        matched = set()
+        for start, args in _call_args(code, USB_MATCH_CALL_RE):
+            if "{" in args:
+                findings.append("%s:%d: a raw-node filter passes a braced token list to usb_tty_descriptor_matches(); "
+                                "move it into the wrapper's <x>_usb_tokens() so the catalog's USB identity reads the "
+                                "same list (#2312)" % (path, code.count("\n", 0, start) + 1))
+            matched.update(USB_TOKENS_NAME_RE.findall(args))
+        for name in USB_TOKENS_DEF_RE.findall(code):
+            defined[name] = path
+            if name not in matched:
+                findings.append("%s defines %s() but its raw-node filter does not match it: the listing and the "
+                                "connect-time scan would read different lists" % (path, name))
+    registered = set()
+    for _, text in sorted(catalogs.items()):
+        for _, args in _call_args(_strip_comments(text), USB_IDENTITY_CALL_RE):
+            registered.update(USB_TOKENS_NAME_RE.findall(args))
+    for name in sorted(set(defined) - registered):
+        findings.append("%s defines %s() but no *_catalog.cpp registers it with add_usb_serial_identity(): the "
+                        "attacheddevices listing would miss that device" % (defined[name], name))
+    for name in sorted(registered - set(defined)):
+        findings.append("a *_catalog.cpp registers %s() but no wrapper under AlpacaCore/src/vendors defines it" % name)
+    if len(defined) < floor:
+        findings.insert(0, "found only %d <x>_usb_tokens() definition(s) under AlpacaCore/src/vendors (floor %d): "
+                           "the definition pattern or the file listing regressed" % (len(defined), floor))
+    return findings
+
+
+def check_usb_identity_single_source(root=ROOT):
+    wrappers, catalogs = {}, {}
+    for path in sorted(Path(root).glob("AlpacaCore/src/vendors/*/*.cpp")):
+        rel = path.relative_to(root).as_posix()
+        (catalogs if rel.endswith("_catalog.cpp") else wrappers)[rel] = read(rel, root)
+    return _usb_identity_findings(wrappers, catalogs)
+
+
+# --- check 31: installed udev rules give every user no access (issue #2290) --
+
+UDEV_TIGHTEN_SCRIPT = "scripts/tighten_udev_rules.sh"
+# A rule source debian/rules installs from the tree: $(CURDIR)/... or $(QHY_SDK_DIR)/....
+_UDEV_RULE_SRC_RE = re.compile(r"\$\((CURDIR|QHY_SDK_DIR)\)(/[^\s\\]+?\.rules)(?=\s)")
+_UDEV_TIGHTEN_CALL_RE = re.compile(
+    r"scripts/tighten_udev_rules\.sh\s+\$\(STAGING\)/usr/lib/udev/rules\.d/\*\.rules")
+# Any install into the staged rules directory, whatever its source ($(GPHOTO_STAGE), debian/ files too).
+_UDEV_RULE_DEST_RE = re.compile(r"\$\(STAGING\)/usr/lib/udev/rules\.d/")
+# A MODE whose last octal digit is not 0 grants access to every user.
+_UDEV_WORLD_MODE_RE = re.compile(r'\bMODE\s*:?=\s*"?0?[0-7]{2}[1-7](?![0-7])')
+
+
+def _udev_world_mode_findings(name, text):
+    findings = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if _UDEV_WORLD_MODE_RE.search(line):
+            findings.append("%s:%d: the installed rule still lets every user open the device: %s"
+                            % (name, n, line.strip()))
+    return findings
+
+
+def check_installed_udev_rules_not_world(root=ROOT):
+    """Check 31 (issue #2290)."""
+    root = Path(root)
+    rules = read("debian/rules", root)
+    m = re.search(r"^QHY_SDK_DIR\s*:?=\s*\$\(CURDIR\)(\S+)\s*$", rules, re.M)
+    qhy_dir = m.group(1) if m else None
+    sources = []
+    last_install = -1
+    for sm in _UDEV_RULE_SRC_RE.finditer(rules):
+        if sm.group(1) == "QHY_SDK_DIR":
+            if qhy_dir is None:
+                return ["debian/rules installs a rule from $(QHY_SDK_DIR) but does not define QHY_SDK_DIR"]
+            rel = qhy_dir.lstrip("/") + sm.group(2)
+        else:
+            rel = sm.group(2).lstrip("/")
+        sources.append(rel)
+        last_install = max(last_install, sm.start())
+    findings = []
+    if not sources:
+        return ["no udev rule installed from the tree found in debian/rules: the extractor is stale"]
+    call = _UDEV_TIGHTEN_CALL_RE.search(rules)
+    # The last install counts every rule copied into the staged directory, not only the tree sources the
+    # check reads back, so a tighten call moved above the libgphoto2 or debian/ rule installs is caught too.
+    for dm in _UDEV_RULE_DEST_RE.finditer(rules):
+        if call is None or not call.start() <= dm.start() < call.end():
+            last_install = max(last_install, dm.start())
+    if call is None:
+        findings.append("debian/rules does not run %s over $(STAGING)/usr/lib/udev/rules.d/*.rules, so the vendor "
+                        "rules install with their own MODE" % UDEV_TIGHTEN_SCRIPT)
+    elif call.start() < last_install:
+        findings.append("debian/rules runs %s before its last rule install, so that rule is not tightened"
+                        % UDEV_TIGHTEN_SCRIPT)
+    script = root / UDEV_TIGHTEN_SCRIPT
+    if not script.is_file():
+        findings.append("%s is missing" % UDEV_TIGHTEN_SCRIPT)
+        return findings
+    with tempfile.TemporaryDirectory() as tmp:
+        copies = []
+        for i, rel in enumerate(sources):
+            src = root / rel
+            if not src.is_file():
+                findings.append("debian/rules installs %s, which does not exist" % rel)
+                continue
+            dst = Path(tmp) / ("%02d-%s" % (i, src.name))
+            dst.write_bytes(src.read_bytes())
+            copies.append((rel, dst))
+        if copies:
+            r = subprocess.run(["bash", str(script)] + [str(d) for _r, d in copies],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                findings.append("%s failed: %s" % (UDEV_TIGHTEN_SCRIPT, (r.stderr or r.stdout).strip()))
+                return findings
+        for rel, dst in copies:
+            findings.extend(_udev_world_mode_findings(rel, dst.read_text(encoding="utf-8", errors="replace")))
+    return findings
 
 
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
-    ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
+    ("zizmor and PMD pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
@@ -2831,7 +3479,7 @@ CHECKS = [
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
     ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
     ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
-    ("Every std::regex in router.cpp is built once (static)", check_router_regexes_static),
+    ("Every std::regex in router.cpp and routes/*.cpp is built once (static)", check_router_regexes_static),
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
@@ -2843,7 +3491,13 @@ CHECKS = [
     ("Decision record Adoption tables match the code", check_decision_adoption),
     ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
      check_review_budget_agrees),
-    ("README Authored code badge is within tolerance of the tracked line count", check_authored_lines_badge),
+    ("README Authored code badge reads the published endpoint", check_authored_lines_badge),
+    ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
+    ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
+    ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
+    ("Each serial device's USB identity is its wrapper's token list", check_usb_identity_single_source),
+    ("Fake ConformU run list matches the fake-connectable roster", check_conformu_run_list_matches_roster),
+    ("No udev rule the package installs lets every user open a device", check_installed_udev_rules_not_world),
 ]
 
 
@@ -3375,6 +4029,64 @@ def self_test():
           len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
     check("fake roster: a row inside a comment is not a row",
           len(_fake_roster_findings("// {\"a\", \"b\", \"fake_x.h\"},\n" + roster_hdr, roster_disk, roster_helpers)) == 0)
+    runs_hdr = ("inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
+                "    {\"skywatcher\", \"telescope\", \"fake_skywatcher_mount.h\"},\n"
+                "    {\"zwo\", \"camera\", \"fake_zwo_sdk.h\"},\n"
+                "    {\"touptek\", \"switch\", \"fake_touptek_powerbox_sdk.h\"},\n"
+                "};\n")
+    runs_head = "vendor\tdeviceType\tfakeHeader\tstatus\tslice\treportPath\treason\n"
+    runs_rows = ("skywatcher\ttelescope\tfake_skywatcher_mount.h\trun\t1\t"
+                 "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt\t-\n"
+                 "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tnot yet tried\n"
+                 "touptek\tswitch\tfake_touptek_powerbox_sdk.h\tpending\t6\t-\tnot yet tried\n")
+    runs_ok = runs_head + runs_rows
+    check("conformu runs: a run list that matches the roster produces no finding",
+          _conformu_run_list_findings(runs_hdr, runs_ok) == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tnot yet tried\n", ""))
+    check("conformu runs: a roster row with no run-list record is flagged by name",
+          len(f) == 1 and "{zwo, camera, fake_zwo_sdk.h}" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tfocuser\tfake_zwo_eaf_sdk.h\tpending\t3\t-\tnot yet tried\n")
+    check("conformu runs: a pending record with no roster row is flagged",
+          len(f) == 1 and "fake_zwo_eaf_sdk.h" in f[0] and "no kFakeConnectableRoster row" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\t-\tno-fake\t6\t-\tno fake\n")
+    check("conformu runs: a no-fake record with no roster row is not a finding", f == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-\tno-fake\t6\t-\tno fake\n")
+    check("conformu runs: a bare no-fake record whose pair has a roster row is flagged",
+          len(f) == 1 and "-<backend>" in f[0])
+    check("conformu runs: a no-fake record naming its backend beside a roster row passes",
+          _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-thermal\tno-fake\t6\t-\tno fake\n") == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "run\t5\t"
+                                    "AlpacaCore/conformu/ZWO/Fake/Fake-Linux-arm64.txt"))
+    check("conformu runs: a run record whose report name breaks the naming rule is flagged",
+          len(f) == 1 and "Fake-camera-fake_zwo_sdk-Linux-arm64.txt" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok, lambda path: False)
+    check("conformu runs: a run record whose report is not committed is flagged",
+          len(f) == 1 and "does not exist" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t\t-"))
+    check("conformu runs: a pending record with no slice is flagged", len(f) == 1 and "slice" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-\tnot yet tried", "pending\t5\t-\t-"))
+    check("conformu runs: a pending record with no reason is flagged", len(f) == 1 and "no reason" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("\t-\tnot yet tried\n", "\t-\n", 1))
+    check("conformu runs: a record without the reason column is flagged", any("6 columns, not 7" in x for x in f))
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5", "skipped\t5"))
+    check("conformu runs: an unknown status is flagged", any("status 'skipped'" in x for x in f))
+    check("conformu runs: a run list with the wrong header is one finding",
+          len(_conformu_run_list_findings(runs_hdr, runs_rows)) == 1)
+    check("conformu runs: a missing roster array is a finding, not a silent pass",
+          len(_conformu_run_list_findings("// nothing here\n", runs_ok)) == 1)
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\tagain\n")
+    check("conformu runs: a repeated record is flagged", len(f) == 1 and "repeats the record" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t5\tAlpacaCore/conformu/ZWO/Fake/x.txt"))
+    check("conformu runs: a pending record that names a report is flagged",
+          len(f) == 1 and "names a report" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\n")
+    check("conformu runs: a record with the wrong column count is flagged", len(f) == 1 and "5 columns, not 7" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\tfake_bisque_mount.h\tno-fake\t6\t-\tno fake\n")
+    check("conformu runs: a no-fake record that names a fake header is flagged",
+          len(f) == 1 and "names a fake header" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("run\t1\t", "run\t\t"))
+    check("conformu runs: a run record with no slice is flagged",
+          len(f) == 1 and "a run record names the slice" in f[0])
 
     rx_ok = 'static const std::regex kX(R"(a)");\n'
     check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
@@ -3404,6 +4116,29 @@ def self_test():
     f = _static_regex_findings("int x = 1;\n")
     check("static regex: no construction at all is a floor finding, not a pass",
           len(f) == 1 and "extractor is stale" in f[0])
+    # #2081: the per-type dispatch moves to AlpacaHTTP/src/http/routes/<type>_routes.cpp, so the
+    # check reads the router and every routes source, with the floor over the union.
+    with tempfile.TemporaryDirectory() as rx_tmp:
+        rx_root = Path(rx_tmp)
+        rx_http = rx_root / "AlpacaHTTP" / "src" / "http"
+        (rx_http / "routes").mkdir(parents=True)
+        (rx_http / "router.cpp").write_text(rx_ok, encoding="utf-8")
+        (rx_http / "routes" / "dome_routes.cpp").write_text("int dispatch = 0;\n", encoding="utf-8")
+        check("static regex: a routes source with no regex adds no finding",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('const std::regex kF("a");\n', encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: a non-static regex in a routes source is reported with its path",
+              len(f) == 1 and "routes/focuser_routes.cpp:1" in f[0] and "kF is not static" in f[0])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('static const std::regex kF("a");\n',
+                                                               encoding="utf-8")
+        (rx_http / "router.cpp").write_text("int x = 1;\n", encoding="utf-8")
+        check("static regex: the floor counts the routes sources too (a regex there is a construction)",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text("int y = 2;\n", encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: no construction in the router or any routes source is one floor finding",
+              len(f) == 1 and "extractor is stale" in f[0] and "routes" in f[0])
 
     # check 15: README headline vs SUPPORTED-DRIVERS.md (issue #684).
     hl_map = {"Alpha": "Alpha", "Beta Motor": "Beta", "Beta Handset": "Beta", "GPhoto": "DSLRs (via libgphoto2)"}
@@ -3531,6 +4266,79 @@ def self_test():
     f = blocking_list_findings(bl_header.replace("The blocking telescopes (", "The telescopes ("), bl_kinds)
     check("blocking list: a header without the telescopes span is BLOCKING-LIST SPAN NOT FOUND",
           len(f) == 1 and f[0].startswith("BLOCKING-LIST SPAN NOT FOUND"))
+    # The shared power-port driver (#2264): scanned by name, and named when it blocks.
+    with tempfile.TemporaryDirectory() as bl_tmp:
+        bl_shared = Path(bl_tmp) / "power_port_switch_driver.h"
+        bl_shared.write_text("bool get_connected() const override { std::lock_guard<std::mutex> g(m_); return c_; }\n")
+        bl_scan, bl_fail = classify_get_connected_bodies([(bl_shared, [])])
+        check("blocking list: a shared header whose get_connected() locks is classified driver-mutex",
+              bl_scan == {"power_port_switch_driver.h": "driver-mutex"} and bl_fail == [])
+        bl_free, bl_locked = Path(bl_tmp) / "free", Path(bl_tmp) / "locked"
+        bl_free.mkdir()
+        bl_locked.mkdir()
+        (bl_free / "a_wrapper.cpp").write_text("bool A::is_open() const { return open_.load(); }\n")
+        (bl_locked / "b_wrapper.cpp").write_text(
+            "bool B::is_open() const { std::lock_guard<std::mutex> g(m_); return open_; }\n")
+        bl_shared.write_text("bool get_connected() const override { return wrapper_.is_open(); }\n")
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free, bl_locked])])
+        check("blocking list: a shared header reaching is_open() is 'wrapper' when any served vendor's is_open() locks",
+              bl_scan == {"power_port_switch_driver.h": "wrapper"})
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free])])
+        check("blocking list: the same header is lock-free when every served vendor's is_open() is lock-free",
+              bl_scan == {"power_port_switch_driver.h": "lock-free"})
+        bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
+        check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
+              bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))
+    bl_gone = ROOT / "AlpacaCore" / "include" / "alpacacore" / "util" / "gone_power_port_driver.h"
+    bl_scan, bl_fail = classify_get_connected_bodies([(bl_gone, [])])
+    check("blocking list: a missing in-repo header is named by its repo-relative path",
+          len(bl_fail) == 1 and "GET_CONNECTED SOURCE MISSING: AlpacaCore/include/alpacacore/util/gone_power_port_driver.h "
+          in bl_fail[0] and str(ROOT) not in bl_fail[0])
+    f = blocking_list_findings(bl_header, dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
+    check("blocking list: a re-locked shared power-port getter is MISSING FROM THE BLOCKING LIST",
+          len(f) == 1 and f[0].startswith("MISSING FROM THE BLOCKING LIST") and "'PowerPortSwitchDriver'" in f[0])
+    f = blocking_list_findings(bl_header.replace("switch drivers ()", "switch drivers (PowerPortSwitchDriver)"),
+                               dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
+    check("blocking list: the re-locked shared getter named in the switches list reports nothing", f == [])
+    # check 5: each SHARED_DRIVER_HEADERS tuple against the vendors that instantiate the class.
+    with tempfile.TemporaryDirectory() as sd_tmp:
+        sd = Path(sd_tmp)
+        sd_hdr = sd / "foo.h"
+        sd_hdr.write_text("template <typename W>\nclass FooDriver {};\n")
+        sd_vendors = sd / "vendors"
+        (sd_vendors / "a").mkdir(parents=True)
+        (sd_vendors / "b").mkdir()
+        (sd_vendors / "a" / "x.cpp").write_text("using D = util::FooDriver<AW>;\n")
+        (sd_vendors / "b" / "y.cpp").write_text("auto d = std::make_unique<util::FooDriver<BW>>(1);\n")
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a",)})
+        check("shared driver vendors: a vendor that instantiates the class but is not listed is "
+              "SHARED DRIVER VENDOR UNLISTED",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER VENDOR UNLISTED") and "'b'" in f[0])
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b", "c")})
+        check("shared driver vendors: a listed vendor that no longer instantiates the class is "
+              "STALE SHARED DRIVER VENDOR",
+              len(f) == 1 and f[0].startswith("STALE SHARED DRIVER VENDOR") and "'c'" in f[0])
+        check("shared driver vendors: a tuple that matches the instantiations reports nothing",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        (sd_vendors / "c").mkdir()
+        (sd_vendors / "c" / "z.cpp").write_text(
+            "// util::FooDriver<CW> is not used here\n/* FooDriver<CW> */\n")
+        check("shared driver vendors: a mention in a comment is not an instantiation",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        (sd_vendors / "c" / "s.cpp").write_text(
+            'const char* k = "util::FooDriver<CW>"; // not "here"\nconst char q = \'"\';\n')
+        check("shared driver vendors: a mention in a string literal is not an instantiation",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        sd_inc = sd / "inc"
+        (sd_inc / "d").mkdir(parents=True)
+        (sd_inc / "d" / "w.h").write_text("using X = util::FooDriver<DW>;\n")
+        f = shared_driver_vendor_findings([sd_vendors, sd_inc], {sd_hdr: ("a", "b")})
+        check("shared driver vendors: an alias in a second root (a vendor header) counts",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER VENDOR UNLISTED") and "'d'" in f[0])
+        sd_hdr.write_text("struct NotATemplate {};\n")
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")})
+        check("shared driver vendors: a header with no class template is SHARED DRIVER CLASS NOT FOUND",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER CLASS NOT FOUND"))
 
     # check 4: VERSION vs README badge, with the ~betaN suffix.
     b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
@@ -3865,6 +4673,15 @@ def self_test():
     f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing, with one exception."))
     check("decision records: the word `exception` in a rule is reported (#2080)",
           any("rule 1 says `exception`" in x for x in f))
+
+    pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
+              "\n      - name: Next\n          ver=9.9.9\n")
+    pmd_pf = 'PMD_VER="7.7.0"\nPMD_SHA256="' + "a" * 64 + '"\n'
+    check("PMD pins: equal pins pass, scoped to the Install PMD step", _pmd_pin_findings(pmd_ci, pmd_pf) == [])
+    check("PMD pins: a sha256 mismatch is reported",
+          any("PMD sha256 mismatch" in x for x in _pmd_pin_findings(pmd_ci, pmd_pf.replace("a" * 64, "b" * 64))))
+    check("PMD pins: a missing preflight pin is reported",
+          any("could not find the PMD pin" in x for x in _pmd_pin_findings(pmd_ci, "")))
     f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])
@@ -3977,25 +4794,163 @@ def self_test():
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
     check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
-    # check 25: README authored-line badge (issue #1465).
-    badge = authored_badge_line(150000)
-    ab_readme = "# T\n\n" + badge + "\n"
-    check("authored badge: the generated line is what the extractor reads",
-          AUTHORED_BADGE_RE.search(ab_readme) is not None and "150k%20lines" in badge)
-    check("authored badge: a badge equal to the count is clean", _authored_badge_findings(ab_readme, 150000) == [])
-    check("authored badge: an ordinary PR's churn inside the tolerance is clean",
-          _authored_badge_findings(ab_readme, 150000 + 3000) == [] and _authored_badge_findings(ab_readme, 150000 - 3000) == [])
-    f = _authored_badge_findings(ab_readme, 170000)
-    check("authored badge: a count beyond the tolerance is flagged with the paste-ready line",
-          len(f) == 1 and "says 150k" in f[0] and "170k%20lines" in f[0])
-    f = _authored_badge_findings(ab_readme, 130000)
-    check("authored badge: a count far below the badge is flagged too", len(f) == 1 and "130k%20lines" in f[0])
+    # check 25: README authored-line badge (issues #1465, #2079).
+    ab_readme = "# T\n\n" + AUTHORED_BADGE_LINE + "\n"
+    check("authored badge: the endpoint badge carries no number and reads the badges branch",
+          not re.search(r"\d+k", AUTHORED_BADGE_LINE) and "img.shields.io/endpoint?url=" in AUTHORED_BADGE_LINE
+          and "%2Fbadges%2Fauthored-lines.json" in AUTHORED_BADGE_LINE)
+    check("authored badge: the endpoint badge is clean whatever the count (no PR fails on main's lines)",
+          all(_authored_badge_findings(ab_readme, n) == [] for n in (1000, 150000, 900000)))
+    static = "[![Authored code](https://img.shields.io/badge/Authored%20code-150k%20lines-informational.svg)](x)"
+    f = _authored_badge_findings("# T\n\n" + static + "\n", 150000)
+    check("authored badge: a static NNNk badge is a finding even at the exact count",
+          len(f) == 1 and "static line count" in f[0] and AUTHORED_BADGE_LINE in f[0])
     f = _authored_badge_findings("# T\n", 150000)
     check("authored badge: a missing badge is a finding, not a pass", len(f) == 1 and "could not find" in f[0])
-    f = _authored_badge_findings(ab_readme.replace("Authored%20code", "Code"), 150000)
-    check("authored badge: a renamed badge label is not found", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme.replace("authored-lines.json", "other.json"), 150000)
+    check("authored badge: an endpoint badge that reads another file is not the badge",
+          len(f) == 1 and "could not find" in f[0])
     f = _authored_badge_findings(ab_readme, 10)
     check("authored badge: a near-zero count is a floor finding", len(f) == 1 and "floor" in f[0])
+    doc = authored_badge_json(301600)
+    check("authored badge JSON: the generator writes a valid shields.io endpoint document",
+          _endpoint_json_findings(doc) == [] and doc["schemaVersion"] == 1 and doc["message"] == "302k lines"
+          and doc["label"] == "Authored code")
+    check("authored badge JSON: it survives a JSON round trip unchanged",
+          _endpoint_json_findings(json.loads(json.dumps(doc))) == [])
+    check("authored badge JSON: a missing schemaVersion is reported",
+          any("schemaVersion" in x for x in _endpoint_json_findings({k: v for k, v in doc.items() if k != "schemaVersion"})))
+    check("authored badge JSON: schemaVersion 2 is reported",
+          any("must be 1" in x for x in _endpoint_json_findings(dict(doc, schemaVersion=2))))
+    check("authored badge JSON: schemaVersion true is not 1",
+          len(_endpoint_json_findings(dict(doc, schemaVersion=True))) >= 1)
+    check("authored badge JSON: a non-string message is reported",
+          any("`message`" in x for x in _endpoint_json_findings(dict(doc, message=302))))
+    check("authored badge JSON: an empty message is reported",
+          any("empty" in x for x in _endpoint_json_findings(dict(doc, message=" "))))
+    check("authored badge JSON: a key outside the schema is reported",
+          any("`colour`" in x for x in _endpoint_json_findings(dict(doc, colour="blue"))))
+    check("authored badge JSON: a list is not an endpoint document", len(_endpoint_json_findings([doc])) == 1)
+
+    # check 27: every workflow job sets timeout-minutes (issue #2059).
+    tw = ("name: X\non:\n  push:\njobs:\n  build:  # the build\n    runs-on: x\n    timeout-minutes: 30\n"
+          "    steps:\n      - run: echo\n  reuse:\n    uses: ./.github/workflows/other.yml\n"
+          "  test:\n    runs-on: x\n    timeout-minutes: ${{ inputs.minutes }}\n    steps:\n      - run: echo\n")
+    check("job timeouts: every job bounded (a reusable call exempt, an expression accepted) is clean",
+          _workflow_timeout_findings({"a.yml": tw}) == [])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: 30\n", "")})
+    check("job timeouts: a job without timeout-minutes is reported by file and job",
+          len(f) == 1 and "a.yml: job `build` has no `timeout-minutes`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: ${{ inputs.minutes }}\n", "")})
+    check("job timeouts: the last job in the file is checked too", len(f) == 1 and "job `test`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: ${{ inputs.minutes }}\n", "")
+                                    .replace("  test:\n", "# ---- tests ----\n  test:\n")})
+    check("job timeouts: a column-0 comment between jobs does not end the jobs block",
+          len(f) == 1 and "job `test`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: 30\n    steps:\n      - run: echo\n",
+                                                        "    steps:\n      - run: echo\n        timeout-minutes: 5\n")})
+    check("job timeouts: a step-level timeout-minutes does not bound the job", len(f) == 1 and "job `build`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw, "b.yml": "on:\n  push:\njobs:\n  only:\n    runs-on: x\n"})
+    check("job timeouts: a second workflow file is read", len(f) == 1 and f[0].startswith("b.yml: job `only`"))
+    f = _workflow_timeout_findings({"a.yml": tw.replace("\n  ", "\n   ")})
+    check("job timeouts: a jobs block the reader cannot split is a finding, not a pass",
+          len(f) == 1 and "found no job" in f[0])
+    check("job timeouts: no workflow at all is a finding", len(_workflow_timeout_findings({})) == 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ("a.yml", "b.yaml", "notes.txt"):
+            (Path(tmp) / ".github/workflows").mkdir(parents=True, exist_ok=True)
+            (Path(tmp) / ".github/workflows" / name).write_text("jobs:\n", encoding="utf-8")
+        check("workflow files: both .yml and .yaml are read, nothing else (checks 20 and 27)",
+              sorted(_workflow_files(tmp)) == [".github/workflows/a.yml", ".github/workflows/b.yaml"])
+
+    # check 31: no installed udev rule is world-accessible (issue #2290). The fixtures run the real
+    # tighten script, copied into a temporary tree, so the check and the script are tested together.
+    with tempfile.TemporaryDirectory() as ud_tmp:
+        ud = Path(ud_tmp)
+        (ud / "scripts").mkdir()
+        (ud / "debian").mkdir()
+        (ud / "AlpacaCore" / "external" / "V" / "sdk").mkdir(parents=True)
+        real_script = ROOT / UDEV_TIGHTEN_SCRIPT
+        if real_script.is_file():
+            (ud / UDEV_TIGHTEN_SCRIPT).write_bytes(real_script.read_bytes())
+        (ud / "AlpacaCore/external/V/a.rules").write_text(
+            '# If you think permissions of 0666 are too loose, see the README\n'
+            'SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", MODE="0666"\n'
+            'ACTION=="add", ATTRS{idVendor}=="03c3", ATTRS{idProduct}=="1f10", GROUP="users", MODE="0666"\n'
+            'SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", MODE="0666" \n', encoding="utf-8")
+        (ud / "AlpacaCore/external/V/sdk/b.rules").write_text(
+            'ATTRS{idVendor}=="1618", MODE:="0664"\n'
+            'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\n', encoding="utf-8")
+        ud_install = ("QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/V/sdk\n"
+                      "\tinstall -m 644 \\\n\t  $(CURDIR)/AlpacaCore/external/V/a.rules \\\n"
+                      "\t  $(STAGING)/usr/lib/udev/rules.d/\n"
+                      "\tinstall -m 644 \\\n\t  $(QHY_SDK_DIR)/b.rules \\\n\t  $(STAGING)/usr/lib/udev/rules.d/\n")
+        ud_call = "\tbash $(CURDIR)/scripts/tighten_udev_rules.sh $(STAGING)/usr/lib/udev/rules.d/*.rules\n"
+        (ud / "debian/rules").write_text(ud_install + ud_call, encoding="utf-8")
+        check("udev modes: world-accessible vendor rules tightened at install are clean",
+              check_installed_udev_rules_not_world(ud) == [])
+        a = (ud / "AlpacaCore/external/V/a.rules").read_text(encoding="utf-8")
+        check("udev modes: the check never edits the vendor rules in the tree", a.count('MODE="0666"') == 3)
+        out = ud / "out.rules"
+        out.write_text(a + 'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\nX, MODE:="0664"\n'
+                       'Y, GROUP:="users", MODE="0666"\n', encoding="utf-8")
+        subprocess.run(["bash", str(ud / UDEV_TIGHTEN_SCRIPT), str(out)], check=False)
+        check("udev modes: the script gives each world rule plugdev 0660, keeps each := and leaves the rest",
+              out.read_text(encoding="utf-8").splitlines() == [
+                  "# If you think permissions of 0666 are too loose, see the README",
+                  'SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", GROUP="plugdev", MODE="0660"',
+                  'ACTION=="add", ATTRS{idVendor}=="03c3", ATTRS{idProduct}=="1f10", GROUP="plugdev", MODE="0660"',
+                  'SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", GROUP="plugdev", MODE="0660" ',
+                  'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"',
+                  'X, GROUP="plugdev", MODE:="0660"',
+                  'Y, GROUP:="plugdev", MODE="0660"'])
+        (ud / "debian/rules").write_text(ud_install, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: no tighten call in debian/rules is a finding",
+              any("does not run" in x for x in f))
+        (ud / "debian/rules").write_text(ud_call + ud_install, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a tighten call before the last rule install is a finding",
+              any("before its last rule install" in x for x in f))
+        (ud / "debian/rules").write_text(
+            ud_install + ud_call + "\tinstall -m 644 $(GPHOTO_STAGE)/usr/lib/udev/rules.d/61-x.rules \\\n"
+            "\t  $(STAGING)/usr/lib/udev/rules.d/\n", encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a rule installed from outside the tree after the tighten call is a finding",
+              any("before its last rule install" in x for x in f))
+        (ud / "debian/rules").write_text(ud_install + ud_call, encoding="utf-8")
+        (ud / UDEV_TIGHTEN_SCRIPT).unlink(missing_ok=True)
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a missing tighten script is a finding", any("is missing" in x for x in f))
+        (ud / UDEV_TIGHTEN_SCRIPT).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a script that leaves MODE 0666 or 0664 reports each line",
+              len(f) == 4 and any("a.rules:2:" in x for x in f) and any("b.rules:1:" in x for x in f)
+              and not any(":1: " in x and "a.rules" in x for x in f))
+        (ud / "debian/rules").write_text(ud_call, encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: no installed rule at all is a floor finding, not a pass",
+              len(f) == 1 and "extractor is stale" in f[0])
+
+    # check 28: every NOLINT gives its reason on the same line (issue #2059).
+    nl_ok = ("x;  // NOLINT(bugprone-empty-catch): the poll retries\n"
+             "// NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd\n"
+             "y;  /* NOLINT(cert-err58-cpp): built once */\n"
+             "// NOLINTBEGIN(readability-magic-numbers): protocol table\n// NOLINTEND(readability-magic-numbers)\n")
+    check("nolint reasons: suppressions with a reason (`:`, `--`, block comment) and a bare NOLINTEND are clean",
+          _nolint_reason_findings({"a.cpp": nl_ok}, floor=1) == [])
+    f = _nolint_reason_findings({"a.cpp": nl_ok + "z;  // NOLINT(bugprone-empty-catch)\n"}, floor=1)
+    check("nolint reasons: a NOLINT with no reason is reported by file and line", f == [
+        "a.cpp:6: a NOLINT with no reason; write why on the same line, after the check list: "
+        "`// NOLINT(check): reason`"])
+    f = _nolint_reason_findings({"a.cpp": "// NOLINTNEXTLINE(misc-x):\nz;\n"}, floor=1)
+    check("nolint reasons: a bare colon is not a reason", len(f) == 1 and "a.cpp:1" in f[0])
+    f = _nolint_reason_findings({"a.cpp": "z;  // NOLINT\n"}, floor=1)
+    check("nolint reasons: a NOLINT with no check list and no reason is reported", len(f) == 1)
+    f = _nolint_reason_findings({"a.cpp": "z;  /* NOLINT(misc-x) */\n"}, floor=1)
+    check("nolint reasons: a block-comment NOLINT with no reason is reported", len(f) == 1)
+    f = _nolint_reason_findings({"a.cpp": nl_ok}, floor=10)
+    check("nolint reasons: fewer sites than the floor is a finding", len(f) == 1 and "floor 10" in f[0])
     check("authored paths: first-party code counts",
           all(is_authored_path(p) for p in ("AlpacaCore/src/a.cpp", "AlpacaHTTP/web/app.js", "scripts/x.py",
                                             "AlpacaHTTP/tests/t.cpp", "AlpacaCore/include/alpacacore/a.h")))
@@ -4008,6 +4963,46 @@ def self_test():
     check("authored lines: blank lines and excluded files are not counted",
           count_authored_lines({"scripts/a.py": "a\n\n  \nb\n", "AlpacaCore/external/x.h": "x\ny\n",
                                 "README.md": "z\n"}) == 2)
+
+    # check 26: CGX state-frame writers (literal fixtures).
+    writer_src = ("class X {\n    void write_frame(int a) const {}\n    CgxSkyPosition read_sky_position(int);\n};\n"
+                  "CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(int a) {\n    write_frame(a);\n}\n"
+                  "void CelestronCgxTelescopeDriver::sync(int a) {\n    // write_frame(a) in a comment\n"
+                  "    const auto p = read_sky_position(a);\n}\n")
+    writer_pins = {("read_sky_position", "write_frame"): (1, ""), ("sync", "read_sky_position"): (1, "")}
+    check("cgx writers: the pinned fixture is clean (declarations, definitions and comments are not calls)",
+          _cgx_frame_writer_findings(writer_src, writer_pins) == [])
+    f = _cgx_frame_writer_findings(writer_src.replace("    const auto p", "    for (;;) write_frame(a);\n    const auto p"),
+                                   writer_pins)
+    check("cgx writers: a new writer call is reported", any("sync() calls write_frame() 1 time(s), pinned 0" in x for x in f))
+    f = _cgx_frame_writer_findings(writer_src, {**writer_pins, ("gone", "write_frame"): (1, "")})
+    check("cgx writers: a pinned caller that no longer writes is reported", any("gone() calls write_frame() 0" in x for x in f))
+
+    # check 29: one home for a serial device's USB identity (literal fixtures).
+    usb_wrapper = ("namespace {\nbool raw(const D& d) {\n    // usb_tty_descriptor_matches(d, {\"x\"}); in a comment\n"
+                   "    return util::usb_tty_descriptor_matches(*d, foo_usb_tokens());\n}\n}  // namespace\n"
+                   "const std::vector<std::string>& foo_usb_tokens() {\n    static const std::vector<std::string> t{\"1a86\"};\n"
+                   "    return t;\n}\n")
+    usb_catalog = "    catalog.add_usb_serial_identity({DeviceKey{\"foo\", DeviceType::Focuser}, vendor::foo::foo_usb_tokens(), {}});\n"
+    check("usb identity: a wrapper list matched by its filter and registered by a catalog is clean",
+          _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=1) == [])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper + "bool r2(const D& d) {\n    return usb_tty_descriptor_matches(\n"
+                                "        *d, {\"CH340\", \"USB_Serial\"});\n}\n"}, {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a braced token list in a filter is reported by file and line",
+          len(f) == 1 and f[0].startswith("w.cpp:12:") and "braced token list" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": ""}, floor=1)
+    check("usb identity: a token list no catalog registers is reported",
+          len(f) == 1 and "no *_catalog.cpp registers it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper},
+                               {"c_catalog.cpp": usb_catalog + usb_catalog.replace("foo_usb", "bar_usb")}, floor=1)
+    check("usb identity: a registered name no wrapper defines is reported",
+          len(f) == 1 and "bar_usb_tokens() but no wrapper" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper.replace("matches(*d, foo_usb_tokens())", "matches(*d, other)")},
+                               {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a token list its own filter does not match is reported",
+          len(f) == 1 and "does not match it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=2)
+    check("usb identity: fewer definitions than the floor is a finding", len(f) == 1 and "floor 2" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
@@ -4036,6 +5031,8 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
+    if "--badge-json" in sys.argv:
+        sys.exit(print_badge_json())
     if "--badge" in sys.argv:
         sys.exit(print_badge())
     sys.exit(main())

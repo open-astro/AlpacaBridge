@@ -134,20 +134,7 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        // Disconnect synchronously -- closing the port is trivial and ASCOM
-        // clients expect Connected to be false immediately after.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Gemini", "Flat panel disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
@@ -248,26 +235,6 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
     // --- CoverCalibrator interface: calibrator ---
 
     int get_max_brightness() const override {
@@ -356,19 +323,22 @@ public:
         return false;
     }
 
-    // No motorized cover on this model -- a structurally absent capability,
-    // not a connection-state matter, so these throw unconditionally (matches
-    // the same pattern as e.g. Celestron/Bisque's SlewToAltAz on mounts that
-    // don't support it: MethodNotImplemented regardless of Connected).
+    // No motorized cover on this model: connection check first, then
+    // MethodNotImplemented (issue #1919). ICoverCalibratorV2 lists both
+    // exceptions with no order, and CoverState only reports NotPresent after a
+    // connect, so a disconnected client gets NotConnected like every other member.
     void open_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
     void close_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
     void halt_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
@@ -536,19 +506,11 @@ public:
     // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
     std::string get_link_fault() const override { return protocol_.link_fault(); }
 
-    void connect() override { start_connection_task(true); }
-
-    // Async, not synchronous like the Lite driver's disconnect(): this
-    // model's protocol_.disconnect() takes the same port mutex that
-    // open_cover()/close_cover() (and now calibrator_on()/off()) can hold for
-    // up to kCoverMoveTimeoutS while a wire command is in flight, so a
-    // synchronous call here could block the HTTP handler for up to 30s.
-    // Routing through start_connection_task() (as ZWOTelescopeDriver does)
-    // runs set_connected(false) on the base class's background thread
-    // instead -- run_connection_task() already catches and logs exceptions.
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    // disconnect() is asynchronous: this model's protocol_.disconnect() takes the port mutex that
+    // open_cover()/close_cover() and calibrator_on()/off() can hold for up to kCoverMoveTimeoutS while a
+    // wire command is in flight, so a synchronous call could block the HTTP handler for up to 30 s. The
+    // base runs set_connected(false) on its background thread instead, and catches and logs a throw.
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
@@ -652,26 +614,6 @@ public:
             teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- CoverCalibrator interface: calibrator ---
@@ -1195,7 +1137,11 @@ private:
             }
             return;
         }
-        calibrator_idle_cv_.notify_all();  // a replaced body waiting for the port returns
+        // A replaced body waiting for the port returns. start() set its superseded
+        // flag under the slot's own mutex, so take and drop calibrator_idle_mutex_
+        // first: a body between its predicate check and its wait cannot miss this.
+        { std::lock_guard<std::mutex> idle_lock(calibrator_idle_mutex_); }
+        calibrator_idle_cv_.notify_all();
     }
 
     struct CalibratorCommand {

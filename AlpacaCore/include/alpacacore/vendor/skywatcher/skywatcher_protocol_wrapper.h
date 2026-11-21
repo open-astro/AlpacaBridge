@@ -58,6 +58,11 @@ struct SkyWatcherPortInfo {
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports();
 
+/// The USB descriptor tokens of a Sky-Watcher mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& skywatcher_usb_tokens();
+
 // Auto-detect probes (exposed for the pty-backed tests). probe_skywatcher_port
 // opens @p port_path at @p baud_rate, sends ":e1" and returns the raw payload
 // ("" on no answer, a port held in the cross-vendor registry, or a SynScan

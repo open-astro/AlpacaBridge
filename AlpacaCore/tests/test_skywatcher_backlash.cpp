@@ -721,6 +721,21 @@ TEST_CASE("SkyWatcher backlash - the final leg waits until the first leg has sto
     CHECK(rig.mount.axis_degrees(2) == 0.0);  // the target: the count origin
 }
 
+TEST_CASE("SkyWatcher backlash - a stopped read right after the final leg's start does not end the goto",
+          "[skywatcher][telescope][backlash]") {
+    // The final leg gets its own start grace (2 s): the first ':f' after its
+    // ':J' reads stopped, as on a board that has not latched the start. Ending
+    // the wait there would report the goto done with the leg still running.
+    SteppedHome rig(20000);
+    sw::set_status_poll_paused_for_testing(*rig.driver, true);
+    rig.mount.report_stopped_after_next_start(2);
+    rig.run();
+    CHECK(rig.failure.empty());
+    CHECK_FALSE(rig.mount.axis_running(2));
+    CHECK_FALSE(rig.home_while_moving);
+    CHECK(rig.mount.axis_degrees(2) == 0.0);  // the target: the count origin
+}
+
 TEST_CASE("SkyWatcher backlash - a failed status read during either leg does not fail the goto",
           "[skywatcher][telescope][backlash]") {
     // The landing wait keeps its last answer across a status read that fails

@@ -1,0 +1,8 @@
+### Added
+- **List plugged-in devices for setup without adding them** (AlpacaHTTP, AlpacaCore, issue #2312): `GET /management/v1/attacheddevices` (and `/management/attacheddevices`) returns every detected serial port, Astroasis HID focuser and listed camera of the built vendors, each with the catalog entries it could be and the config a `configuredevice` call needs. Serial ports are read from `/dev/serial/by-id`, the raw `ttyUSB`/`ttyACM` names and the USB descriptor in sysfs: no port is opened, no serial claim is taken and no probe runs, so a port a connected device holds is still listed. A CH340 adapter lists every vendor that ships one; the client chooses. A result a configured device already uses names that device, and a lister that fails is reported beside the other results. Any verb but GET is 405. `attachedcameras` and `thermalcameras` are unchanged.
+
+### Changed
+- **One token list per serial device's USB identity** (AlpacaCore, issue #2312): each serial wrapper's raw-node scan filter now reads its `<x>_usb_tokens()` list, which the vendor's catalog file also registers as the device's USB identity, and docs-drift check 29 fails on a braced list in a filter or a list no catalog registers. The lists are unchanged, so auto-detect matches the same adapters.
+
+### Added (tests)
+- **attacheddevices over a fake by-id/sysfs tree** (issue #2312): four `[attached_devices]` cases (a CH340 port listed once with several candidates, no open and no claim proven with inotify and held claims, the configured marker, a throwing lister) and the route case in `test_routing`; the fake tree is `AlpacaCore/tests/fake_usb_serial_tree.h`.

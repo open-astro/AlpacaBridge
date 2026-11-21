@@ -11,6 +11,7 @@ SERVICE_NAME="alpacahttp.service"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
+ADD_PLUGDEV="${ALPACA_ADD_PLUGDEV:-ON}"
 ADD_GPIO="${ALPACA_ADD_GPIO:-ON}"
 GIT_PULL="${ALPACA_GIT_PULL:-OFF}"
 CLEAN_BUILD="${ALPACA_CLEAN_BUILD:-OFF}"
@@ -23,6 +24,7 @@ Environment overrides:
   ALPACACORE_ENABLE_ALL_VENDORS=ON|OFF
   ALPACA_INSTALL_UDEV_RULES=ON|OFF
   ALPACA_ADD_DIALOUT=ON|OFF       (add the user to dialout: serial devices)
+  ALPACA_ADD_PLUGDEV=ON|OFF       (create plugdev, add the user: USB devices under the udev rules)
   ALPACA_ADD_GPIO=ON|OFF          (create the gpio group, add the user: ASIAIR power ports)
   ALPACA_GIT_PULL=ON|OFF          (update only)
   ALPACA_CLEAN_BUILD=ON|OFF       (install/update)
@@ -72,6 +74,7 @@ install_udev_rules() {
 # it. Runs on every install and update; each step is a no-op when already done.
 ensure_device_groups() {
   host_setup_ensure_dialout "${ADD_DIALOUT}"
+  host_setup_ensure_plugdev "${ADD_PLUGDEV}"
   host_setup_ensure_gpio "${ADD_GPIO}"
 }
 

@@ -135,7 +135,6 @@ AlpacaHTTP/
 |       |-- config.h
 |       |-- json_utils.h
 |       `-- util/
-|           |-- threading.h
 |           |-- logging_adapter.h
 |           `-- error_mapping.h
 |
@@ -143,7 +142,9 @@ AlpacaHTTP/
 |   |-- http/
 |   |   |-- server.cpp
 |   |   |-- session.cpp
-|   |   `-- router.cpp
+|   |   |-- router.cpp
+|   |   |-- router_helpers.h # helpers router.cpp shares with routes/
+|   |   `-- routes/          # one <type>_routes.cpp per device type's method dispatch
 |   |
 |   |-- core/
 |   |   |-- request.cpp
@@ -155,7 +156,6 @@ AlpacaHTTP/
 |   |   `-- discovery.cpp
 |   |
 |   `-- util/
-|       |-- threading.cpp
 |       |-- logging_adapter.cpp
 |       `-- error_mapping.cpp
 |
@@ -312,7 +312,6 @@ Never crash the server on device errors.
 
 ```
 ALPACAHTTP_BUILD_TESTS
-ALPACAHTTP_ENABLE_DISCOVERY
 ```
 
 Cursor must guard optional components behind these flags.

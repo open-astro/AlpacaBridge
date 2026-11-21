@@ -28,6 +28,11 @@ struct SynScanPortInfo {
 
 std::vector<SynScanPortInfo> enumerate_synscan_ports();
 
+/// The USB descriptor tokens of a SynScan mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& synscan_usb_tokens();
+
 enum class ConnectionType {
     Serial,
     Network
@@ -71,10 +76,15 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    /// A disconnect is coming (issue #2070): while set, a reply read in flight ends at once and every exchange that
+    /// reads fails with NotConnected, with no fault text and no link loss, so the driver's teardown never waits out a
+    /// silent handset's response timeout behind the wrapper's lock. Lock-free; cleared by passing false or by the
+    /// next connect().
+    void set_interrupt(bool interrupt) noexcept;
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;
-    /// False once an exchange over serial has seen the port gone (a hangup on a read, or EIO/ENXIO/ENODEV on a
+    /// False once an exchange over serial has seen the port gone (a hangup on a read, or EIO/ENXIO/ENODEV/EBADF on a
     /// write); the port is then already released and the exchange threw NotConnected (decision 0009 rule 2a).
     /// Cleared by the next connect(). Lock-free.
     bool link_alive() const noexcept;

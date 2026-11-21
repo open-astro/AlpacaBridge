@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
-[![Authored code](https://img.shields.io/badge/Authored%20code-308k%20lines-informational.svg)](docs/architecture.md#modules)
+[![Authored code](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fopen-astro%2FAlpacaBridge%2Fbadges%2Fauthored-lines.json)](docs/architecture.md#modules)
 
 **The engine at the telescope.**
 
@@ -16,7 +16,7 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [6.0.0~beta3] - 2026-11-20 &middot; [Changelog](CHANGELOG.md)
+#### [5.0.2] - 2026-10-29 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
@@ -61,7 +61,7 @@ Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standa
 
 Three commands from the [OpenAstro APT repository](https://apt.openastro.net), and it stays current with `apt upgrade`.
 
-AlpacaBridge is built for a single-purpose appliance: its udev rules let any local user open a supported device. Do not install it on a shared machine. See [the LAN surface threat model](docs/decisions/0007-lan-surface-threat-model.md).
+AlpacaBridge is built for a single-purpose appliance: its udev rules let any member of the `plugdev` group open a supported USB device, and other software that uses the same cameras must run as a `plugdev` member. Do not install it on a shared machine. See [the LAN surface threat model](docs/decisions/0007-lan-surface-threat-model.md).
 
 **1. Add the OpenAstro signing key**
 

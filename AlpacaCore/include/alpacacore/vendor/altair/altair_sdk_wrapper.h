@@ -17,7 +17,7 @@
 namespace alpacacore::vendor::altair {
 
 /**
- * The production Altair camera SDK (altaircamsdk 20260531, libaltaircam).
+ * The production Altair camera SDK (altaircamsdk, libaltaircam).
  *
  * Altair Astro cameras are ToupTek OEM hardware and altaircam is the ToupTek
  * SDK under Altair's name, so this is the shared ToupcamFamilySDK

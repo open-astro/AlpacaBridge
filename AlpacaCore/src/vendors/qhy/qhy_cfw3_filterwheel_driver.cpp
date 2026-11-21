@@ -15,6 +15,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
@@ -110,16 +111,9 @@ public:
     // has seen the port die the wrapper latches link_lost_ and releases the fd.
     // Both reads are lock-free; this stays a FAST-timing getter.
     bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogTag, "QHYCFW3 disconnect error: " + std::string(e.what()));
-        }
-    }
-    bool get_connecting() const override { return connection_task_active(); }
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
+
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // A sync connect here is slow (the wheel's post-reset boot is ~17 s),
@@ -171,9 +165,7 @@ public:
                 kLogTag);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                slot_count_ = info.slot_count;
-                slot_count_valid_ = true;
-                normalize_slot_data_locked();
+                slots_.publish_slot_count(info.slot_count, kLogTag);
                 position_cache_ = info.position;
                 pending_target_.reset();
             }
@@ -188,21 +180,6 @@ public:
             teardown_locked();
             ALPACA_LOG_INFO(kLogTag, "QHYCFW3 disconnected");
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-    bool can_action(std::string_view) const override { return false; }
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // ── FilterWheelDriver ────────────────────────────────────────────────────
@@ -241,6 +218,7 @@ public:
         // holding mutex_ (the body's publish path needs mutex_).
         std::lock_guard<std::mutex> initiator_lock(move_start_mutex_);
         std::optional<int> previous_position;
+        std::optional<std::string> previous_failure;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Re-assert under the locks: teardown_locked() stores connected_
@@ -250,12 +228,13 @@ public:
             // NotConnected from the body, or worse, run a real move after a
             // reconnect).
             ensure_connected();
-            if (!slot_count_valid_ || slot_count_ <= 0) {
+            const std::optional<int> slot_count = slots_.slot_count();
+            if (!slot_count.has_value()) {
                 throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
             }
-            if (position >= slot_count_) {
+            if (position >= *slot_count) {
                 throw AlpacaException(
-                    "Filter position out of range (wheel has " + std::to_string(slot_count_) + " slots)",
+                    "Filter position out of range (wheel has " + std::to_string(*slot_count) + " slots)",
                     AlpacaError::InvalidValue);
             }
             if (pending_target_.has_value()) {
@@ -270,6 +249,7 @@ public:
                 return;
             }
             previous_position = position_cache_;
+            previous_failure = move_failure_;
             position_cache_.reset();
             move_failure_.reset();
             pending_target_ = position;
@@ -284,6 +264,7 @@ public:
             // No body runs: undo the claim so Position does not read -1 forever.
             std::lock_guard<std::mutex> lock(mutex_);
             position_cache_ = previous_position;
+            move_failure_ = previous_failure;  // Position keeps raising the earlier failed move (#2085)
             pending_target_.reset();
             throw;
         }
@@ -291,31 +272,26 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_valid_ && slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        if (slot_count_valid_ && slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        }
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing() {
+        return protocol_.consume_link_lost_at();
     }
 
     void set_position_read_gap_hook_for_testing(std::function<void()> hook) {
@@ -387,7 +363,7 @@ private:
         cancel_and_join_move();
         protocol_.disconnect();
         std::lock_guard<std::mutex> lock(mutex_);
-        slot_count_valid_ = false;
+        slots_.clear_slot_count();
         position_cache_.reset();
         move_failure_.reset();
         pending_target_.reset();
@@ -400,64 +376,6 @@ private:
         if (!protocol_.link_alive()) {
             throw AlpacaException("Filter wheel link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
-        }
-    }
-
-    // Slot-data helpers: same shape as the integrated QHY CFW and ZWO EFW
-    // drivers, so every filter wheel names and stores filters the same way.
-    void normalize_slot_data_locked() {
-        if (!slot_count_valid_ || slot_count_ <= 0) return;
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        expand_shorthand_locked(filter_names_);
-        if (filter_names_.empty()) {
-            filter_names_.assign(slots, std::string());
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN(kLogTag, "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                         ") does not match the CFW3 slot count (" + std::to_string(slots) +
-                                         "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-        if (focus_offsets_.empty()) {
-            focus_offsets_.assign(slots, 0);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN(kLogTag, "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                         ") does not match the CFW3 slot count (" + std::to_string(slots) +
-                                         "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
-    // "LRGB" -> L,R,G,B only when the lone token has no lowercase letters, so
-    // an ordinary name that happens to match the slot count stays whole. Same
-    // rule as parseFilterNamesInput in the web UI; keep the two in step.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (!slot_count_valid_ || slot_count_ <= 0 || names.size() != 1) return;
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(slots);
-            for (char ch : candidate) expanded.emplace_back(1, ch);
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) filter_names_[i] = "Filter " + std::to_string(i + 1);
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (!slot_count_valid_ || slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        if (provided_size != slot_count_) {
-            throw AlpacaException(
-                "Invalid " + std::string(field_name) + " length: expected " + std::to_string(slot_count_),
-                AlpacaError::InvalidValue);
         }
     }
 
@@ -478,10 +396,8 @@ private:
 
     // Driver state: slot data and the position model.
     mutable std::mutex mutex_;
-    int slot_count_ = 0;
-    bool slot_count_valid_ = false;
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    // Names, offsets and the wheel's slot count (known from a connect until the next teardown).
+    util::FilterWheelSlots slots_;
     // Settled slot; empty while a goto is in flight or after a failed move.
     std::optional<int> position_cache_;
     // Text of the last goto's failure, raised by Position until the next
@@ -558,6 +474,13 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int devi
     return create_qhy_cfw3_filterwheel_deferred(device_number, [wheel_index, settings] {
         return resolve_qhy_cfw3_filterwheel_by_index(wheel_index, settings);
     });
+}
+
+std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(FilterWheelDriver& driver) {
+    if (auto* cfw3 = dynamic_cast<QhyCfw3FilterWheelDriver*>(&driver)) {
+        return cfw3->consume_link_lost_at_for_testing();
+    }
+    return std::nullopt;
 }
 
 void set_position_read_gap_hook_for_testing(FilterWheelDriver& driver, std::function<void()> hook) {

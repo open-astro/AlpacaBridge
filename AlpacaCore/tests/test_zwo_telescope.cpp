@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/version.h>
 
 #include <atomic>
 #include <chrono>
@@ -76,6 +77,22 @@ TEST_CASE("ZWO Mount Telescope Driver - Defaults", "[zwo][telescope][unit]") {
     REQUIRE(driver->get_can_set_guide_rates());
 }
 
+// Required case 2 (issue #1863). Before a connect has read the mount, the fallback UniqueID is the device number's.
+TEST_CASE("ZWO Mount Telescope Driver - Device metadata", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(3, conn);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO AM Mount Driver (Serial/TCP LX200-compatible protocol)");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO Mount Driver");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
+    CHECK(driver->get_interface_version() == 4);
+    CHECK(driver->get_unique_id() == "ZWO_MOUNT_3");
+}
+
 TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
@@ -135,6 +152,16 @@ TEST_CASE("ZWO Mount Telescope Driver - Disconnected Behavior", "[zwo][telescope
     require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->park(); }, alpacacore::AlpacaError::NotConnected);
+
+    // open-astro#1919: an unsupported member checks the connection before its NotImplemented answer.
+    require_alpaca_error([&]() { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_alt_az(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
 }
@@ -210,8 +237,39 @@ TEST_CASE("ZWO Mount Telescope Driver - Telescope Properties", "[zwo][telescope]
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
 
     CHECK(driver->get_interface_version() >= 3);
-    CHECK(driver->get_slew_settle_time() >= 0);
+    // Disconnected: SlewSettleTime is NotConnected, after the write's InvalidValue check.
+    require_alpaca_error([&]() { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_slew_settle_time(1); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #2258: with two bad arguments the command gate names the direction before the duration. Falsified by:
+// util::check_pulse_guide_arguments checking the duration first, or a ZWO pulse_direction/pulse_duration text change.
+TEST_CASE("ZWO Mount Telescope Driver - PulseGuide with a bad direction and duration names the direction",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->pulse_guide(5, -1); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("PulseGuide direction must be 0..3") != std::string::npos);
+    CHECK(text.find("duration") == std::string::npos);
+}
+
+// #2258: with a negative RA and a NaN Dec the gate checks RA in full first, so the answer is the range text.
+// Falsified by: set_guide_rate() checking Dec before RA, or checking both values for finiteness before either range.
+TEST_CASE("ZWO Mount Telescope Driver - GuideRate with a negative RA and a NaN Dec names the RA range",
+          "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::string text = alpacacore::test::alpaca_error_message([&] { driver->set_guide_rate({-1.0, nan}); },
+                                                                    alpacacore::AlpacaError::InvalidValue);
+    CHECK(text.find("GuideRate must not be negative") != std::string::npos);
+    CHECK(text.find("finite") == std::string::npos);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {
@@ -234,7 +292,10 @@ TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][uni
     require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and enumeration", "[zwo][telescope][unit]") {
+// Not an enumeration case (#1858): with no mount attached the scan returned nothing, so a loop over its result pinned
+// nothing. The scan is driven over loopback mounts through the candidate seam in test_zwo_mount_network_isolation.cpp
+// and test_zwo_mount_identity.cpp; the Auto connect case below runs the real one.
+TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and ZWODeviceInfo defaults", "[zwo][telescope][unit]") {
     using alpacacore::vendor::zwo::ConnectionType;
     using alpacacore::vendor::zwo::ZWODeviceInfo;
 
@@ -253,22 +314,6 @@ TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and enumeration", "
     CHECK(info.tcp_port == 4030);
     CHECK(info.model_name.empty());
     CHECK(info.label.empty());
-
-    // enumerate_zwo_mounts with a short probe timeout must return without
-    // throwing or hanging. On a host with no ZWO device attached (CI runners),
-    // it returns an empty list; with a ZWO device present it returns at least
-    // one entry carrying a non-empty model name (probed via :GVP).
-    std::vector<ZWODeviceInfo> devices;
-    REQUIRE_NOTHROW(devices = alpacacore::vendor::zwo::enumerate_zwo_mounts(100));
-    for (const auto& dev : devices) {
-        CHECK_FALSE(dev.model_name.empty());
-        REQUIRE((dev.type == ConnectionType::Serial || dev.type == ConnectionType::Network));
-        if (dev.type == ConnectionType::Serial) {
-            CHECK_FALSE(dev.port_path.empty());
-        } else {
-            CHECK_FALSE(dev.host.empty());
-        }
-    }
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo][telescope][unit]") {
@@ -279,17 +324,18 @@ TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(6, conn);
     REQUIRE(driver != nullptr);
 
-    // With no ZWO mount reachable, connect() must fail cleanly (no crash,
-    // no hang) rather than throwing or leaving a half-open state.
-    try {
-        driver->set_connected(true);
-        // Some platforms (a host with a real ZWO device) may succeed; that is
-        // fine. Only assert that a failure surfaces as NotConnected/DriverException
-        // rather than corrupting the driver.
-    } catch (const alpacacore::AlpacaException&) {
+    // A host with a real ZWO mount attached would connect; this case is about the missing one (#1858).
+    if (!alpacacore::vendor::zwo::enumerate_zwo_mounts(100).empty()) {
+        WARN("a ZWO mount is reachable from this host; the missing-hardware case does not apply");
+        return;
     }
-    // The driver must remain in a well-defined (disconnected) state afterwards.
-    CHECK(driver->get_connecting() == false);
+
+    // With no ZWO mount reachable, the connect must fail (no crash, no hang)
+    // and leave the driver disconnected, never half-open.
+    REQUIRE_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_connecting());
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32
@@ -398,8 +444,15 @@ TEST_CASE(
     // gap hid it from the [stress] case). :GAT "1#" passes the tracking gate,
     // :SMTI "1#" acks the time sync the reconnect path sends (hash-terminated
     // so the wrapper's idle-break wait does not add 100 ms to every refresh),
-    // and "0#" is a validly terminated reply for everything else.
-    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+    // and "0#" is a validly terminated reply for everything else. Every guide
+    // command (":Mg") is counted, so the tail can tell a dropped queue from one
+    // that drained after the refresh (#1858).
+    std::atomic<int> guide_commands{0};
+    alpacacore::test::FakeMountServer server([&guide_commands](const std::string& chunk) -> std::string {
+        // Every ":Mg" in the chunk, so two guide commands in one read count as two.
+        for (auto at = chunk.find(":Mg"); at != std::string::npos; at = chunk.find(":Mg", at + 3)) {
+            guide_commands.fetch_add(1);
+        }
         if (chunk == ":GVP#") return "AM5#";
         if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
@@ -492,13 +545,24 @@ TEST_CASE(
     }
 
     // The real-time storm above exercises scheduling, not a driver deadline.
-    // Rule 3: the redundant refresh drops queued pulses; expire any dequeued pulse and its hold virtually.
-    driver->pulse_guide(0, 500);
+    // Rule 3: the redundant refresh drops queued pulses. Three more queue behind
+    // the one the drain may be running; after the refresh at most the ":Mg" of
+    // a task the drain had already taken (its send can land just after the
+    // count) reaches the mount, however long the clock runs. A queue that
+    // survived the refresh sends at least two more (#1858: one pulse alone left
+    // nothing queued to drop). 3 s of virtual time is the three pulses and the hold.
+    for (int i = 0; i < 3; ++i) {
+        driver->pulse_guide(0, 500);
+    }
     CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(true);
+    const int guides_at_refresh = guide_commands.load();
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(1500));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    for (int step = 0; step < 30; ++step) {
+        clock.advance(std::chrono::milliseconds(100));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    CHECK(guide_commands.load() <= guides_at_refresh + 1);
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_connected());
 
@@ -893,10 +957,39 @@ TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site rea
     driver->set_connected(false);
 }
 
+// #2314: a connect that cannot read the guide rate reports no rate, not a guess, until a client write sets one.
+// Falsified by: zwo_telescope_driver.cpp get_guide_rate() without its guide_rate_known_ check (the getter answers
+// the unread rate instead of raising DriverException).
+TEST_CASE("ZWO Mount Telescope Driver - an unreadable guide rate raises until a write sets it",
+          "[zwo][telescope][unit]") {
+    using namespace alpacacore::test;
+    FakeTaskClock clock;
+    FakeZwoMount mount(clock, "AM5");
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(mount), clock);
+    mount.override_reply(":Ggr", "x");  // a non-number on every attempt
+    driver->connect();
+    REQUIRE(mount.wait_for_count(":Ggr", 1, std::chrono::seconds(2)));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect is in its 150 ms retry pause
+    clock.advance(std::chrono::milliseconds(150));
+    REQUIRE(wait_until_connected(*driver));
+    mount.override_reply(":Ggr", "", 0);
+
+    // GuideRateRightAscension and GuideRateDeclination both read get_guide_rate().
+    require_alpaca_error([&]() { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::DriverException);
+
+    const double sidereal_deg_per_sec = 360.0 / 86164.0905;
+    driver->set_guide_rate_right_ascension(0.50 * sidereal_deg_per_sec);
+    const auto rate = driver->get_guide_rate();
+    CHECK(rate.ra / sidereal_deg_per_sec == Catch::Approx(0.50).margin(0.02));
+    CHECK(rate.dec / sidereal_deg_per_sec == Catch::Approx(0.50).margin(0.02));
+    driver->set_connected(false);
+}
+
 // A GuideRate write that lands while the connect retries its unreadable guide-rate read (150 ms pause, no lock held)
-// is newer than the 1.00x the connect then assumes.
+// is newer than the connect's failed read.
 // Falsified by: zwo_telescope_driver.cpp set_connected(true) publishing guide_rate_ without the guide_rate_writes_
-// check (the connect stores the assumed 1.00x over the 0.30x the client wrote during the retry pause).
+// check (the connect marks the rate unknown over the 0.30x the client wrote during the retry pause).
 TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect read-back is kept",
           "[zwo][telescope][unit][getter-stall]") {
     using namespace alpacacore::test;
@@ -904,7 +997,7 @@ TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect re
     FakeZwoMount mount(clock, "AM5");
     REQUIRE(mount.ok());
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(mount), clock);
-    mount.override_reply(":Ggr", "x");  // a non-number, so the connect falls back to 1.00x after its retry
+    mount.override_reply(":Ggr", "x");  // a non-number, so the connect has no reading after its retry
     driver->connect();
     REQUIRE(mount.wait_for_count(":Ggr", 1, std::chrono::seconds(2)));
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect is in its 150 ms retry pause
@@ -956,16 +1049,100 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
 
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 
-TEST_CASE("ZWO Mount Telescope Driver spec audit - DoesRefraction is not implemented",
+// open-astro#1919: the connection check ahead of each throw leaves the connected answer as it was.
+// Falsified by: zwo_telescope_driver.cpp get_does_refraction() (or any other listed member) without its
+// PropertyNotImplemented/NotImplemented throw, returning a value instead (no error is raised once connected).
+TEST_CASE("ZWO Mount Telescope Driver - connected unsupported members keep their NotImplemented answers",
           "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
     alpacacore::vendor::zwo::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(driver->get_connected());
+
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); }, AlpacaError::NotImplemented);
     // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
-    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(180.0, 45.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
+// Issue #1866: the tracking, rate and equatorial-system members on a connected driver. Each listed TrackingRate is
+// accepted, sent as its own command and read back; the driver applies no rate offset, so both rates read 0.0.
+TEST_CASE("ZWO Mount Telescope Driver - connected tracking rate members and equatorial system",
+          "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    CHECK(driver->get_can_set_tracking());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::Topocentric);
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+
+    // DriveRates: 0 sidereal, 1 lunar, 2 solar; the AM mount has no King rate.
+    REQUIRE(driver->get_tracking_rates() == std::vector<int>{0, 1, 2});
+    const char* const commands[] = {":TQ", ":TL", ":TS"};
+    for (const int rate : {2, 1, 0}) {
+        INFO("TrackingRate " << rate);
+        const int sent = mount.count(commands[rate]);
+        driver->set_tracking_rate(rate);
+        // A blind command: the fake records it on its own thread, so wait for it in real time.
+        CHECK(mount.wait_for_count(commands[rate], sent + 1, std::chrono::seconds(2)));
+        CHECK(driver->get_tracking_rate() == rate);
+    }
+    require_alpaca_error([&] { driver->set_tracking_rate(3); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_tracking_rate() == 0);
+    driver->set_connected(false);
+}
+
+// Issue #1866: SetPark records the current position as the park position (":Sp01") and does not park; a refusal
+// from the mount is InvalidOperation.
+TEST_CASE("ZWO Mount Telescope Driver - SetPark sends the park-here command and leaves AtPark false",
+          "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    CHECK(mount.count(":Sp01") == 0);
+
+    REQUIRE_NOTHROW(driver->set_park());
+    CHECK(mount.count(":Sp01") == 1);
+    CHECK(mount.count(":hP") == 0);
+    CHECK_FALSE(driver->get_at_park());
+
+    mount.override_reply(":Sp01", "0", 1);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.count(":Sp01") == 2);
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",

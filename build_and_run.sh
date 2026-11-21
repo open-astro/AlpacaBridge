@@ -12,6 +12,10 @@
 #                                    things look genuinely wrong.
 #   ALPACA_INSTALL_UDEV_RULES=ON|OFF  default ON
 #   ALPACA_ADD_DIALOUT=ON|OFF         default ON
+#   ALPACA_ADD_PLUGDEV=ON|OFF         default ON. When ON, ensures the plugdev
+#                                    group exists and adds the current user:
+#                                    the installed udev rules give USB devices
+#                                    to plugdev 0660 (issue #2290).
 #   ALPACA_ADD_GPIO=ON|OFF             default ON. When ON, ensures the gpio
 #                                    group exists (creates it if missing) and
 #                                    adds the current user to it. Required for
@@ -33,6 +37,7 @@ CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 INSTALL_ACCELERATORS="${ALPACA_INSTALL_ACCELERATORS:-ON}"
 ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
+ADD_PLUGDEV="${ALPACA_ADD_PLUGDEV:-ON}"
 ADD_GPIO="${ALPACA_ADD_GPIO:-ON}"
 CLEAN="${CLEAN:-0}"
 
@@ -147,6 +152,7 @@ run_system_setup() {
 # invocation. Each step is idempotent (no-op when already in the desired
 # state) and only escalates to sudo when an actual change is required.
 ensure_gpio_group() {
+  host_setup_ensure_plugdev "${ADD_PLUGDEV}"
   host_setup_ensure_gpio "${ADD_GPIO}"
 }
 
@@ -166,7 +172,7 @@ if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
   fi
 fi
 
-# gpio group + device-node fixups always run, independent of the udev-rule
+# plugdev and gpio groups + device-node fixups always run, independent of the udev-rule
 # install stamp above — group membership and node ownership are per-system
 # state that the SDK-file hash can't track.
 ensure_gpio_group

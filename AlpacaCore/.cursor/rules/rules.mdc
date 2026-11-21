@@ -13,7 +13,7 @@ These rules tell Cursor how to work inside the **AlpacaCore** repository.
 **AlpacaCore** is a **vendor-neutral C++ Alpaca core library** that:
 
 - Implements ASCOM Alpaca device models and behavior
-- Contains **no server** (no listening socket, router or inbound request parsing; outbound vendor clients go through the `util::HttpClient` seam planned in decision 0023)
+- Contains **no server** (no listening socket, router or inbound request parsing; outbound vendor clients go through the `util::HttpClient` seam of decision 0023)
 - Avoids platform-specific hacks
 - Exposes a clean API that higher-level servers (e.g. **AlpacaHTTP** inside **AlpacaOS**) use
 - Follow the ASCOM Alpaca API specification: https://ascom-standards.org/api/
@@ -80,7 +80,7 @@ Cursor must **not** alter the license.
 AlpacaCore is **protocol-level only**:
 
 - Implements Alpaca device behavior/state
-- No server: no listening socket, router or inbound request parsing (decision 0023); outbound vendor clients go through the `util::HttpClient` seam planned there
+- No server: no listening socket, router or inbound request parsing (decision 0023); outbound vendor clients go through the `util::HttpClient` seam
 - Higher layers translate HTTP/JSON into AlpacaCore calls
 
 ---
@@ -119,7 +119,6 @@ AlpacaCore/
 |       |-- switch_driver.h
 |       |-- util/
 |       |   |-- logging.h
-|       |   |-- threading.h
 |       |   |-- error_handling.h
 |       |   `-- units.h
 |       `-- vendor/                  # Vendor wrappers API
@@ -130,7 +129,6 @@ AlpacaCore/
 |   |   |-- alpaca_defs.cpp
 |   |   `-- util/
 |   |       |-- logging.cpp
-|   |       |-- threading.cpp
 |   |       |-- error_handling.cpp
 |   |       `-- units.cpp
 |   |
@@ -229,7 +227,9 @@ Higher layers override using `set_log_sink`.
 - No global mutable state.
 - Device instances manage their own internal locking.
 - Higher layers manage concurrency.
-- Use primitives from `util/threading.h`.
+- Use the standard library mutexes, `AsyncConnectable` and `util::AsyncOperation`
+  (`include/alpacacore/util/async_operation.h`); the rules are in
+  `.github/instructions/driver-lifecycle.instructions.md`.
 
 ---
 

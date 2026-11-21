@@ -24,6 +24,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -77,7 +78,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - Not connected throws", "[ioptron][focus
 TEST_CASE("iOptron iEAF Focuser Driver - Unsupported actions", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
-    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"SetZero"});
     CHECK(driver->can_action("anything") == false);
     require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("test", false); },
@@ -188,6 +189,30 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("iOptron iEAF Focuser Driver - The SetZero action makes the current position 0 without moving",
+          "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    CHECK(driver->can_action("setZero"));
+    require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_position() == 1000);  // cached frame: SetZero must drop it
+
+    SECTION("an idle focuser is zeroed in place") {
+        CHECK(driver->action("SETZERO", "") == "");
+        CHECK(fake.count(":FZ#") == 1);
+        CHECK(fake.count(":FM") == 0);
+        CHECK(driver->get_position() == 0);
+    }
+    SECTION("a moving focuser is refused and keeps its position") {
+        fake.set_focuser_moving(true);
+        require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(fake.count(":FZ#") == 0);
+        CHECK(fake.position() == 1000);
+    }
+    driver->set_connected(false);
 }
 
 // #1590: the 100 ms status cache ages by the driver's TaskClock.
@@ -453,6 +478,29 @@ TEST_CASE("iEAF Link - a write to a pulled focuser loses the link at once and Di
     CHECK(driver->get_link_fault() == "iEAF serial link lost (errno 5)");
     REQUIRE_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
+}
+
+// Issue #2262: EBADF on the focuser's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException "Write failed"
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iEAF Link - EBADF on a command write loses the link at once",
+          "[ioptron][focuser][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path(), "ieaf", clock);
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->halt(); }, kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "iEAF serial link lost (errno 9)");
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released
+    REQUIRE_NOTHROW(driver->set_connected(false));
     CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
 }
 

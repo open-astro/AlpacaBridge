@@ -1,0 +1,87 @@
+FAKE REPORT: ConformU against FakeQhyQFocuser (simulated Q-Focuser over a pseudo-terminal), not hardware. Not hardware validation.
+10:36:00.822 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 08:09:42          
+10:36:00.822                                              
+10:36:00.822 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+10:36:00.822                                              
+10:36:00.822 Alpaca device: QHY CFW3 (127.0.0.1:11120 Focuser/0)          
+10:36:00.822                                              
+10:36:00.822 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11120, Alpaca device number: 0
+10:36:00.825 CreateDevice                        INFO     Alpaca device created OK
+10:36:00.825 CreateDevice                        INFO     Successfully created driver
+10:36:01.859 CreateDevice                        OK       Found a valid interface version: 4
+10:36:01.859 CreateDevice                        OK       Driver instance created successfully
+10:36:01.859                                              
+10:36:01.859 Connect to device                            
+10:36:02.026 Connected                           OK       Connected to device successfully using Connected = True
+10:36:02.580 Connected                           OK       Disconnected from device successfully using Connected = False
+10:36:03.089 Connect                             OK       Connected to device successfully using Connect()
+10:36:03.089                                              
+10:36:03.089 Common Driver Methods                        
+10:36:03.089 InterfaceVersion                    OK       4
+10:36:03.090 Connected                           OK       True
+10:36:03.091 Description                         OK       QHY Q-Focuser Driver
+10:36:03.092 DriverInfo                          OK       AlpacaCore QHY Q-Focuser Driver
+10:36:03.092 DriverVersion                       OK       5.0.2
+10:36:03.092 Name                                OK       QHY Q-Focuser
+10:36:03.092                                              
+10:36:03.093 SupportedActions                    OK       Driver returned an empty action list
+10:36:03.093 Action                              INFO     Conform cannot test the Action method
+10:36:03.093                                              
+10:36:03.094 DeviceState                         OK       Received 4 operational state properties.
+10:36:03.094 DeviceState                         OK         IsMoving = False
+10:36:03.094 DeviceState                         OK         Position = 1000
+10:36:03.094 DeviceState                         OK         Temperature = 23.881
+10:36:03.094 DeviceState                         OK         TimeStamp = 11/18/2026 5:36:02 PM
+10:36:03.095 DeviceState                         OK       Found all expected operational properties
+10:36:03.095                                              
+10:36:03.095 Properties                                   
+10:36:03.096 Absolute                            OK       True
+10:36:03.096 IsMoving                            OK       False
+10:36:03.097 MaxStep                             OK       64000
+10:36:03.097 MaxIncrement                        OK       64000
+10:36:03.097 Position                            OK       1000
+10:36:03.101 StepSize                            OK       Optional member returned a NotImplementedException error.
+10:36:03.103 TempCompAvailable                   OK       False
+10:36:03.103 TempComp Read                       OK       False
+10:36:03.105 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+10:36:03.110 Temperature                         OK       23.881
+10:36:03.110                                              
+10:36:03.110 Methods                                      
+10:36:03.159 Halt                                OK       Focuser halted OK
+10:36:03.663 Move - TempComp False               OK       Absolute move OK
+10:36:04.166                                              
+10:36:04.166 Disconnect from device                       
+10:36:04.167 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+10:36:04.167                                              
+10:36:04.167 Conformance test has finished                
+10:36:04.167                                              
+10:36:04.167 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+10:36:04.167                                     
+10:36:04.167 Timing Summary                               See Help for further information.
+10:36:04.167 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+10:36:04.167 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+10:36:04.167 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+10:36:04.167 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+10:36:04.167                                              
+10:36:04.167 Connect                                      At 10:36:02.581 Connect                  0.001 seconds. ✓ (STANDARD)
+10:36:04.167 InterfaceVersion                             At 10:36:03.089 InterfaceVersion         0.000 seconds. ✓ (FAST)
+10:36:04.167 Connected                                    At 10:36:03.090 Connected                0.001 seconds. ✓ (FAST)
+10:36:04.167 Description                                  At 10:36:03.091 Description              0.001 seconds. ✓ (FAST)
+10:36:04.167 DriverInfo                                   At 10:36:03.092 DriverInfo               0.000 seconds. ✓ (FAST)
+10:36:04.167 DriverVersion                                At 10:36:03.092 DriverVersion            0.000 seconds. ✓ (FAST)
+10:36:04.167 Name                                         At 10:36:03.092 Name                     0.000 seconds. ✓ (FAST)
+10:36:04.167 SupportedActions                             At 10:36:03.093 SupportedActions         0.001 seconds. ✓ (FAST)
+10:36:04.167 DeviceState                                  At 10:36:03.094 DeviceState              0.001 seconds. ✓ (FAST)
+10:36:04.167 Absolute                                     At 10:36:03.096 Absolute                 0.000 seconds. ✓ (FAST)
+10:36:04.167 IsMoving                                     At 10:36:03.096 IsMoving                 0.000 seconds. ✓ (FAST)
+10:36:04.167 MaxStep                                      At 10:36:03.097 MaxStep                  0.001 seconds. ✓ (FAST)
+10:36:04.167 MaxIncrement                                 At 10:36:03.097 MaxIncrement             0.000 seconds. ✓ (FAST)
+10:36:04.167 Position                                     At 10:36:03.097 Position                 0.000 seconds. ✓ (FAST)
+10:36:04.167 TempCompAvailable                            At 10:36:03.103 TempCompAvailable        0.001 seconds. ✓ (FAST)
+10:36:04.167 TempComp Read                                At 10:36:03.103 TempComp Read            0.000 seconds. ✓ (FAST)
+10:36:04.167 Temperature                                  At 10:36:03.109 Temperature              0.004 seconds. ✓ (FAST)
+10:36:04.167 Halt                                         At 10:36:03.159 Halt                     0.050 seconds. ✓ (STANDARD)
+10:36:04.167 Move to 7400                                 At 10:36:03.161 Move to 7400             0.000 seconds. ✓ (STANDARD)
+10:36:04.167 Disconnect                                   At 10:36:04.166 Disconnect               0.000 seconds. ✓ (STANDARD)
+10:36:04.167                                              
+10:36:04.167 Congratulations, all members returned within their target response times!!          

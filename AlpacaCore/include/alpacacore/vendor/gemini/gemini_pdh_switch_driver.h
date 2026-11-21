@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -39,9 +40,12 @@ namespace alpacacore::vendor::gemini {
  * @param device_number Alpaca device number
  * @param serial_port Serial port path, e.g. "/dev/ttyUSB0"
  * @param baud_rate Fixed at 19200; any other value fails at connect
+ * @param clock Clock for the link-fault stamp that the decision 0009 staleness
+ *              bound measures (tests pass a FakeTaskClock)
  */
 std::unique_ptr<SwitchDriver> create_gemini_pdh_switch(int device_number, const std::string& serial_port,
-                                                       int baud_rate = 19200);
+                                                       int baud_rate = 19200,
+                                                       util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief Create a Gemini Power & Data Hubs Advanced 3 Switch driver that
@@ -49,7 +53,9 @@ std::unique_ptr<SwitchDriver> create_gemini_pdh_switch(int device_number, const 
  *
  * @param device_number Alpaca device number
  * @param hub_index 0-based index into the detected hubs
+ * @param clock Clock for the link-fault stamp (see create_gemini_pdh_switch())
  */
-std::unique_ptr<SwitchDriver> create_gemini_pdh_switch_by_index(int device_number, int hub_index = 0);
+std::unique_ptr<SwitchDriver> create_gemini_pdh_switch_by_index(int device_number, int hub_index = 0,
+                                                                util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::gemini
