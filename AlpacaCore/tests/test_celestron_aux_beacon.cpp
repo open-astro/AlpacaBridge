@@ -153,9 +153,12 @@ TEST_CASE("Celestron SkyPortal beacon - finds one adapter and parses its beacon"
     REQUIRE(port > 0);
     BeaconSender adapter("127.0.0.2", port, {kCapturedBeacon});
     REQUIRE(adapter.ok());
+    const auto started = std::chrono::steady_clock::now();
 
     const auto found = listen_for_aux_beacons(milliseconds(400), port);
 
+    // A steady stream of beacons does not stretch the window.
+    CHECK(std::chrono::steady_clock::now() - started < milliseconds(900));
     REQUIRE(found.size() == 1);  // heard several times, listed once
     CHECK(found[0].ip == "127.0.0.2");
     CHECK(found[0].ssid == "Celestron-AFFC");
