@@ -78,10 +78,15 @@ public:
     throw AuxTimeout(std::string(link_prefix(tcp)) + "AUX transaction timed out", AlpacaError::DriverException);
 }
 
-// The read-only motor queries, the only requests the TCP link re-sends: position, model, home done, slew done, guide
-// active and version on the RA and Dec controllers. They change nothing, so a second copy is harmless.
-bool retryable_query(const AuxFrame& request) {
-    if ((request.destination != 0x10 && request.destination != 0x11) || !request.payload.empty()) return false;
+// The requests the TCP link re-sends, because a second copy changes nothing more than the first: the read-only motor
+// queries (position, model, home done, slew done, guide active and version) and, slice 5c (user decision amending
+// decision 3), the absolute tracking-rate writes (0x06, 0x07), which name the whole rate. The rig lost a tracking-off
+// reply in a GOTO's correction loop (2026-11-21 23:41), and each leg now writes a rate twice.
+bool resendable(const AuxFrame& request) {
+    if (request.destination != 0x10 && request.destination != 0x11) return false;
+    if (request.command == 0x06 || request.command == 0x07)
+        return request.payload.size() == 2 || request.payload.size() == 3;
+    if (!request.payload.empty()) return false;
     switch (request.command) {
         case 0x01:
         case 0x05:
@@ -97,7 +102,7 @@ bool retryable_query(const AuxFrame& request) {
 
 // The motion and label commands whose lost TCP reply the axis status can settle (slice 3): home start, GOTO fast and
 // slow, set position, guide pulse and the stop (MC_MOVE_POS 0). They are never re-sent; the rate writes (0x06, 0x07)
-// have no readback and are not here.
+// have no readback and are re-sent instead (resendable()).
 bool confirmable(const AuxFrame& request) {
     if (request.destination != 0x10 && request.destination != 0x11) return false;
     switch (request.command) {
@@ -564,16 +569,17 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, Timeout request
     }
 }
 
-// Reads the reply to `wire`, written at `sent`, until `deadline`. A read-only query over TCP whose reply has not come
-// is written again 300 and 600 ms after it first went out, each time only while the deadline is later.
+// Reads the reply to `wire`, written at `sent`, until `deadline`. A read-only query or an absolute rate write over TCP
+// whose reply has not come is written again 300 and 600 ms after it first went out, each time only while the deadline
+// is later.
 AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const std::vector<std::uint8_t>& bytes,
                                                   std::chrono::steady_clock::time_point sent,
                                                   std::chrono::steady_clock::time_point deadline) {
     const bool tcp = tcp_.load();
     // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to 2,900 idle,
     // rig 2026-11-20). During a home the losses come in bursts while the home-switch boards talk (rig 2026-11-21: a
-    // query and its first re-send both lost), so a read-only query gets two re-sends.
-    const bool retryable = tcp && retryable_query(wire);
+    // query and its first re-send both lost), so a read-only query or a rate write gets two re-sends.
+    const bool retryable = tcp && resendable(wire);
     int resends = 0;
     while (true) {
         const auto resend_at = sent + kTcpRetryAfter * (resends + 1);
@@ -890,7 +896,7 @@ std::optional<std::vector<std::uint8_t>> CelestronCgxProtocol::buffered_frame_lo
             const std::size_t frame_size = length + 3;
             if (receive_buffer_.size() >= frame_size && tcp_.load() && !checksum_valid(receive_buffer_, frame_size)) {
                 // The adapter forwards collision debris (rig 2026-11-20): drop this start byte and resync on the
-                // next one. A read-only query whose reply was lost this way is re-sent by exchange().
+                // next one. A read-only query or rate write whose reply was lost this way is re-sent by exchange().
                 receive_buffer_.erase(receive_buffer_.begin());
                 continue;
             }

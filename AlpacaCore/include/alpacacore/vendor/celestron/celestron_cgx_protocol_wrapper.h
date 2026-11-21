@@ -77,8 +77,8 @@ public:
     /// Why the link was lost, empty while it is alive. Never waits on an exchange.
     std::string link_fault() const;
     std::uint64_t session_generation() const { return session_generation_.load(); }
-    /// Lost replies recovered since the last connect (a counter, not a fault): a read-only query's by its one TCP
-    /// re-send, a motion or label command's by the axis status. Lock-free.
+    /// Lost replies recovered since the last connect (a counter, not a fault): a read-only query's or an absolute rate
+    /// write's by its TCP re-sends, a motion or label command's by the axis status. Lock-free.
     std::uint64_t recovered_retries() const { return recovered_retries_.load(); }
     /// A last-resort stop: MC_MOVE_POS(0) and a zero rate written to `axis` without waiting for a reply, also while
     /// the stream is desynchronized. Not proof of a stop. Throws NotConnected on a closed link.
