@@ -469,8 +469,7 @@ TEST_CASE("Celestron CGX AUX TCP - a re-send goes out only while the deadline is
     CHECK(adapter.count(kRa, 0x01) == 2);
 }
 
-TEST_CASE("Celestron CGX AUX TCP - a burst of lost requests after a home start",
-          "[celestron][cgx][protocol][tcp]") {
+TEST_CASE("Celestron CGX AUX TCP - a burst of lost requests after a home start", "[celestron][cgx][protocol][tcp]") {
     FakeCelestronAuxTcpAdapter adapter;
     adapter.set_position(kDec, 0x123456);
     adapter.set_home_duration(milliseconds(3000));
@@ -831,6 +830,7 @@ TEST_CASE("Celestron CGX AUX TCP - a send-only stop goes out on a desynchronized
     FakeCelestronAuxTcpAdapter adapter;
     adapter.script(kRa, 0x01, 1, Fault::Drop);
     adapter.script(kRa, 0x01, 2, Fault::Drop);
+    adapter.script(kRa, 0x01, 3, Fault::Drop);
     CelestronCgxProtocol protocol;
     connect(protocol, adapter);
     require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension); },

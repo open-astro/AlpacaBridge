@@ -51,11 +51,11 @@ namespace alpacacore::test {
 // search on an axis given set_home_runaway() reads searching and drifts at that rate until a stop: a switch never
 // found (the Oct-28 incident shape), with no limit sensor or hard stop. set_home_burst_loss() swallows a run of
 // requests after each home start, as the rig lost them in bursts while the home-switch boards talked (2026-11-21);
-// the real loss is not tied to a request count. Rate commands (0x06, 0x07) are ACKed and change nothing. It ACKs every write except a client's ACK of a motor report
-// (0x50, 0x51), which it does not answer. Motor reports are sent only when a case injects them. It does not simulate
-// the bus, the switch boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The
-// Gen4 startup backlog is replayed as one scripted burst; the real one was 216 frames of an earlier session (October
-// progress log).
+// the real loss is not tied to a request count. Rate commands (0x06, 0x07) are ACKed and change nothing. It ACKs every
+// write except a client's ACK of a motor report (0x50, 0x51), which it does not answer. Motor reports are sent only
+// when a case injects them. It does not simulate the bus, the switch boards' timing or the adapter's real loss
+// mechanism; the faults are scripted per request. The Gen4 startup backlog is replayed as one scripted burst; the real
+// one was 216 frames of an earlier session (October progress log).
 
 /// Loopback fake of a SkyPortal WiFi adapter on the AUX bus.
 class FakeCelestronAuxTcpAdapter {

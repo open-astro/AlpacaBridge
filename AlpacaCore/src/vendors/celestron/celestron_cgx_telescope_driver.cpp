@@ -95,6 +95,7 @@ struct CgxFrame {
     std::uint32_t ra_encoder = 0;
     std::uint32_t dec_encoder = 0;
     std::chrono::system_clock::time_point read_at{};
+    std::uint64_t poll_sequence = 0;  // the poll that read the pair; a control path's write_frame() keeps it
 };
 
 double configured_site_coordinate(const std::optional<double>& coordinate, const char* name) {
@@ -497,6 +498,7 @@ private:
         try {
             if (!protocol_.is_healthy()) protocol_.resync();
             CgxFrame frame;
+            frame.poll_sequence = ++poll_sequence_;
             frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
             frame.read_at = system_now_();  // the RA encoder's read, the one tracking moves
             frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
@@ -548,17 +550,20 @@ private:
         std::array<util::TaskClock::clock::time_point, 2> started;
         std::array<bool, 2> rehomed{};
         std::array<bool, 2> done{};
-        // The home travel guard: each axis's last encoder read and the travel summed from read to read.
+        // The home travel guard: each axis's last encoder read and the travel summed from read to read, and the
+        // poll_sequence of the poll frame it last took (or that was held at its own first read).
         std::array<std::optional<std::uint32_t>, 2> last_encoder;
         std::array<double, 2> travel_degrees{};
+        std::optional<std::uint64_t> poll_sequence;
     };
     // Called by both home waits between their polls (#2213): an axis not home-done kHomeSearchBound after its
     // MC_LEVEL_START is stopped, waited still and sent MC_LEVEL_START once more; a re-home that misses the bound too,
-    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). First it reads both encoders
-    // and adds each axis's travel since the last read: a sum past kHomeTravelBoundDegrees, or a re-home due above
-    // kHomeRehomeTravelLimitDegrees, throws the travel-guard error (the caller's catch stops the axes). The stop and
-    // the home send are run_motion_stage() stages on `claim`, and the still-wait asks motion_stop_reason(), so a cancel
-    // or a supersede ends it sending nothing more; it then returns early and the caller's loop handles the reason.
+    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). First it takes both encoders
+    // (the state poll's newest frame, else its own reads) and adds each axis's travel since the last reading: a sum
+    // past kHomeTravelBoundDegrees, or a re-home due above kHomeRehomeTravelLimitDegrees, throws the travel-guard error
+    // (the caller's catch stops the axes). The stop and the home send are run_motion_stage() stages on `claim`, and the
+    // still-wait asks motion_stop_reason(), so a cancel or a supersede ends it sending nothing more; it then returns
+    // early and the caller's loop handles the reason.
     void supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim, HomeSearch& search,
                                util::TaskClock::clock::time_point deadline, const char* timeout_message);
     void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
@@ -694,6 +699,7 @@ private:
     // Nothing reads the value yet (no #521 consumer).
     util::LinkLostStamp link_lost_at_;
     util::OperationGeneration poll_generation_;
+    std::atomic<std::uint64_t> poll_sequence_{0};  // probe() only: numbers the poll's frames for the travel guard
     // The encoder pair the getters serve. Last: destroyed first, so its poll joins while protocol_, clock_ and the
     // stamp its callbacks use are alive.
     mutable util::PolledState<CgxFrame> polled_;
@@ -2444,9 +2450,23 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
                                    " deg without finding home" + what,
                                AlpacaError::DriverException);
     };
-    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
-        const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
-        const auto encoder = protocol_.get_axis_position(axis);
+    // The state poll reads both encoders every 250 ms; reading them here too doubled the bus traffic during a home,
+    // where the SkyPortal adapter lost requests in bursts (rig 2026-11-21). So a poll frame read since the last sample
+    // is taken; otherwise, and always for the first sample (a frame from before the home is never the baseline), both
+    // encoders are read here. Every sample is a reading, so the sum runs from the last good one and no travel goes
+    // uncounted; a poll read that went out just before an own read can only add to the sum.
+    const auto polled = polled_.read();
+    const std::uint64_t held = polled ? polled->value.poll_sequence : 0;
+    std::array<std::uint32_t, 2> encoders{};
+    if (polled && search.poll_sequence && polled->value.poll_sequence != *search.poll_sequence) {
+        encoders = {polled->value.ra_encoder, polled->value.dec_encoder};
+    } else {
+        encoders = {protocol_.get_axis_position(CgxAxis::RightAscension),
+                    protocol_.get_axis_position(CgxAxis::Declination)};
+    }
+    search.poll_sequence = held;
+    for (const std::size_t index : {std::size_t{0}, std::size_t{1}}) {
+        const std::uint32_t encoder = encoders[index];
         std::optional<std::uint32_t>& last = search.last_encoder[index];
         if (last)
             search.travel_degrees[index] +=

@@ -45,6 +45,7 @@ constexpr std::uint32_t kAuxPositionModulus = 1U << 24;
 
 constexpr std::uint8_t kTcpSource = 0x20;                        // SkyPortal clients talk from 0x20; USB from 0x00
 constexpr auto kTcpRetryAfter = std::chrono::milliseconds(300);  // rig 2026-11-20: WiFi reply p99 33 ms, max 134 ms
+constexpr int kTcpMaxResends = 2;  // rig 2026-11-21: during a home a query and its first re-send were both lost
 constexpr auto kTcpBacklogQuiet = std::chrono::milliseconds(200);
 constexpr auto kTcpBacklogBound = std::chrono::seconds(2);
 constexpr auto kUsbDefaultTimeout = std::chrono::milliseconds(500);
@@ -564,28 +565,30 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, Timeout request
 }
 
 // Reads the reply to `wire`, written at `sent`, until `deadline`. A read-only query over TCP whose reply has not come
-// 300 ms after it went out is written once more, when the deadline is later.
+// is written again 300 and 600 ms after it first went out, each time only while the deadline is later.
 AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const std::vector<std::uint8_t>& bytes,
                                                   std::chrono::steady_clock::time_point sent,
                                                   std::chrono::steady_clock::time_point deadline) {
     const bool tcp = tcp_.load();
-    // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to 2,900, rig
-    // 2026-11-20); one re-send of a read-only query at 300 ms recovered every one.
-    bool resend = tcp && retryable_query(wire) && sent + kTcpRetryAfter < deadline;
-    auto wait_until = resend ? sent + kTcpRetryAfter : deadline;
-    bool resent = false;
+    // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to 2,900 idle,
+    // rig 2026-11-20). During a home the losses come in bursts while the home-switch boards talk (rig 2026-11-21: a
+    // query and its first re-send both lost), so a read-only query gets two re-sends.
+    const bool retryable = tcp && retryable_query(wire);
+    int resends = 0;
     while (true) {
+        const auto resend_at = sent + kTcpRetryAfter * (resends + 1);
+        const bool may_resend = retryable && resends < kTcpMaxResends && resend_at < deadline;
         std::vector<std::uint8_t> frame;
         try {
-            frame = read_frame_locked(wait_until);
+            frame = read_frame_locked(may_resend ? resend_at : deadline);
         } catch (const AuxTimeout&) {
-            if (!resend) throw;
-            resend = false;
-            resent = true;
-            wait_until = deadline;
+            if (!may_resend) throw;
+            ++resends;
             ALPACA_LOG_WARN("Celestron CGX",
-                            "no reply over TCP in 300 ms: destination=" + std::to_string(wire.destination) +
-                                " command=" + std::to_string(wire.command) + "; re-sent once");
+                            "no reply over TCP in " + std::to_string((kTcpRetryAfter * resends).count()) +
+                                " ms: destination=" + std::to_string(wire.destination) +
+                                " command=" + std::to_string(wire.command) + "; re-sent (" + std::to_string(resends) +
+                                " of " + std::to_string(kTcpMaxResends) + ")");
             write_frame_locked(bytes, deadline);
             continue;
         }
@@ -594,7 +597,7 @@ AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const st
         // The reply swaps our addresses: a request echo (AMW006) and traffic for other devices never match.
         if (response.source == wire.destination && response.destination == wire.source &&
             response.command == wire.command) {
-            if (resent) ++recovered_retries_;  // a counter, not a fault (user decision 5)
+            if (resends > 0) ++recovered_retries_;  // one per lost reply recovered, a counter, not a fault (decision 5)
             healthy_.store(true);
             return response;
         }

@@ -237,7 +237,8 @@ TEST_CASE("Celestron CGX TCP driver - FindHome through a burst of lost requests 
             return !rig.driver->get_slewing();
         } catch (const alpacacore::AlpacaException& error) {
             failure = error.what();
-            return true;
+            // Until the stop's first ACK the link fault raises (#1950); the body's own error comes after it.
+            return failure.find("communications compromised") == std::string::npos;
         }
     };
     const auto deadline = std::chrono::steady_clock::now() + 10s;

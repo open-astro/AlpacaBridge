@@ -30,8 +30,9 @@ at all, so no test could show travel.
 ## Prevention
 
 - `supervise_home_search()` (`celestron_cgx_telescope_driver.cpp`), called by
-  both home waits every 200 ms, reads both encoders first and adds the wrapped
-  difference from the previous read (`kHomeTravelBoundDegrees`, 270 deg; never
+  both home waits every 200 ms, takes both encoders first (the state poll's
+  newest frame when the poll has read one since the last sample, else its own
+  reads) and adds the wrapped difference from the previous reading (`kHomeTravelBoundDegrees`, 270 deg; never
   reset by the re-home). Past the bound it throws "Celestron CGX home travel
   guard: ..."; the home loop's catch runs the verified cleanup stop and the
   error stays in the motion slot for Slewing (and AtHome for FindHome/Park).

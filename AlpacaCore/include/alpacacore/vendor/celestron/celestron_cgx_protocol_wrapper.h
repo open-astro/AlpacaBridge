@@ -52,14 +52,14 @@ public:
     /// lock) and `port`, closing any link held. Requests go out from source 0x20, whatever source the caller set.
     /// Input that arrives before the socket has been quiet for 200 ms (the adapter's startup backlog) is discarded.
     /// Unlike the serial link, a read-only motor query (position, model, home and slew status, guide status,
-    /// version) whose reply is lost is re-sent once, 300 ms after it went out, when the exchange's deadline is
-    /// later; nothing else is ever re-sent. A motion or label command (LEVEL_START, GOTO, SET_POSITION, AUX_GUIDE, the
-    /// stop) whose reply has not come in 300 ms is settled by the axis status within the same deadline: one that took
-    /// effect returns as acknowledged, without a desync; one that did not times out as before. The adapter closing the
-    /// connection is a lost link (link_alive()).
-    /// The link owns `host`:`port` process-wide until it closes: a second link to it is refused with InvalidOperation
-    /// naming the holder. A motor controller's unsolicited report (0x50, 0x51) is acknowledged; anything but a
-    /// low-battery warning fails the exchange as a session error.
+    /// version) whose reply is lost is re-sent up to twice, 300 and 600 ms after it first went out, each only while
+    /// the exchange's deadline is later; nothing else is ever re-sent. A motion or label command (LEVEL_START, GOTO,
+    /// SET_POSITION, AUX_GUIDE, the stop) whose reply has not come in 300 ms is settled by the axis status within the
+    /// same deadline: one that took effect returns as acknowledged, without a desync; one that did not times out as
+    /// before. The adapter closing the connection is a lost link (link_alive()). The link owns `host`:`port`
+    /// process-wide until it closes: a second link to it is refused with InvalidOperation naming the holder. A motor
+    /// controller's unsolicited report (0x50, 0x51) is acknowledged; anything but a low-battery warning fails the
+    /// exchange as a session error.
     void connect_tcp(const std::string& host, int port, std::chrono::milliseconds timeout = std::chrono::seconds(3));
     void disconnect();
     /// Clears a desynchronized link on the port already held: flushes stale input
