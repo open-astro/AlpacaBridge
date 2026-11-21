@@ -629,6 +629,23 @@ inline ContractEntry contract_entry_celestron_cgx_telescope() {
     entry.can_move_axis = {false, false, false};
     return entry;
 }
+// The same CGX driver over the SkyPortal WiFi adapter (AUX over TCP): a numeric host selects the transport. The
+// sweep's calls run disconnected and open no socket.
+inline ContractEntry contract_entry_celestron_cgx_tcp_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx_tcp", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.host = "127.0.0.1";
+            info.tcp_port = 1;  // closed: a connect is refused at once
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
 inline ContractEntry contract_entry_celestron_focuser() {
     auto entry = make_entry(
         "celestron_focuser", "celestron", "focuser", DeviceType::Focuser,
@@ -931,7 +948,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_focuser)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_cgx_tcp_telescope) X(celestron_focuser)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -1069,6 +1086,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
+    {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
     {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},

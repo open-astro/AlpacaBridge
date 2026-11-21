@@ -20,6 +20,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
+#include <alpacacore/version.h>
 
 #include <chrono>
 #include <cstdint>
@@ -263,6 +264,112 @@ TEST_CASE("Celestron CGX TCP driver - two devices cannot share one adapter", "[c
     require_alpaca_error([&] { second->set_connected(true); }, AlpacaError::InvalidOperation);
     CHECK_FALSE(second->get_connected());
     CHECK(rig.adapter.connections() == 1);
+}
+
+// The required driver cases for the WiFi variant (testing instructions, cases 1, 2 and 5-8; cases 3, 4 and the
+// disconnected range probes come from the celestron_telescope_cgx_tcp entry in contract_sweep.h).
+namespace {
+cgx::CelestronCgxConnectionInfo wifi_info(int port) {
+    cgx::CelestronCgxConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    return info;
+}
+}  // namespace
+
+TEST_CASE("Celestron CGX WiFi Telescope Driver - Defaults", "[celestron][cgx][telescope][tcp][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, wifi_info(1), clock);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == alpacacore::DeviceType::Telescope);
+    CHECK(driver->get_device_number() == 0);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");
+    CHECK_FALSE(driver->get_can_slew());
+    CHECK(driver->get_can_slew_async());
+    CHECK(driver->get_can_pulse_guide());
+    CHECK(driver->get_can_set_guide_rates());
+    CHECK(driver->get_can_find_home());
+    CHECK(driver->get_can_park());
+    CHECK_FALSE(driver->get_can_move_axis(0));
+    CHECK_FALSE(driver->get_can_move_axis(1));
+}
+
+TEST_CASE("Celestron CGX WiFi Telescope Driver - Device metadata", "[celestron][cgx][telescope][tcp][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(3, wifi_info(1), clock);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");  // decision 0024: the transport is not in the name
+    CHECK(driver->get_description() == "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: 0");
+    CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
+    CHECK(driver->get_interface_version() == 4);
+    CHECK(driver->get_unique_id() == "Celestron_CGX_USB_3");  // the fallback; the router assigns the stored ID
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+}
+
+TEST_CASE("Celestron CGX WiFi Telescope Driver - a refused adapter connection fails the connect",
+          "[celestron][cgx][telescope][tcp]") {
+    alpacacore::test::FakeTaskClock clock;
+    // Port 1 on loopback: nothing listens, so the connect is refused at once.
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, wifi_info(1), clock);
+    try {
+        driver->set_connected(true);
+        FAIL("a refused adapter connection must fail the connect");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(std::string(error.what()).find("Celestron CGX TCP") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Celestron CGX WiFi Telescope Driver - state machine before and after FindHome",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpRig rig;
+    rig.set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_tracking());
+    // No reference over a fresh socket: tracking and slews wait for FindHome.
+    require_alpaca_error([&] { rig.driver->set_tracking(true); }, AlpacaError::InvalidOperation);
+    rig.find_home();
+    CHECK(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_slewing());
+    rig.driver->set_tracking(true);
+    CHECK(rig.driver->get_tracking());
+    CHECK_FALSE(rig.driver->get_at_home());
+    rig.driver->set_tracking(false);
+    rig.set_connected(false);
+    CHECK_FALSE(rig.driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); }, AlpacaError::NotConnected);
+}
+
+TEST_CASE("Celestron CGX WiFi Telescope Driver - value ranges and unsupported members while connected",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpRig rig;
+    rig.set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    require_alpaca_error([&] { rig.driver->pulse_guide(4, 100); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->pulse_guide(0, -1); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_target_declination(90.1); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_target_right_ascension(24.0); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_tracking_rate(3); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_side_of_pier(2); }, AlpacaError::InvalidValue);
+    // CGX motor rates are not calibrated (contract_sweep.h): no MoveAxis, no Alt/Az, no rate offsets.
+    require_alpaca_error([&] { rig.driver->move_axis(0, 1.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { rig.driver->set_right_ascension_rate(0.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { rig.driver->set_side_of_pier(1); }, AlpacaError::NotImplemented);
+    CHECK(rig.driver->get_supported_actions().empty());
+    require_alpaca_error([&] { static_cast<void>(rig.driver->action("gps_status", "")); },
+                         AlpacaError::ActionNotImplemented);
+    // Nothing above reached the wire as motion.
+    CHECK(rig.adapter.count(kRa, 0x02) == 0);
+    CHECK(rig.adapter.count(kRa, 0x26) == 0);
 }
 
 #endif  // !_WIN32

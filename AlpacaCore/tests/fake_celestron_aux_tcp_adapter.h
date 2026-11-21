@@ -153,6 +153,11 @@ public:
         backlog_ = std::move(bytes);
         backlog_delay_ = delay;
     }
+    /// While muted, every request is swallowed (Fault::Drop): taken, never executed, never answered.
+    void set_muted(bool muted) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        muted_ = muted;
+    }
     /// Applies `fault` to the `nth` (1-based) request to (`destination`, `command`), counted over all connections.
     void script(std::uint8_t destination, std::uint8_t command, int nth, Fault fault) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -274,6 +279,7 @@ private:
             const int nth = ++counts_[{request.destination, request.command}];
             const auto it = faults_.find({request.destination, request.command, nth});
             if (it != faults_.end()) fault = it->second;
+            if (muted_) fault = Fault::Drop;
             const auto before = before_reply_.find({request.destination, request.command, nth});
             if (before != before_reply_.end()) before_bytes = before->second;
             echo = echo_;
@@ -460,6 +466,7 @@ private:
     int stop_settle_reads_ = 0;
     bool echo_ = false;
     bool foreign_ = false;
+    bool muted_ = false;
     std::vector<std::uint8_t> backlog_;
     std::chrono::milliseconds backlog_delay_{0};
     std::map<std::tuple<std::uint8_t, std::uint8_t, int>, Fault> faults_;

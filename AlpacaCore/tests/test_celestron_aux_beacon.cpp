@@ -16,12 +16,15 @@
 // window is wire timing (decision 0005 rule 6, steady_clock), so the cases wait real, bounded time.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/catalog/builtin_catalog.h>
+#include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/vendor/celestron/celestron_aux_beacon.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -96,8 +99,9 @@ int free_port() {
 // the listener has bound whatever the scheduling, as the adapter's 2 s beacon does.
 class BeaconSender {
 public:
-    BeaconSender(std::string source, int port, std::vector<std::string> datagrams)
-        : source_(std::move(source)), port_(port), datagrams_(std::move(datagrams)) {
+    // `quiet_for`: how long the sender waits before its first datagram (an adapter whose next beacon is late).
+    BeaconSender(std::string source, int port, std::vector<std::string> datagrams, milliseconds quiet_for = {})
+        : source_(std::move(source)), port_(port), datagrams_(std::move(datagrams)), quiet_for_(quiet_for) {
         const int on = 1;
         ::setsockopt(socket_.fd(), SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
         ok_ = bind_to(socket_.fd(), source_.c_str(), 0);
@@ -118,6 +122,10 @@ private:
         to.sin_family = AF_INET;
         to.sin_port = htons(static_cast<std::uint16_t>(port_));
         ::inet_pton(AF_INET, "127.255.255.255", &to.sin_addr);
+        // Real time, in 10 ms steps so a stopping sender is noticed: the quiet spell is wire timing.
+        for (const auto loud = std::chrono::steady_clock::now() + quiet_for_;
+             !stop_.load() && std::chrono::steady_clock::now() < loud;)
+            std::this_thread::sleep_for(milliseconds(10));
         while (!stop_.load()) {
             for (const auto& datagram : datagrams_) {
                 if (::sendto(socket_.fd(), datagram.data(), datagram.size(), 0, reinterpret_cast<const sockaddr*>(&to),
@@ -134,6 +142,7 @@ private:
     std::string source_;
     int port_;
     std::vector<std::string> datagrams_;
+    milliseconds quiet_for_;
     bool ok_ = false;
     std::atomic<bool> stop_{false};
     std::atomic<int> sent_{0};
@@ -268,4 +277,29 @@ TEST_CASE("Celestron SkyPortal beacon - a bad window or port is an invalid value
     require_alpaca_error([] { (void)listen_for_aux_beacons(milliseconds(10001)); }, AlpacaError::InvalidValue);
     require_alpaca_error([] { (void)listen_for_aux_beacons(milliseconds(100), 0); }, AlpacaError::InvalidValue);
     require_alpaca_error([] { (void)listen_for_aux_beacons(milliseconds(100), 65536); }, AlpacaError::InvalidValue);
+}
+
+// The web UI's "Find adapter" reaches the listener only through the catalog hook (AlpacaHTTP names no vendor header).
+// The adapter stays quiet for 4 s, as when a beacon is lost (gaps of 4 s and 6 s were captured), so a window shorter
+// than the 5 s the capture asks for hears nothing. This case listens on the real beacon port, 55555.
+TEST_CASE("Celestron SkyPortal beacon - the catalog's Find adapter hook listens 5 s on the beacon port",
+          "[celestron][beacon]") {
+    alpacacore::catalog::DeviceCatalog catalog;
+    alpacacore::catalog::register_builtin_factories(catalog);
+    BeaconSender adapter("127.0.0.9", alpacacore::vendor::celestron::kAuxBeaconPort, {kCapturedBeacon}, milliseconds(4000));
+    REQUIRE(adapter.ok());
+    const auto started = std::chrono::steady_clock::now();
+
+    const auto found = catalog.find_network_adapters("celestron");
+
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    REQUIRE(found.has_value());
+    // A real adapter on a network this host has joined (the rig's dongle) is heard too, so look for the sender.
+    const auto sender = std::find_if(found->begin(), found->end(), [](const auto& a) { return a.host == "127.0.0.9"; });
+    REQUIRE(sender != found->end());
+    CHECK(sender->ssid == "Celestron-AFFC");
+    CHECK(sender->module == "Telit WE310G4");
+    CHECK(elapsed >= milliseconds(5000));
+    CHECK(elapsed < milliseconds(6500));
+    CHECK_FALSE(catalog.find_network_adapters("zwo").has_value());
 }

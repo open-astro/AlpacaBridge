@@ -65,6 +65,13 @@ struct AttachedHidDevice {
     std::string name;  // display name
 };
 
+// One network adapter a vendor's finder heard announce itself on the LAN (the SkyPortal WiFi adapter's beacon).
+struct FoundNetworkAdapter {
+    std::string host;    // the numeric address a configuredevice call names
+    std::string ssid;    // the network the adapter serves, empty when it did not say
+    std::string module;  // the adapter's radio module, empty when it did not say
+};
+
 class DeviceCatalog {
 public:
     // Every key with a schema, in insertion order. available means "a factory is
@@ -149,6 +156,14 @@ public:
     void add_hid_lister(DeviceKey key, HidLister lister);  // replaces the key's
     const std::vector<std::pair<DeviceKey, HidLister>>& hid_listers() const { return hid_listers_; }
 
+    // The adapters a vendor's network devices announce on the LAN, for the web UI's "Find adapter" button. A
+    // finder listens for a bounded window (it blocks the caller for all of it), sends nothing and may throw;
+    // registered only when the vendor is built.
+    using NetworkAdapterFinder = std::function<std::vector<FoundNetworkAdapter>()>;
+    void add_network_adapter_finder(std::string vendor, NetworkAdapterFinder finder);  // replaces the vendor's
+    // nullopt when no finder is registered for the vendor; otherwise the finder's result.
+    std::optional<std::vector<FoundNetworkAdapter>> find_network_adapters(std::string_view vendor) const;
+
 private:
     const Schema* find_schema(const DeviceKey& key) const;
     const Factory* find_factory(const DeviceKey& key) const;
@@ -158,6 +173,7 @@ private:
     std::vector<std::pair<std::string, CameraLister>> camera_listers_;
     std::vector<UsbSerialIdentity> usb_serial_identities_;
     std::vector<std::pair<DeviceKey, HidLister>> hid_listers_;
+    std::vector<std::pair<std::string, NetworkAdapterFinder>> network_adapter_finders_;
 };
 
 // Formats a range bound for a message: an Int field without a fraction, a

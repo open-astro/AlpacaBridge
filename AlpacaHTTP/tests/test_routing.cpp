@@ -6086,6 +6086,12 @@ int main() {
             R"({"protocol":"cgx-aux","connectionType":"serial","portPath":"/dev/ttyUSB-cgx",)"
             R"("siteLatitude":-33.87,"siteLongitude":151.21,"siteElevation":0.0,)"
             R"("apertureDiameter":0.2,"focalLength":1.0})");
+        // The CGX over the SkyPortal WiFi adapter: the host and TCP port, and the USB port path it keeps unused.
+        add("celestron", "telescope", "Telescope", "cgx-aux SkyPortal WiFi",
+            R"({"protocol":"cgx-aux","connectionType":"network","host":"1.2.3.4","tcpPort":2000,)"
+            R"("portPath":"/dev/ttyUSB-cgx","siteLatitude":45.5,"siteLongitude":-75.25,"siteElevation":80.0})",
+            R"({"protocol":"cgx-aux","connectionType":"network","host":"1.2.3.4","tcpPort":2000,)"
+            R"("portPath":"/dev/ttyUSB-cgx","siteLatitude":45.5,"siteLongitude":-75.25,"siteElevation":80.0})");
         // #860: a known alignmentMode survives; an unknown string or a non-string drops.
         add("celestron", "telescope", "Telescope", "alignmentMode auto",
             R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"auto"})",
@@ -9506,6 +9512,109 @@ int main() {
             route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz").body(), nullptr, false);
         EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) != 0);
         EXPECT(thrown.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
+    // GET /management/v1/networkadapters?vendor=<v> serves the catalog's network adapter finder for the
+    // Celestron CGX form's "Find adapter" button (the SkyPortal WiFi beacon), in the management envelope.
+    {
+        // case: networkadapters serves the vendor's finder result from the catalog
+        alpacahttp::Router router;
+        int finder_calls = 0;
+        router.catalog().add_network_adapter_finder("zzz", [&finder_calls] {
+            ++finder_calls;
+            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{
+                {"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"}, {"192.168.4.20", "", ""}};
+        });
+        const auto response =
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz&ClientTransactionID=33");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 33);
+        EXPECT(finder_calls == 1);
+        EXPECT(json.contains("Value") && json["Value"].is_array() && json["Value"].size() == 2);
+        if (json.contains("Value") && json["Value"].size() == 2) {
+            EXPECT(json["Value"][0] ==
+                   nlohmann::json({{"Host", "1.2.3.4"}, {"Ssid", "Celestron-AFFC"}, {"Module", "Telit WE310G4"}}));
+            EXPECT(json["Value"][1] == nlohmann::json({{"Host", "192.168.4.20"}, {"Ssid", ""}, {"Module", ""}}));
+        }
+        const auto unversioned = nlohmann::json::parse(
+            route_request(router, "GET", "/management/networkadapters?vendor=zzz").body(), nullptr, false);
+        EXPECT(!unversioned.is_discarded() && unversioned.value("ErrorNumber", -1) == 0);
+    }
+    {
+        // case: networkadapters refuses an unknown vendor and any verb but GET, and reports a throwing finder
+        alpacahttp::Router router;
+        router.catalog().add_network_adapter_finder("zzz", []() -> std::vector<alpacacore::catalog::FoundNetworkAdapter> {
+            throw alpacacore::AlpacaException("Celestron SkyPortal beacon: cannot bind UDP port 55555",
+                                              alpacacore::AlpacaError::DriverException);
+        });
+        const auto unknown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=nope").body(), nullptr, false);
+        EXPECT(!unknown.is_discarded() && unknown.value("ErrorNumber", 0) == 0x401);
+        const auto put = route_request(router, "PUT", "/management/v1/networkadapters", "vendor=zzz");
+        EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
+        const auto thrown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz").body(), nullptr, false);
+        EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) == 0x500);
+        EXPECT(thrown.value("ErrorMessage", "").find("cannot bind UDP port 55555") != std::string::npos);
+        // A failed search ends the search: the next one runs.
+        const auto again = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz").body(), nullptr, false);
+        EXPECT(!again.is_discarded() && again.value("ErrorNumber", 0) == 0x500);
+    }
+    {
+        // case: a networkadapters search holds no lock: other requests are served while it listens, and a second search is refused at once
+        alpacahttp::Router router;
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool entered = false;
+        bool released = false;
+        router.catalog().add_network_adapter_finder("zzz", [&] {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            entered = true;
+            gate_cv.notify_all();
+            // Bounded: a broken release fails the case instead of hanging it.
+            gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
+            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{{"1.2.3.4", "Celestron-AFFC", "Telit WE310G4"}};
+        });
+        const auto release = [&] {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            released = true;
+            gate_cv.notify_all();
+        };
+        auto search = std::async(std::launch::async, [&] {
+            return route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz");
+        });
+        {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
+        }
+        // A client and the web UI keep being served while the search listens.
+        auto listing = std::async(std::launch::async, [&] {
+            return route_request(router, "GET", "/management/v1/configureddevices");
+        });
+        const bool listing_served = listing.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        auto second = std::async(std::launch::async, [&] {
+            return route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz");
+        });
+        const bool second_answered = second.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        release();
+        EXPECT(listing_served);
+        EXPECT(listing.get().status_code() == 200);
+        EXPECT(second_answered);
+        const auto refused = nlohmann::json::parse(second.get().body(), nullptr, false);
+        EXPECT(!refused.is_discarded() && refused.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(refused.value("ErrorMessage", "").find("already running") != std::string::npos);
+        const auto first = nlohmann::json::parse(search.get().body(), nullptr, false);
+        EXPECT(!first.is_discarded() && first.value("ErrorNumber", -1) == 0);
+        EXPECT(first.contains("Value") && first["Value"].size() == 1);
+        // Once the first search ended, the next one runs.
+        const auto next = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz").body(), nullptr, false);
+        EXPECT(!next.is_discarded() && next.value("ErrorNumber", -1) == 0);
     }
 
     // GET /management/v1/attacheddevices (#2312): every detected serial, HID and

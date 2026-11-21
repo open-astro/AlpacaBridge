@@ -23,6 +23,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "driver_rig.h"
+#include "fake_celestron_aux_tcp_adapter.h"
 #include "fake_celestron_cgx_mount.h"
 #include "getter_stall_probe.h"
 
@@ -188,6 +189,32 @@ TEST_CASE("Celestron CGX USB telescope - the state frame stays fresh through the
     CHECK(slews.unexpected_count() == 0);
     CHECK(slews.total_calls() > 0);
     driver->set_connected(false);
+}
+
+// The same driver over the SkyPortal WiFi adapter (AUX over TCP): every Connect opens a new socket and takes the mount
+// over with a verified stop, every Disconnect closes it, and the adapter serves one client at a time. The fake adapter
+// answers at once; its motor model completes a GOTO and a home search at once too.
+TEST_CASE("Celestron CGX WiFi telescope - connection and motion lifecycle stress", "[celestron][telescope][stress]") {
+    alpacacore::test::FakeCelestronAuxTcpAdapter adapter;
+    REQUIRE(adapter.ok());
+    alpacacore::vendor::celestron::CelestronCgxConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = adapter.port();
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+
+    // DriverException: a Disconnect that lands during an exchange can cut it short (the socket closes).
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::InvalidWhileParked,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](alpacacore::AlpacaDriver& d) { operate(guard, d); });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Celestron CGX USB telescope - destruction races an in-flight connect", "[celestron][telescope][stress]") {
