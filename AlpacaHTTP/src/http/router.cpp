@@ -4692,6 +4692,20 @@ Response Router::handle_log_file_item(const Request& request,
         return *rejected;
     }
 
+    // A wrong verb is answered before the name is checked, so the answer does not depend on the name (#2484).
+    if (request.method() != HttpMethod::GET && request.method() != HttpMethod::DELETE_) {
+        response.set_content_type("application/json");
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_OPERATION,
+            "Unsupported HTTP method for log file endpoint"
+        );
+        response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, DELETE");
+        return response;
+    }
+
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -4729,39 +4743,26 @@ Response Router::handle_log_file_item(const Request& request,
         }
     }
 
-    if (request.method() == HttpMethod::DELETE_) {
-        try {
-            util::delete_log_file(filename);
-            util::log_info("Deleted log file " + filename);
-            response.set_content_type("application/json");
-            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-            nlohmann::json payload;
-            payload["Deleted"] = filename;
-            alpaca_response.value = payload;
-            response.set_body(alpaca_response);
-            return response;
-        } catch (const std::exception& e) {
-            response.set_content_type("application/json");
-            AlpacaResponse err = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::DRIVER_ERROR,
-                std::string("Failed to delete log file: ") + e.what()
-            );
-            response.set_body(err);
-            return response;
-        }
+    try {
+        util::delete_log_file(filename);
+        util::log_info("Deleted log file " + filename);
+        response.set_content_type("application/json");
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        nlohmann::json payload;
+        payload["Deleted"] = filename;
+        alpaca_response.value = payload;
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        response.set_content_type("application/json");
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::DRIVER_ERROR,
+            std::string("Failed to delete log file: ") + e.what()
+        );
+        response.set_body(err);
+        return response;
     }
-
-    response.set_content_type("application/json");
-    AlpacaResponse err = make_error_response(
-        client_tx_id, server_tx_id,
-        util::ErrorCode::INVALID_OPERATION,
-        "Unsupported HTTP method for log file endpoint"
-    );
-    response.set_body(err);
-    response.set_status(405, "Method Not Allowed");
-    response.set_header("Allow", "GET, DELETE");
-    return response;
 }
 
 Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx_id) {
