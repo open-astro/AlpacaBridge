@@ -403,6 +403,14 @@ void case_run_last_exposure_early_read_logs_debug() {
 }  // namespace
 
 int main() {
+    {
+        // case: a duplicated query parameter keeps its first value, as the form body does (#2292)
+        auto q = make("GET", "/x?Position=1&position=2&Position=3");
+        EXPECT(q->get_query_param("Position") == "1");
+        auto f_req = put_form("Position=1&position=2&Position=3");
+        DeviceCall f(*f_req, kServerTx);
+        EXPECT(f.form_field("Position").value_or("<none>") == "1");
+    }
     case_url_decode_invalid_and_trailing_escapes();
     case_query_before_json();
     case_json_key_before_value();
