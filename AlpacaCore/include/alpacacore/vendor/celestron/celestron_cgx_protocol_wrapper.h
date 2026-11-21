@@ -91,13 +91,17 @@ private:
                    std::chrono::milliseconds timeout);
     void disconnect_locked();
     [[noreturn]] void lose_link_locked(const std::string& reason);
+    [[noreturn]] void fail_socket_locked(const char* operation, int code);
+    void drain_backlog_locked();
+    std::size_t discard_input_locked();
     void write_frame_locked(const std::vector<std::uint8_t>& bytes, std::chrono::steady_clock::time_point deadline);
     void wait_for_locked(short events, std::chrono::steady_clock::time_point deadline);
     std::vector<std::uint8_t> read_frame_locked(std::chrono::steady_clock::time_point deadline);
 
     const std::string owner_;
     mutable std::mutex mutex_;
-    int serial_fd_ = -1;
+    int serial_fd_ = -1;            // the tty from link_, or the socket while tcp_
+    std::atomic<bool> tcp_{false};  // the transport of the last connect: SkyPortal TCP or USB serial
     std::atomic<std::uint64_t> session_generation_{0};
     std::atomic<bool> healthy_{false};
     bool desynchronized_ = false;

@@ -328,3 +328,27 @@ TEST_CASE("Celestron CGX AUX link - a lost USB reply is never re-sent", "[celest
     CHECK(sent == 1);
     protocol.disconnect();
 }
+
+TEST_CASE("Celestron CGX AUX link - a USB connect after a TCP session speaks USB", "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    protocol.connect_serial(mount.slave_path());
+    CHECK(adapter.connections() == 1);
+
+    const auto reply = protocol.exchange(request(kRa, 0xfe), milliseconds(500));
+    CHECK(reply.destination == 0x00);
+    const auto frames = mount.requests();
+    REQUIRE_FALSE(frames.empty());
+    CHECK(frames.back().source == 0x00);
+    protocol.disconnect();
+    require_alpaca_error([&] { (void)protocol.exchange(request(kRa, 0xfe), milliseconds(100)); },
+                         AlpacaError::NotConnected);
+    try {
+        (void)protocol.exchange(request(kRa, 0xfe), milliseconds(100));
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(std::string(error.what()) == "Celestron CGX USB is not connected");
+    }
+}

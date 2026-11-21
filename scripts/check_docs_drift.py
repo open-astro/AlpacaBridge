@@ -1840,6 +1840,7 @@ HELPER_FAKES = {
     "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
     "fake_synscan_handset.h": "stateful SynScan handset responder plugged into FakeMountServer for the SynScan async, slot and supersede cases; the SynScan roster row stays on fake_mount_server.h",
     "fake_celestron_handset.h": "stateful NexStar hand-controller responder plugged into FakeMountServer for the Celestron async cases; the Celestron roster row stays on fake_mount_server.h",
+    "fake_celestron_aux_tcp_adapter.h": "loopback SkyPortal WiFi adapter for the CGX AUX link's TCP transport cases; no driver connects over TCP yet",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
