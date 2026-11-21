@@ -60,6 +60,22 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that has been
   silent for less than the staleness bound.
 
+## Synchronized vs trusted host clock
+
+- **Synchronized host clock**: the kernel reports the host's clock disciplined by NTP
+  (`util::ClientUtcWarning::host_synchronized()`).
+- **Trusted host clock**: a host clock good enough to write into a mount that keeps its
+  own clock (`util::HostClockTrust`, #2419). It is trusted when it is synchronized, or
+  once something has set or confirmed it since the server started: a client's `UTCDate`
+  write, the web UI's Sync Time, or a clock step the server observed. Trust is never
+  withdrawn while the server runs.
+- A clock the kernel loaded from a hardware RTC at boot is neither: nothing on a host
+  without NTP verifies the RTC, and a board with no RTC boots on the time of its last
+  shutdown.
+- Avoid: "synced" for a trusted clock, or "correct" or "valid" for either. A clock a
+  client set is trusted and not synchronized, and a synchronized clock can still
+  disagree with the client's `UTCDate`.
+
 ## Native device vs proxied device
 
 - **Native device**: a device AlpacaBridge drives itself, over a serial port, a USB SDK
