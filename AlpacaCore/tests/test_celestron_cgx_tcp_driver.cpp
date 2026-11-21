@@ -217,6 +217,56 @@ TEST_CASE("Celestron CGX TCP driver - FindHome over a lost LEVEL_START reply",
     CHECK(rig.adapter.count(kRa, 0x0b) == 1);
 }
 
+// Rig 2026-11-21 (slice 5a): during a home the adapter lost requests in bursts, while the home-switch boards talk.
+TEST_CASE("Celestron CGX TCP driver - FindHome through a burst of lost requests after LEVEL_START",
+          "[celestron][cgx][telescope][tcp][home-search]") {
+    TcpRig rig;
+    rig.adapter.set_home_duration(800ms);
+    rig.set_connected(true);
+    const int ra_stops = rig.adapter.count(kRa, 0x24);
+    const int dec_stops = rig.adapter.count(kDec, 0x24);
+    const int ra_status = rig.adapter.count(kRa, 0x13);
+    const int dec_status = rig.adapter.count(kDec, 0x13);
+    const int lost = GENERATE(2, 3);
+    INFO("lost=" << lost);
+    rig.adapter.set_home_burst_loss(lost);  // the requests right after Dec's LEVEL_START, whatever they are
+    rig.driver->find_home();
+    std::string failure;
+    const auto ended = [&] {
+        try {
+            return !rig.driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& error) {
+            failure = error.what();
+            return true;
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!ended() && std::chrono::steady_clock::now() < deadline) {
+        if (rig.clock.wait_for_waiters(1, 1ms)) rig.clock.advance(20ms);
+        std::this_thread::sleep_for(1ms);  // real time: the search and the re-sends run in real time
+    }
+    INFO("Slewing failure: " << failure);
+    CHECK(rig.adapter.count(kRa, 0x0b) == 1);
+    CHECK(rig.adapter.count(kDec, 0x0b) == 1);
+    if (lost == 2) {
+        CHECK(failure.empty());
+        CHECK(rig.driver->get_at_home());
+        CHECK(rig.driver->get_link_fault().empty());
+        CHECK(rig.driver->get_description().find("lost replies recovered: 1") != std::string::npos);
+        CHECK(rig.adapter.count(kRa, 0x24) == ra_stops);
+    } else {
+        // All three sends lost: the home fails as a lost reply always did, and both axes are stopped and verified
+        // (a stop the status did not confirm would replace the error with its own).
+        CHECK(failure.find("AUX transaction timed out") != std::string::npos);
+        CHECK(failure.find("did not confirm") == std::string::npos);
+        CHECK_FALSE(rig.driver->get_at_home());
+        CHECK(rig.adapter.count(kRa, 0x24) > ra_stops);
+        CHECK(rig.adapter.count(kDec, 0x24) > dec_stops);
+        CHECK(rig.adapter.count(kRa, 0x13) > ra_status);
+        CHECK(rig.adapter.count(kDec, 0x13) > dec_status);
+    }
+}
+
 TEST_CASE("Celestron CGX USB driver - a cleanup stop keeps its 500 ms budget",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;

@@ -49,8 +49,9 @@ namespace alpacacore::test {
 // reads done (a tracking axis, or a status that reads done too early). Real motors accelerate and decelerate; this one
 // does not, except that set_stop_settle_reads() makes SLEW_DONE read busy for a number of reads after a stop. A home
 // search on an axis given set_home_runaway() reads searching and drifts at that rate until a stop: a switch never
-// found (the Oct-28 incident shape), with no limit sensor or hard stop. Rate
-// commands (0x06, 0x07) are ACKed and change nothing. It ACKs every write except a client's ACK of a motor report
+// found (the Oct-28 incident shape), with no limit sensor or hard stop. set_home_burst_loss() swallows a run of
+// requests after each home start, as the rig lost them in bursts while the home-switch boards talked (2026-11-21);
+// the real loss is not tied to a request count. Rate commands (0x06, 0x07) are ACKed and change nothing. It ACKs every write except a client's ACK of a motor report
 // (0x50, 0x51), which it does not answer. Motor reports are sent only when a case injects them. It does not simulate
 // the bus, the switch boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The
 // Gen4 startup backlog is replayed as one scripted burst; the real one was 216 frames of an earlier session (October
@@ -133,6 +134,13 @@ public:
     void set_home_runaway(std::uint8_t axis, double counts_per_second) {
         std::lock_guard<std::mutex> lock(mutex_);
         home_runaway_[axis] = counts_per_second;
+    }
+    /// After each MC_LEVEL_START (0x0b), the next `requests` requests to `destination` (any, when empty) that arrive
+    /// `delay` or more after it are swallowed (Fault::Drop). A later LEVEL_START starts a new burst.
+    void set_home_burst_loss(int requests, std::optional<std::uint8_t> destination = std::nullopt,
+                             std::chrono::milliseconds delay = std::chrono::milliseconds(0)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        burst_ = Burst{.requests = requests, .destination = destination, .delay = delay, .armed_at = {}, .left = 0};
     }
     /// After a stop, SLEW_DONE on that axis reads busy for its next `reads` reads (a deceleration).
     void set_stop_settle_reads(int reads) {
@@ -287,6 +295,17 @@ private:
             const auto it = faults_.find({request.destination, request.command, nth});
             if (it != faults_.end()) fault = it->second;
             if (muted_) fault = Fault::Drop;
+            if (burst_.requests > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (request.command == 0x0b) {
+                    burst_.armed_at = now;
+                    burst_.left = burst_.requests;
+                } else if (burst_.left > 0 && burst_.armed_at && now - *burst_.armed_at >= burst_.delay &&
+                           (!burst_.destination || *burst_.destination == request.destination)) {
+                    --burst_.left;
+                    fault = Fault::Drop;
+                }
+            }
             const auto before = before_reply_.find({request.destination, request.command, nth});
             if (before != before_reply_.end()) before_bytes = before->second;
             echo = echo_;
@@ -478,6 +497,14 @@ private:
     std::chrono::milliseconds home_duration_{0};
     std::map<std::uint8_t, double> home_runaway_;
     int stop_settle_reads_ = 0;
+    struct Burst {
+        int requests = 0;
+        std::optional<std::uint8_t> destination;
+        std::chrono::milliseconds delay{0};
+        std::optional<std::chrono::steady_clock::time_point> armed_at;
+        int left = 0;
+    };
+    Burst burst_;
     bool echo_ = false;
     bool foreign_ = false;
     bool muted_ = false;

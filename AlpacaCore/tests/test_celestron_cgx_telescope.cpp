@@ -4643,4 +4643,46 @@ TEST_CASE("Celestron CGX USB Telescope Driver - the longest legitimate homes pas
     CHECK(mount.axis_physical_position(0x10) == 0U);
     CHECK(mount.axis_physical_position(0x11) == 0U);
 }
+
+// Slice 5a (rig 2026-11-21): the state poll reads both encoders every 250 ms anyway, so during a home the travel guard
+// takes the poll's frames instead of reading the encoders again: over WiFi the double reads fell in the window where
+// the adapter lost requests in bursts. The guard still sees all the travel, from the poll's readings alone.
+TEST_CASE("Celestron CGX USB Telescope Driver - the travel guard takes the state poll's encoder reads",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    mount.script_home_search(0x10, {HomeLeg{1, kFastHomeRate, 0}});  // RA never finds its switch
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10); }));
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    int polled_steps = 0;
+    while (!motion_ended(*driver)) {
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        if (!clock.wait_for_waiters(1, 1ms)) continue;
+        const int ra_reads = mount.count_command(0x10, 0x01);
+        const int dec_reads = mount.count_command(0x11, 0x01);
+        mount.advance_motion(1s);
+        poll_now(*driver);  // one poll per loop iteration, as the 250 ms poll and the 200 ms loop run on the rig
+        clock.advance(1s);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+        // The poll's read only: the guard read nothing of its own.
+        CHECK(mount.count_command(0x10, 0x01) - ra_reads == 1);
+        CHECK(mount.count_command(0x11, 0x01) - dec_reads == 1);
+        ++polled_steps;
+    }
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(polled_steps >= 60);  // stopped at the 60 s point, past the 90 deg a re-home may start from
+    CHECK(mount.count_command(0x10, 0x0b) == 1);
+}
 #endif

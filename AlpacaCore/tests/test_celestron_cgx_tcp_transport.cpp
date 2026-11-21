@@ -145,25 +145,47 @@ TEST_CASE("Celestron CGX AUX TCP - re-sends a lost read-only query once and keep
     }
 }
 
-TEST_CASE("Celestron CGX AUX TCP - a second miss is a link fault and is never sent a third time",
+// Rig 2026-11-21: during a home the adapter lost requests in bursts, a query and its first re-send both (slice 5a).
+TEST_CASE("Celestron CGX AUX TCP - a query whose first re-send is lost too is recovered by the second",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kDec, 0x000555);
+    adapter.script(kDec, 0x01, 1, Fault::Drop);
+    adapter.script(kDec, 0x01, 2, Fault::Drop);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    const auto session = protocol.session_generation();
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(protocol.get_axis_position(CgxAxis::Declination, milliseconds(1000)) == 0x000555);
+    CHECK(since(started) >= milliseconds(600));
+    CHECK(adapter.count(kDec, 0x01) == 3);
+    CHECK(protocol.is_healthy());
+    CHECK(protocol.session_generation() == session);
+    CHECK(protocol.recovered_retries() == 1);  // one lost reply recovered, however many sends it took
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a third miss is a link fault and is never sent a fourth time",
           "[celestron][cgx][protocol][tcp]") {
     FakeCelestronAuxTcpAdapter adapter;
     adapter.set_position(kRa, 0x000777);
     adapter.script(kRa, 0x01, 1, Fault::Drop);
     adapter.script(kRa, 0x01, 2, Fault::Drop);
+    adapter.script(kRa, 0x01, 3, Fault::Drop);
     CelestronCgxProtocol protocol;
     connect(protocol, adapter);
     const auto session = protocol.session_generation();
 
     require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension, milliseconds(1000)); },
                          AlpacaError::DriverException);
-    CHECK(adapter.count(kRa, 0x01) == 2);
+    CHECK(adapter.count(kRa, 0x01) == 3);
     CHECK_FALSE(protocol.is_healthy());
     CHECK(protocol.session_generation() != session);
+    CHECK(protocol.recovered_retries() == 0);
     CHECK(protocol.link_alive());  // a timeout is not evidence the transport is gone
     require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension); },
                          AlpacaError::DriverException);
-    CHECK(adapter.count(kRa, 0x01) == 2);  // refused while desynchronized
+    CHECK(adapter.count(kRa, 0x01) == 3);  // refused while desynchronized
 
     protocol.resync();  // drains the socket; never a tcflush on it
     CHECK(protocol.is_connected());
@@ -434,6 +456,49 @@ TEST_CASE("Celestron CGX AUX TCP - no re-send when the deadline comes before the
     CHECK(adapter.count(kRa, 0x01) == 1);
 }
 
+TEST_CASE("Celestron CGX AUX TCP - a re-send goes out only while the deadline is later",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.script(kRa, 0x01, 1, Fault::Drop);
+    adapter.script(kRa, 0x01, 2, Fault::Drop);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    // 300 ms is before a 500 ms deadline, 600 ms is not: one re-send, then the timeout.
+    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension, milliseconds(500)); },
+                         AlpacaError::DriverException);
+    CHECK(adapter.count(kRa, 0x01) == 2);
+}
+
+TEST_CASE("Celestron CGX AUX TCP - a burst of lost requests after a home start",
+          "[celestron][cgx][protocol][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.set_position(kDec, 0x123456);
+    adapter.set_home_duration(milliseconds(3000));
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    const auto session = protocol.session_generation();
+    SECTION("the query and its first re-send lost: the second re-send is answered") {
+        adapter.set_home_burst_loss(2, kDec);
+        protocol.start_axis_home(CgxAxis::RightAscension);
+        CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0x123456);
+        CHECK(adapter.count(kDec, 0x01) == 3);
+        CHECK(protocol.is_healthy());
+        CHECK(protocol.session_generation() == session);
+        CHECK(protocol.recovered_retries() == 1);
+    }
+    SECTION("all three lost: the usual timeout") {
+        adapter.set_home_burst_loss(3, kDec);
+        protocol.start_axis_home(CgxAxis::RightAscension);
+        require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::Declination); },
+                             AlpacaError::DriverException);
+        CHECK(adapter.count(kDec, 0x01) == 3);
+        CHECK_FALSE(protocol.is_healthy());
+        CHECK(protocol.session_generation() != session);
+        CHECK(protocol.link_alive());
+    }
+    CHECK(adapter.count(kRa, 0x0b) == 1);
+}
+
 TEST_CASE("Celestron CGX AUX TCP - a bad checksum resyncs and the lost query is re-sent",
           "[celestron][cgx][protocol][tcp]") {
     FakeCelestronAuxTcpAdapter adapter;
@@ -611,7 +676,7 @@ TEST_CASE("Celestron CGX AUX TCP - an exchange without a timeout gets 1000 ms, r
     CelestronCgxProtocol protocol;
     connect(protocol, adapter);
     CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0x0abcde);
-    CHECK(adapter.count(kRa, 0x01) == 2);
+    CHECK(adapter.count(kRa, 0x01) >= 2);  // the 600 ms re-send may go out just before the late reply lands
     CHECK(protocol.is_healthy());
 }
 
