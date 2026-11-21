@@ -373,6 +373,10 @@ public:
     // Set while no command runs; set_average_period() calls it after its NotConnected check, before its body starts.
     void set_caller_hook(std::function<void()> hook) { caller_hook_ = std::move(hook); }
 
+    // Set while no command runs; a Refresh or AveragePeriod caller calls it after its body has ended, before it
+    // answers.
+    void set_command_done_hook(std::function<void()> hook) { command_done_hook_ = std::move(hook); }
+
     std::uint64_t command_generation() const { return command_generation_.current(); }
 
 private:
@@ -603,7 +607,8 @@ private:
     // A command (Refresh, an AveragePeriod write) runs as a body in its own slot (decision 0023, decision 0006 rule
     // 1); the caller waits for the body's outcome, which the per-call timeout bounds, and gets its error unchanged. A
     // refused connection is a lost link at once (NotConnected); another call with no reply is a DriverException, or
-    // NotConnected when the poll lost the link meanwhile.
+    // NotConnected when the poll lost the link meanwhile. Both are decided inside the body: a Connect joins the slot
+    // first, so no reconnect lands between the failure and its answer (#2456).
     void run_command(std::function<void(util::OperationContext&)> body) {
         struct Outcome {
             std::mutex mutex;
@@ -612,10 +617,19 @@ private:
             std::exception_ptr error;
         };
         auto outcome = std::make_shared<Outcome>();
-        command_op_.start([outcome, body = std::move(body)](util::OperationContext& ctx) {
+        command_op_.start([this, outcome, body = std::move(body)](util::OperationContext& ctx) {
             std::exception_ptr error;
             try {
-                body(ctx);
+                try {
+                    body(ctx);
+                } catch (const RemoteConnectRefused& e) {
+                    lose_link(e.what());
+                    require_connected();
+                    throw;
+                } catch (const RemoteTransportError&) {
+                    require_connected();
+                    throw;
+                }
             } catch (...) {
                 error = std::current_exception();
             }
@@ -631,17 +645,8 @@ private:
             std::unique_lock<std::mutex> lock(outcome->mutex);
             outcome->done_cv.wait(lock, [&outcome] { return outcome->done; });
         }
-        if (!outcome->error) return;
-        try {
-            std::rethrow_exception(outcome->error);
-        } catch (const RemoteConnectRefused& e) {
-            lose_link(e.what());
-            require_connected();
-            throw;
-        } catch (const RemoteTransportError&) {
-            require_connected();
-            throw;
-        }
+        if (command_done_hook_) command_done_hook_();
+        if (outcome->error) std::rethrow_exception(outcome->error);
     }
 
     // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under transition_mutex_, so a start never
@@ -764,8 +769,9 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> poll_paused_{false};
-    std::function<void()> command_hook_;  // test seam: set_command_hook_for_testing()
-    std::function<void()> caller_hook_;   // test seam: set_caller_hook_for_testing()
+    std::function<void()> command_hook_;       // test seam: set_command_hook_for_testing()
+    std::function<void()> caller_hook_;        // test seam: set_caller_hook_for_testing()
+    std::function<void()> command_done_hook_;  // test seam: set_command_done_hook_for_testing()
     // Under transition_mutex_: the upstream was told Connect and not yet Disconnect, and its InterfaceVersion then.
     bool forwarded_connect_ = false;
     int forwarded_version_ = 0;
@@ -822,6 +828,12 @@ void set_command_hook_for_testing(ObservingConditionsDriver& driver, std::functi
 void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_caller_hook(std::move(hook));
+    }
+}
+
+void set_command_done_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_command_done_hook(std::move(hook));
     }
 }
 
