@@ -958,35 +958,49 @@ private:
                     throw AlpacaException("exposure status read failed: " + std::string(e.what()),
                                           AlpacaError::DriverException);
                 }
-                if (status == ZWOExposureStatus::Success) {
+                // Issue #2414: a frame the SDK reports ready before this attempt's exposure could have ended began
+                // before the trigger (an ASI120MM Mini started inside ~0.3 s of the previous download delivers a frame
+                // the camera began itself, ready a fixed time after that download), so it predates the client's
+                // request. It is never published: it is discarded and the exposure restarted, under the same retry
+                // count and budget as a failed attempt. Measured from attempt_started, taken before the trigger, so
+                // the SDK's own start latency only makes a fresh frame later.
+                const auto exposure = std::chrono::microseconds(request.exposure_us);
+                const bool early = status == ZWOExposureStatus::Success &&
+                                   clock_.now() - attempt_started < exposure - early_frame_tolerance(exposure);
+                if (status == ZWOExposureStatus::Success && !early) {
                     break;
                 }
-                if (status == ZWOExposureStatus::Failed) {
+                if (status == ZWOExposureStatus::Failed || early) {
                     // The transient ASI_EXP_FAILED class (USB timing hiccups, the INDI ASI driver's policy): re-trigger
                     // up to kExposureRetries times before the failure is kept. Found by ConformU 4.4 on an ASI2600MM
-                    // Pro. The retries are paced so a transient USB condition has a chance to clear.
+                    // Pro. The retries are paced so a transient USB condition has a chance to clear. An early frame
+                    // (#2414) is retaken the same way: the retry's stop drops it in the SDK, so it is never read.
+                    // TODO(#2414): confirm on an ASI120MM Mini rig that ASIStopExposure after Success drops the stale
+                    // frame and that the next ASIStartExposure gives a fresh frame (no repeated early Success).
+                    const std::string what = early ? "camera delivered a frame that began before the exposure started"
+                                                   : "camera exposure failed";
+                    const auto failed_at = clock_.now();
+                    const auto attempt_took = failed_at - attempt_started;
+                    const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
+                    const std::string cause =
+                        early ? "frame ready " + std::to_string(took_ms) + " ms after the trigger of a " +
+                                    std::to_string(request.exposure_us / 1000) + " ms exposure (stale frame discarded)"
+                              : "exposure failed (transient SDK/USB error)";
                     if (retries_left <= 0) {
-                        ALPACA_LOG_ERROR("ZWO", "exposure failed after " + std::to_string(kExposureRetries) +
+                        ALPACA_LOG_ERROR("ZWO", cause + "; no retry left after " + std::to_string(kExposureRetries) +
                                                     " retries; reporting failure to the client");
-                        throw AlpacaException("camera exposure failed after SDK retries", AlpacaError::DriverException);
+                        throw AlpacaException(what + " after SDK retries", AlpacaError::DriverException);
                     }
                     // A retry is at least a full exposure, and takes as long as the attempt that just failed when
                     // the failure came late (the SDK reports it after the exposure's end on the rig).
-                    const auto failed_at = clock_.now();
-                    const auto attempt_took = failed_at - attempt_started;
-                    const auto retry_length = std::max<util::TaskClock::clock::duration>(
-                        attempt_took, std::chrono::microseconds(request.exposure_us));
+                    const auto retry_length = std::max<util::TaskClock::clock::duration>(attempt_took, exposure);
                     if (failed_at + kExposureRetryInterval + retry_length > retry_ends_by) {
-                        const auto took_ms =
-                            std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
-                        ALPACA_LOG_ERROR("ZWO",
-                                         "exposure failed (transient SDK/USB error); a retry would not end within " +
-                                             std::to_string(kRetryBudget.count()) +
-                                             " s of the exposure's end (this attempt took " + std::to_string(took_ms) +
-                                             " ms); reporting failure to the client");
-                        throw AlpacaException(
-                            "camera exposure failed; a retry would run past the client's exposure wait",
-                            AlpacaError::DriverException);
+                        ALPACA_LOG_ERROR("ZWO", cause + "; a retry would not end within " +
+                                                    std::to_string(kRetryBudget.count()) +
+                                                    " s of the exposure's end (this attempt took " +
+                                                    std::to_string(took_ms) + " ms); reporting failure to the client");
+                        throw AlpacaException(what + "; a retry would run past the client's exposure wait",
+                                              AlpacaError::DriverException);
                     }
                     if (last_retry.has_value()) {
                         const auto since = clock_.now() - *last_retry;
@@ -997,8 +1011,7 @@ private:
                     }
                     last_retry = clock_.now();
                     --retries_left;
-                    ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
-                                               std::to_string(retries_left) + " retries left");
+                    ALPACA_LOG_WARN("ZWO", cause + "; retrying, " + std::to_string(retries_left) + " retries left");
                     bool retried = false;
                     try {
                         attempt_started = clock_.now();
@@ -1054,8 +1067,9 @@ private:
     // kUsb2SettleMinExposure waits, until kUsb2PostDownloadSettle after the download, and a guide
     // loop of short exposures restarts at once. Below 0.3 s the camera also delivers every other
     // frame early: the next frame becomes ready a fixed time after the previous download whatever the
-    // start time, so it looks started by the camera itself; the wait avoids that for long exposures
-    // and leaves short ones as they were. USB 3.0 cameras show neither.
+    // start time, so it looks started by the camera itself; the wait avoids that for long exposures,
+    // and for short ones the status poll refuses such a frame and retakes it (#2414). USB 3.0 cameras
+    // show neither.
     // The wait runs in the body (decision 0020 rule 4), so StartExposure returns at once. False when the body must
     // stop.
     bool settle_after_usb2_download(util::CaptureControl& c, const ExposureRequest& request) {
@@ -1255,6 +1269,17 @@ private:
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).
     static constexpr std::chrono::milliseconds kStatusPollInterval{50};
     static constexpr long kFormatWriteExposureUs = 10'000;  // under the SDK's 100 ms slow-clock threshold
+    // Issue #2414: how much earlier than its trigger plus the exposure a frame may be reported ready and still count
+    // as fresh. A fresh frame cannot be ready before then except by the sensor rounding the exposure to whole lines
+    // (well under 1 ms) and the camera's clock running fast against the host's (crystals hold 50-100 ppm; the 0.1 %
+    // term is ten times that). The fixed 20 ms absorbs scheduling and SDK call jitter around the stamp. On the rig the
+    // client had the stale frames 0.92-0.95 s after a 1 s StartExposure, download included; any frame seen 21 ms or
+    // more early in a 1 s exposure is refused, and with the 50 ms status poll one ready 71 ms or more early always is.
+    static constexpr std::chrono::milliseconds kEarlyFrameTolerance{20};
+    static constexpr long kEarlyFrameToleranceDivisor = 1000;  // the 0.1 % term
+    static std::chrono::microseconds early_frame_tolerance(std::chrono::microseconds exposure) {
+        return kEarlyFrameTolerance + exposure / kEarlyFrameToleranceDivisor;
+    }
     static constexpr std::chrono::seconds kWatchdogGrace{15};
     // A leaf of the exposure path, never held with mutex_: orders the body's trigger with the driver's SDK stop, so an
     // exposure the driver stopped is never triggered after it, and a stopped one is not stopped twice. Lock order:
