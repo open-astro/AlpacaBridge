@@ -1021,7 +1021,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop owns cancelled mot
         auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
-        REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         driver->set_tracking(true);
         mount.set_auto_complete_motions(false);
         driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 21.0, 24.0), 65.0);
@@ -1107,7 +1107,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync waits for encoder stability
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
-    REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
     mount.set_ra_stop_drift_reads(8);
     driver->set_tracking(true);
     driver->set_tracking(false);
@@ -1128,7 +1128,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync refuses unsettled encoders 
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
-    REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
     const int ra_writes = mount.count_command(0x10, 0x04);
     const int dec_writes = mount.count_command(0x11, 0x04);
     mount.set_ra_stop_drift_reads(10000);
@@ -1154,7 +1154,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
         auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
-        REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         const int ra_writes = mount.count_command(0x10, 0x04);
         const int dec_writes = mount.count_command(0x11, 0x04);
         mount.set_label_read_offsets(0x10, {4, 3, 1, 0, 0});
