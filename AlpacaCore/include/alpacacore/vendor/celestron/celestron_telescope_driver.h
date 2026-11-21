@@ -79,7 +79,8 @@ void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// as the body returns, whatever it did. Around it: ClientWriting and ClientWritten just before and after a client
 /// UTCDate write's exchange (under transition_mutex_ only), ExitChecked at each pass of set_connected()'s exit with
 /// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its state is published (under
-/// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held).
+/// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held),
+/// HookBusy when on_host_clock_changed() found the gate held (on the timer thread, no driver lock held).
 enum class ClockResyncStep : std::uint8_t {
     Decided,
     Exchange,
@@ -90,6 +91,7 @@ enum class ClockResyncStep : std::uint8_t {
     ExitChecked,
     PulseSent,
     Gated,
+    HookBusy,
 };
 /// Runs at each step of a re-sync body; null clears it.
 void set_clock_resync_hook_for_testing(TelescopeDriver& driver, std::function<void(ClockResyncStep)> hook);

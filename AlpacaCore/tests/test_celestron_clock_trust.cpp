@@ -744,6 +744,43 @@ TEST_CASE("Celestron host clock - a host clock change as a set_connected() call 
     rig.driver->set_connected(false);
 }
 
+TEST_CASE("Celestron host clock - a change whose gate try fails during a set_connected() exit pass is not lost",
+          "[celestron][clock][telescope][unit]") {
+    alpacacore::test::HostClockTrustGuard untrusted(false);
+    ClockRig rig;
+    rig.connect();
+    REQUIRE(rig.st->time_writes.load() == 0);
+    // The timer thread's hook fails its gate try while the exit pass holds the gate, and is held right there until
+    // set_connected() has returned: the exit's last look at the flag comes before the hook goes on.
+    std::atomic<bool> fired{false};
+    std::atomic<bool> hook_busy{false};
+    std::atomic<bool> release_hook{false};
+    std::thread timer;
+    rig.at_step([&](cel::ClockResyncStep step) {
+        if (step == cel::ClockResyncStep::HookBusy) {
+            hook_busy = true;
+            while (!release_hook.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return;
+        }
+        if (step != cel::ClockResyncStep::ExitChecked || fired.exchange(true)) return;
+        timer = std::thread([&] {
+            alpacacore::util::HostClockTrust::mark_set("test");
+            rig.driver->on_host_clock_changed(kBecameTrusted);
+        });
+        REQUIRE(eventually([&] { return hook_busy.load(); }));
+    });
+
+    rig.driver->set_connected(true);  // already connected: returns at once
+    release_hook = true;
+    timer.join();
+    REQUIRE(fired.load());
+    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    CHECK(rig.st->time_writes.load() == 1);
+    CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
+    rig.at_step(nullptr);
+    rig.driver->set_connected(false);
+}
+
 TEST_CASE("Celestron host clock - a host clock change as a set_connected() call takes the gate still re-syncs",
           "[celestron][clock][telescope][unit]") {
     alpacacore::test::HostClockTrustGuard untrusted(false);

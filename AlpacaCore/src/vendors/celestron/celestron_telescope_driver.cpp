@@ -1042,22 +1042,28 @@ public:
     // open-astro#2419: the server's timer saw the host clock step or become trusted. With syncTimeOnConnect on, a
     // connected mount gets the host time again, as the connect would have written it, from a body on the clock
     // re-sync slot. The timer thread calls this with no lock held: it does no I/O, joins nothing and never waits for
-    // a driver lock. A connect or disconnect holding the gate leaves the change pending for that set_connected() to
-    // act on as it returns. AsyncOperation::start() itself can wait up to kStaleReapTimeout (2 s) when three
-    // replaced bodies are still running, as on a blocked link (#2432).
+    // a driver lock. The change is stored as pending BEFORE the gate is tried, so whoever holds the gate (a
+    // set_connected() exit pass, or another hook) sees it after it lets go: a change that arrives just as an exit
+    // pass releases the gate is never lost (the iOptron, OnStep and SynScan hooks use the same order).
+    // AsyncOperation::start() itself can wait up to kStaleReapTimeout (2 s) when three replaced bodies are still
+    // running, as on a blocked link (#2432).
     void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
         try {
             // sync_time_on_connect_ is fixed at construction.
             if (!sync_time_on_connect_ || !util::HostClockTrust::trusted()) return;
-            std::unique_lock<std::mutex> gate(clock_resync_gate_mutex_, std::try_to_lock);
-            if (!gate.owns_lock()) {
-                clock_resync_pending_.store(true);
-                return;
-            }
-            clock_resync_pending_.store(false);  // this body covers a change left pending before it
-            start_clock_resync_gate_locked(event.kind == util::HostClockEvent::Kind::Stepped
-                                               ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                               : std::string("Host clock became trusted"));
+            const std::string why = event.kind == util::HostClockEvent::Kind::Stepped
+                                        ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
+                                        : std::string("Host clock became trusted");
+            clock_resync_pending_.store(true);
+            do {
+                std::unique_lock<std::mutex> gate(clock_resync_gate_mutex_, std::try_to_lock);
+                if (!gate.owns_lock()) {
+                    run_clock_resync_hook(ClockResyncStep::HookBusy);
+                    return;  // the holder looks at the flag after it lets go
+                }
+                // One body covers this change and any left pending before it.
+                if (clock_resync_pending_.exchange(false)) start_clock_resync_gate_locked(why);
+            } while (clock_resync_pending_.load());
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -1090,9 +1096,9 @@ private:
     }
 
     // set_connected()'s exit, after it released the gate, under transition_mutex_. Takes the gate back and acts on
-    // a pending change, then checks the flag again with the gate released: a change the hook left pending while
-    // this held the gate is picked up by the next pass, and one after the last pass finds the gate free and starts
-    // its own body. A gate held elsewhere is a hook starting a body itself (it clears the flag).
+    // a pending change, then checks the flag again with the gate released: a change the hook stored while this held
+    // the gate is picked up by the next pass (the hook stores before it tries the gate), and one after the last pass
+    // finds the gate free and starts its own body. A gate held elsewhere is a hook that loops on the flag itself.
     void finish_pending_clock_resyncs() noexcept {
         try {
             do {
