@@ -760,7 +760,7 @@
                         <label for="celestron-protocol">Mount Connection:</label>
                         <select id="celestron-protocol" name="celestronProtocol" data-config-key="protocol" required>
                             <option value="nexstar">NexStar hand controller</option>
-                            <option value="cgx-aux">CGX / CGX-L direct USB (no hand controller)</option>
+                            <option value="cgx-aux">CGX / CGX-L direct, USB or SkyPortal WiFi (no hand controller)</option>
                         </select>
                     </div>
 
@@ -775,6 +775,8 @@
                         <small>For a fork mount on a wedge, pick Equatorial. German equatorial mounts ignore this.</small>
                     </div>
 
+                    </div>
+
                     <div class="form-group">
                         <label for="celestron-connection-type">Connection Type:</label>
                         <select id="celestron-connection-type" name="celestronConnectionType" data-config-key="connectionType" data-config-fill="manual" required>
@@ -782,7 +784,7 @@
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
                         </select>
-                    </div>
+                        <small id="celestron-connection-help" style="display: none;">USB: the mount's own USB port. WiFi: a SkyPortal WiFi adapter on the mount's AUX port, with this board joined to the adapter's own network (Celestron-XXXX).</small>
                     </div>
 
                     <!-- Serial Connection -->
@@ -799,7 +801,7 @@
                     </div>
 
                     <div id="celestron-cgx-site-config" style="display: none;">
-                        <h4>Direct USB Site</h4>
+                        <h4>CGX Site</h4>
                         <div class="form-group">
                             <label for="celestron-cgx-site-latitude">Site Latitude (degrees):</label>
                             <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude" data-config-key="siteLatitude"
@@ -826,7 +828,13 @@
                         <div class="form-group">
                             <label for="celestron-tcp-port">TCP Port:</label>
                             <input type="number" id="celestron-tcp-port" name="celestronTcpPort" data-config-key="tcpPort" value="2000" min="1" max="65535">
-                            <small>Default port for NexStar WiFi bridges.</small>
+                            <small id="celestron-tcp-port-help">Default port for NexStar WiFi bridges.</small>
+                        </div>
+                        <!-- CGX over WiFi: listen 5 s for the SkyPortal adapter's beacon. The select has no name, so it never reaches the submitted form; a pick fills the IP Address. -->
+                        <div id="celestron-cgx-find" class="form-group" style="display: none;">
+                            <button id="celestron-cgx-find-button" class="btn btn-secondary btn-small" type="button">Find adapter</button>
+                            <select id="celestron-cgx-adapters" style="display: none;"></select>
+                            <small id="celestron-cgx-find-status">Listens 5 s for the SkyPortal adapter on the networks this board has joined.</small>
                         </div>
                     </div>
 
@@ -2400,8 +2408,8 @@
     </dialog>
     <div id="toast-region" class="toast-region"></div>
 
-    <script src="/web/format.js?v=21"></script>
+    <script src="/web/format.js?v=22"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=55"></script>
+    <script src="/web/app.js?v=56"></script>
 </body>
 </html>

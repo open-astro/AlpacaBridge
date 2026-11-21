@@ -25,6 +25,8 @@ namespace alpacacore::vendor::celestron {
 // 1 interval in 20), so a 3 s window misses an adapter about 2.5% of the time and a 5 s window about 0.1%.
 inline constexpr int kAuxBeaconPort = 55555;
 inline constexpr std::chrono::milliseconds kAuxBeaconMaxWindow{10000};
+// The web UI's "Find adapter" listen: the 3 s the beacon interval suggests misses an adapter about 1 time in 40.
+inline constexpr std::chrono::milliseconds kAuxBeaconFindWindow{5000};
 
 struct AuxBeacon {
     std::string ip;      // numeric IPv4 source address of the datagram (not the payload's "ip" field)

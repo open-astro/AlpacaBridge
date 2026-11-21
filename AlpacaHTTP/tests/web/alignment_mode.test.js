@@ -50,7 +50,7 @@ test('Celestron protocol picker distinguishes the handset and direct CGX USB tra
     assert.ok(select, 'no Celestron protocol selector');
     const values = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
     assert.deepEqual(values, ['nexstar', 'cgx-aux']);
-    assert.ok(html.includes('CGX / CGX-L direct USB (no hand controller)'));
+    assert.ok(html.includes('CGX / CGX-L direct, USB or SkyPortal WiFi (no hand controller)'));
     assert.ok(html.includes('id="celestron-cgx-site-latitude"'));
     assert.ok(html.includes('id="celestron-cgx-site-longitude"'));
 });
