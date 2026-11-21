@@ -43,9 +43,9 @@ namespace alpacacore::test {
 // one TCP client at a time), modelled on the 2026-11-20 rig evidence and the scratch fake_aux_adapter.py. It answers
 // at once and never moves an axis: positions change only through set_position(). It reports every axis idle and
 // home-done, every guide inactive, and ACKs every write except a client's ACK of a motor report (0x50, 0x51), which
-// it does not answer. Motor reports are sent only when a case injects them. It does not simulate the bus, the switch boards' timing or
-// the adapter's real loss mechanism; the faults are scripted per request. The Gen4 startup backlog is replayed as one
-// scripted burst; the real one was 216 frames of an earlier session (October progress log).
+// it does not answer. Motor reports are sent only when a case injects them. It does not simulate the bus, the switch
+// boards' timing or the adapter's real loss mechanism; the faults are scripted per request. The Gen4 startup backlog is
+// replayed as one scripted burst; the real one was 216 frames of an earlier session (October progress log).
 
 /// Loopback fake of a SkyPortal WiFi adapter on the AUX bus.
 class FakeCelestronAuxTcpAdapter {
@@ -138,6 +138,8 @@ public:
         return received_;
     }
     int connections() const { return connections_.load(); }
+    /// True while a client's connection is open on the fake's side (it sees the client's close at once).
+    bool serving() const { return serving_.load(); }
 
     static std::vector<std::uint8_t> frame(std::uint8_t source, std::uint8_t destination, std::uint8_t command,
                                            std::vector<std::uint8_t> payload = {}) {
@@ -164,8 +166,10 @@ private:
             const int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             ++connections_;
+            serving_.store(true);
             serve(fd);
             ::close(fd);
+            serving_.store(false);
         }
     }
 
@@ -314,6 +318,7 @@ private:
     int port_ = 0;
     std::atomic<bool> stop_{false};
     std::atomic<int> connections_{0};
+    std::atomic<bool> serving_{false};
     mutable std::mutex mutex_;
     std::map<std::uint8_t, std::uint32_t> positions_;
     bool echo_ = false;

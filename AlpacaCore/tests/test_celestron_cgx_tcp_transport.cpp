@@ -364,6 +364,15 @@ std::vector<AuxFrame> report_acks(const FakeCelestronAuxTcpAdapter& adapter) {
     return acks;
 }
 
+// The ACKs once the fake has read `count` of them: the exchange returns as soon as its reply is in, before the fake
+// reads the ACK sent just ahead of it (real time, bounded at 1 s).
+std::vector<AuxFrame> wait_for_report_acks(const FakeCelestronAuxTcpAdapter& adapter, std::size_t count) {
+    const auto deadline = std::chrono::steady_clock::now() + milliseconds(1000);
+    while (report_acks(adapter).size() < count && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(milliseconds(5));
+    return report_acks(adapter);
+}
+
 }  // namespace
 
 TEST_CASE("Celestron CGX AUX TCP - an exchange without a timeout gets 1000 ms, room for the re-send",
@@ -448,7 +457,7 @@ TEST_CASE("Celestron CGX AUX TCP - a low-battery report is acknowledged and the 
     CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0x000321);
     CHECK(protocol.is_healthy());
     CHECK(protocol.session_generation() == session);
-    const auto acks = report_acks(adapter);
+    const auto acks = wait_for_report_acks(adapter, 1);
     REQUIRE(acks.size() == 1);
     CHECK(acks[0].source == 0x20);
     CHECK(acks[0].destination == kRa);
@@ -480,7 +489,7 @@ TEST_CASE("Celestron CGX AUX TCP - a motor fault report is acknowledged and fail
         CHECK_FALSE(protocol.is_healthy());
         CHECK(protocol.session_generation() != session);
         CHECK(protocol.link_alive());
-        const auto acks = report_acks(adapter);
+        const auto acks = wait_for_report_acks(adapter, 1);
         REQUIRE(acks.size() == 1);
         CHECK(acks[0].source == report.destination);
         CHECK(acks[0].destination == report.source);
@@ -499,14 +508,13 @@ TEST_CASE("Celestron CGX AUX TCP - a report between exchanges is handled by the 
     adapter.inject(FakeCelestronAuxTcpAdapter::frame(kDec, 0x20, 0x50, {0x00}));
     std::this_thread::sleep_for(milliseconds(100));  // real time: the fake's serve slice sends it
     CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0);
-    CHECK(report_acks(adapter).size() == 1);
+    CHECK(wait_for_report_acks(adapter, 1).size() == 1);
 
     const auto session = protocol.session_generation();
     adapter.inject(FakeCelestronAuxTcpAdapter::frame(kDec, 0x20, 0x51, {0x01}));
     std::this_thread::sleep_for(milliseconds(100));
-    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::Declination); },
-                         AlpacaError::DriverException);
-    CHECK(report_acks(adapter).size() == 2);
+    require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::Declination); }, AlpacaError::DriverException);
+    CHECK(wait_for_report_acks(adapter, 2).size() == 2);
     CHECK(protocol.session_generation() != session);
     protocol.resync();
     CHECK(protocol.get_axis_position(CgxAxis::Declination) == 0);
@@ -523,6 +531,7 @@ TEST_CASE("Celestron CGX AUX TCP - reports from other devices or for other clien
     connect(protocol, adapter);
     CHECK(protocol.get_axis_position(CgxAxis::RightAscension) == 0);
     CHECK(protocol.is_healthy());
+    std::this_thread::sleep_for(milliseconds(100));  // real time: an ACK sent in error would have been read by now
     CHECK(report_acks(adapter).empty());
 }
 

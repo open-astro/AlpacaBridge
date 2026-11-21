@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,6 +54,9 @@ public:
     /// Unlike the serial link, a read-only motor query (position, model, home and slew status, guide status,
     /// version) whose reply is lost is re-sent once, 300 ms after it went out, when the exchange's deadline is
     /// later; nothing else is ever re-sent. The adapter closing the connection is a lost link (link_alive()).
+    /// The link owns `host`:`port` process-wide until it closes: a second link to it is refused with InvalidOperation
+    /// naming the holder. A motor controller's unsolicited report (0x50, 0x51) is acknowledged; anything but a
+    /// low-battery warning fails the exchange as a session error.
     void connect_tcp(const std::string& host, int port, std::chrono::milliseconds timeout = std::chrono::seconds(3));
     void disconnect();
     /// Clears a desynchronized link on the port already held: flushes stale input
@@ -71,30 +75,32 @@ public:
     std::string link_fault() const;
     std::uint64_t session_generation() const { return session_generation_.load(); }
     /// Lost replies recovered by the one TCP re-send since the last connect (a counter, not a fault). Lock-free.
-    std::uint64_t recovered_retries() const { return 0; }
+    std::uint64_t recovered_retries() const { return recovered_retries_.load(); }
     /// A last-resort stop: MC_MOVE_POS(0) and a zero rate written to `axis` without waiting for a reply, also while
     /// the stream is desynchronized. Not proof of a stop. Throws NotConnected on a closed link.
-    void send_stop(CgxAxis) {}
+    void send_stop(CgxAxis axis);
 
-    AuxFrame exchange(const AuxFrame& request, std::chrono::milliseconds timeout);
-    std::uint32_t get_axis_position(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    void set_axis_position(CgxAxis axis, std::uint32_t position,
-                           std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    void goto_axis_fast(CgxAxis axis, std::uint32_t position,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    void goto_axis_slow(CgxAxis axis, std::uint32_t position,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    bool is_axis_slew_done(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    void start_axis_home(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    bool is_axis_home_done(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
+    /// Every exchange without a timeout gets the transport's: 500 ms over USB, 1000 ms over TCP (room for the re-send).
+    using Timeout = std::optional<std::chrono::milliseconds>;
+    AuxFrame exchange(const AuxFrame& request, Timeout timeout = std::nullopt);
+    std::uint32_t get_axis_position(CgxAxis axis, Timeout timeout = std::nullopt);
+    void set_axis_position(CgxAxis axis, std::uint32_t position, Timeout timeout = std::nullopt);
+    void goto_axis_fast(CgxAxis axis, std::uint32_t position, Timeout timeout = std::nullopt);
+    void goto_axis_slow(CgxAxis axis, std::uint32_t position, Timeout timeout = std::nullopt);
+    bool is_axis_slew_done(CgxAxis axis, Timeout timeout = std::nullopt);
+    void start_axis_home(CgxAxis axis, Timeout timeout = std::nullopt);
+    bool is_axis_home_done(CgxAxis axis, Timeout timeout = std::nullopt);
     void pulse_guide_axis(CgxAxis axis, int velocity_percent, int duration_centiseconds,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
-    bool is_aux_guide_active(CgxAxis axis, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
+                          Timeout timeout = std::nullopt);
+    bool is_aux_guide_active(CgxAxis axis, Timeout timeout = std::nullopt);
 
 private:
-    void goto_axis(CgxAxis axis, std::uint32_t position, std::uint8_t command, const char* operation,
-                   std::chrono::milliseconds timeout);
+    void goto_axis(CgxAxis axis, std::uint32_t position, std::uint8_t command, const char* operation, Timeout timeout);
     void disconnect_locked();
+    bool take_report_locked(const AuxFrame& frame, std::chrono::steady_clock::time_point deadline);
+    void read_available_locked();
+    void drain_input_locked(std::chrono::steady_clock::time_point deadline);
+    std::optional<std::vector<std::uint8_t>> buffered_frame_locked();
     [[noreturn]] void lose_link_locked(const std::string& reason);
     [[noreturn]] void fail_socket_locked(const char* operation, int code);
     void drain_backlog_locked();
@@ -109,6 +115,8 @@ private:
     std::atomic<bool> tcp_{false};  // the transport of the last connect: SkyPortal TCP or USB serial
     std::atomic<std::uint64_t> session_generation_{0};
     std::atomic<bool> healthy_{false};
+    std::atomic<std::uint64_t> recovered_retries_{0};
+    std::string tcp_endpoint_;  // the "host:port" this link claims while its socket is open
     bool desynchronized_ = false;
     util::SerialLink link_;  // the claim, TIOCEXCL and the fd; serial_fd_ is link_.fd() while open
     std::vector<std::uint8_t> receive_buffer_;

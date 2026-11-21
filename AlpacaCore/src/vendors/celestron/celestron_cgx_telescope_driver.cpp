@@ -126,8 +126,9 @@ public:
 
     CelestronCgxTelescopeDriver(int device_number, CelestronCgxConnectionInfo info, util::TaskClock& clock,
                                 CgxSystemNow system_now)
-        : AsyncConnectable("Celestron CGX USB"),
+        : AsyncConnectable(info.host.empty() ? "Celestron CGX USB" : "Celestron CGX TCP"),
           device_number_(device_number),
+          tcp_(!info.host.empty()),
           info_(std::move(info)),
           clock_(clock),
           system_now_(std::move(system_now)),
@@ -174,7 +175,11 @@ public:
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
-    std::string get_description() const override { return "Celestron CGX/CGX-L direct USB mount"; }
+    std::string get_description() const override {
+        if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
+        return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered by a re-send: " +
+               std::to_string(protocol_.recovered_retries());
+    }
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }
@@ -577,6 +582,7 @@ private:
     std::pair<std::uint32_t, std::uint32_t> read_stopped_checkpoint();
 
     const int device_number_;
+    const bool tcp_;  // SkyPortal WiFi (a configured host) rather than direct USB, for the device's lifetime
     CelestronCgxConnectionInfo info_;
     util::TaskClock& clock_;
     CgxSystemNow system_now_;
@@ -795,7 +801,8 @@ void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& 
 
 void CelestronCgxTelescopeDriver::require_connected() const {
     if (!connected_.load()) {
-        throw AlpacaException("Celestron CGX USB is not connected", AlpacaError::NotConnected);
+        throw AlpacaException(tcp_ ? "Celestron CGX TCP is not connected" : "Celestron CGX USB is not connected",
+                              AlpacaError::NotConnected);
     }
     if (link_lost()) {
         throw AlpacaException("Celestron CGX link lost; set Connected false then true to reconnect",
@@ -975,12 +982,17 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     // runs and the reference is dropped (decision 0011 rule 3: FindHome again).
     if (connected_.load()) teardown_locked();
     (void)link_lost_at_.consume();  // the relink consumes the loss stamp; nothing times motion by it yet
-    protocol_.connect_serial(info_.port_path);
+    // The one transport call site: a later beacon re-find of a silent adapter (station mode) wraps it.
+    if (tcp_)
+        protocol_.connect_tcp(info_.host, info_.tcp_port);
+    else
+        protocol_.connect_serial(info_.port_path);
     try {
-        const AuxFrame ra_version = protocol_.exchange(
-            {0x00, static_cast<std::uint8_t>(CgxAxis::RightAscension), 0xfe, {}}, std::chrono::milliseconds(500));
-        const AuxFrame dec_version = protocol_.exchange(
-            {0x00, static_cast<std::uint8_t>(CgxAxis::Declination), 0xfe, {}}, std::chrono::milliseconds(500));
+        // The exchanges here and below take the transport's timeout: 500 ms over USB, 1000 ms over TCP.
+        const AuxFrame ra_version =
+            protocol_.exchange({0x00, static_cast<std::uint8_t>(CgxAxis::RightAscension), 0xfe, {}});
+        const AuxFrame dec_version =
+            protocol_.exchange({0x00, static_cast<std::uint8_t>(CgxAxis::Declination), 0xfe, {}});
         const bool modern_version = ra_version.payload.size() == 4 && dec_version.payload.size() == 4;
         if (!modern_version && (ra_version.payload.size() != 2 || dec_version.payload.size() != 2)) {
             throw AlpacaException("Celestron CGX motor-controller identity response is malformed",
@@ -994,8 +1006,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             // require_known_motor_model() refuses to drive it with them.
             bool unknown_motor = false;
             for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
-                const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}},
-                                                          std::chrono::milliseconds(500));
+                const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}});
                 if (model.payload.size() != 2) {
                     throw AlpacaException("Celestron CGX motor model reply is malformed", AlpacaError::DriverException);
                 }
@@ -1010,7 +1021,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         } else {
             const auto query_home_switch = [this](std::uint8_t address) {
                 try {
-                    return protocol_.exchange({0x00, address, 0xfe, {}}, std::chrono::milliseconds(500));
+                    return protocol_.exchange({0x00, address, 0xfe, {}});
                 } catch (const std::exception&) {
                     throw_missing_cgx_home_switches();
                 }
@@ -1025,7 +1036,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             std::lock_guard<std::mutex> lock(mutex_);
             motion_state_unverified = motion_state_unverified_;
         }
-        if (motion_state_unverified) stop_axes_checked();
+        // Over TCP the adapter may have served another client (the SkyPortal app) since this driver last saw the
+        // mount, so every Connect takes it over with a verified stop; USB stops only after unverified motion.
+        if (motion_state_unverified || tcp_) stop_axes_checked();
         const auto format_version = [](const auto& bytes) {
             std::string version = std::to_string(bytes[0]) + "." + std::to_string(bytes[1]);
             if (bytes.size() == 4) {
@@ -1141,7 +1154,8 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
             stop_axes_checked();
             std::unique_lock<std::mutex> lock(mutex_);
             disconnected_checkpoint_.reset();
-            if (reference_valid_locked()) {
+            // Over TCP the socket closes below, and a new socket is a new session: no checkpoint could be used.
+            if (!tcp_ && reference_valid_locked()) {
                 const auto reference_generation = reference_generation_;
                 lock.unlock();
                 const auto checkpoint = read_stopped_checkpoint();
@@ -1187,8 +1201,10 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
     }
     // Keep the exclusive fd for the lifetime of this configured device, even
     // without a reference. Only a failed stop/initialization, a lost link (the
-    // poll's on_lost, decision 0009) and destruction release ownership.
-    if (stop_failure) protocol_.disconnect();
+    // poll's on_lost, decision 0009) and destruction release ownership. A TCP
+    // socket closes on every disconnect: the adapter session (and its backlog)
+    // is not trusted across clients, so the reference goes with it.
+    if (stop_failure || tcp_) protocol_.disconnect();
     motion_slot_.clear_failure();
     for (auto& slot : pulse_slots_) slot.clear_failure();
     stop_slot_.clear_failure();
@@ -1543,7 +1559,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         const auto send = [&](CgxAxis axis, std::uint8_t command, std::vector<std::uint8_t> payload) {
             try {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), command, std::move(payload)};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), operation);
+                require_cgx_ack(protocol_.exchange(request), operation);
             } catch (...) {
                 if (!failure) failure = std::current_exception();
             }
@@ -2125,7 +2141,7 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
         for (const auto axis : axes) {
             try {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+                require_cgx_ack(protocol_.exchange(request), "axis stop");
             } catch (...) {
                 if (!acknowledgement_failure) acknowledgement_failure = std::current_exception();
                 try {
@@ -2146,6 +2162,16 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
         if (!acknowledgement_failure) {
             stop_acknowledged = true;
             break;
+        }
+    }
+    if (!stop_acknowledged && tcp_) {
+        // Last resort over TCP: the stop and a zero rate, sent without waiting for replies, then verified below.
+        for (const auto axis : axes) {
+            try {
+                protocol_.send_stop(axis);
+            } catch (const std::exception& error) {
+                ALPACA_LOG_WARN("Celestron CGX", std::string("Send-only TCP stop failed: ") + error.what());
+            }
         }
     }
     {
@@ -2405,7 +2431,7 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
         // This axis only: the other one may be home-done already.
         if (!run_motion_stage(context, claim, [&] {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+                require_cgx_ack(protocol_.exchange(request), "axis stop");
             }))
             return;
         while (!protocol_.is_axis_slew_done(axis)) {

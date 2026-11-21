@@ -124,6 +124,10 @@ TEST_CASE("Celestron CGX TCP driver - Disconnect closes the socket and the refer
     rig.set_connected(false);
     // No continuity checkpoint: a new socket is a new session, so it could never be used.
     CHECK(rig.adapter.count(kRa, 0x01) == position_reads);
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (rig.adapter.serving() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);  // real time: the fake sees the close within a serve slice
+    CHECK_FALSE(rig.adapter.serving());
     rig.set_connected(true);
     REQUIRE(rig.driver->get_connected());
     CHECK(rig.adapter.connections() == 2);
@@ -154,7 +158,7 @@ TEST_CASE("Celestron CGX TCP driver - a motor fault report costs the reference",
     REQUIRE(rig.driver->get_declination() > 89.99);
 
     rig.adapter.inject(FakeCelestronAuxTcpAdapter::frame(kDec, 0x20, 0x51, {0x01}));
-    std::this_thread::sleep_for(100ms);  // real time: the fake's serve slice sends it
+    std::this_thread::sleep_for(100ms);            // real time: the fake's serve slice sends it
     cgx::poll_state_now_for_testing(*rig.driver);  // meets the report: a session error
     cgx::poll_state_now_for_testing(*rig.driver);  // resyncs and reads a frame again
     CHECK(rig.driver->get_connected());

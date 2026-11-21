@@ -30,6 +30,7 @@
 #include <array>
 #include <cerrno>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <utility>
 
@@ -46,6 +47,19 @@ constexpr std::uint8_t kTcpSource = 0x20;                        // SkyPortal cl
 constexpr auto kTcpRetryAfter = std::chrono::milliseconds(300);  // rig 2026-11-20: WiFi reply p99 33 ms, max 134 ms
 constexpr auto kTcpBacklogQuiet = std::chrono::milliseconds(200);
 constexpr auto kTcpBacklogBound = std::chrono::seconds(2);
+constexpr auto kUsbDefaultTimeout = std::chrono::milliseconds(500);
+constexpr auto kTcpDefaultTimeout = std::chrono::milliseconds(1000);  // user decision 2: room for the 300 ms re-send
+
+// The SkyPortal endpoints held by a TCP link, process-wide, so two devices never share one adapter: "host:port" to the
+// holder's owner name. The mutex is a leaf under the wrapper's I/O lock: map operations only.
+struct TcpEndpointRegistry {
+    std::mutex mutex;
+    std::map<std::string, std::string> holders;
+};
+TcpEndpointRegistry& tcp_endpoints() {
+    static auto* registry = new TcpEndpointRegistry();  // NOLINT(cppcoreguidelines-owning-memory): exit order
+    return *registry;
+}
 
 const char* link_prefix(bool tcp) { return tcp ? "Celestron CGX TCP: " : "Celestron CGX USB: "; }
 
@@ -135,6 +149,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
 
     std::lock_guard<std::mutex> lock(mutex_);
     link_lost_.store(false);
+    recovered_retries_.store(0);
     {
         std::lock_guard<std::mutex> loss(loss_mutex_);
         loss_reason_.clear();
@@ -223,22 +238,39 @@ void CelestronCgxProtocol::connect_tcp(const std::string& host, int port, std::c
                               AlpacaError::InvalidValue);
     }
     const std::string endpoint = "the adapter at " + host + " port " + std::to_string(port);
+    // The claim key is the address as parsed, so two spellings of one IPv6 address are one endpoint.
+    std::array<char, INET6_ADDRSTRLEN> text{};
+    ::inet_ntop(address.ss_family,
+                address.ss_family == AF_INET ? static_cast<const void*>(&ipv4->sin_addr) : &ipv6->sin6_addr,
+                text.data(), text.size());
+    const std::string key = std::string(text.data()) + ":" + std::to_string(port);
 
     std::lock_guard<std::mutex> lock(mutex_);
     link_lost_.store(false);
+    recovered_retries_.store(0);
     {
         std::lock_guard<std::mutex> loss(loss_mutex_);
         loss_reason_.clear();
     }
     disconnect_locked();
     link_.clear_loss();
-    const int fd = ::socket(address.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        throw_link_error(true, "cannot open a socket: " + util::errno_string(errno));
+    {
+        auto& registry = tcp_endpoints();
+        std::lock_guard<std::mutex> claim(registry.mutex);
+        const auto [holder, claimed] = registry.holders.emplace(key, owner_);
+        if (!claimed) {
+            throw AlpacaException("Celestron CGX TCP: " + endpoint + " is in use by " + holder->second,
+                                  AlpacaError::InvalidOperation);
+        }
     }
-    serial_fd_ = fd;
+    tcp_endpoint_ = key;
     tcp_.store(true);
     try {
+        const int fd = ::socket(address.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            throw_link_error(true, "cannot open a socket: " + util::errno_string(errno));
+        }
+        serial_fd_ = fd;
         // Non-blocking and bounded: this runs under the I/O lock, and a blocking connect to a host that is gone
         // would hold it for the kernel's ~127 s.
         if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), address_size) != 0) {
@@ -297,21 +329,43 @@ void CelestronCgxProtocol::drain_backlog_locked() {
     }
 }
 
-// TCP only: drops the receive buffer and every byte the socket holds now, without waiting. Bytes that arrive before
-// a request is sent cannot be its reply: a duplicate after a re-send, or a backlog straggler.
+// TCP only: drops the receive buffer and every byte the socket holds now, without waiting (the startup backlog: its
+// reports are stale too).
 std::size_t CelestronCgxProtocol::discard_input_locked() {
-    std::size_t discarded = receive_buffer_.size();
+    read_available_locked();
+    const std::size_t discarded = receive_buffer_.size();
     receive_buffer_.clear();
+    return discarded;
+}
+
+// TCP only: before a request is sent and on resync(), drops what the socket holds now, without waiting: bytes that
+// arrive before a request is sent cannot be its reply (a duplicate after a re-send, a backlog straggler). A motor
+// report among them is still handled, so it is never dropped unacknowledged.
+void CelestronCgxProtocol::drain_input_locked(std::chrono::steady_clock::time_point deadline) {
+    read_available_locked();
+    while (const auto bytes = buffered_frame_locked()) {
+        try {
+            static_cast<void>(take_report_locked(decode_aux_frame(*bytes), deadline));
+        } catch (const std::invalid_argument&) {
+            continue;  // stale and undecodable: dropped like the rest
+        }
+    }
+    receive_buffer_.clear();
+}
+
+// TCP only: appends every byte the socket holds now to the receive buffer, without waiting.
+void CelestronCgxProtocol::read_available_locked() {
     std::array<std::uint8_t, 128> incoming{};
     while (true) {
         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): MSG_DONTWAIT on an O_NONBLOCK socket
         const ssize_t count = ::recv(serial_fd_, incoming.data(), incoming.size(), MSG_DONTWAIT);
         if (count > 0) {
-            discarded += static_cast<std::size_t>(count);
+            receive_buffer_.insert(receive_buffer_.end(), incoming.begin(),
+                                   incoming.begin() + static_cast<std::ptrdiff_t>(count));
         } else if (count == 0) {
             lose_link_locked("the adapter closed the connection");
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return discarded;
+            return;
         } else if (errno != EINTR) {
             fail_socket_locked("recv", errno);
         }
@@ -336,7 +390,7 @@ void CelestronCgxProtocol::resync() {
         return;
     }
     if (tcp_.load()) {
-        discard_input_locked();  // tcflush() fails on a socket
+        drain_input_locked(std::chrono::steady_clock::now() + kTcpRetryAfter);  // tcflush() fails on a socket
     } else if (::tcflush(serial_fd_, TCIFLUSH) != 0) {
         disconnect_locked();
         throw_link_error(tcp_.load(), "cannot clear stale AUX input before recovery");
@@ -363,7 +417,8 @@ bool CelestronCgxProtocol::is_connected() const {
     return serial_fd_ >= 0;
 }
 
-AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::milliseconds timeout) {
+AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, Timeout requested) {
+    const auto timeout = requested.value_or(tcp_.load() ? kTcpDefaultTimeout : kUsbDefaultTimeout);
     if (timeout <= std::chrono::milliseconds::zero() || timeout > kMaximumExchangeTimeout) {
         throw AlpacaException("Celestron CGX AUX timeout must be between 1 and 5000 ms", AlpacaError::InvalidValue);
     }
@@ -404,13 +459,14 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
     bool request_started = false;
     try {
         request_started = true;
-        if (tcp) discard_input_locked();
+        if (tcp) drain_input_locked(deadline);
         write_frame_locked(request_bytes, deadline);
         // The SkyPortal adapter sometimes TCP-acks a request and never puts it on the bus (about 1 in 1,300 to
         // 2,900, rig 2026-11-20); one re-send of a read-only query at 300 ms recovered every one. A motion or write
         // command is never re-sent: AUX has no transaction id, so a second copy could act twice.
         bool resend = tcp && retryable_query(wire) && started + kTcpRetryAfter < deadline;
         auto wait_until = resend ? started + kTcpRetryAfter : deadline;
+        bool resent = false;
 
         while (true) {
             std::vector<std::uint8_t> bytes;
@@ -419,6 +475,7 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
             } catch (const AuxTimeout&) {
                 if (!resend) throw;
                 resend = false;
+                resent = true;
                 wait_until = deadline;
                 ALPACA_LOG_WARN("Celestron CGX",
                                 "no reply over TCP in 300 ms: destination=" + std::to_string(wire.destination) +
@@ -427,9 +484,11 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
                 continue;
             }
             const AuxFrame response = decode_aux_frame(bytes);
+            if (tcp && take_report_locked(response, deadline)) continue;
             // The reply swaps our addresses: a request echo (AMW006) and traffic for other devices never match.
             if (response.source == wire.destination && response.destination == wire.source &&
                 response.command == wire.command) {
+                if (resent) ++recovered_retries_;  // a counter, not a fault (user decision 5)
                 healthy_.store(true);
                 return response;
             }
@@ -461,7 +520,7 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
     }
 }
 
-std::uint32_t CelestronCgxProtocol::get_axis_position(CgxAxis axis, std::chrono::milliseconds timeout) {
+std::uint32_t CelestronCgxProtocol::get_axis_position(CgxAxis axis, Timeout timeout) {
     const AuxFrame response =
         exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x01, .payload = {}}, timeout);
     if (response.payload.size() != 3) {
@@ -471,7 +530,7 @@ std::uint32_t CelestronCgxProtocol::get_axis_position(CgxAxis axis, std::chrono:
            (static_cast<std::uint32_t>(response.payload[1]) << 8) | static_cast<std::uint32_t>(response.payload[2]);
 }
 
-void CelestronCgxProtocol::set_axis_position(CgxAxis axis, std::uint32_t position, std::chrono::milliseconds timeout) {
+void CelestronCgxProtocol::set_axis_position(CgxAxis axis, std::uint32_t position, Timeout timeout) {
     if (position >= kAuxPositionModulus) {
         throw AlpacaException("Celestron CGX encoder position must fit in 24 bits", AlpacaError::InvalidValue);
     }
@@ -483,16 +542,16 @@ void CelestronCgxProtocol::set_axis_position(CgxAxis axis, std::uint32_t positio
     require_empty_ack(tcp_.load(), exchange(request, timeout), "MC_SET_POSITION");
 }
 
-void CelestronCgxProtocol::goto_axis_fast(CgxAxis axis, std::uint32_t position, std::chrono::milliseconds timeout) {
+void CelestronCgxProtocol::goto_axis_fast(CgxAxis axis, std::uint32_t position, Timeout timeout) {
     goto_axis(axis, position, 0x02, "MC_GOTO_FAST", timeout);
 }
 
-void CelestronCgxProtocol::goto_axis_slow(CgxAxis axis, std::uint32_t position, std::chrono::milliseconds timeout) {
+void CelestronCgxProtocol::goto_axis_slow(CgxAxis axis, std::uint32_t position, Timeout timeout) {
     goto_axis(axis, position, 0x17, "MC_GOTO_SLOW", timeout);
 }
 
 void CelestronCgxProtocol::goto_axis(CgxAxis axis, std::uint32_t position, std::uint8_t command, const char* operation,
-                                     std::chrono::milliseconds timeout) {
+                                     Timeout timeout) {
     if (position >= kAuxPositionModulus) {
         throw AlpacaException("Celestron CGX GOTO position must fit in 24 bits", AlpacaError::InvalidValue);
     }
@@ -504,21 +563,21 @@ void CelestronCgxProtocol::goto_axis(CgxAxis axis, std::uint32_t position, std::
     require_empty_ack(tcp_.load(), exchange(request, timeout), operation);
 }
 
-bool CelestronCgxProtocol::is_axis_slew_done(CgxAxis axis, std::chrono::milliseconds timeout) {
+bool CelestronCgxProtocol::is_axis_slew_done(CgxAxis axis, Timeout timeout) {
     return decode_axis_completion(
         tcp_.load(),
         exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x13, .payload = {}}, timeout),
         "MC_SLEW_DONE");
 }
 
-void CelestronCgxProtocol::start_axis_home(CgxAxis axis, std::chrono::milliseconds timeout) {
+void CelestronCgxProtocol::start_axis_home(CgxAxis axis, Timeout timeout) {
     require_empty_ack(
         tcp_.load(),
         exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x0b, .payload = {}}, timeout),
         "MC_LEVEL_START");
 }
 
-bool CelestronCgxProtocol::is_axis_home_done(CgxAxis axis, std::chrono::milliseconds timeout) {
+bool CelestronCgxProtocol::is_axis_home_done(CgxAxis axis, Timeout timeout) {
     return decode_axis_completion(
         tcp_.load(),
         exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x12, .payload = {}}, timeout),
@@ -526,7 +585,7 @@ bool CelestronCgxProtocol::is_axis_home_done(CgxAxis axis, std::chrono::millisec
 }
 
 void CelestronCgxProtocol::pulse_guide_axis(CgxAxis axis, int velocity_percent, int duration_centiseconds,
-                                            std::chrono::milliseconds timeout) {
+                                            Timeout timeout) {
     if (velocity_percent < -100 || velocity_percent > 100 || duration_centiseconds < 1 || duration_centiseconds > 255) {
         throw AlpacaException("Celestron CGX pulse guide rate or duration is out of range", AlpacaError::InvalidValue);
     }
@@ -538,13 +597,57 @@ void CelestronCgxProtocol::pulse_guide_axis(CgxAxis axis, int velocity_percent, 
     require_empty_ack(tcp_.load(), exchange(request, timeout), "MC_AUX_GUIDE");
 }
 
-bool CelestronCgxProtocol::is_aux_guide_active(CgxAxis axis, std::chrono::milliseconds timeout) {
+bool CelestronCgxProtocol::is_aux_guide_active(CgxAxis axis, Timeout timeout) {
     const AuxFrame response =
         exchange(AuxFrame{.source = 0x00, .destination = axis_address(axis), .command = 0x27, .payload = {}}, timeout);
     if (response.payload.size() != 1 || response.payload[0] > 1) {
         throw_link_error(tcp_.load(), "MC_AUX_GUIDE_ACTIVE returned an invalid status");
     }
     return response.payload[0] == 1;
+}
+
+// A motor controller's unsolicited report to this client (0x20) or to every client (0x00), forwarded by the adapter:
+// 0x50 with payload 0 is a low battery; any other 0x50, and 0x51, a motion limit or motor error. Each is acknowledged
+// (addresses swapped, same command, empty payload). A fault is a session error (decision 0011 rule 2): the stream is
+// desynchronized and the session bumped before the throw, so motion needs FindHome again. False for any other frame.
+bool CelestronCgxProtocol::take_report_locked(const AuxFrame& frame, std::chrono::steady_clock::time_point deadline) {
+    if ((frame.command != 0x50 && frame.command != 0x51) || (frame.source != 0x10 && frame.source != 0x11) ||
+        (frame.destination != kTcpSource && frame.destination != 0x00)) {
+        return false;
+    }
+    write_frame_locked(
+        encode_aux_frame(AuxFrame{
+            .source = frame.destination, .destination = frame.source, .command = frame.command, .payload = {}}),
+        deadline);
+    const std::string axis = frame.source == 0x10 ? "RA" : "Dec";
+    if (frame.command == 0x50 && frame.payload == std::vector<std::uint8_t>{0x00}) {
+        ALPACA_LOG_WARN("Celestron CGX", owner_ + ": the " + axis + " motor controller reports a low battery");
+        return true;
+    }
+    desynchronized_ = true;
+    ++session_generation_;
+    healthy_.store(false);
+    throw_link_error(true, "the " + axis + " motor controller reports a motion limit or motor error (command " +
+                               std::to_string(frame.command) + "); run FindHome before moving the mount again");
+}
+
+void CelestronCgxProtocol::send_stop(CgxAxis axis) {
+    const auto address = axis_address(axis);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (serial_fd_ < 0) {
+        throw AlpacaException(tcp_.load() ? "Celestron CGX TCP is not connected" : "Celestron CGX USB is not connected",
+                              AlpacaError::NotConnected);
+    }
+    // No reply is read, so desynchronized_ does not stop it. A late ACK never matches a query (another command), and
+    // the pre-send drain drops one that arrived before the next request.
+    const std::uint8_t source = tcp_.load() ? kTcpSource : 0x00;
+    const auto deadline = std::chrono::steady_clock::now() + kTcpRetryAfter;
+    write_frame_locked(
+        encode_aux_frame(AuxFrame{.source = source, .destination = address, .command = 0x24, .payload = {0}}),
+        deadline);
+    write_frame_locked(
+        encode_aux_frame(AuxFrame{.source = source, .destination = address, .command = 0x06, .payload = {0, 0, 0}}),
+        deadline);
 }
 
 void CelestronCgxProtocol::disconnect_locked() {
@@ -555,6 +658,12 @@ void CelestronCgxProtocol::disconnect_locked() {
         serial_fd_ = -1;
     }
     link_.close();  // releases TIOCEXCL and the registry claim
+    if (!tcp_endpoint_.empty()) {
+        auto& registry = tcp_endpoints();
+        std::lock_guard<std::mutex> claim(registry.mutex);
+        registry.holders.erase(tcp_endpoint_);
+        tcp_endpoint_.clear();
+    }
     receive_buffer_.clear();
     desynchronized_ = false;
 }
@@ -644,11 +753,9 @@ void CelestronCgxProtocol::write_frame_locked(const std::vector<std::uint8_t>& b
     }
 }
 
-std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::steady_clock::time_point deadline) {
+// The next complete frame in the receive buffer, junk before it skipped; nullopt until one is there.
+std::optional<std::vector<std::uint8_t>> CelestronCgxProtocol::buffered_frame_locked() {
     while (true) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw_timeout(tcp_.load());
-        }
         const auto start = std::find(receive_buffer_.begin(), receive_buffer_.end(), kAuxStart);
         receive_buffer_.erase(receive_buffer_.begin(), start);
         if (receive_buffer_.size() >= 2) {
@@ -672,6 +779,16 @@ std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::s
                 return frame;
             }
         }
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::steady_clock::time_point deadline) {
+    while (true) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw_timeout(tcp_.load());
+        }
+        if (auto frame = buffered_frame_locked()) return std::move(*frame);
 
         wait_for_locked(POLLIN, deadline);
         std::array<std::uint8_t, 128> incoming{};
