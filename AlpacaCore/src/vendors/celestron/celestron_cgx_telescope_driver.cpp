@@ -937,8 +937,10 @@ CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(std::unique_lock<s
     std::uint32_t dec;
     {
         const MutexRelease unlocked(lock);  // The I/O lock is never taken under mutex_.
-        ra = protocol_.get_axis_position(CgxAxis::RightAscension);
+        // Dec first: while tracking, RA moves and Dec does not, so the RA count read last is the one closest to the
+        // UTC the position is computed at. Read first, it lagged by the Dec exchange: ~0.3" at 21 ms over WiFi.
         dec = protocol_.get_axis_position(CgxAxis::Declination);
+        ra = protocol_.get_axis_position(CgxAxis::RightAscension);
     }
     // The pair may be from a session that no longer exists: re-validate.
     require_readable_locked();
@@ -1477,7 +1479,13 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                                                         util::TaskClock::clock::time_point deadline,
                                                         double right_ascension_hours, double declination_degrees,
                                                         CgxPointingSide pointing_side, const char* timeout_message) {
+    // The mount stands untracked from the moment a correction is aimed until it tracks, and the sky moves on: over WiFi
+    // (~21 ms an exchange) the check read came 140-270 ms, 2-4", after the aim (rig 2026-11-21). So each leg starts
+    // tracking as it lands, before the check reads it, and each correction is aimed at the sky that far ahead: its
+    // lead is the time from aiming the previous correction to its tracking start (the first has none to measure).
     int corrections = 0;
+    std::optional<util::TaskClock::clock::time_point> aimed_at;
+    util::TaskClock::clock::duration lead{};
     while (true) {
         if (!wait_for_slew_completion(context, claim, deadline, timeout_message,
                                       std::chrono::milliseconds(corrections == 0 ? 200 : 20)))
@@ -1485,6 +1493,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
         bool arrived = false;
         if (!run_motion_stage(context, claim, [&] {
                 std::unique_lock<std::mutex> lock(mutex_);
+                set_tracking_locked(true, lock);
+                if (aimed_at) lead = clock_.now() - *aimed_at;
                 const CgxSkyPosition actual = read_sky_position(lock);
                 const double ra_error_degrees =
                     std::abs(std::remainder(actual.right_ascension_hours - right_ascension_hours, 24.0)) * 15.0;
@@ -1500,10 +1510,13 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                 ALPACA_LOG_DEBUG("Celestron CGX", arrival_diagnostic);
                 if (ra_error_degrees <= kSlewArrivalToleranceDegrees &&
                     dec_error_degrees <= kSlewArrivalToleranceDegrees) {
-                    set_tracking_locked(true, lock);
                     arrived = true;
                     return;
                 }
+                // Off before a further GOTO_SLOW or the failure stop. TODO: whether MC_GOTO_SLOW while the axis tracks
+                // ends or adds to the tracking is not established on the controller; the stop's 0x24 ending tracking
+                // is the driver's assumption on every stop path.
+                set_tracking_locked(false, lock);
                 if (ra_error_degrees > kMaxSlewCorrectionDegrees || dec_error_degrees > kMaxSlewCorrectionDegrees ||
                     corrections >= kMaxSlewCorrections) {
                     ALPACA_LOG_ERROR("Celestron CGX", arrival_diagnostic + " bounded refinement failed");
@@ -1517,9 +1530,12 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                     throw AlpacaException(std::string(timeout_message) + ": " + arrival_diagnostic,
                                           AlpacaError::DriverException);
                 }
-                const auto utc = std::chrono::system_clock::time_point{
-                    std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                        std::chrono::duration<double>(current_utc_locked()))};
+                aimed_at = clock_.now();
+                const auto utc =
+                    std::chrono::system_clock::time_point{
+                        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                            std::chrono::duration<double>(current_utc_locked()))} +
+                    std::chrono::duration_cast<std::chrono::system_clock::duration>(lead);
                 const double lst = cgx_local_sidereal_time_hours(
                     utc, configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
                 const auto target = cgx_sky_position_to_encoders(right_ascension_hours, declination_degrees, lst,

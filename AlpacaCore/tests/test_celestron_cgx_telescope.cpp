@@ -4140,7 +4140,8 @@ TEST_CASE(
     alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, {});
 
     // A's poll sees its home or GOTO done and runs its next stage meanwhile: the rebase and GOTO, or the arrival
-    // check and the tracking restore.
+    // check and the tracking restore. Tracking starts before the arrival read, so that stage is done once both hold.
+    const int ra_reads = mount.count_command(0x10, 0x01);
     if (leg == 0) {
         mount.complete_axis_home(0x10);
         mount.complete_axis_home(0x11);
@@ -4150,7 +4151,8 @@ TEST_CASE(
     }
     const bool staged = wait_until([&] {
         clock.advance(20ms);
-        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos : driver->get_tracking();
+        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos
+                        : driver->get_tracking() && mount.count_command(0x10, 0x01) > ra_reads;
     });
 
     // B's position read then fails, so B is refused without claiming anything.
