@@ -2447,10 +2447,11 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
     for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
         const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
         const auto encoder = protocol_.get_axis_position(axis);
-        if (search.last_encoder[index])
-            search.travel_degrees[index] += std::abs(signed_cgx_encoder_delta(encoder, *search.last_encoder[index])) *
-                                            360.0 / kCgxEncoderStepsPerRevolution;
-        search.last_encoder[index] = encoder;
+        std::optional<std::uint32_t>& last = search.last_encoder[index];
+        if (last)
+            search.travel_degrees[index] +=
+                std::abs(signed_cgx_encoder_delta(encoder, *last)) * 360.0 / kCgxEncoderStepsPerRevolution;
+        last = encoder;
         if (search.travel_degrees[index] > kHomeTravelBoundDegrees)
             throw travel_exceeded(index,
                                   " (bound " + std::to_string(static_cast<int>(kHomeTravelBoundDegrees)) + " deg)");
