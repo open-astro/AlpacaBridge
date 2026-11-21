@@ -839,17 +839,17 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        if (!std::isfinite(duration) || duration <= 0.0) {
-            throw AlpacaException("Exposure duration must be positive", AlpacaError::InvalidValue);
+        // #2259: 0 (a bias frame) and anything below the SDK minimum run at the minimum (ExposureMin).
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
         }
         ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
         const double exposure_us_value = duration * 1'000'000.0;
-        if (!std::isfinite(exposure_us_value) || exposure_us_value < static_cast<double>(caps.min_value) ||
-            exposure_us_value > static_cast<double>(caps.max_value)) {
+        if (!std::isfinite(exposure_us_value) || exposure_us_value > static_cast<double>(caps.max_value)) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
-        const long exposure_us = static_cast<long>(std::lround(exposure_us_value));
+        const long exposure_us = std::max(static_cast<long>(std::lround(exposure_us_value)), caps.min_value);
 
         ExposureRequest request;
         request.exposure_us = exposure_us;

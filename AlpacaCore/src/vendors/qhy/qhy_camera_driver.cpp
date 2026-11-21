@@ -1456,10 +1456,12 @@ public:
         // Serialize even the cancellation bypass with mode changes. Workers and
         // cached getters never hold this lock, so a blocked download stays cancellable.
         std::lock_guard<std::mutex> io_lock(io_mutex_);
+        double minimum_us = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             validate_exposure_locked(duration);
+            minimum_us = exposure_range_.available ? exposure_range_.min : 0.0;
         }
 
         // Reap the previous worker FIRST, before any other SDK call in this
@@ -1534,8 +1536,9 @@ public:
             }
         }
 
-        // Apply exposure time (microseconds)
-        double exposure_us = duration * 1'000'000.0;
+        // Apply exposure time (microseconds). A duration below ExposureMin (0, a bias frame, included) runs at the
+        // minimum (#2259), never at 0 us.
+        const double exposure_us = std::max(duration * 1'000'000.0, minimum_us);
         sdk_.set_param(id, control::EXPOSURE, exposure_us);
 
         // Close mechanical shutter for dark/bias frames if the camera supports it
