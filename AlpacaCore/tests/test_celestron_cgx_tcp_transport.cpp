@@ -463,9 +463,11 @@ TEST_CASE("Celestron CGX AUX TCP - a re-send goes out only while the deadline is
     adapter.script(kRa, 0x01, 2, Fault::Drop);
     CelestronCgxProtocol protocol;
     connect(protocol, adapter);
-    // 300 ms is before a 500 ms deadline, 600 ms is not: one re-send, then the timeout.
+    // 300 ms is before a 500 ms deadline, 600 ms is not: one re-send, then the timeout at the deadline.
+    const auto started = std::chrono::steady_clock::now();
     require_alpaca_error([&] { (void)protocol.get_axis_position(CgxAxis::RightAscension, milliseconds(500)); },
                          AlpacaError::DriverException);
+    CHECK(since(started) < milliseconds(590));  // never waits for a re-send point past the deadline
     CHECK(adapter.count(kRa, 0x01) == 2);
 }
 
