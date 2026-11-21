@@ -55,6 +55,11 @@ Thumbs.db
 !external/libgpiod/**
 !external/libgphoto2/**
 
+# Not built or shipped: CMake links libqhyccd.so, debian/rules ships .so* (#1741).
+external/QHY/*/usr/local/lib/*.a
+external/QHY/*/usr/local/testapp/
+external/QHY/*/usr/local/doc/
+
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories
 external/**/.DS_Store

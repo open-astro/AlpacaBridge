@@ -54,6 +54,7 @@
 #include <utility>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 #include "fake_skywatcher_board.h"
 
@@ -385,13 +386,15 @@ private:
                     }
                 }
                 if (delay > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                    alpacacore::test::connect_hold(std::chrono::milliseconds(delay));  // connect_hold_gate.h
                 }
                 if (const int latency_ms = latency_ms_.load(); latency_ms > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
                 }
-                pty_write_bounded(pty_.master_fd(), reply, stop_);
+                // Count before the send, as the UDP fake does (#1186, #1755): a client that has
+                // its reply already sees it counted.
                 served_.fetch_add(1);
+                pty_write_bounded(pty_.master_fd(), reply, stop_);
                 std::string straggler;
                 int straggler_ms = 0;
                 {

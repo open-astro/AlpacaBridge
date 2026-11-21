@@ -452,9 +452,7 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     // Wave-series mounts expose an STM32 CDC-ACM virtual COM port (0483:5740,
     // /dev/ttyACM*); also accept the classic EQDIRECT cable chips.
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
-                      "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, skywatcher_usb_tokens());
 }
 }  // namespace
 #endif  // _WIN32
@@ -706,6 +704,11 @@ public:
                                    std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
         connected_ = ok;
+#ifndef _WIN32
+        // A connect, failed or done, leaves the serial link's verdict clear (#2262); a loss in the driver's
+        // handshake that follows latches it again.
+        link_.clear_loss();
+#endif
         return ok;
     }
 
@@ -723,10 +726,15 @@ public:
     }
 
     // The client's own connect or disconnect settles a loss (decision 0009,
-    // point 5): the kept fault text and the sticky flag go; the lost-at stamp
-    // stays for the relink's outage-length decision.
+    // point 5): the kept fault text and the sticky flag go, and so does the
+    // serial link's own verdict (#2262; disconnect_locked(), the port release
+    // after a loss, keeps it); the lost-at stamp stays for the relink's
+    // outage-length decision.
     void clear_loss_locked() {
         link_lost_.store(false);
+#ifndef _WIN32
+        link_.clear_loss();
+#endif
         std::lock_guard<std::mutex> lock(health_mutex_);
         lost_fault_.clear();
     }
@@ -1115,6 +1123,18 @@ private:
         struct stat st {};
         return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
     }
+
+    // Whether a failed serial write, poll or read lost the link. The errno
+    // verdict is the link's (util::SerialLink, #2262: EIO, ENXIO, ENODEV and
+    // EBADF on its fd); this wrapper keeps no serial errno list. Its own
+    // poll()-bounded loops run behind the serial_read_/serial_write_ seams
+    // rather than link_.read()/write_all() (decision 0017 rule 5), so each
+    // failure's errno, a seam's included, is fed to the link here. A removed
+    // node is a loss with no errno, judged by the wrapper as before.
+    bool serial_failure_lost_locked(int err) {
+        (void)link_.note_error(err);
+        return link_.lost() || serial_node_removed_locked();
+    }
 #endif
 
     bool connect_serial(const ConnectionInfo& info) {
@@ -1414,7 +1434,7 @@ private:
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             if (!write_all_bounded(frame.data(), frame.size(), deadline)) {
                 const int err = errno;
-                if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                if (serial_failure_lost_locked(err)) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
                 }
                 // A non-blocking write can stop part-way (deadline hit after a partial
@@ -1447,7 +1467,7 @@ private:
                         continue;
                     }
                     const int err = errno;
-                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                    if (serial_failure_lost_locked(err)) {
                         lose_serial_link_locked("Serial poll failed: " + util::errno_string(err));
                     }
                     throw AlpacaException("Serial poll failed: " + util::errno_string(err));
@@ -1467,7 +1487,7 @@ private:
                     }
                 } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
                     const int err = errno;
-                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                    if (serial_failure_lost_locked(err)) {
                         lose_serial_link_locked("Serial read failed: " + util::errno_string(err));
                     }
                     throw AlpacaException("Serial read failed: " + util::errno_string(err));
@@ -1566,8 +1586,8 @@ private:
                 setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 char buf[64] = {};
                 // Serialized transport: bounded by SO_RCVTIMEO.
-                ssize_t n =
-                    recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- SO_RCVTIMEO bounds the wait
+                ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
                 if (n > 0) {
                     exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     std::string reply(buf, static_cast<std::size_t>(n));
@@ -1620,8 +1640,8 @@ private:
         char buf[64];
         while (true) {
             // MSG_DONTWAIT: non-blocking drain, never actually blocks.
-            ssize_t n =
-                recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- MSG_DONTWAIT, returns at once
+            ssize_t n = recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);
             if (n <= 0) {
                 break;
             }
@@ -1685,8 +1705,8 @@ private:
             tv.tv_usec = static_cast<long>(100) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             char buf[64] = {};
-            ssize_t n =
-                recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- 100 ms SO_RCVTIMEO bounds the wait
+            ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
             if (n <= 0) {
                 continue;
             }
@@ -1711,8 +1731,9 @@ private:
             tv.tv_sec = 0;
             tv.tv_usec = static_cast<long>(50) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            if (recv(socket_fd_, buf, sizeof(buf), 0) > 0) {  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-                exchange_saw_frame_ = true;                   // open-astro#505: still answering
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- 50 ms SO_RCVTIMEO bounds the wait
+            if (recv(socket_fd_, buf, sizeof(buf), 0) > 0) {
+                exchange_saw_frame_ = true;  // open-astro#505: still answering
             }
         }
     }
@@ -2097,6 +2118,13 @@ uint32_t SkyWatcherProtocolWrapper::get_feature(int axis, uint32_t inquiry) {
 
 void SkyWatcherProtocolWrapper::set_feature(int axis, uint32_t command) {
     send_command('W', axis, encode_u24(command));
+}
+
+const std::vector<std::string>& skywatcher_usb_tokens() {
+    static const std::vector<std::string> tokens{
+        "STM32", "STMicroelectronics", "0483",       "Prolific",  "PL2303", "067b", "FTDI", "CP210", "CH340", "CH341",
+        "1a86",  "Silicon_Labs",       "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::skywatcher

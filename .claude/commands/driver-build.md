@@ -352,7 +352,7 @@ Existing examples:
 Every new `.h`, `.hpp`, `.cpp` file must include the AGPL-3.0-or-later license header. Copy it from any existing source file in the same directory — do not write it from scratch or modify it.
 
 ### Boundary rules
-- `AlpacaCore` has NO server code (no listening socket, router or inbound request parsing, decision 0023); a vendor whose wire is HTTP reaches it through the `util::HttpClient` seam planned in decision 0023.
+- `AlpacaCore` has NO server code (no listening socket, router or inbound request parsing, decision 0023); a vendor whose wire is HTTP reaches it through the `util::HttpClient` seam of decision 0023.
 - `AlpacaHTTP` has NO vendor SDK usage and NO duplicated device logic.
 - Call flow: `AlpacaHTTP -> AlpacaCore driver -> vendor implementation`.
 - Raw vendor SDK headers must NOT be included outside wrapper implementation files.
@@ -618,7 +618,7 @@ All 8 are mandatory; cases 3 and 4 come from the driver's `contract_sweep.h` ent
      ```
 
 4. **Unsupported actions** `"<Vendor> <Device> Driver - Unsupported actions"` `[<vendor>][<device>][unit]`
-   - `CHECK(driver.get_supported_actions().empty());` (unless the driver defines custom actions)
+   - `CHECK(driver.get_supported_actions().empty());` (unless the driver defines custom actions). Do not write these six members for a driver without actions or pass-through: `AlpacaDriver` already answers them (issue #1757).
    - `CHECK(driver.can_action("anything") == false);`
    - Assert the exact codes with the `require_alpaca_error` helper (case 6), not `CHECK_THROWS_AS(..., alpacacore::AlpacaException)`, which passes for any code: `action()` with an unlisted name is `ActionNotImplemented` (0x40C), and the three `command_*` methods are `MethodNotImplemented` (0x400) unless the driver implements command pass-through. A pass-through driver checks the connection first, so disconnected it throws `NotConnected` (0x407): assert that code for its three `command_*` calls instead of the `MethodNotImplemented` lines below.
      ```cpp
@@ -688,6 +688,7 @@ The unit cases above run without hardware because they never connect. Concurrenc
 **1. The seam.** Pick the shape by what the driver talks to:
 
 - **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. The one exception today is Player One: `FakePlayerOneSDK` takes its own mutex in every method, so it has no `locked_playerone_sdk.h` and its stress case and contract-sweep host use the fake directly. A new seam gets the decorator; if that internal mutex is ever removed, Player One needs one too. Worked examples: ToupTek (`ToupTekSDK`, `tests/fake_touptek_sdk.h`, `tests/locked_touptek_sdk.h`) shows the seam and `[stress]` registration; QHY has the same seam and a registered connected-camera stress case in `AlpacaCore/tests/qhy_camera_concurrency_stress.cpp`. Read the QHY fake-SDK constraints in `.github/instructions/testing.instructions.md` ("Hardware-free driver tests via the SDK seam") before copying its camera worker path. Do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
+- **The fake ConformU row.** A fake added to `kFakeConnectableRoster` (`AlpacaCore/tests/contract_sweep.h`) gets a record in `scripts/conformu_fake_runs.tsv` in the same PR (`run` when the fake can pass ConformU on merit, or `pending` with the #2078 slice and the reason, such as the fake's parity gap; a driver with no fake gets a `no-fake` record). Docs-drift check 30 fails the PR otherwise.
 - **Serial or network protocol** (mounts, focusers, hubs): a fake device on the other end of the real transport. A pseudo-terminal fake for serial (`tests/fake_gemini_focuser.h`, `tests/fake_skywatcher_serial_board.h`; `PtyPair` in `tests/fake_pty_write.h` owns the pty), a loopback server for TCP/UDP (`tests/fake_mount_server.h`, `tests/fake_skywatcher_mount.h`). The driver connects through its real protocol wrapper, so the wrapper's own threads and timeouts are what get stormed.
 
 A driver whose seam cannot be built yet (no fake is possible without the hardware in hand) still registers: with every connect failing fast at enumeration the storm exercises the `AsyncConnectable` machinery, the failure-path cleanup and the getters racing the lifecycle, which is where this driver family's findings have lived. Say so in the file's header comment, the way `test_zwo_concurrency_stress.cpp` does.

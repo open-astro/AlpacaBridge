@@ -1,0 +1,61 @@
+# Lock issues and pull requests that have been closed with no activity for 14
+# days, so a new report goes into a new issue instead of a comment on an old
+# merged PR that nobody watches (a 5.0.2 bulb regression was reported on
+# merged PR #1100). Collaborators can still comment on a locked thread.
+#
+# The two steps split at 2026-11-10, the day this workflow was added: threads
+# closed before it are the backlog (about 1,600) and are locked without a
+# comment, so their subscribers get no notification; threads closed after it
+# get a comment pointing at a new issue. lock-threads handles 50 threads per
+# step per run, so at four runs a day the backlog drains in about 8 days.
+
+name: Lock closed threads
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: lock-threads
+  cancel-in-progress: false
+
+jobs:
+  lock:
+    name: Lock inactive closed threads
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      issues: write          # lock issues and comment on them
+      pull-requests: write   # lock pull requests and comment on them
+    steps:
+      - name: Lock the backlog without a comment
+        uses: dessant/lock-threads@89ae32b08ed1a541efecbab17912962a5e38981c  # v6.0.2
+        with:
+          process-only: 'issues, prs'
+          issue-inactive-days: '14'
+          pr-inactive-days: '14'
+          exclude-issue-closed-after: '2026-11-10'
+          exclude-pr-closed-after: '2026-11-10'
+
+      - name: Lock newer threads with a comment
+        uses: dessant/lock-threads@89ae32b08ed1a541efecbab17912962a5e38981c  # v6.0.2
+        with:
+          process-only: 'issues, prs'
+          issue-inactive-days: '14'
+          pr-inactive-days: '14'
+          exclude-issue-closed-before: '2026-11-10'
+          exclude-pr-closed-before: '2026-11-10'
+          issue-comment: >
+            This issue was closed with no activity for 14 days and is now locked.
+            If you still see the problem, or something related, please open a
+            [new issue](https://github.com/open-astro/AlpacaBridge/issues/new/choose)
+            and link this one.
+          pr-comment: >
+            This pull request was closed with no activity for 14 days and is now
+            locked. To report a problem with this change, please open a
+            [new issue](https://github.com/open-astro/AlpacaBridge/issues/new/choose)
+            and link this pull request.

@@ -52,6 +52,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 class FakeIGuiderV4L2 final : public vendor::ioptron::IGuiderV4L2 {
@@ -130,7 +132,7 @@ public:
 
     int open(const std::string& path) override {
         hit("open");
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
         const vendor::ioptron::IGuiderDeviceInfo* known = nullptr;
         for (const auto& d : devices) {
             if (d.path == path) known = &d;

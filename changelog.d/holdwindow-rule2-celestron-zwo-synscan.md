@@ -1,0 +1,10 @@
+### Fixed
+- **Celestron NexStar, ZWO AM and SynScan telescopes: Slewing and IsPulseGuiding windows now follow decision 0022 rule 2** (AlpacaCore, issues #1833, #1834, #1836). Each window is armed before its command goes out and is cleared or restored when that command fails or is refused, so a failed command no longer leaves Slewing or IsPulseGuiding true for the whole hold:
+  - **Celestron:** the pulse window is armed before the `MC_AUX_GUIDE` write. A failed guide write, a refused chunk chain, AbortSlew, a reconnect, MoveAxis and a slew, Park or FindHome takeover end the pulse's position hold and correction, so RightAscension and Declination read the live mount instead of a predicted value. A blocking SlewToCoordinates whose GOTO send or pier read fails puts the earlier slew state back. FindHome ends a superseded GOTO's hold once its home command is answered.
+  - **ZWO AM:** MoveAxis, FindHome and Park arm the slew window before their command, and a failed command puts back the window it replaced. A rejected GOTO and a MoveAxis stop that sends `:Q` end the window. A failed `:Mg`, or a refused pulse drain start, keeps only the time of the steps already sent and the pulses queued behind it.
+  - **SynScan:** the pulse window is armed before the rate command. A SlewToCoordinates or landing re-GOTO whose send throws ends the slew window. A pulse cut short by a replacement pulse, MoveAxis, Park or AbortSlew that then fails or is refused no longer keeps IsPulseGuiding true.
+
+  Hold lengths and landing do not change. Landing still waits on each window (rule 3) until a rig shows the mount reports a slew at once, so the three 0022 rows stay `partial`.
+
+### Added (tests)
+- **Rule 2 hold-window cases for the Celestron, ZWO and SynScan telescopes** (issues #1833, #1834, #1836), tagged `[hold-window]`: each window is armed while its command is on the wire, each failed or refused command leaves the window as the rule requires, and a window that an earlier GOTO or pulse still owns is kept.

@@ -49,7 +49,8 @@ check 21): add a one-line pointer here, not the rule.
 
 Each line is a summary; the linked topic file holds the rule and its history.
 
-- Inherit `AsyncConnectable` for connect/disconnect and run operation bodies in a
+- Inherit `AsyncConnectable` for connect/disconnect, its forwarders written as
+  `ALPACA_ASYNC_CONNECT_FORWARDERS()`, and run operation bodies in a
   `util::AsyncOperation` slot; never hand-roll either
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md)).
 - An async operation body that fails keeps its error, and the device's completion property
@@ -71,6 +72,8 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - `InvalidValue` precedes the connection check; every other member throws
   `NotConnected` while disconnected
   ([ascom-contract](.github/instructions/ascom-contract.instructions.md#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it)).
+- `get_name()` is brand + model only; paths and driver state go in `get_description()`
+  ([ascom-contract](.github/instructions/ascom-contract.instructions.md#name-is-brand-and-model-all-drivers)).
 - Declare every persisted config field in the vendor's catalog schema; prefix every
   non-ZWO form field name
   ([http-integration](.github/instructions/http-integration.instructions.md#enumeration-index-fields--unique-names--auto-numbering-all-vendors)).
@@ -100,7 +103,6 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - `AlpacaCore` is vendor-neutral Alpaca logic and device behavior only:
   - No server: no listening socket, router or inbound request parsing. An outbound client inside a
     vendor wrapper is that vendor's wire protocol, reached through the `util::HttpClient` seam
-    that decision 0023 plans
     ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)).
   - Vendor SDKs isolated to `external/` + `src/vendors/<vendor>/` + `include/alpacacore/vendor/<vendor>/`.
 - `AlpacaHTTP` is transport/routing/config/discovery only:
@@ -183,7 +185,7 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 ## Out of Scope Guardrails
 
 - Do not add server code to AlpacaCore: no listening socket, router or inbound request parsing
-  ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)). Outbound vendor clients go through the `util::HttpClient` seam planned there.
+  ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)). Outbound vendor clients go through the `util::HttpClient` seam.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
 - Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.

@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=34">
+    <link rel="stylesheet" href="/web/style.css?v=38">
 </head>
 <body>
     <div class="container">
@@ -28,22 +28,26 @@
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
         </header>
 
-        <nav class="tabs">
-            <button class="tab active" onclick="showTab('devices')">Devices</button>
-            <button class="tab" onclick="showTab('configure')">Configure</button>
-            <button class="tab" onclick="showTab('server')">Server Info</button>
+        <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
+             when the bridge stops answering; a polite live region. -->
+        <div id="link-banner" class="link-banner" role="status" aria-live="polite" hidden></div>
+
+        <nav class="tabs" role="tablist" aria-label="Sections">
+            <button class="tab active" type="button" role="tab" id="devices-tab-button" data-tab="devices" aria-selected="true" aria-controls="devices-tab" onclick="showTab('devices')">Devices</button>
+            <button class="tab" type="button" role="tab" id="configure-tab-button" data-tab="configure" aria-selected="false" aria-controls="configure-tab" tabindex="-1" onclick="showTab('configure')">Configure</button>
+            <button class="tab" type="button" role="tab" id="server-tab-button" data-tab="server" aria-selected="false" aria-controls="server-tab" tabindex="-1" onclick="showTab('server')">Server Info</button>
         </nav>
 
         <!-- Devices Tab -->
-        <div id="devices-tab" class="tab-content active">
+        <div id="devices-tab" class="tab-content active" role="tabpanel" aria-labelledby="devices-tab-button">
             <h2>Configured Devices</h2>
             <div id="devices-list" class="devices-list">
-                <p class="loading">Loading devices...</p>
+                <div class="device-card skeleton" role="status" aria-busy="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="visually-hidden">Loading devices</span></div>
             </div>
         </div>
 
         <!-- Configure Tab -->
-        <div id="configure-tab" class="tab-content">
+        <div id="configure-tab" class="tab-content" role="tabpanel" aria-labelledby="configure-tab-button">
             <h2 id="configure-title">Add Device</h2>
             <form id="device-form" class="device-form">
                 <div class="form-group">
@@ -85,6 +89,7 @@
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
+                        <option value="remotealpaca">Remote Alpaca</option>
                         <option value="synscan">Sky-Watcher</option>
                         <option value="skywatcher">Sky-Watcher</option>
                         <option value="svbony">SVBONY</option>
@@ -549,8 +554,135 @@
                     </div>
                 </div>
 
-                <!-- OnStep Telescope Configuration -->
-                <div id="onstep-config" data-vendor="onstep" data-device-type="telescope" class="vendor-config" style="display: none;">
+                <!-- OnStep Configuration: the telescope, and a focuser, the rotator or the auxiliary features on the same controller (#2223, #2221, #2222) -->
+                <div id="onstep-config" data-vendor="onstep" class="vendor-config" style="display: none;">
+                  <div id="onstep-focuser-config" data-device-type="focuser" style="display: none;">
+                    <h3>OnStep Focuser Configuration</h3>
+                    <small style="color: #666;">A focuser wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-focuser-number">Focuser Number:</label>
+                        <input type="number" id="onstep-focuser-number" name="onstepFocuserNumber" data-config-key="focuserNumber" value="1" min="1" max="6">
+                        <small>Which of the controller's focusers (1 to 6) this device drives. Add one device per focuser.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="onstep-focuser-connection-type">Connection Type:</label>
+                        <select id="onstep-focuser-connection-type" name="onstepFocuserConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-focuser-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-focuser-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-focuser-port-path" name="onstepFocuserPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-focuser-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-focuser-baud-rate" name="onstepFocuserBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-focuser-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-focuser-host">IP Address:</label>
+                            <input type="text" id="onstep-focuser-host" name="onstepFocuserHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-focuser-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-focuser-tcp-port" name="onstepFocuserTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-rotator-config" data-device-type="rotator" style="display: none;">
+                    <h3>OnStep Rotator Configuration</h3>
+                    <small style="color: #666;">The rotator wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Moves stay inside the travel set in the firmware and are refused while the firmware's derotation is on. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-rotator-connection-type">Connection Type:</label>
+                        <select id="onstep-rotator-connection-type" name="onstepRotatorConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-rotator-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-rotator-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-rotator-port-path" name="onstepRotatorPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-rotator-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-rotator-baud-rate" name="onstepRotatorBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-rotator-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-rotator-host">IP Address:</label>
+                            <input type="text" id="onstep-rotator-host" name="onstepRotatorHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-rotator-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-rotator-tcp-port" name="onstepRotatorTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-switch-config" data-device-type="switch" style="display: none;">
+                    <h3>OnStep Switch Configuration</h3>
+                    <small style="color: #666;">The auxiliary features of the OnStepX controller (power switches, PWM outputs, dew heaters) as one Switch device, each under its firmware name. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. The feature list is read at each connect. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-switch-connection-type">Connection Type:</label>
+                        <select id="onstep-switch-connection-type" name="onstepSwitchConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-switch-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-switch-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-switch-port-path" name="onstepSwitchPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-switch-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-switch-baud-rate" name="onstepSwitchBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-switch-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-switch-host">IP Address:</label>
+                            <input type="text" id="onstep-switch-host" name="onstepSwitchHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-switch-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-switch-tcp-port" name="onstepSwitchTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-telescope-config" data-device-type="telescope">
                     <h3>OnStep Telescope Configuration</h3>
 
                     <div class="form-group">
@@ -558,8 +690,9 @@
                         <select id="onstep-connection-type" name="onstepConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
                         </select>
-                        <small>OnStep controllers connect over USB serial only.</small>
+                        <small>Auto-Detect scans the USB serial ports only. Choose Network for a WiFi or Ethernet OnStepX (ESP32, or the Smart Web Server add-on) and enter its address.</small>
                     </div>
 
                     <!-- Serial Connection -->
@@ -572,6 +705,20 @@
                         <div class="form-group">
                             <label for="onstep-baud-rate">Baud Rate:</label>
                             <input type="number" id="onstep-baud-rate" name="onstepBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <!-- Network Connection -->
+                    <div id="onstep-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-host">IP Address:</label>
+                            <input type="text" id="onstep-host" name="onstepHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The controller's address on your network. It is not discovered automatically.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-tcp-port" name="onstepTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>Default: 9998, a persistent command channel. Port 9999 closes the connection 2 seconds after it opens.</small>
                         </div>
                     </div>
 
@@ -591,6 +738,7 @@
                         <input type="number" id="onstep-focal-length" name="onstepFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="1000">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
                 </div>
 
                 <!-- Celestron NexStar Telescope Configuration -->
@@ -1588,6 +1736,32 @@
                     </div>
                 </div>
 
+                <!-- Remote Alpaca: a device of another Alpaca server (the upstream), served here as a device of this server -->
+                <div id="remotealpaca-config" data-vendor="remotealpaca" data-device-type="observingconditions" class="vendor-config" style="display: none;">
+                    <h3>Remote Alpaca Observing Conditions</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-host" name="remoteAlpacaHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-port" name="remoteAlpacaPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-device-number" name="remoteAlpacaDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the ObservingConditions device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-poll-period" name="remoteAlpacaPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds.</small>
+                    </div>
+                </div>
+
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),
                      CoverCalibrator (flat panels) and Switch (Power & Data Hubs
                      Advanced 3) share one vendor block,
@@ -2005,7 +2179,7 @@
         </div>
 
         <!-- Server Info Tab -->
-        <div id="server-tab" class="tab-content">
+        <div id="server-tab" class="tab-content" role="tabpanel" aria-labelledby="server-tab-button">
             <h2>Server Information</h2>
             <div id="server-info-section" class="section-card collapsed">
                 <div class="section-card-header">
@@ -2020,6 +2194,21 @@
                         <p class="loading">Loading server information...</p>
                     </div>
                     <p id="server-info-status" class="server-status"></p>
+                </div>
+            </div>
+            <!-- Issue #1764 item 1: Shutdown sits in its own row, apart from Restart and the screen edge. -->
+            <div id="server-actions-section" class="section-card">
+                <div class="section-card-header">
+                    <h3>Server Actions</h3>
+                </div>
+                <div class="section-card-body">
+                    <div class="server-actions server-actions-card">
+                        <button class="btn btn-secondary" type="button" onclick="syncTime()">Sync Time</button>
+                        <button class="btn btn-secondary" type="button" onclick="restartServer()">Restart Server</button>
+                    </div>
+                    <div class="server-actions server-actions-danger">
+                        <button class="btn btn-danger" type="button" onclick="shutdownServer()">Shutdown Server</button>
+                    </div>
                 </div>
             </div>
             <div id="update-section" class="section-card collapsed">
@@ -2124,6 +2313,16 @@
                         <select id="wifi-country" class="wifi-country-select"></select>
                     </div>
 
+                    <!-- Issue #856: the radio that joins networks, stored as its permanent MAC. -->
+                    <div class="wifi-row">
+                        <div class="wifi-row-label">
+                            <span>Client adapter</span>
+                            <small>The radio that joins networks</small>
+                            <button class="info-btn" type="button" aria-label="About the client adapter" data-info-title="Client adapter" data-info-text="On a board with more than one WiFi radio, pick the one that joins your networks, for example a USB adapter, while the hotspot stays where it is. The choice is the adapter's hardware address, so it survives a reboot or a different USB port. Every saved network is pinned to it. If the adapter is unplugged, the device picks one itself.">i</button>
+                        </div>
+                        <select id="wifi-adapter" class="wifi-country-select" aria-label="Client adapter"></select>
+                    </div>
+
                     <div class="wifi-group-title">Join a Network<button class="info-btn" type="button" aria-label="About joining a network" data-info-title="Join a Network" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
                     <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see nearby networks.</p></div>
                     <div class="wifi-actions-right"><button class="btn btn-secondary btn-small" type="button" onclick="wifiScanClicked()">Scan Again</button></div>
@@ -2178,16 +2377,31 @@
             </div>
         </div>
 
+        <!-- Issue #1764 item 1: only Refresh stays in the bar; the server actions are a card on Server Info. -->
         <div class="server-actions global-actions">
             <button id="global-refresh" class="btn btn-primary" onclick="globalRefresh()">Refresh</button>
-            <button class="btn btn-secondary" onclick="syncTime()">Sync Time</button>
-            <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
-            <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
         </div>
     </div>
 
-    <script src="/web/format.js?v=17"></script>
+    <!-- Issue #1764: the page's own dialog and toasts, never a native alert/confirm/prompt. -->
+    <dialog id="ui-dialog" class="ui-dialog" aria-labelledby="ui-dialog-title" aria-describedby="ui-dialog-body">
+        <form method="dialog" class="ui-dialog-form">
+            <h2 id="ui-dialog-title" class="ui-dialog-title"></h2>
+            <p id="ui-dialog-body" class="ui-dialog-body"></p>
+            <label id="ui-dialog-field" class="ui-dialog-field" hidden>
+                <span id="ui-dialog-input-label"></span>
+                <input id="ui-dialog-input" type="text" autocomplete="off">
+            </label>
+            <div class="ui-dialog-actions">
+                <button id="ui-dialog-cancel" class="btn btn-secondary" type="button">Cancel</button>
+                <button id="ui-dialog-confirm" class="btn btn-primary" type="submit" value="confirm">OK</button>
+            </div>
+        </form>
+    </dialog>
+    <div id="toast-region" class="toast-region"></div>
+
+    <script src="/web/format.js?v=21"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=50"></script>
+    <script src="/web/app.js?v=55"></script>
 </body>
 </html>

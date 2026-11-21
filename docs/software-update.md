@@ -227,7 +227,8 @@ answers 0x400 "Software update not configured".
 the arm64 Trixie `main` index at apt.openastro.net, which means "follow the
 update channel": leave the key out (it is a commented example in the shipped
 file) unless you mirror the repository. Any other non-empty value is an
-override that pins the check and disables the channel selector. Only the check
+override that pins the check and disables the channel selector. The URL must be
+`https://`: the fetch refuses a plain `http://` mirror ("Unsupported protocol"). Only the check
 uses it; the install always goes through the host's own apt sources. An empty
 value disables the check. Credentials do not belong in this URL: any client on
 the LAN can read the status, and although the server removes a

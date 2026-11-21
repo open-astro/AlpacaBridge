@@ -1,5 +1,5 @@
 # Altair Astro vendor support
-# Uses vendored SDK in external/Altair/altaircamsdk.20260531
+# Uses vendored SDK in external/Altair/altaircamsdk
 #
 # Altair cameras are ToupTek OEM hardware and altaircam is the ToupTek SDK
 # renamed, so this target holds only the Altair SDK wrapper (the shared
@@ -16,7 +16,7 @@ if(ALPACACORE_ENABLE_ALTAIR)
     endif()
 
     get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-    set(ALTAIR_SDK_ROOT "${ALPACACORE_ROOT}/external/Altair/altaircamsdk.20260531")
+    set(ALTAIR_SDK_ROOT "${ALPACACORE_ROOT}/external/Altair/altaircamsdk")
     set(ALTAIR_SDK_INCLUDE "${ALTAIR_SDK_ROOT}/inc")
 
     if(NOT EXISTS "${ALTAIR_SDK_INCLUDE}/altaircam.h")

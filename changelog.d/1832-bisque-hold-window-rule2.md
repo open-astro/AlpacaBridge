@@ -1,0 +1,5 @@
+### Fixed
+- **Bisque: Slewing is true while SlewToRaDec is being sent, and a slew TheSkyX refuses leaves the earlier slew as it was** (AlpacaCore), issue #1832 and decision 0022 rule 2. Both slew forms arm the 8 s Slewing hold before the command goes out, so a client that reads Slewing during the send reads true. When TheSkyX refuses the command, the window, Slewing, any kept poll error and the completion wait of an accepted earlier slew are put back, so a SlewToCoordinates still waiting for that slew lowers Slewing when it lands. A disconnect and a SlewToCoordinates landing now also close the window. Landing still waits for the 8 s window to close before the status poll asks TheSkyX (rule 3, open until a TheSkyX run).
+
+### Added (tests)
+- **Bisque hold window: Slewing during the send, a refused slew and a refused retarget, and the disconnect, AbortSlew and landing clears** (issue #1832), on the fake TheSkyX, which gains a refused-SlewToRaDec knob and a hook that runs while the driver waits for the SlewToRaDec reply.

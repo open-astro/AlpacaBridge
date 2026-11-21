@@ -59,11 +59,11 @@ std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSw
  * @brief Test seam: as create_touptek_switch(), over an injected power box.
  *
  * @p powerbox must outlive the driver. Its port_count() must equal
- * config.ports.size(), else this throws InvalidValue. The config still supplies
+ * config.ports.size(); the shared driver refuses a mismatch with InvalidValue. The config still supplies
  * the port table (names, writability, PWM); the injected object supplies the
  * line values and the open state.
  */
-std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config,
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config,
                                                     TouptekPowerboxSDK& powerbox);
 
 }  // namespace alpacacore::vendor::touptek

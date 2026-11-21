@@ -454,7 +454,7 @@ private:
                     char* value = nullptr;
                     // Text, radio and menu widgets write a `const char*` through the void* out-param, so a
                     // char** here is required, not a mistake.
-                    // NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion)
+                    // NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion): the out-param needs a char**
                     result = gp_widget_get_value(widget, &value);
                     if (result == GP_OK && value != nullptr) out = value;
                     break;

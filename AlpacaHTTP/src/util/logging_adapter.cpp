@@ -19,19 +19,24 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace alpacahttp::util {
 
@@ -170,28 +175,74 @@ namespace {
         }
     }
 
-    // Cutoff date (YYYY-MM-DD) for retention. Files with an embedded date
-    // strictly less than this string are eligible for deletion. retention=0
-    // returns an empty string and disables pruning.
-    std::string retention_cutoff_locked() {
+    // A YYYY-MM-DD date as days since the epoch, or nullopt for a string that is not one.
+    std::optional<std::chrono::sys_days> parse_log_date(const std::string& text) {
+        int y = 0;
+        unsigned m = 0;
+        unsigned d = 0;
+        if (text.size() != 10 || std::sscanf(text.c_str(), "%4d-%2u-%2u", &y, &m, &d) != 3) return std::nullopt;
+        const std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{m}, std::chrono::day{d}};
+        if (!ymd.ok()) return std::nullopt;
+        return std::chrono::sys_days{ymd};
+    }
+
+    std::string format_log_date(std::chrono::sys_days day) {
+        const std::chrono::year_month_day ymd{day};
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04d-%02u-%02u", static_cast<int>(ymd.year()),
+                      static_cast<unsigned>(ymd.month()), static_cast<unsigned>(ymd.day()));
+        return buf;
+    }
+
+    // Cutoff date (YYYY-MM-DD) for retention: files with an embedded date strictly less than it are eligible for
+    // deletion. retention=0 returns an empty string and disables pruning.
+    //
+    // The cutoff counts back from today, unless the logs show a clock jump (#2292): a gap between two logged days
+    // longer than the retention itself. A clock set years ahead (a client's far-future synctime) would otherwise
+    // make every log kept before the jump look older than the retention and delete it all at the first rollover.
+    // Across such a gap the days logged since the jump count as if they had followed the last day logged before
+    // it, so the history before the jump stays until that many days of newer logs exist. In normal running no gap
+    // is that long and the anchor is today. @p earlier_days: the dates of the dated files before today.
+    std::string retention_cutoff_locked(std::vector<std::chrono::sys_days> earlier_days) {
         if (g_log_retention_days <= 0) {
             return "";
         }
-        const auto now = std::chrono::system_clock::now() -
-                         std::chrono::hours(24) * g_log_retention_days;
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf{};
-        localtime_r(&time_t, &tm_buf);
-        std::ostringstream stream;
-        stream << std::put_time(&tm_buf, "%Y-%m-%d");
-        return stream.str();
+        const auto today = parse_log_date(current_local_date());
+        if (!today) return "";
+        auto anchor = *today;
+        std::sort(earlier_days.begin(), earlier_days.end(), std::greater<>());
+        const std::chrono::days retention{g_log_retention_days};
+        auto newer = *today;  // walking back from today over the logged days
+        for (const auto day : earlier_days) {
+            if (newer - day > retention) {
+                // The jump lies between `day` (the last day logged before it) and `newer` (the first after it).
+                anchor = day + std::chrono::days{1} + (*today - newer);
+                break;
+            }
+            newer = day;
+        }
+        return format_log_date(anchor - retention);
     }
 
     std::size_t prune_old_files_locked() {
-        if (g_log_directory.empty()) {
+        if (g_log_directory.empty() || g_log_retention_days <= 0) {
             return 0;
         }
-        const std::string cutoff = retention_cutoff_locked();
+        // The dates of the dated files before today, which place the cutoff's anchor.
+        std::vector<std::chrono::sys_days> earlier_days;
+        {
+            std::error_code scan_ec;
+            const std::string today = current_local_date();
+            for (const auto& entry : std::filesystem::directory_iterator(g_log_directory, scan_ec)) {
+                if (scan_ec) break;
+                const std::string name = entry.path().filename().string();
+                if (!std::regex_match(name, kLogFilenameRegex)) continue;
+                const auto day = parse_log_date(name.substr(13, 10));
+                if (!day || name.substr(13, 10) >= today) continue;
+                earlier_days.push_back(*day);
+            }
+        }
+        const std::string cutoff = retention_cutoff_locked(std::move(earlier_days));
         if (cutoff.empty()) {
             return 0;
         }

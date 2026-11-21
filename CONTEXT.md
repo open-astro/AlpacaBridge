@@ -38,8 +38,7 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - **Superseded**: a newer operation now owns the same axes or device. The old body
   touches neither hardware nor driver state, except to stop a move it started in a
   wire turn it still holds; the newer one is responsible for both.
-  SkyWatcher tells the two apart by hand today through its driver-wide motion
-  generation counter.
+  `util::MotionOwner` tells the two apart per axis (#2263).
 - Avoid: "aborted" or "stopped" for both. Treating a superseded body as cancelled
   would send a stop to axes the newer operation owns.
 
@@ -59,6 +58,23 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   leaves to the bound.
 - Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that has been
   silent for less than the staleness bound.
+
+## Synchronized vs trusted host clock
+
+- **Synchronized host clock**: the kernel reports the host's clock disciplined by NTP
+  (`util::ClientUtcWarning::host_synchronized()`).
+- **Trusted host clock**: a host clock good enough to write into a mount that keeps its
+  own clock (`util::HostClockTrust`, #2419). It is trusted when it is synchronized, or
+  once something has set or confirmed it since the server started: a client's `UTCDate`
+  write, the web UI's Sync Time, or a clock step the server observed. Trust from a set
+  or confirmed clock lasts until the server stops; trust from synchronization alone ends
+  when the kernel stops reporting the clock synchronized.
+- A clock the kernel loaded from a hardware RTC at boot is neither: nothing on a host
+  without NTP verifies the RTC, and a board with no RTC boots on the time of its last
+  shutdown.
+- Avoid: "synced" for a trusted clock, or "correct" or "valid" for either. A clock a
+  client set is trusted and not synchronized, and a synchronized clock can still
+  disagree with the client's `UTCDate`.
 
 ## Native device vs proxied device
 

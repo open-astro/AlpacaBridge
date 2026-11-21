@@ -236,7 +236,7 @@ Open `http://<your-asiair-plus-ip>:6800/` in a browser:
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
 3. **Vendor**: ZWO
-4. **Switch Type**: **ASIAIR Plus 12V Power Switch (Pi CM4)** — the same libgpiod driver as the Pi 4 Pro, reported as "ASIAIR Plus (Pi CM4)". The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
+4. **Switch Type**: **ASIAIR Plus 12V Power Switch (Pi CM4)** — the same libgpiod driver as the Pi 4 Pro, named "ZWO ASIAIR Plus Switch", with the Pi CM4 board in its Description. The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
 5. **Device Number**: 0 (or any unique number)
 6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit

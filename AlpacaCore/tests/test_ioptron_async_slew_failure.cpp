@@ -441,7 +441,7 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);
-    CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, 20.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->slew_to_coordinates(5.5, 20.0); }, alpacacore::AlpacaError::DriverException);
     const int goto_attempts = mount.count(":MS1#");
     CHECK(goto_attempts == 1);  // no retry after a limit rewrite
 

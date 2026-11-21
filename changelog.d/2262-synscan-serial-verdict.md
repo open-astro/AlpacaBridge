@@ -1,0 +1,3 @@
+### Fixed
+
+- **The SynScan hand controller mount drops `Connected` on `EBADF` too** (issue #2262 PR 6, decision 0009 point 2a). Its serial writes and reads now go through the shared `util::SerialLink` verdict, so `EBADF` on a command write is a lost link at once, as `EIO`, `ENXIO` and `ENODEV` already were (`Connected` false, operations `NotConnected`, the port released, "SynScan serial link lost (write): Bad file descriptor" kept until the next Connect or Disconnect). Before, the write failed with `DriverException` and `Connected` stayed true. An `EBADF` logs one ERROR line naming the port, since it means a driver bug. Over TCP nothing changes.

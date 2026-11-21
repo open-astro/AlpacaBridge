@@ -1,0 +1,297 @@
+// AlpacaCore
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
+#pragma once
+
+// The scripted OnStepX controller model (no test framework), split out of onstep_controller.h so the fake ConformU
+// server (AlpacaHTTP/tests/fake_conformu_server.cpp, #2078) can host the OnStep focuser over it. The test helpers that
+// need Catch2 stay in onstep_controller.h, which includes this file.
+
+#ifndef _WIN32
+
+#include <alpacacore/focuser_driver.h>
+#include <alpacacore/rotator_driver.h>
+#include <alpacacore/switch_driver.h>
+#include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/sexagesimal.h>
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
+#include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
+#include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "fake_mount_server.h"
+
+namespace alpacacore::test::onstep_controller {
+
+namespace onstep = alpacacore::vendor::onstep;
+using std::chrono::milliseconds;
+
+// An OnStepX controller: a German mount at rest, focusers on :F<n>...#, a rotator on :r...# and auxiliary features
+// on :GXY/:GXX/:SXX, as OnStepX answers them (Focuser.command.cpp, Rotator.command.cpp, Features.command.cpp,
+// af1d26bf). A focuser that is not configured gets the
+// unknown-command "0", as the firmware passes an addressed command for an absent axis on and nothing claims it; a
+// controller built without the rotator answers :GX98# with `rotator_kind` (N) and every :r command with "0". Every
+// command is logged.
+struct OnStepXController {
+    std::mutex mutex;
+    std::vector<std::string> log;            // under mutex
+    std::string version = "10.23a";          // :GVN#; under mutex
+    std::set<int> focusers{1};               // the configured focusers; under mutex
+    long min_steps = 100;                    // :F<n>i#
+    long max_steps = 50100;                  // :F<n>m#
+    long position = 1100;                    // :F<n>g#, raw steps; under mutex
+    long target = 1100;                      // under mutex
+    bool moving = false;                     // under mutex
+    long step_per_status = 5000;             // how far a move gets at each :F<n>T#
+    std::string microns = "0.50000";         // :F<n>u#; under mutex
+    std::string temperature = "21.5";        // :F<n>t#; "nan" with no probe; under mutex
+    bool tcf = false;                        // :F<n>c#; under mutex
+    std::string goto_reply = "1";            // :F<n>s...#; under mutex
+    std::string tcf_reply = "1";             // :F<n>c0#/c1#; under mutex
+    std::string ge_code = "00#";             // :GE#; under mutex
+    std::string set_park_reply = "1";        // :hQ#; under mutex
+    std::string unpark_reply = "1";          // :hR#; under mutex
+    std::atomic<int> focuser_latency_ms{0};  // added to every focuser reply
+
+    // The rotator (Rotator.command.cpp). Angles are the firmware's, in degrees, inside [rotator_min, rotator_max].
+    std::string rotator_kind = "R";         // :GX98#: "R" rotate only, "D" with derotation, "N" none, "0" unknown
+    long rotator_min = -180;                // :rI#
+    long rotator_max = 180;                 // :rM#
+    std::string rotator_step = "0.00500";   // :rD#; under mutex
+    double rotator_angle = 30.0;            // :rG#; under mutex
+    double rotator_target = 30.0;           // under mutex
+    bool rotator_moving = false;            // under mutex
+    bool derotating = false;                // :rT# 'D' while stopped; under mutex
+    double rotator_step_per_status = 20.0;  // how far a move gets at each :rT#
+    std::string rotator_goto_reply = "1";   // :rS...#; under mutex
+
+    // The auxiliary features (Features.command.cpp), slots 1-8; a slot with purpose 0 is off. `power` is the
+    // ";volts,amps,flags" a power-monitor build appends to :GXX<n>#. Under mutex.
+    struct Feature {
+        std::string name;
+        int purpose = 0;
+        long value = 0;
+        std::string power;
+    };
+    std::map<int, Feature> features{{1, {"Camera", 1, 0, ";12.1,0.5,!!!!!"}},
+                                    {2, {"Dew 1", 3, 1, ""}},
+                                    {3, {"Flat", 2, 128, ""}},
+                                    {5, {"Intervalom", 4, 0, ""}},
+                                    {6, {"Hidden", 6, 1, ""}}};
+    std::string feature_set_reply = "1";  // :SXX<n>,V<v>#; under mutex
+
+    // Command prefix -> reply, checked before every other reply; under mutex.
+    std::map<std::string, std::string> reply_overrides;
+
+    int count(const std::string& prefix) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<int>(
+            std::count_if(log.begin(), log.end(), [&](const std::string& c) { return c.rfind(prefix, 0) == 0; }));
+    }
+    std::vector<std::string> commands() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return log;
+    }
+
+    std::string focuser_reply(int n, const std::string& body) {
+        if (!focusers.count(n)) return "0";  // CE_CMD_UNKNOWN, a numeric reply: a bare digit
+        if (body == "T") {
+            if (moving) {
+                const long step = std::min(step_per_status, std::labs(target - position));
+                position += target > position ? step : -step;
+                moving = position != target;
+            }
+            return std::string(moving ? "M" : "S") + "3#";
+        }
+        if (body == "g") return std::to_string(position) + "#";
+        if (body == "i") return std::to_string(min_steps) + "#";
+        if (body == "m") return std::to_string(max_steps) + "#";
+        if (body == "u") return microns + "#";
+        if (body == "t") return temperature + "#";
+        if (body == "c") return tcf ? "1" : "0";
+        if (body == "c0" || body == "c1") {
+            if (tcf_reply == "1") tcf = body == "c1";
+            return tcf_reply;
+        }
+        if (body == "Q") {
+            moving = false;
+            target = position;
+            return "";
+        }
+        if (!body.empty() && body[0] == 's') {
+            if (goto_reply != "1") return goto_reply;
+            target = std::strtol(body.c_str() + 1, nullptr, 10);
+            moving = target != position;
+            return "1";
+        }
+        return "0";
+    }
+
+    std::string rotator_reply(const std::string& body) {
+        if (rotator_kind != "R" && rotator_kind != "D") return "0";  // CE_CMD_UNKNOWN: no rotator in this build
+        if (body == "T") {
+            if (rotator_moving) {
+                const double step = std::min(rotator_step_per_status, std::fabs(rotator_target - rotator_angle));
+                rotator_angle += rotator_target > rotator_angle ? step : -step;
+                rotator_moving = std::fabs(rotator_target - rotator_angle) > 1e-9;
+            }
+            if (rotator_moving) return "M3#";
+            return std::string("S") + (derotating ? "D" : "") + "3#";
+        }
+        if (body == "G") {
+            // doubleToDms(fullRange, signPresent, PM_LOW): "+DDD*MM", whole arcminutes.
+            return alpacacore::util::format_dm(rotator_angle, 3, '*') + "#";
+        }
+        if (body == "I") return std::to_string(rotator_min) + "#";
+        if (body == "M") return std::to_string(rotator_max) + "#";
+        if (body == "D") return rotator_step + "#";
+        if (body == "Q") {
+            rotator_moving = false;
+            rotator_target = rotator_angle;
+            return "";
+        }
+        if (!body.empty() && body[0] == 'S') {
+            if (rotator_goto_reply != "1") return rotator_goto_reply;
+            const auto degrees = alpacacore::util::parse_sexagesimal(body.substr(1));
+            if (!degrees || *degrees < rotator_min || *degrees > rotator_max) return "0";
+            rotator_target = *degrees;
+            rotator_moving = std::fabs(rotator_target - rotator_angle) > 1e-9;
+            return "1";
+        }
+        return "0";
+    }
+
+    std::string feature_reply(const std::string& c) {
+        if (c == ":GXY0#") {
+            std::string map;
+            for (int n = 1; n <= 8; ++n) {
+                const auto it = features.find(n);
+                map += it != features.end() && it->second.purpose != 0 ? '1' : '0';
+            }
+            return map + "#";
+        }
+        const int n = c.size() > 4 ? c[4] - '0' : 0;
+        const auto it = features.find(n);
+        const bool on = it != features.end() && it->second.purpose != 0;
+        if (c.rfind(":GXY", 0) == 0) {
+            if (!on) return "0";  // CE_0
+            const int purpose = it->second.purpose == 5 || it->second.purpose == 7 ? 1 : it->second.purpose;
+            return it->second.name.substr(0, 10) + "," + std::to_string(purpose) + "#";
+        }
+        if (c.rfind(":GXX", 0) == 0) {
+            if (!on) return "0";
+            const Feature& f = it->second;
+            if (f.purpose == 3) return std::to_string(f.value) + ",5.0,15.0,NAN" + f.power + "#";
+            if (f.purpose == 4) return std::to_string(f.value) + ",1.000,1.00,0#";
+            return std::to_string(f.value) + f.power + "#";
+        }
+        // :SXX<n>,V<v>#
+        if (!on) return "0";
+        if (feature_set_reply != "1") return feature_set_reply;
+        const auto v = c.find(",V");
+        if (v == std::string::npos) return "0";
+        const long value = std::lround(std::strtod(c.c_str() + v + 2, nullptr));
+        const long max = it->second.purpose == 2 ? 255 : 1;
+        if (value < 0 || value > max) return "0";
+        it->second.value = value;
+        return "1";
+    }
+
+    std::string reply(const std::string& chunk) {
+        bool focuser = false;
+        std::string out;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            log.push_back(chunk);
+            const auto override_it = std::find_if(reply_overrides.begin(), reply_overrides.end(),
+                                                  [&](const auto& o) { return chunk.rfind(o.first, 0) == 0; });
+            if (override_it != reply_overrides.end()) {
+                out = override_it->second;
+            } else if (chunk.size() >= 4 && chunk.rfind(":F", 0) == 0 && chunk[2] >= '1' && chunk[2] <= '9' &&
+                       chunk.back() == '#') {
+                focuser = true;
+                out = focuser_reply(chunk[2] - '0', chunk.substr(3, chunk.size() - 4));
+            } else if (chunk.size() >= 4 && chunk.rfind(":r", 0) == 0 && chunk.back() == '#') {
+                out = rotator_reply(chunk.substr(2, chunk.size() - 3));
+            } else if (chunk.rfind(":GXY", 0) == 0 || chunk.rfind(":GXX", 0) == 0 || chunk.rfind(":SXX", 0) == 0) {
+                out = feature_reply(chunk);
+            } else if (chunk == ":GX98#") {
+                out = rotator_kind == "0" ? "0" : rotator_kind + "#";
+            } else if (chunk.rfind(":GVP", 0) == 0) {
+                out = "On-Step#";
+            } else if (chunk.rfind(":GVN", 0) == 0) {
+                out = version + "#";
+            } else if (chunk.rfind(":GE", 0) == 0) {
+                out = ge_code;
+            } else if (chunk.rfind(":hQ", 0) == 0) {
+                out = set_park_reply;
+            } else if (chunk.rfind(":hR", 0) == 0) {
+                out = unpark_reply;
+            } else {
+                out = mount_reply(chunk);
+            }
+        }
+        if (focuser && focuser_latency_ms.load() > 0 && !out.empty()) {
+            std::this_thread::sleep_for(milliseconds(focuser_latency_ms.load()));
+        }
+        return out;
+    }
+
+    // A German mount at rest: not tracking, no GOTO, not parked.
+    static std::string mount_reply(const std::string& c) {
+        if (c.rfind(":GXEE", 0) == 0) return "1";
+        if (c.rfind(":GU", 0) == 0) return "nNpEo190#";
+        if (c.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
+        if (c.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        if (c.rfind(":GA", 0) == 0) return "+45*00:00#";
+        if (c.rfind(":GZ", 0) == 0) return "180*00:00#";
+        if (c.rfind(":GL", 0) == 0) return "10:20:30#";
+        if (c.rfind(":GC", 0) == 0) return "10/28/26#";
+        if (c.rfind(":GG", 0) == 0) return "+00:00#";
+        if (c.rfind(":Gt", 0) == 0) return "+40*30#";
+        if (c.rfind(":Gg", 0) == 0) return "+074*00#";
+        if (c.rfind(":Q", 0) == 0 || c.rfind(":M", 0) == 0 || c.rfind(":R", 0) == 0 || c.rfind(":T", 0) == 0) {
+            return "";
+        }
+        if (c.rfind(":S", 0) == 0 || c.rfind(":h", 0) == 0) return "1";
+        return "0#";
+    }
+};
+
+inline onstep::ConnectionInfo endpoint(int port, int response_timeout_ms = 300) {
+    onstep::ConnectionInfo info;
+    info.type = onstep::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = response_timeout_ms;
+    return info;
+}
+
+}  // namespace alpacacore::test::onstep_controller
+
+#endif  // _WIN32

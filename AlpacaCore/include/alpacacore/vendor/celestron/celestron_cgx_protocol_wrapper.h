@@ -56,8 +56,9 @@ public:
     bool is_connected() const;
     bool is_healthy() const { return healthy_.load(); }
     /// False once an exchange saw the serial port gone (decision 0009 rule 2a): a hangup or end-of-file on the fd,
-    /// or EIO/ENXIO/ENODEV on a read or write. The port is then already released and that exchange threw
-    /// NotConnected. A timeout is not evidence. Lock-free; the next connect_serial() clears it.
+    /// or EIO/ENXIO/ENODEV/EBADF on a read or write (the util::SerialLink verdict since #2262). The port is then
+    /// already released and that exchange threw NotConnected. A timeout is not evidence. Lock-free; the next
+    /// connect_serial() clears it.
     bool link_alive() const noexcept { return !link_lost_.load(); }
     /// Why the link was lost, empty while it is alive. Never waits on an exchange.
     std::string link_fault() const;

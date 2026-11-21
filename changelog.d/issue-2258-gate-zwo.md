@@ -1,0 +1,2 @@
+### Changed
+- **ZWO AM telescope: PulseGuide, MoveAxis, the equatorial slews and the GuideRate argument checks run through the telescope command gate** (AlpacaCore), issue #2258. A call with two bad arguments may now name the other one first: PulseGuide checks the direction before the duration, and GuideRate checks the RA value fully before the Dec value. The code is InvalidValue either way. No other error code, message, limit, order or stop threshold changes.
