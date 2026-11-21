@@ -3940,7 +3940,7 @@ private:
 
     // Under the re-sync's wire turn and mutex_ (released for the `J`): true only when the handset answers that it
     // holds no star alignment. An aligned handset aims by a pointing model built on its clock, so changing the clock
-    // shifts the model by the size of the change: the re-sync leaves it alone (a client UTCDate write or Sync Time
+    // shifts the model by the size of the change: the re-sync leaves it alone (a client UTCDate write or a reconnect
     // still sets it). A failed `J` leaves it alone too, since an aligned handset cannot be ruled out.
     bool clock_resync_handset_unaligned_locked(std::unique_lock<std::mutex>& lock, const std::string& why) const {
         try {
@@ -4003,6 +4003,7 @@ private:
                         if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
                         const bool moving = clock_resync_motion_locked() || clock_resync_handset_slewing_locked(lock);
                         // The `L` released mutex_, so everything is checked again after it.
+                        // cppcheck-suppress identicalConditionAfterEarlyExit
                         if (!clock_resync_may_write_locked(ctx, decided_generation)) return;
                         if (!moving && !clock_resync_motion_locked()) {
                             if (!clock_resync_handset_unaligned_locked(lock, why)) return;
