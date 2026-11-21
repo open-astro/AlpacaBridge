@@ -28,6 +28,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -55,7 +56,10 @@ namespace alpacacore::test {
 // write except a client's ACK of a motor report (0x50, 0x51), which it does not answer. Motor reports are sent only
 // when a case injects them. It does not simulate the bus, the switch boards' timing or the adapter's real loss
 // mechanism; the faults are scripted per request. The Gen4 startup backlog is replayed as one scripted burst; the real
-// one was 216 frames of an earlier session (October progress log).
+// one was 216 frames of an earlier session (October progress log). Opt-in for the GOTO arrival cases: a virtual motor
+// clock (use_virtual_time(), advance()), a hook before each request (set_before_request(), where a case adds its WiFi
+// round trip) and sidereal tracking (set_tracking_rate(): a non-zero 0x06/0x07 rate drifts the axis at that rate, a
+// zero rate stops it); a GOTO ends a drift, which is the fake's assumption, not established controller behaviour.
 
 /// Loopback fake of a SkyPortal WiFi adapter on the AUX bus.
 class FakeCelestronAuxTcpAdapter {
@@ -122,13 +126,36 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         begin_goto_locked(axes_[axis], target, duration);
     }
+    /// From now on the motor model reads a virtual clock that moves only with advance(), not steady_clock. It starts
+    /// at the real time, so a stamp taken before the switch is in the past.
+    void use_virtual_time() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        virtual_now_ = std::chrono::steady_clock::now();
+    }
+    void advance(std::chrono::milliseconds elapsed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!virtual_now_) throw std::logic_error("FakeCelestronAuxTcpAdapter::advance needs use_virtual_time()");
+        *virtual_now_ += elapsed;
+    }
+    /// Called on the fake's thread for each request before it is executed, without mutex_. Clear it (nullptr)
+    /// before what it captures dies: the clear waits for a call in progress.
+    void set_before_request(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(before_request_mutex_);
+        before_request_ = std::move(hook);
+    }
+    /// A non-zero rate command (0x06 forward, 0x07 back) drifts its axis at `counts_per_second`; a zero one stops
+    /// it. 0 (the default): rate commands change nothing.
+    void set_tracking_rate(double counts_per_second) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tracking_rate_ = counts_per_second;
+    }
     /// `axis` moves at `counts_per_second` while SLEW_DONE reads done, until a stop.
     void set_drift(std::uint8_t axis, double counts_per_second) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& state = axes_[axis];
         settle_locked(state);
         state.drift = counts_per_second;
-        state.drift_since = std::chrono::steady_clock::now();
+        state.drift_since = now_locked();
     }
     /// Every home search on `axis` from now on reads searching and drifts at `counts_per_second` until a stop.
     void set_home_runaway(std::uint8_t axis, double counts_per_second) {
@@ -283,6 +310,10 @@ private:
         } catch (const std::invalid_argument&) {
             return true;  // a damaged request is not answered, as on the bus
         }
+        {
+            std::lock_guard<std::mutex> lock(before_request_mutex_);  // held across the call: see set_before_request
+            if (before_request_) before_request_();
+        }
         std::optional<Fault> fault;
         bool echo = false;
         bool foreign = false;
@@ -296,7 +327,7 @@ private:
             if (it != faults_.end()) fault = it->second;
             if (muted_) fault = Fault::Drop;
             if (burst_.requests > 0) {
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = now_locked();
                 if (request.command == 0x0b) {
                     burst_.armed_at = now;
                     burst_.left = burst_.requests;
@@ -388,8 +419,8 @@ private:
         return delta;
     }
 
-    static std::uint32_t position_locked(const Axis& axis) {
-        const auto now = std::chrono::steady_clock::now();
+    std::uint32_t position_locked(const Axis& axis) const {
+        const auto now = now_locked();
         std::int64_t moved = 0;
         if (axis.going) {
             const auto elapsed = now - axis.goto_started;
@@ -406,16 +437,16 @@ private:
     }
 
     // Folds a GOTO or a drift into a resting position where it is now.
-    static void settle_locked(Axis& axis) {
+    void settle_locked(Axis& axis) const {
         axis.position = position_locked(axis);
         axis.going = false;
         axis.drift = 0.0;
     }
 
-    static void begin_goto_locked(Axis& axis, std::uint32_t target, std::chrono::milliseconds duration) {
+    void begin_goto_locked(Axis& axis, std::uint32_t target, std::chrono::milliseconds duration) const {
         settle_locked(axis);
         axis.goto_delta = signed_delta(target, axis.position);
-        axis.goto_started = std::chrono::steady_clock::now();
+        axis.goto_started = now_locked();
         axis.goto_duration = duration;
         axis.going = duration.count() > 0;
         if (!axis.going) axis.position = target & kCountMask;
@@ -431,7 +462,7 @@ private:
     std::vector<std::uint8_t> execute_locked(const vendor::celestron::AuxFrame& request) {
         if (request.destination != 0x10 && request.destination != 0x11) return {};
         auto& axis = axes_[request.destination];
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = now_locked();
         if (axis.going && now - axis.goto_started >= axis.goto_duration) settle_locked(axis);
         switch (request.command) {
             case 0x01: {
@@ -479,6 +510,16 @@ private:
                 return {};
             case 0x27:
                 return {static_cast<std::uint8_t>(now < axis.guide_until ? 0x01 : 0x00)};
+            case 0x06:
+            case 0x07:
+                if (tracking_rate_ != 0.0) {
+                    settle_locked(axis);
+                    const bool stop = std::all_of(request.payload.begin(), request.payload.end(),
+                                                  [](std::uint8_t byte) { return byte == 0; });
+                    axis.drift = stop ? 0.0 : (request.command == 0x06 ? tracking_rate_ : -tracking_rate_);
+                    axis.drift_since = now;
+                }
+                return {};
             case 0xfe:
                 return {7, 18, 0x08, 0xa6};
             default:
@@ -497,6 +538,13 @@ private:
     std::chrono::milliseconds home_duration_{0};
     std::map<std::uint8_t, double> home_runaway_;
     int stop_settle_reads_ = 0;
+    std::optional<std::chrono::steady_clock::time_point> virtual_now_;
+    std::mutex before_request_mutex_;  // not mutex_: the hook takes it (advance)
+    std::function<void()> before_request_;
+    double tracking_rate_ = 0.0;
+    std::chrono::steady_clock::time_point now_locked() const {
+        return virtual_now_ ? *virtual_now_ : std::chrono::steady_clock::now();
+    }
     struct Burst {
         int requests = 0;
         std::optional<std::uint8_t> destination;

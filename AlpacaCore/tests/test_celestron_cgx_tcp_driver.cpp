@@ -22,7 +22,9 @@
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -362,6 +364,67 @@ cgx::CelestronCgxConnectionInfo wifi_info(int port) {
     return info;
 }
 }  // namespace
+
+// Slice 5 rig finding (2026-11-21): over WiFi each exchange takes ~21 ms, and an untracked mount falls behind the sky
+// between aiming a correction and reading its arrival, so every GOTO used all three corrections and one failed at
+// 3.055". Here every exchange costs 21 ms on every clock (the task clock, the pointing UTC and the adapter's motors),
+// a GOTO takes 150 ms (the rig's 2-3 SLEW_DONE polls), and sidereal tracking drifts the RA axis.
+TEST_CASE("Celestron CGX TCP driver - GOTO arrival over 21 ms exchanges lands within 3 arcsec",
+          "[celestron][cgx][telescope][tcp]") {
+    FakeCelestronAuxTcpAdapter adapter;
+    REQUIRE(adapter.ok());
+    adapter.use_virtual_time();
+    std::atomic<std::int64_t> epoch_milliseconds{1800000000000};
+    alpacacore::test::FakeTaskClock clock;
+    cgx::CelestronCgxConnectionInfo info;
+    info.port_path = "/dev/null/not-a-port";
+    info.host = "127.0.0.1";
+    info.tcp_port = adapter.port();
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    const auto now = [&] {
+        return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_milliseconds.load())};
+    };
+    std::unique_ptr<alpacacore::TelescopeDriver> driver =
+        alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    alpacacore::test::set_cgx_connected(*driver, clock, true);
+    auto home = std::async(std::launch::async, [&] { driver->find_home(); });
+    alpacacore::test::drain_cgx_clock_task(home, clock);
+    home.get();
+    const auto advance = [&](std::chrono::milliseconds elapsed) {
+        epoch_milliseconds.fetch_add(elapsed.count());
+        adapter.advance(elapsed);
+        clock.advance(elapsed);
+    };
+    const auto slew_ended = [&] {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    REQUIRE(alpacacore::test::step_cgx_motion(clock, advance, slew_ended, 20ms));
+    REQUIRE(driver->get_at_home());
+    driver->set_tracking(true);
+    adapter.set_goto_duration(150ms);
+    adapter.set_tracking_rate(16777216.0 / 86164.0905);  // counts per second at the sidereal rate
+    // By value: the cleanup's Disconnect runs after `advance` is gone.
+    adapter.set_before_request([advance] { advance(21ms); });
+
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    driver->slew_to_coordinates_async(target_ra, 30.0);
+    REQUIRE(alpacacore::test::step_cgx_motion(clock, advance, slew_ended, 20ms));
+    REQUIRE_NOTHROW(driver->get_slewing());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking());
+    CHECK(adapter.count(kRa, 0x17) <= 2);
+    advance(500ms);
+    cgx::poll_state_now_for_testing(*driver);
+    CHECK(std::abs(std::remainder(driver->get_right_ascension() - target_ra, 24.0)) * 15.0 * 3600.0 <= 0.5);
+    CHECK(std::abs(driver->get_declination() - 30.0) * 3600.0 <= 3.0);
+    adapter.set_before_request(nullptr);
+}
 
 TEST_CASE("Celestron CGX WiFi Telescope Driver - Defaults", "[celestron][cgx][telescope][tcp][unit]") {
     alpacacore::test::FakeTaskClock clock;

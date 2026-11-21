@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -51,6 +52,11 @@ namespace alpacacore::test {
 // Stop-completion delay, post-stop motion behind a done status, label-readback transients and post-rate-off encoder
 // drift are scripted fault hooks, not a simulation of the controller's deceleration or settling dynamics.
 // Per-read RA drift is a legacy Sync fault hook, not the elapsed-time model.
+// A GOTO minimum duration (set_goto_min_duration()) holds SLEW_DONE busy at the target, a stand-in for the
+// controller's deceleration and settle; a tracking rate (set_tracking_counts_per_second()) moves a tracking axis at a
+// fixed rate in the 0x06/0x07 direction, whatever rate the command asked for. A GOTO ends tracking on its axis: whether
+// the controller does so is not established (an assumption of the fake). Wire latency is the case's own hook
+// (set_before_request()); the fake answers at once.
 // A crawling home search never reports done and does not move the encoder; it is not the controller's fallback path.
 // A scripted home search (script_home_search()) drives fixed legs at constant rates and ends exactly at the physical
 // home, or drives its last leg forever (a switch never found); it has no acceleration, no limit sensor and no hard
@@ -117,6 +123,23 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         axes_[axis_index(axis)].velocity_counts_per_second = counts_per_second;
     }
+    // A tracking axis moves at this rate in advance_motion() (0: at the axis velocity, the older shape).
+    void set_tracking_counts_per_second(std::uint8_t axis, std::uint32_t counts_per_second) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].tracking_counts_per_second = counts_per_second;
+    }
+    // Each GOTO (0x02, 0x17) reads busy for at least this much advance_motion() time, at its target once there.
+    void set_goto_min_duration(std::chrono::milliseconds duration) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        goto_min_duration_ms_ = static_cast<std::uint64_t>(duration.count());
+    }
+    // Called on the fake's thread for each request to a motor before it is executed, with no fake lock held: a case
+    // advances its clocks there to model the round trip. Clear it (nullptr) before what it captures dies: the clear
+    // waits for a call in progress.
+    void set_before_request(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(before_request_mutex_);
+        before_request_ = std::move(hook);
+    }
     // One leg of a scripted home search at `counts_per_second`: `counts` encoder counts in `direction` (+1 or -1),
     // `counts` 0 driving forever; or, with `direction` 0, the shorter way to the physical home, where it ends.
     struct HomeLeg {
@@ -158,16 +181,19 @@ public:
                 continue;
             }
             if (!(axis.slewing || axis.tracking || axis.manual_motion)) continue;
-            const std::uint64_t numerator =
-                static_cast<std::uint64_t>(axis.velocity_counts_per_second) * milliseconds + axis.motion_remainder;
+            const std::uint32_t rate = axis.tracking && axis.tracking_counts_per_second != 0
+                                           ? axis.tracking_counts_per_second
+                                           : axis.velocity_counts_per_second;
+            const std::uint64_t numerator = static_cast<std::uint64_t>(rate) * milliseconds + axis.motion_remainder;
             const std::uint64_t budget = numerator / 1000;
             axis.motion_remainder = numerator % 1000;
             if (axis.slewing) {
+                axis.goto_busy_ms_left -= std::min(axis.goto_busy_ms_left, milliseconds);
                 const std::int32_t delta = signed_delta(axis.target, encoder_position(axis));
                 const std::uint64_t distance = static_cast<std::uint64_t>(std::abs(delta));
                 if (distance <= budget) {
                     axis.physical_position = (axis.physical_position + delta) & 0x00ffffffU;
-                    axis.slewing = false;
+                    axis.slewing = axis.goto_busy_ms_left > 0;
                     axis.motion_remainder = 0;
                 } else if (budget != 0) {
                     const auto step = static_cast<std::int32_t>(budget);
@@ -286,6 +312,8 @@ private:
         std::uint32_t encoder_offset = 0;
         std::uint32_t target = 0;
         std::uint32_t velocity_counts_per_second = 100000;
+        std::uint32_t tracking_counts_per_second = 0;
+        std::uint64_t goto_busy_ms_left = 0;
         std::uint64_t motion_remainder = 0;
         int motion_direction = 1;
         bool slewing = false;
@@ -455,6 +483,11 @@ private:
                                                     echo.size(), stop_));
             }
             send_unrelated_noise(request);
+            if (request.destination == 0x10 || request.destination == 0x11) {
+                std::lock_guard<std::mutex> lock(
+                    before_request_mutex_);  // held across the call: see set_before_request
+                if (before_request_) before_request_();
+            }
             const std::optional<AuxFrame> response = respond_to(request);
             if (!response) {
                 continue;
@@ -570,6 +603,7 @@ private:
                 if (request.payload.size() != 3) return std::nullopt;
                 axis.target = decode_u24(request.payload);
                 axis.slewing = !auto_complete_motions_.load();
+                axis.goto_busy_ms_left = goto_min_duration_ms_;
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
@@ -695,6 +729,9 @@ private:
     std::optional<std::pair<std::uint8_t, std::uint8_t>> fragment_filter_;
     std::array<AxisState, 2> axes_{};
     int ra_stop_drift_reads_ = 0;
+    std::uint64_t goto_min_duration_ms_ = 0;
+    std::mutex before_request_mutex_;  // not state_mutex_: the hook takes it (advance_motion)
+    std::function<void()> before_request_;
     std::array<std::pair<int, std::int32_t>, 2> post_stop_motion_{};
     std::array<std::vector<std::int32_t>, 2> label_read_offsets_;
     std::array<std::vector<std::uint8_t>, 2> motor_versions_{{{7, 18}, {7, 18}}};

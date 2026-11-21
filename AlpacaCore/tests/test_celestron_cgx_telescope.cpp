@@ -3310,6 +3310,193 @@ TEST_CASE("Celestron CGX USB Telescope Driver - elapsed arrival uses native slow
     }
 }
 
+namespace {
+
+// Slice 5 rig finding (2026-11-21, WiFi): the motors land each MC_GOTO_SLOW within ~0.5", but the mount stands
+// untracked from the moment a correction is aimed until the arrival check reads it, and the sky moves on at the
+// sidereal rate: 140-270 ms at ~21 ms an exchange, 2-4", so every GOTO used all three corrections and one failed at
+// 3.055". The rig here: each exchange costs `latency` on every clock (the task clock, the pointing UTC and the motors),
+// a GOTO reads busy 150 ms at its target (the rig's 2-3 SLEW_DONE polls per correction), a tracking RA axis follows
+// the sky and an untracked one stands still.
+constexpr std::uint32_t kSiderealCountsPerSecond = 195;  // 2^24 counts per sidereal day of 86164.09 s: 194.7
+
+struct LatencyArrivalRig {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    std::atomic<std::int64_t> epoch_milliseconds{1800000000000};
+    alpacacore::test::FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+
+    LatencyArrivalRig(std::chrono::milliseconds latency, double latitude) {
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        auto info = test_info();
+        info.port_path = mount.slave_path();
+        info.site_latitude_degrees = latitude;
+        const auto now = [this] {
+            return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_milliseconds.load())};
+        };
+        driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+        alpacacore::test::set_cgx_connected(*driver, clock, true);
+        driver->find_home();
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+        driver->set_tracking(true);
+        mount.set_auto_complete_motions(false);
+        for (const std::uint8_t axis : {0x10, 0x11}) mount.set_axis_velocity_counts_per_second(axis, 10000000);
+        mount.set_tracking_counts_per_second(0x10, kSiderealCountsPerSecond);
+        mount.set_goto_min_duration(std::chrono::milliseconds(150));
+        if (latency.count() > 0) mount.set_before_request([this, latency] { advance(latency); });
+    }
+
+    // The hook goes before the clock and the UTC it advances, which die before the mount whose thread runs it.
+    ~LatencyArrivalRig() { mount.set_before_request(nullptr); }
+
+    void advance(std::chrono::milliseconds elapsed) {
+        epoch_milliseconds.fetch_add(elapsed.count());
+        mount.advance_motion(elapsed);
+        clock.advance(elapsed);
+    }
+
+    bool slew_ended() const {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            return true;  // a failed slew ends too; the case reads the failure
+        }
+    }
+
+    // Starts a slew to `hour_angle`, lets the FAST leg take 1.2 s more (it lands ~18" behind the sky, so a correction
+    // follows), then steps the body 20 ms at a time until it ends.
+    void slew(double hour_angle, double declination) {
+        using namespace std::chrono_literals;
+        target_ra = std::fmod(driver->get_sidereal_time() - hour_angle + 48.0, 24.0);
+        target_dec = declination;
+        const int fast_before = mount.count_command(0x10, 0x02);
+        driver->slew_to_coordinates_async(target_ra, target_dec);
+        if (hour_angle < 0.0) {  // BeyondPole: the home route first
+            REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+            mount.complete_axis_home(0x10);
+            mount.complete_axis_home(0x11);
+        }
+        REQUIRE(alpacacore::test::step_cgx_motion(
+            clock, [this](std::chrono::milliseconds step) { advance(step); },
+            [&] { return mount.count_command(0x10, 0x02) > fast_before; }, 20ms));
+        REQUIRE(clock.wait_for_waiters(1, 2s));
+        advance(1200ms);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+        REQUIRE(alpacacore::test::step_cgx_motion(
+            clock, [this](std::chrono::milliseconds step) { advance(step); }, [this] { return slew_ended(); }, 20ms));
+    }
+
+    // The pointing error now, from a fresh encoder read: the served frame of the arrival check would hide how far the
+    // mount fell behind before tracking started.
+    double ra_error_arcseconds() {
+        alpacacore::vendor::celestron::poll_state_now_for_testing(*driver);
+        return std::abs(std::remainder(driver->get_right_ascension() - target_ra, 24.0)) * 15.0 * 3600.0;
+    }
+    double dec_error_arcseconds() const { return std::abs(driver->get_declination() - target_dec) * 3600.0; }
+
+    double target_ra = 0.0;
+    double target_dec = 0.0;
+};
+
+}  // namespace
+
+TEST_CASE("Celestron CGX USB Telescope Driver - GOTO arrival over 21 ms exchanges lands within 3 arcsec",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    // Both pier sides (hour angle +1 Normal, -1 BeyondPole through the home route), both hemispheres: a correction is
+    // aimed where the sky will be when it lands, so the lead must move the RA target along the tracking direction.
+    for (const double latitude : {45.0, -45.0}) {
+        for (const double hour_angle : {1.0, -1.0}) {
+            INFO("latitude=" << latitude << " hour_angle=" << hour_angle);
+            LatencyArrivalRig rig(21ms, latitude);
+            rig.slew(hour_angle, latitude > 0.0 ? 30.0 : -30.0);
+            std::string failure;
+            bool slewing = true;
+            try {
+                slewing = rig.driver->get_slewing();
+            } catch (const alpacacore::AlpacaException& error) {
+                failure = error.what();
+            }
+            CHECK(failure.empty());
+            if (!failure.empty()) continue;  // the other sides and hemispheres still run
+            CHECK_FALSE(slewing);
+            CHECK(rig.driver->get_tracking());
+            // The first correction has no measured lead and lands ~4.4" behind; the second leads by its duration.
+            CHECK(rig.mount.count_command(0x10, 0x17) <= 2);
+            rig.advance(500ms);  // tracking holds it
+            CHECK(rig.ra_error_arcseconds() <= 0.5);
+            CHECK(rig.dec_error_arcseconds() <= 3.0);
+        }
+    }
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - GOTO arrival with no exchange latency still converges",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(0ms, 45.0);
+    rig.slew(1.0, 30.0);
+    REQUIRE_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_tracking());
+    CHECK(rig.mount.count_command(0x10, 0x17) == 1);
+    CHECK(rig.ra_error_arcseconds() <= 3.0);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a refinement that fails turns tracking off before its stop",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(21ms, 45.0);
+    // Each RA read of a tracking axis jumps 300 counts (~23") back, away from where the sky goes: every check misses,
+    // and the third correction fails.
+    rig.mount.set_ra_tracking_drift_per_read((1U << 24) - 300);
+    rig.slew(1.0, 30.0);
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount.count_command(0x10, 0x17) == 3);
+    CHECK_FALSE(rig.driver->get_tracking());
+    // The last RA rate command before the failure stop is a zero rate: the mount is told to stop tracking, not left to
+    // a stop whose effect on tracking is not established.
+    const auto requests = rig.mount.requests();
+    const auto stop = std::find_if(requests.rbegin(), requests.rend(), [](const auto& request) {
+        return request.destination == 0x10 && request.command == 0x24;
+    });
+    REQUIRE(stop != requests.rend());
+    const auto rate = std::find_if(stop, requests.rend(), [](const auto& request) {
+        return request.destination == 0x10 && (request.command == 0x06 || request.command == 0x07);
+    });
+    REQUIRE(rate != requests.rend());
+    CHECK(rate->payload == std::vector<std::uint8_t>{0, 0, 0});
+    const auto ra = rig.mount.axis_position(0x10);
+    rig.mount.advance_motion(1000ms);
+    CHECK(rig.mount.axis_position(0x10) == ra);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - AbortSlew between corrections stops and restores tracking",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(21ms, 45.0);
+    rig.mount.set_ra_tracking_drift_per_read((1U << 24) - 300);  // 300 counts back a read: it never arrives
+    rig.target_ra = std::fmod(rig.driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    rig.driver->slew_to_coordinates_async(rig.target_ra, 30.0);
+    // The tracking a landed correction starts is on only inside the arrival stage, which holds motion_start_mutex_,
+    // so AbortSlew lands between stages: here while the second correction moves, with tracking off again.
+    REQUIRE(alpacacore::test::step_cgx_motion(
+        rig.clock, [&](std::chrono::milliseconds step) { rig.advance(step); },
+        [&] { return rig.mount.count_command(0x10, 0x17) == 2; }, 20ms));
+    CHECK_FALSE(rig.driver->get_tracking());
+    rig.driver->abort_slew();
+    REQUIRE(alpacacore::test::step_cgx_motion(
+        rig.clock, [&](std::chrono::milliseconds step) { rig.advance(step); }, [&] { return rig.slew_ended(); }, 20ms));
+    REQUIRE_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.mount.count_command(0x10, 0x17) == 2);
+    CHECK(rig.mount.count_command(0x10, 0x24) > 0);
+    CHECK(rig.mount.count_command(0x11, 0x24) > 0);
+    CHECK(rig.driver->get_tracking());  // AbortSlew owes the tracking the slew turned off, as before
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - stalled GOTO times out and stops both axes",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
