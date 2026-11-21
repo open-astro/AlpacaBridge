@@ -585,7 +585,12 @@ TEST_CASE("SynScan GOTO landing - the settle time follows the last landing move 
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         use_fast_guide_rate(*driver);
         driver->set_slew_settle_time(settle_seconds);
-        REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }));
+        // As in virtual_slew_duration(): the status poll's own wait on the clock must not count as the slew being
+        // parked, or each step taken while the slew is on the socket adds virtual time to what this case measures.
+        alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(10)));
+        const std::size_t parked = clock.waiter_count();  // the paused poll's period wait
+        REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }, parked + 1));
         const auto returned = clock.now();
         REQUIRE(st->goto_count.load() == 1);
         REQUIRE(st->nudge_count.load() >= 1);

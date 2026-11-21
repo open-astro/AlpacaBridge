@@ -107,6 +107,11 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                 std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: turns the zero search watchdog's 1 s status reads (until a search shows motion) off or on. Off, the
+/// watchdog waits only for the 120 s bound, so a case about client reads runs with no second reader. On by default.
+/// Set it before FindHome. A driver not from the factories is ignored.
+void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled);
+
 /// Test seam: `hook` runs on the clock-sync body after its start delay (it may block or throw).
 /// Set it before connecting. A driver not from the factories above is ignored.
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);

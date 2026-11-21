@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -264,6 +265,36 @@ TEST_CASE("Celestron MoveAxis - successful dispatch clears a stored slew error",
     CHECK(driver->get_slewing());
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2431: a MoveAxis supersedes a slew body without joining it. While that body still runs, its published
+// slewing_cached_ (false) must not hide the axis the MoveAxis set moving. The body is held right after its GOTO
+// exchange, before it publishes anything, so the order of the two checks in get_slewing() decides the read.
+TEST_CASE("Celestron MoveAxis - Slewing reads the moving axis while a superseded slew body still runs",
+          "[celestron][telescope][async][slewfailure]") {
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    std::atomic<bool> held{false};
+    std::promise<void> release;
+    std::shared_future<void> released = release.get_future().share();
+    alpacacore::vendor::celestron::set_slew_body_hook_for_testing(
+        *driver, [&held, released](const alpacacore::vendor::celestron::SlewBodyStopReason&) {
+            held.store(true);
+            (void)released.wait_for(std::chrono::seconds(5));  // bounded, so a regression fails instead of hanging
+        });
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    REQUIRE(wait_until([&] { return held.load(); }, 5000));
+
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.5));  // supersedes the held body without joining it
+    CHECK(driver->get_slewing());                // the moving axis, not the body's published false
+    release.set_value();
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+    alpacacore::vendor::celestron::set_slew_body_hook_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
 

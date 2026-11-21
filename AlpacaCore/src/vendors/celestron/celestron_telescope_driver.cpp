@@ -3425,12 +3425,17 @@ private:
         if (parking_) {
             return true;
         }
+        // A moving MoveAxis supersedes a slew body without joining it: while that body winds down, its
+        // slewing_cached_ (false) must not hide the axis that now moves (#2431).
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            return true;
+        }
         // The async body owns its completion polling; a getter serves its
         // published state instead of competing for a second wire read.
         if (slew_.running()) {
             return slewing_cached_;
         }
-        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || slew_hold_.active(clock_.now()) || homing_) {
+        if (slew_hold_.active(clock_.now()) || homing_) {
             return true;  // homing: the status poll checks for completion
         }
         return std::nullopt;
