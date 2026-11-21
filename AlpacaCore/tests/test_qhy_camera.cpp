@@ -3661,3 +3661,27 @@ TEST_CASE("QHY Camera Driver - StartExposure below ExposureMin runs at the minim
     driver->set_connected(false);
     CHECK(fake.params[alpacacore::vendor::qhy::control::EXPOSURE] == Catch::Approx(100.0));
 }
+
+// Issue #2259: the StartExposure floor is the ExposureMin the driver reports, also when the SDK range reads a
+// minimum of 0 or the EXPOSURE control is not listed (ExposureMin = 1 us). A floor at the raw range minimum wrote
+// 0 us for a 0 s bias frame on those cameras.
+TEST_CASE("QHY Camera Driver - StartExposure(0) never writes 0 us when the SDK range has no minimum",
+          "[qhy][camera][unit][fakesdk]") {
+    auto fake = make_fake();
+    fake.read_directly = true;
+    if (GENERATE(false, true)) {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].min = 0.0;
+    } else {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].available = false;
+        fake.controls_available.erase(alpacacore::vendor::qhy::control::EXPOSURE);
+    }
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_exposure_min() == Catch::Approx(0.000001));
+    driver->start_exposure(0.0, true);
+    driver->abort_exposure();  // joins the worker before the fake's params are read
+    driver->set_connected(false);
+    CHECK(fake.params[alpacacore::vendor::qhy::control::EXPOSURE] == Catch::Approx(1.0));
+}

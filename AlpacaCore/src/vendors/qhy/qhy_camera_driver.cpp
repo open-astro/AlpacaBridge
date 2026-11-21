@@ -861,12 +861,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_exposure_range_valid_locked();
-        const auto& range = exposure_range_;
-        if (!range.available) {
-            return 0.000001; // 1 µs default
-        }
-        double min_s = range.min / 1'000'000.0;
-        return min_s > 0.0 ? min_s : 0.000001;
+        return exposure_min_us_locked() / 1'000'000.0;
     }
 
     double get_exposure_resolution() const override {
@@ -1461,7 +1456,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             validate_exposure_locked(duration);
-            minimum_us = exposure_range_.available ? exposure_range_.min : 0.0;
+            minimum_us = exposure_min_us_locked();
         }
 
         // Reap the previous worker FIRST, before any other SDK call in this
@@ -2255,6 +2250,16 @@ private:
                 "set ReadoutMode again or reconnect",
                 AlpacaError::DriverException);
         }
+    }
+
+    // ExposureMin in microseconds, and the floor StartExposure writes (#2259): the SDK range minimum, or 1 us when
+    // the range is unavailable or reports 0 or less, so a 0 s bias frame never writes 0 us.
+    double exposure_min_us_locked() const {
+        constexpr double kDefaultMinimumUs = 1.0;
+        if (!exposure_range_.available || !(exposure_range_.min > 0.0)) {
+            return kDefaultMinimumUs;
+        }
+        return exposure_range_.min;
     }
 
     QHYControlRange read_exposure_range(const std::string& id) {
