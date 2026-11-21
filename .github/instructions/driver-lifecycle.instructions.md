@@ -106,7 +106,8 @@ vendor-agnostic; do them in the driver from the start.
   Identity, limits and capabilities (`Name`, `Max*`, `Can*`, names
   lists) are published at the end of connect (the `UniqueID` is the router's stored ID, decision 0018); `Connected` is lock-free. Lock order in
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
-  SDK-wrapper mutex. A camera's operations keep `mutex_` →
+  SDK-wrapper mutex; the base `TelescopeDriver` per-axis GuideRate setters take `guide_rate_axis_mutex_` before
+  all of these, and nothing else takes it (#2465). A camera's operations keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex, and a driver not yet converted is a
   `partial` row in the decision 0016 Adoption table; the `AsyncOperation`
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver

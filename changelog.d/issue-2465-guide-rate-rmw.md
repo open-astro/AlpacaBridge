@@ -1,0 +1,3 @@
+### Fixed
+
+- **Two GuideRate writes to different axes no longer lose one of them**, telescope base class, issue #2465. The base `TelescopeDriver` `GuideRateRightAscension` and `GuideRateDeclination` setters read the guide-rate pair, change one axis and write the pair back; two clients writing different axes at the same moment could both read the old pair, and the later write put the other axis back to its old value. The read and the write now run under one base-class lock, so each axis keeps its last written value. This covers every mount that uses the base setters (NexStar, iOptron, Bisque and Celestron CGX on this branch).
