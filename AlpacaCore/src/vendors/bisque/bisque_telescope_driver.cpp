@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -371,15 +372,23 @@ public:
     }
 
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view /*action_parameters*/) override {
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // FindHome is TheSkyX's own Find Home. On a Paramount that is a homing-sensor search, but the driver
+            // cannot tell which mount TheSkyX drives and no Paramount run has verified it, so it reports false.
+            if (!get_connected()) throw AlpacaException("Not connected to TheSkyX", AlpacaError::NotConnected);
+            const bool sensor_search = false;
+            return util::format_findhome_sensor_search(sensor_search, util::kFindHomeExternal, "");
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view /*action_name*/) const override {
-        return false;
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool /*raw*/) override {

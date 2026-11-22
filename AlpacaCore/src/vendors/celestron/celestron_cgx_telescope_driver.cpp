@@ -15,6 +15,7 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -177,9 +178,14 @@ public:
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
     bool get_connecting() const override { return connection_task_active(); }
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
     std::string action(std::string_view, std::string_view) override;
-    bool can_action(std::string_view) const override { return false; }
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
+    }
     std::string command_blind(std::string_view, bool) override;
     bool command_bool(std::string_view, bool) override;
     std::string command_string(std::string_view, bool) override;
@@ -1002,6 +1008,12 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
 }
 
 std::string CelestronCgxTelescopeDriver::action(std::string_view action_name, std::string_view) {
+    if (util::is_findhome_sensor_search_action(action_name)) {
+        // Connect refuses a CGX whose home switches do not answer on the AUX bus, and FindHome sends
+        // MC_LEVEL_START, which drives each axis to its switch: a real sensor search whenever connected.
+        require_connected();
+        return util::format_findhome_sensor_search(true, util::kFindHomeSwitchSearch, "");
+    }
     throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
 }
 std::string CelestronCgxTelescopeDriver::command_blind(std::string_view, bool) { not_implemented("CommandBlind"); }

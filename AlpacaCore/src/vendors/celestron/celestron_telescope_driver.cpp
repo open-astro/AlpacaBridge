@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
@@ -381,12 +382,29 @@ public:
 
     std::vector<std::string> get_supported_actions() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || link_lost() || !has_gps_) return {};
-        return {std::string(kGpsStatusAction)};
+        // Both actions are listed while connected; gps_status only with the GPS module found.
+        if (!connected_ || link_lost()) return {};
+        if (!has_gps_) return {std::string(util::kFindHomeSensorSearchAction)};
+        return {std::string(kGpsStatusAction), std::string(util::kFindHomeSensorSearchAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;  // gps_status takes none
+        (void)action_parameters;  // neither action takes any
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // From the model and bus probe at connect, no device I/O: FindHome sends MC_LEVEL_START, which drives
+            // each axis to its hardware home switch. That is a real sensor search only on the mounts with home
+            // switches (CGE Pro 13, CGX 23, CGX-L 24) whose two switch devices also answered the AUX bus probe; a
+            // probe answer alone is not enough, since a hand controller may answer for an absent device.
+            if (!get_connected()) {
+                throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            const bool switch_model = mount_model_id_ == 13 || mount_model_id_ == 23 || mount_model_id_ == 24;
+            const bool sensor_search = switch_model && has_ra_switch_ && has_dec_switch_;
+            return util::format_findhome_sensor_search(
+                sensor_search, sensor_search ? util::kFindHomeSwitchSearch : util::kFindHomeNoSensor,
+                mount_model_name_);
+        }
         if (!util::is_gps_status_action(action_name)) {
             throw AlpacaException("Action not supported: " + std::string(action_name),
                                   AlpacaError::ActionNotImplemented);
@@ -406,6 +424,7 @@ public:
     }
 
     bool can_action(std::string_view action_name) const override {
+        if (util::is_findhome_sensor_search_action(action_name)) return get_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_ && !link_lost() && has_gps_ && util::is_gps_status_action(action_name);
     }

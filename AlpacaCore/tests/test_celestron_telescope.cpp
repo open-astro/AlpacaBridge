@@ -842,7 +842,10 @@ struct SnapshotMount {
     std::atomic<bool> p_mute{false};      // the pier-side query goes unanswered
     std::atomic<int> p_count{0};          // pier-side queries received
     std::atomic<int> s_count{0};          // sync and time commands received
-    std::atomic<bool> gps_absent{false};  // no GPS module on the AUX bus: its version probe goes unanswered
+    std::atomic<bool> gps_absent{false};
+    std::atomic<bool> home_switches{false};  // the RA and Dec home switch devices (AUX 0x30, 0x31) answer the probe
+    std::atomic<int> model_id{24};           // the 'm' reply: CGX-L  //
+                                             // no GPS module on the AUX bus: its version probe goes unanswered
     std::atomic<bool> gps_linked{false};  // GPS_LINKED (0x37) answer
     std::atomic<int> gps_lat_raw{0};      // GPS_GET_LAT: 24-bit signed fraction of 360 degrees
     std::atomic<int> gps_long_raw{0};     // GPS_GET_LONG: the same encoding
@@ -857,8 +860,8 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
     if (st.mute.load()) return "";
     if (st.latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.latency_ms.load()));
     switch (chunk[0]) {
-        case 'm':  // CGX-L: German equatorial
-            return std::string(1, static_cast<char>(24)) + "#";
+        case 'm':  // CGX-L (24) by default: German equatorial
+            return std::string(1, static_cast<char>(st.model_id.load())) + "#";
         case 'V':
             return std::string("\x05\x23#", 3);
         case 'w':
@@ -939,6 +942,9 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
                 }
             }
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
+            if (op == 0xFE && (device == 0x30 || device == 0x31) && st.home_switches.load()) {
+                return std::string("\x01\x00#", 3);  // home switch devices (CGX, CGX-L, CGE Pro)
+            }
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x13) return st.slewing.load() ? std::string("\x00#", 2) : std::string("\xFF#");  // MC_SLEW_DONE
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
@@ -2663,7 +2669,7 @@ TEST_CASE("Celestron snapshot - gps_status reports the GPS module's link and rea
     auto driver = snapshot_driver(server, clock);
     REQUIRE(driver->get_connected());
 
-    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status", "findhomeissensorsearch"});
     CHECK(driver->can_action("gps_status"));
     CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
     CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
@@ -2728,10 +2734,40 @@ TEST_CASE("Celestron snapshot - gps_status is not listed on a mount without a GP
     auto driver = snapshot_driver(server, clock);
     REQUIRE(driver->get_connected());
 
-    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"findhomeissensorsearch"});
     CHECK_FALSE(driver->can_action("gps_status"));
     require_alpaca_error([&] { (void)driver->action("gps_status", ""); },
                          alpacacore::AlpacaError::ActionNotImplemented);
     driver->set_connected(false);
+}
+
+// FindHome sends MC_LEVEL_START, which drives each axis to its hardware home switch: a real sensor search only on a
+// home-switch model (CGE Pro, CGX, CGX-L) whose two switch devices answered the AUX bus probe at connect.
+TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model with its switches on the bus",
+          "[celestron][telescope][snapshot][findhome-sensor]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    // The fake answers every other AUX probe, so its switch devices always read present; model 20 is an AVX.
+    const auto [model, switches] = GENERATE(std::make_pair(24, true), std::make_pair(20, false));
+    st->model_id = model;
+    st->home_switches = switches;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    const std::string reply = driver->action("findhomeissensorsearch", "");
+    if (switches) {
+        CHECK(reply.rfind("{\"sensor_search\":true,\"method\":\"home_switch_search\",\"model\":\"", 0) == 0);
+    } else {
+        CHECK(reply.rfind("{\"sensor_search\":false,\"method\":\"no_home_sensor\",\"model\":\"", 0) == 0);
+    }
+    driver->set_connected(false);
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
 }
 #endif

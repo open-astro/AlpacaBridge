@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <functional>
@@ -454,5 +455,27 @@ TEST_CASE("SkyWatcher Telescope Driver - ApertureArea connected (#1869)", "[skyw
     // Falsified by: a zero diameter leaving the previous area in place.
     driver->set_aperture_diameter(0.0);
     CHECK(driver->get_aperture_area() == 0.0);
+    driver->set_connected(false);
+}
+
+// Ara trusts AtHome after FindHome only for a real sensor search: a board with the home index sensor on both axes
+// (the Wave, feature bit 0x04) runs AutoHome; any other board's FindHome is the count-frame goto.
+TEST_CASE("SkyWatcher Telescope Driver - findhomeissensorsearch follows the home index feature",
+          "[skywatcher][telescope][unit][findhome-sensor]") {
+    const bool wave = GENERATE(true, false);
+    FakeSkyWatcherMount mount(wave ? alpacacore::test::FakeMountProfile::wave_100i()
+                                   : alpacacore::test::FakeMountProfile::eqm35_pro());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -33.856784, 151.215297, 42.0);
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          (wave ? "{\"sensor_search\":true,\"method\":\"home_index_search\",\"model\":\"\"}"
+                : "{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"\"}"));
     driver->set_connected(false);
 }

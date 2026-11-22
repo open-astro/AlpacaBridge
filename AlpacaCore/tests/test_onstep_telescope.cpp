@@ -4303,3 +4303,20 @@ TEST_CASE("OnStep Telescope Driver - a stored motion failure does not outlive a 
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
+
+// OnStep's FindHome is :hC#, a slew to the stored home; the driver cannot see optional OnStepX home sensors.
+TEST_CASE("OnStep Telescope Driver - findhomeissensorsearch is false", "[onstep][telescope][unit][findhome-sensor]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"\"}");
+    driver->set_connected(false);
+}

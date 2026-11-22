@@ -2236,3 +2236,19 @@ TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session end
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
     rig.mount.ignore_aborts = 0;
 }
+
+// TheSkyX runs its own Find Home. A Paramount's is a homing-sensor search, but the driver cannot tell which mount
+// TheSkyX drives, so it reports false.
+TEST_CASE("Bisque Telescope Driver - findhomeissensorsearch is false", "[bisque][telescope][unit][findhome-sensor]") {
+    ConnectedFakeBisque rig;
+    auto& driver = rig.driver;
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":false,\"method\":\"external_find_home\",\"model\":\"\"}");
+    driver->set_connected(false);
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+}
