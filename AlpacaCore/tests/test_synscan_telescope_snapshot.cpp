@@ -1533,3 +1533,18 @@ TEST_CASE("SynScan Link - a Connect after a clean Disconnect sends no relink sto
     REQUIRE(driver.get_connected());
     CHECK_FALSE(relink_stops_first(rig.handset->received()));
 }
+
+TEST_CASE("SynScan Link - a Disconnect over a lost link keeps the relink stop for the next Connect",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.handset->unplug();
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    driver.set_connected(false);  // the client disconnects first
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    CHECK(relink_stops_first(rig.handset->received()));
+}

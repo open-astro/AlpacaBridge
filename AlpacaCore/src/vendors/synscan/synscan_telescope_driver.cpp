@@ -1781,6 +1781,7 @@ public:
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        // Once: initiator_mutex_ is held for the whole call, so no motion initiator can start before the `s`.
         refuse_while_moving_locked("SyncToCoordinates");
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
@@ -1791,7 +1792,6 @@ public:
             [this] {
                 check_connected();
                 check_not_parked_locked("SyncToCoordinates");
-                refuse_while_moving_locked("SyncToCoordinates");
                 return true;
             },
             [&] { protocol.sync_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_); });
@@ -2458,6 +2458,8 @@ private:
     // mutex) and held again on return or throw. A start the slot refuses fails closed: the axis just started is
     // stopped and MoveAxis throws.
     void start_motion_bound(std::unique_lock<std::mutex>& lock, int axis) {
+        // A previous body may be between clearing motion_bound_active_ and returning: start() supersedes it and does
+        // not refuse, so the new body is the one that watches.
         motion_bound_active_ = true;
         lock.unlock();
         try {
@@ -2546,7 +2548,7 @@ private:
                         clock_.now() < manual_axis_deadline_[axis]) {
                         return false;
                     }
-                    restore_mode = axis == 0 ? tracking_mode_cached_ : 0;
+                    restore_mode = axis == 0 && tracking_mode_valid_ ? tracking_mode_cached_ : 0;
                     return true;
                 },
                 [&] {

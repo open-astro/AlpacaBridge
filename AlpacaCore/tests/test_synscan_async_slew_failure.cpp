@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -107,7 +108,8 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
         st->requests.fetch_add(1);
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
+        if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R' || chunk[0] == 'W' ||
+            chunk[0] == 'H') {
             st->record(chunk);
         }
         if (chunk[0] == 'T' && st->reject_tracking.load()) return "";
@@ -1626,4 +1628,48 @@ TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and f
     }
     CHECK(rig.stops(kDecMotor) == kStopCommands);  // fails closed: the move just started is stopped
     CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// The second check of a site or UTCDate write runs at the write's own wire turn: a MoveAxis that set its flags while
+// the write waited for its turn (queued behind it) is refused against, and the write sends nothing.
+TEST_CASE("SynScan - a site or time write is refused at its wire turn by a MoveAxis queued meanwhile",
+          "[synscan][telescope][goto-safety]") {
+    const bool utc = GENERATE(false, true);
+    MoveAxisBoundRig rig;
+    std::promise<void> move_queued;
+    std::atomic<int> hook_calls{0};
+    std::atomic<bool> queued_in_time{false};  // set on the driver's thread; checked here (no REQUIRE off-thread)
+    std::thread mover;
+    struct ClearHook {
+        alpacacore::TelescopeDriver& driver;
+        std::thread& mover;
+        ~ClearHook() {
+            sc_bound::set_wire_turn_wait_hook_for_testing(driver, nullptr);
+            if (mover.joinable()) mover.join();
+        }
+    } clear_hook{*rig.driver, mover};
+    sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, [&] {
+        const int call = hook_calls.fetch_add(1);
+        if (call == 0) {
+            // The write's turn wait: start a MoveAxis, and wait until it waits for its own turn behind the write, its
+            // flags already set.
+            mover = std::thread([&] { (void)rig.driver->move_axis(0, 1.0); });
+            queued_in_time.store(move_queued.get_future().wait_for(std::chrono::seconds(5)) ==
+                                 std::future_status::ready);
+        } else if (call == 1) {
+            move_queued.set_value();
+        }
+    });
+    const auto writes = [&] { return rig.st->command_count('W') + rig.st->command_count('H'); };
+    const int before = writes();
+    if (utc) {
+        require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    } else {
+        require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+    mover.join();
+    CHECK(queued_in_time.load());
+    CHECK(writes() == before);
+    CHECK(rig.starts(kRaMotor) == 1);  // the MoveAxis went out after the refused write
 }
