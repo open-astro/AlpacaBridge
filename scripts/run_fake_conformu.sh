@@ -22,8 +22,11 @@
 # first line is "FAKE REPORT: ..." (see scripts/check_conformu_reports.py),
 # with its server.log, register.json and the raw ConformU log beside it.
 # Every row runs even after one fails; the script exits non-zero when any
-# ConformU run exits non-zero or its log does not show a clean pass. Run it on
-# arm64 only: the pinned ConformU is the linux-arm64 build.
+# full-profile row's ConformU run exits non-zero or its log does not show a
+# clean pass, or when a PR-profile telescope row fails check_pr_profile_run()
+# (that run exits 2 on its two expected configuration alerts, so its exit
+# status is logged, not used). Run it on arm64 only: the pinned ConformU is the
+# linux-arm64 build.
 set -euo pipefail
 
 usage="usage: run_fake_conformu.sh <fake_conformu_server> <conformu> <output-dir> [run-list]"
@@ -150,6 +153,7 @@ run_row() {
   if [ "$pr_run" -eq 1 ]; then
     # ConformU exits with its error + issue + configuration-alert count, and the two omitted tests are two alerts:
     # the results file, not the exit status, decides this run.
+    echo "ConformU exited with status $status (PR profile: the two omitted tests count as alerts)" >&2
     python3 - "$report" "$results" <<'PY'
 import sys
 sys.path.insert(0, "scripts")

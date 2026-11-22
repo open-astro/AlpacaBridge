@@ -113,7 +113,8 @@ on:
       - "AlpacaHTTP/include/alpacahttp/**"
       # The run script, the run list it walks and the roster that list is
       # pinned to (a roster change can change what runs), the report checker
-      # whose check_text() decides whether a run passes, the committed fake
+      # whose check_text() (or, for a PR-profile telescope row,
+      # check_pr_profile_run()) decides whether a run passes, the committed fake
       # report and this workflow.
       - "scripts/run_fake_conformu.sh"
       - "scripts/conformu_fake_runs.tsv"
@@ -359,12 +360,13 @@ jobs:
           ./conformu --version | tail -1
 
       - name: Run ConformU against the row's fake
-        # Fails when ConformU exits non-zero or its log lacks the clean-pass line
-        # or shows a response-time finding (the checker's own rules). On a pull
-        # request a telescope row runs the PR profile (issue #2568): no extended
-        # rate-offset or pulse-guide tests, passed by check_pr_profile_run(). The
-        # nightly and dispatched runs keep the full test, and only their reports
-        # are committed (check_text() refuses a PR-profile report).
+        # A full-profile row fails when ConformU exits non-zero or its log lacks
+        # the clean-pass line or shows a response-time finding (the checker's own
+        # rules). On a pull request a telescope row runs the PR profile (issue
+        # #2568): no extended rate-offset or pulse-guide tests, passed by
+        # check_pr_profile_run(). The nightly and dispatched runs keep the full
+        # test, and only their reports are committed (check_text() refuses a
+        # PR-profile report).
         env:
           ROW_KEY: ${{ matrix.row.key }}
           FAKE_CONFORMU_PROFILE: ${{ github.event_name == 'pull_request' && 'pr' || 'full' }}
