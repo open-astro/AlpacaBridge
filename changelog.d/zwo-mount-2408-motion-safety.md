@@ -4,7 +4,7 @@
   - A MoveAxis that is not renewed by a new MoveAxis within 60 s is stopped, and Slewing reports it.
   - AbortSlew checks that the mount stopped and sends the stop again, up to three times, then Slewing reports the failure.
   - A GOTO that comes to rest more than 600 arcsec from its target is reported as a failure instead of a landing.
-  - A GOTO start with no reply or an "N/A" reply, or a target write with no reply, is no longer taken as accepted: the driver stops the mount and the slew fails.
+  - A GOTO start with no reply or an "N/A" reply is no longer taken as accepted: the driver stops the mount and the slew fails. A target write with no reply fails the slew before the GOTO start is sent.
   - A GOTO the mount refuses as below the horizon (e5) is no longer sent again after a site and time re-push.
   - A reconnect after a link that dropped during a GOTO or a MoveAxis stops the mount before anything else.
 
