@@ -8,8 +8,9 @@
 # and the run script are generic: scripts/run_fake_conformu.sh walks every
 # `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
 # serial motor board since slice 2, five focusers since slice 3, three filter
-# wheels since slice 4, two cameras since slice 5, three rotators and the Gemini
-# Pro flat panel since slice 6; a row runs
+# wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
+# Pro flat panel and the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
+# switches since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -47,6 +48,8 @@ on:
       - "AlpacaCore/include/alpacacore/vendor/qhy/**"
       - "AlpacaCore/src/vendors/playerone/**"
       - "AlpacaCore/include/alpacacore/vendor/playerone/**"
+      - "AlpacaCore/src/vendors/touptek/**"
+      - "AlpacaCore/include/alpacacore/vendor/touptek/**"
       - "AlpacaCore/src/vendors/gemini/**"
       - "AlpacaCore/include/alpacacore/vendor/gemini/**"
       - "AlpacaCore/src/vendors/gphoto/**"
@@ -73,6 +76,10 @@ on:
       - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
       - "AlpacaCore/tests/fake_gemini_flatpanel.h"
+      - "AlpacaCore/tests/conformu_switch_factories.h"
+      - "AlpacaCore/tests/fake_ioptron_gpio.h"
+      - "AlpacaCore/tests/fake_gemini_pdh.h"
+      - "AlpacaCore/tests/fake_touptek_powerbox_sdk.h"
       - "AlpacaCore/tests/fake_iguider_v4l2.h"
       - "AlpacaCore/tests/locked_iguider_v4l2.h"
       - "AlpacaCore/tests/fake_gphoto_sdk.h"
@@ -91,6 +98,7 @@ on:
       - "AlpacaCore/include/alpacacore/camera_driver.h"
       - "AlpacaCore/include/alpacacore/rotator_driver.h"
       - "AlpacaCore/include/alpacacore/covercalibrator_driver.h"
+      - "AlpacaCore/include/alpacacore/switch_driver.h"
       - "AlpacaCore/include/alpacacore/alpaca_defs.h"
       - "AlpacaCore/include/alpacacore/alpaca_errors.h"
       - "AlpacaCore/include/alpacacore/alpacadriver.h"
@@ -172,12 +180,14 @@ jobs:
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
           # Vendors whose build requires libgpiod >= 2.0, which the runner's apt does not ship (iOptron's is optional).
           NEEDS_GPIOD = {"zwo"}
+          # The iMate and StellaVita switch rows build their power box only with libgpiod; the vendor's other rows do not.
+          NEEDS_GPIOD_SWITCH = {"ioptron", "touptek"}
           # Vendors that link the bundled libgphoto2 (scripts/build_bundled_gphoto.sh), never the distro's.
           NEEDS_GPHOTO = {"gphoto"}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
-                         "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini"}
+                         "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
@@ -253,7 +263,7 @@ jobs:
                       "options": " ".join("-DALPACACORE_ENABLE_%s=ON" % o
                                           for o in BUILT_BY.get(vendor, [vendor.upper()])),
                       "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
-                      "gpiod": vendor in NEEDS_GPIOD,
+                      "gpiod": vendor in NEEDS_GPIOD or (dtype == "switch" and vendor in NEEDS_GPIOD_SWITCH),
                       "gphoto": vendor in NEEDS_GPHOTO,
                   })
           print("rows=" + json.dumps(rows))
