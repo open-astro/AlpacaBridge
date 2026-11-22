@@ -225,16 +225,16 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     if (serial_fd_ >= 0 && registry_path == link_.key() && ::fstat(serial_fd_, &held) == 0 &&
         ::stat(port_path.c_str(), &current) == 0 && held.st_nlink != 0 && held.st_dev == current.st_dev &&
         held.st_ino == current.st_ino && held.st_rdev == current.st_rdev) {
-        if (desynchronized_) {
-            // Recover matching without an ownership gap. The failed exchange
-            // already advanced the session generation and invalidated references.
-            if (::tcflush(serial_fd_, TCIFLUSH) != 0) {
-                disconnect_locked();
-                throw_link_error(false, "cannot clear stale AUX input before recovery");
-            }
-            receive_buffer_.clear();
-            desynchronized_ = false;  // healthy_ stays false until a reply (decision 0009 rule 1)
+        // The held fd kept collecting bus traffic while logically disconnected (rig 2026-11-22: an hour of stale
+        // frames failed the first reply's checksum), so every reuse starts from clear input, as a fresh open does.
+        if (::tcflush(serial_fd_, TCIFLUSH) != 0) {
+            disconnect_locked();
+            throw_link_error(false, "cannot clear stale AUX input before reconnect");
         }
+        receive_buffer_.clear();
+        // Recovery after a desync keeps no ownership gap. The failed exchange already advanced the session
+        // generation and invalidated references; healthy_ stays false until a reply (decision 0009 rule 1).
+        desynchronized_ = false;
         return;
     }
     disconnect_locked();
