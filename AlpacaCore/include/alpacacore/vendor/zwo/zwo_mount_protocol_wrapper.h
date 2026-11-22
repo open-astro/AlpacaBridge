@@ -74,6 +74,9 @@ enum class MountMode {
     AltAzimuth
 };
 
+// The start of the error goto_target() throws when ":MS" gets no reply or "N/A" (#2408): the driver stops the mount.
+inline constexpr std::string_view kGotoNotConfirmed = "GOTO not confirmed";
+
 struct EquatorialCoordinates {
     double ra_hours = 0.0;
     double dec_degrees = 0.0;

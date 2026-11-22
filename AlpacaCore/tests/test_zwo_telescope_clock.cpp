@@ -264,7 +264,9 @@ TEST_CASE("ZWO telescope clock - SlewToCoordinates polls every 200 ms, then slee
     CHECK(elapsed <= 9800ms);  // plus the poll and 200 ms granularity
 }
 
-TEST_CASE("ZWO telescope clock - a synchronous slew that never settles times out at 15 minutes",
+// #2408 (#2396 AB-8): the poll loop's slew bound stops the GOTO at 15 minutes, and the synchronous wait reports that
+// stop.
+TEST_CASE("ZWO telescope clock - a synchronous slew that never settles is stopped at 15 minutes",
           "[zwo][telescope][unit][clock]") {
     Rig rig;
     rig.connect();
@@ -288,8 +290,9 @@ TEST_CASE("ZWO telescope clock - a synchronous slew that never settles times out
         FAIL("the synchronous slew returned instead of timing out");
     } catch (const AlpacaException& e) {
         CHECK(e.error_code() == AlpacaError::DriverException);
-        CHECK(std::string(e.what()).find("timed out") != std::string::npos);
+        CHECK(std::string(e.what()).find("did not end within 15 min; the driver stopped it") != std::string::npos);
     }
+    CHECK(rig.mount.count(":Q") == 1);
 }
 
 TEST_CASE("ZWO telescope clock - a GOTO refused as busy backs off 300 ms on the task clock",
