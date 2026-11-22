@@ -4129,11 +4129,12 @@ TEST_CASE("iOptron mount wrapper - a reply that arrives after its timeout is not
     REQUIRE(mount.ok());
     auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
     alpacacore::vendor::ioptron::ConnectionInfo info = loopback_endpoint(mount.port());
-    info.response_timeout_ms = 600;
+    info.response_timeout_ms = 1000;
     REQUIRE(protocol.connect(info));
 
-    // Past the 600 ms timeout and its 200 ms late-byte grace, inside the next command's 600 ms drain window.
-    mount.hold_next_reply(std::chrono::milliseconds(1000));
+    // Past the 1000 ms timeout and its 200 ms late-byte grace (1200 ms), inside the next command's 1000 ms drain
+    // window (until 2000 ms at the earliest): about 400 ms of slack each side.
+    mount.hold_next_reply(std::chrono::milliseconds(1600));
     CHECK_THROWS_AS((void)protocol.get_status(), alpacacore::AlpacaException);
     // The late :GLS# reply is drained, not read as this one.
     const auto pos = protocol.get_position();
@@ -4149,9 +4150,11 @@ TEST_CASE("iOptron mount wrapper - a position reply of the wrong shape is refuse
     auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
     REQUIRE(protocol.connect(loopback_endpoint(mount.port())));
     // A :GLS# reply (23 characters, site longitude first; its latitude field is low enough that the nine digits
-    // read as RA are in range), a bad pier digit, a non-digit and an RA of 360 degrees. Each fails one check only.
+    // read as RA are in range), a bad pier digit, a non-digit, an RA of 360 degrees and one digit too many. Each fails
+    // one check only.
     const auto reply = GENERATE(std::string("+1740000003600000000000#"), std::string("+0846720000000000091#"),
-                                std::string("+084672000000x000001#"), std::string("+0846720012960000001#"));
+                                std::string("+084672000000x000001#"), std::string("+0846720012960000001#"),
+                                std::string("+08467200000000000011#"));
     mount.set_position_reply(reply);
     CHECK_THROWS_AS((void)protocol.get_position(), alpacacore::AlpacaException);
     mount.set_position_reply("");
@@ -4198,4 +4201,21 @@ TEST_CASE("iOptron Telescope Driver - a Sync whose position read is not a positi
     mount.set_position_reply("");
     CHECK(sync_failure(*driver).empty());
     driver->set_connected(false);
+}
+
+// An extra reply already queued on the socket (a stray ack, or a late reply that came after the drain window) is
+// discarded before the next command is written, so that command still reads its own reply.
+TEST_CASE("iOptron mount wrapper - bytes already queued before a command are discarded over TCP",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    REQUIRE(protocol.connect(loopback_endpoint(mount.port())));
+    // One :GEP# answered with two position replies: the second stays queued.
+    mount.set_position_reply("+0000000000000000001#+0000000000000000001#");
+    CHECK_NOTHROW((void)protocol.get_position());
+    mount.set_position_reply("");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the second reply is on the socket
+    CHECK_NOTHROW((void)protocol.get_status());                   // reads its own :GLS# reply, not the queued :GEP# one
+    protocol.disconnect();
 }

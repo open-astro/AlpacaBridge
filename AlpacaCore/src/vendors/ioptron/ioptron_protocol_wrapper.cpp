@@ -1112,6 +1112,8 @@ public:
         }
 
         ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " (blind)");
+        // reply_overdue_ is left for the next send_command(): the ack drain below also discards a late reply that
+        // lands inside its window, and one that lands after it is drained before the next reply read.
 
         if (!write_data(full_command)) {
             fail_link_if_gone_locked(errno);
