@@ -512,6 +512,53 @@ TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor connects generi
     }
 }
 
+// CGX-L motors report model 0x18xx (INDI celestronaux.cpp formatModelString: "0x18xx : 'CGXL'"; the CGX is 0x1788) and
+// share the CGX's mechanics and 2^24-count axes, so both families drive; the CGX-L is not qualified on hardware.
+TEST_CASE("Celestron CGX USB Telescope Driver - CGX-L motors (model 0x18xx) connect as the CGX and may move",
+          "[celestron][cgx][telescope]") {
+    for (const std::vector<std::uint8_t>& model : {std::vector<std::uint8_t>{0x18, 0x00}, {0x18, 0x8a}}) {
+        INFO("model " << int(model[0]) << " " << int(model[1]));
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        mount.set_motor_identity(0x10, {7, 17, 0, 25}, model);
+        mount.set_motor_identity(0x11, {7, 17, 0, 25}, model);
+        auto config = test_info();
+        config.port_path = mount.slave_path();
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(driver->get_name() == "Celestron CGX/CGX-L");
+        driver->find_home();
+        CHECK(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+        CHECK_NOTHROW(driver->set_tracking(true));
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a mixed CGX/CGX-L pair or another family still refuses motion",
+          "[celestron][cgx][telescope]") {
+    using Model = std::vector<std::uint8_t>;
+    for (const auto& [ra, dec] : std::vector<std::pair<Model, Model>>{{{0x17, 0x88}, {0x18, 0x88}},
+                                                                     {{0x18, 0x88}, {0x17, 0x88}},
+                                                                     {{0x14, 0x85}, {0x14, 0x85}}}) {
+        INFO("RA " << int(ra[0]) << " " << int(ra[1]) << ", Dec " << int(dec[0]) << " " << int(dec[1]));
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_motor_identity(0x10, {7, 17, 0, 25}, ra);
+        mount.set_motor_identity(0x11, {7, 17, 0, 25}, dec);
+        auto config = test_info();
+        config.port_path = mount.slave_path();
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(driver->get_name() == "Celestron Telescope");
+        require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(mount.count_command(0x10, 0x0b) == 0);
+        driver->set_connected(false);
+    }
+}
+
 // #2204: a stop needs no axis scaling, so an unknown motor must still honour AbortSlew and Unpark.
 // Falsified by: celestron_cgx_telescope_driver.cpp start_stop_operation() calling require_known_motor_model().
 TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor still accepts AbortSlew and Unpark (#2204)",
