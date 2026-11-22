@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **NexStar blocking-slew reap case waits for the blocking slew's GOTO** (Celestron NexStar tests, issue #2518): "Celestron sync - a blocking slew reaps a prior async slew task" started stepping the fake clock as soon as the blocking slew's thread was created, so on a loaded runner the async slew body could land and restore tracking before the blocking slew claimed the mount, a legal order that wrote a second `T` and failed the count. The case now waits in real time until the blocking slew's own GOTO has reached the fake, which proves the claim came first, and keeps its one-`T` expectation.
