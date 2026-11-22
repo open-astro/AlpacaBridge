@@ -372,6 +372,34 @@ datagrams before each send so replies cannot get off-by-one.
   or when a newer command (MoveAxis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
   because that command owns the axes. Tests: `SkyWatcher async - a goto that fails after RA started
   stops the axes (#2407)` and its timeout and synchronous siblings.
+- **The rest of #2407's motion-safety rules** (#2396 AB-4, AB-7, AB-9; all fake-only, no Sky-Watcher hardware):
+  - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
+    failure stop, cancelled-body stop, Unpark stop or cap stop that did not reach the board, an AbortSlew check that ran out
+    of stops, or a failed disconnect stop (judged on the flags sampled before `cancel_async_tasks()`, since a
+    cancelled body clears them) sets `relink_stop_pending_`; a relink stop that fails sets it again, and a
+    disconnect whose two stops are acked clears it
+    (it survives `reset_runtime_state_locked()`), and the next connect stops every axis it finds running,
+    however short the outage. A GOTO-mode axis found running after a link loss is stopped too: it is never
+    tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
+    cannot attribute (tracking, most likely); a first connect with no loss stamp still stops nothing.
+  - *MoveAxis cap.* One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at most
+    (`enforce_move_axis_cap_locked()`, run by every status poll, so it adds no clock waiter); a new MoveAxis call on the axis restarts it. On expiry the axis gets `:L`,
+    RA's drive stays off (no tracking restore: the client that owned the jog is gone) and Slewing raises.
+  - *Non-convergence.* A landing still more than `kFarMissArcsec` (600") off after the three re-gotos is a
+    failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
+    keeps the old bound. The RA part is measured on the sky (times cos(dec)), so a good landing near the pole is
+    not a miss. Every re-goto runs `check_target_altitude_locked()` like the first leg.
+  - *Time base.* SiteLongitude is refused with InvalidOperation while a GoTo, Park, FindHome or MoveAxis runs
+    (`refuse_time_base_write_while_moving_locked()`): it sets the LST the slew aims by. Pulses and tracking do
+    not block it. UTCDate is not refused: [decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md)
+    rule 2 accepts every write on an undisciplined host.
+  - *Verified AbortSlew.* After the `:L` pair, `abort_verify_` reads both axes every 250 ms; an axis that
+    should be at rest (RA unless the abort restored tracking, Dec unless it restarted a DeclinationRate) and
+    still runs gets `:L` again, three stops in all within 3 s. Not verified by then, Slewing raises "the mount
+    still reports motion after 3 stops" and the next connect owes a stop. A newer motion command ends the check.
+  - Tests: the `[goto-safety]` cases in `test_skywatcher_async.cpp`, `test_skywatcher_async_slew_failure.cpp`
+    and `test_skywatcher_serial.cpp` (fake knobs `ignore_instant_stops()` and `reject_ramped_stops()`; the
+    owed-stop cases pause the status poll where its Slewing frame would also mark a driver motion).
 - **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
   (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
   (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:

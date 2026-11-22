@@ -49,4 +49,13 @@ constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
 // (nobody watching a live axis at all) has no other backstop.
 constexpr auto kClientSilenceStopInterval = std::chrono::seconds(30);
 
+// open-astro#2396 AB-9, #2407: the longest one MoveAxis call keeps an axis
+// running. A jog is a human or a client steering by eye; a minute at the
+// fastest rate is tens of degrees, and a client that wants more sends MoveAxis
+// again (each call restarts the cap). On expiry the driver stops the axis and
+// the next Slewing read raises the error. The client-silence stop above covers
+// a client that stops polling; this one covers a client that keeps polling
+// (or another client that does) while the one that started the jog is gone.
+constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
+
 }  // namespace alpacacore::util

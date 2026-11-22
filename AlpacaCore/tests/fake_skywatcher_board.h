@@ -421,6 +421,20 @@ public:
         ax(axis).reject_instant_stops = n;
     }
 
+    /// open-astro#2407: ack the next @p n instant stops (":L") on an axis and keep running, as a board that lost
+    /// the command after its reply would. stop_count() still counts them.
+    void ignore_instant_stops(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).ignore_instant_stops = n;
+    }
+
+    /// open-astro#2407: refuse the next @p n ramped stops (":K") on an axis with "!2", as the disconnect's
+    /// best-effort stop sees on a board that will not take it. Nothing is applied.
+    void reject_ramped_stops(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).reject_ramped_stops = n;
+    }
+
     /// The T1 step period the axis is actually running with (last APPLIED ":I").
     uint32_t step_period(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -530,6 +544,8 @@ protected:
         int ignore_start_relatches = 0;     // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
         int reject_starts = 0;              // ":J" to refuse with "!2" (test knob)
         int reject_instant_stops = 0;       // ":L" to refuse with "!2" (test knob)
+        int ignore_instant_stops = 0;       // ":L" to ack and not act on (test knob, open-astro#2407)
+        int reject_ramped_stops = 0;        // ":K" to refuse with "!2" (test knob, open-astro#2407)
         int64_t home_index_counts = kHome;
         // Set from the injected clock in the constructor.
         std::chrono::steady_clock::time_point last{};
@@ -803,6 +819,10 @@ public:
                 }
                 return "=";
             case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
+                if (a.reject_ramped_stops > 0) {
+                    --a.reject_ramped_stops;
+                    return "!2";
+                }
                 ++a.stop_count;
                 a.coasting = false;  // an explicit stop ends the landing coast
                 if (a.running && stop_ramp_ms_ > 0) {
@@ -823,6 +843,10 @@ public:
                     return "!2";
                 }
                 ++a.stop_count;
+                if (a.ignore_instant_stops > 0) {
+                    --a.ignore_instant_stops;
+                    return "=";  // acked, and the axis runs on
+                }
                 a.coasting = false;  // an explicit stop ends the landing coast
                 a.running = false;
                 a.stopping = false;
