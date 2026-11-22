@@ -12026,8 +12026,7 @@ int main() {
         // case: configureddevices reports ActiveClients and LastClientRequestAgeMs from the client registry (#1764)
         const ScopedCwd scratch;
         auto now = std::chrono::steady_clock::now();
-        alpacahttp::Router router;
-        router.set_client_clock_for_test([&now] { return now; });
+        alpacahttp::Router router({}, 0, [&now] { return now; });
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto stub = std::make_shared<ConnectStubDriver>(9764);
         EXPECT(registry.register_device(stub));
@@ -12071,8 +12070,7 @@ int main() {
         // case: the web UI's own device requests do not refresh client activity (#1764)
         const ScopedCwd scratch;
         auto now = std::chrono::steady_clock::now();
-        alpacahttp::Router router;
-        router.set_client_clock_for_test([&now] { return now; });
+        alpacahttp::Router router({}, 0, [&now] { return now; });
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto stub = std::make_shared<ConnectStubDriver>(9765);
         EXPECT(registry.register_device(stub));
@@ -12202,9 +12200,8 @@ int main() {
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto stub = std::make_shared<ConnectStubDriver>(9293);
         EXPECT(registry.register_device(stub));
-        alpacahttp::Router router;
         auto now = std::chrono::steady_clock::now();
-        router.set_client_clock_for_test([&now] { return now; });
+        alpacahttp::Router router({}, 0, [&now] { return now; });
         const std::string base = "/api/v1/covercalibrator/9293";
         for (int id = 1; id <= 256; ++id) {
             put_connected(router, base, std::to_string(id), true);

@@ -103,7 +103,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   worth a structural fix here: closing it means every driver exposing one
   atomic "get state" call instead of two, a bigger change than this PR's
   scope. Left as a known risk rather than solved.
-- **`Connected` is per-client, refcounted in the router — never wire an
+- **`Connected` is per-client, refcounted by the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
   guider on the same mount), so the router keeps a per-device registry of
@@ -112,8 +112,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `getpeername`, so ClientID-less clients on different hosts get distinct
   anonymous slots; the length prefix keeps a client-supplied ClientID from
   forging a collision with another (address, ClientID) pair, and an empty
-  address degrades to ClientID-only) via `Router::register_client_connection` and
-  friends: first client in powers the upstream link, `PUT connected=false`
+  address degrades to ClientID-only; `ClientConnectionLedger::client_key`) in
+  `ClientConnectionLedger` (`src/http/client_connection_ledger.h`, issue #2521,
+  tested alone in `test_client_connection_ledger.cpp`): first client in powers the upstream link, `PUT connected=false`
   (and Platform 7 `disconnect`) only tears it down when the LAST registered
   client leaves, and `GET connected` answers the *caller's* registration
   AND-ed with device state (ClientID-less requests read raw device state on
@@ -125,14 +126,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   device connected; device removal clears the registry entry (the map is
   keyed by driver pointer — a later driver at a recycled address must not
   inherit registrations). A per-device connection-op mutex
-  (`device_connection_op_mutex`) serializes the whole decision + driver call
+  (`ClientConnectionLedger::op_mutex`) serializes the whole decision + driver call
   so a client connecting during another client's last-out teardown can't
   register against a link about to drop; it is held across the blocking
   connect/disconnect waits (same-device ops queue) while the registry mutex
-  itself still never spans driver calls — and `clear_client_connections`
+  itself still never spans driver calls — and `ClientConnectionLedger::clear`
   must never erase the op-mutex entry (it runs under the op mutex; erasing
   would let a concurrent op mint a fresh mutex and bypass serialization) —
-  op-mutex entries are reaped only by `purge_device_connection_state`,
+  op-mutex entries are reaped only by `ClientConnectionLedger::purge`,
   called in `handle_remove_device` AFTER the op lock is released and the
   device is out of the DeviceRegistry (issue #162); `device_is_current`
   guards every map insertion so a straggler request that fetched the device
@@ -144,7 +145,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   The same registry feeds the web UI's activity dot (issue #1764):
   `configureddevices` reports per device `ActiveClients` (registrations
   refreshed inside the 10 minute window) and `LastClientRequestAgeMs` (age
-  of the newest, absent when none) from `Router::client_activity`, which reads
+  of the newest, absent when none) from `ClientConnectionLedger::activity`, which reads
   the map only and never calls the driver. A device request carrying
   `X-AlpacaBridge-Client: web-ui` (the web UI's own, `WEB_UI_CLIENT_HEADER` in
   `web/format.js`) skips the per-request refresh in `handle_device`; a
@@ -153,7 +154,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   action). The header is the web UI's alone: an Alpaca client that copies it
   stops refreshing its own registration, which then expires after 10 minutes.
   The registry clock is
-  injectable (`set_client_clock_for_test`); the 10 minute window is unchanged.
+  injectable (the ledger takes it at construction; a router test passes it as
+  `Router`'s third constructor argument); the 10 minute window is unchanged.
 - **Connections are persistent (HTTP keep-alive) — never emit
   `Connection: close` on a normal response** (2026-09-07). `Response::to_string()`
   defaulted to `Connection: close`, and `Server::handle_connection` served one

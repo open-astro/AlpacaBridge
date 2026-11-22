@@ -274,6 +274,7 @@ set(ALPACAHTTP_SOURCES
     src/http/routes/safetymonitor_routes.cpp
     src/http/routes/switch_routes.cpp
     src/http/routes/telescope_routes.cpp
+    src/http/client_connection_ledger.cpp
     src/http/device_call.cpp
     src/http/persisted_config_store.cpp
     src/http/image_payload.cpp
@@ -509,6 +510,14 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_persisted_config_store alpacahttp)
     target_include_directories(test_persisted_config_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test_persisted_config_store COMMAND test_persisted_config_store)
+
+    # open-astro#2521: the per-client Connected bookkeeping on its own, over a
+    # test clock (src/http/client_connection_ledger.h is an internal seam,
+    # hence src/ on the include path): no Router, no devices.
+    add_executable(test_client_connection_ledger tests/test_client_connection_ledger.cpp)
+    target_link_libraries(test_client_connection_ledger alpacahttp)
+    target_include_directories(test_client_connection_ledger PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_client_connection_ledger COMMAND test_client_connection_ledger)
     
     # Socket-level tests for the Server request-read path (read_request), which
     # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).

@@ -61,6 +61,7 @@ namespace alpacahttp {
 
 class DeviceCall;  // src/http/device_call.h: one Device API call, built per request
 class PersistedConfigStore;  // src/http/persisted_config_store.h: config/registered_devices.json
+class ClientConnectionLedger;  // src/http/client_connection_ledger.h: per-client Connected bookkeeping
 
 struct RouteMatch {
     std::string device_type;
@@ -93,6 +94,11 @@ public:
     // devices load, so a proxied device configured on this server is refused
     // there too (decision 0023 rule 4). The Server passes its configured port.
     Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port);
+    // As above, with the clock that stamps and ages the per-client Connected
+    // registrations (issue #1764; steady_clock::now() when empty). Only tests
+    // pass one; the clock must outlive the Router.
+    using ClientClock = std::function<std::chrono::steady_clock::time_point()>;
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port, ClientClock client_clock);
 
     // The catalog register_device_from_config() and sanitize_device_config()
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
@@ -272,14 +278,6 @@ public:
     std::size_t delayed_thread_count_for_test() {
         std::lock_guard<std::mutex> lock(delayed_mutex_);
         return delayed_threads_.size();
-    }
-
-    // Test seam (issue #1764): the clock that stamps and ages the per-client
-    // Connected registrations, steady_clock::now() by default. A test sets it
-    // before routing any request; the clock must outlive the Router.
-    void set_client_clock_for_test(std::function<std::chrono::steady_clock::time_point()> clock) {
-        std::lock_guard<std::mutex> lock(client_connections_mutex_);
-        client_clock_ = std::move(clock);
     }
 
     // Route request and generate response
@@ -476,38 +474,6 @@ private:
     Response dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
                                            const std::string& method_name, const DeviceCall& call);
 
-    // Per-client Connected tracking (issue #160). Alpaca allows several
-    // clients to share one device (imaging app + guider on the same mount);
-    // the upstream link must only be torn down when the LAST client
-    // disconnects. Keyed by driver instance; the inner map records each
-    // ClientID's last-seen time so registrations from vanished clients can
-    // expire instead of pinning the device connected forever.
-    // nullopt when the device already holds kMaxClientsPerDevice other clients (#2292).
-    std::optional<std::size_t> register_client_connection(const void* device, const std::string& client_key);
-    std::size_t unregister_client_connection(const void* device, const std::string& client_key);
-    bool client_connection_registered(const void* device, const std::string& client_key);
-    void touch_client_connection(const void* device, const std::string& client_key);
-    void clear_client_connections(const void* device);
-    // Issue #1764: what configureddevices reports per device from the registry
-    // above, never from the driver. `active_clients` counts registrations
-    // refreshed inside the stale window; `last_request_age` is the age of the
-    // newest of them, empty when there is none.
-    struct ClientActivity {
-        std::size_t active_clients = 0;
-        std::optional<std::chrono::milliseconds> last_request_age;
-    };
-    ClientActivity client_activity(const void* device) const;
-    // Erase BOTH maps' entries for a removed device (issue #162). Never call
-    // while the device's op mutex is held — see clear_client_connections.
-    void purge_device_connection_state(const void* device);
-
-    // Serializes the connect/disconnect DECISION + driver call per device so
-    // a client connecting during another client's last-out teardown can't
-    // register against a link that is about to drop (review of #160). Held
-    // across the blocking connect/disconnect waits — same-device connection
-    // ops queue; everything else (other devices, GETs) is unaffected.
-    std::shared_ptr<std::mutex> device_connection_op_mutex(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
-
     void add_clock_fields(nlohmann::json& desc) const;
     void warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const;
 
@@ -527,15 +493,8 @@ private:
     // nothing would ever reap them (PR #164 review of issue #162).
     static bool device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
-    // Guards client_connections_ only; never held across driver calls.
-    mutable std::mutex client_connections_mutex_;
-    std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
-        client_connections_;
-    std::unordered_map<const void*, std::shared_ptr<std::mutex>> connection_op_mutexes_;
-    // Read and set under client_connections_mutex_ (set_client_clock_for_test).
-    std::function<std::chrono::steady_clock::time_point()> client_clock_ = [] {
-        return std::chrono::steady_clock::now();
-    };
+    // Per-client Connected bookkeeping (issues #160, #2521); src/http/client_connection_ledger.h.
+    std::unique_ptr<ClientConnectionLedger> client_ledger_;
 
     // config/registered_devices.json (issue #2481); src/http/persisted_config_store.h.
     std::unique_ptr<PersistedConfigStore> persisted_store_;
