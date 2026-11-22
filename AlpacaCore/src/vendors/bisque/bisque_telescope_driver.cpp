@@ -352,7 +352,7 @@ public:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("Bisque", std::string("Disconnect: stopping MoveAxis failed: ") + e.what());
                     std::lock_guard<std::mutex> relock(mutex_);
-                    relink_stop_pending_ = true;
+                    relink_move_stop_pending_ = true;
                 }
             }
             // State is cleared first; the close then takes the wrapper's lock with mutex_ free, so an exchange in
@@ -1765,11 +1765,14 @@ private:
     // Every motion command and every connect clears a stored motion failure (Slewing raises it until then).
     void begin_motion_command_locked() { motion_error_.clear(); }
 
-    // A session that ends on a lost link while the driver had a slew or a MoveAxis running leaves a stop for the
-    // next connect to send first. Under mutex_.
+    // A session that ends on a lost link while the driver had a slew or a MoveAxis running leaves the matching stop
+    // for the next connect to send first: Abort() for a slew, DoCommand(10) for a MoveAxis. Under mutex_.
     void note_relink_stop_if_moving_locked() {
-        if (slewing_cached_ || manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
-            relink_stop_pending_ = true;
+        if (slewing_cached_) {
+            relink_abort_pending_ = true;
+        }
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            relink_move_stop_pending_ = true;
         }
     }
 
@@ -1777,15 +1780,20 @@ private:
     // A stop that fails fails the connect, and the record stays for the next one.
     void send_relink_stop_if_pending(std::unique_lock<std::mutex>& lock) {
         lock.lock();
-        const bool pending = relink_stop_pending_;
+        const bool abort_pending = relink_abort_pending_;
+        const bool move_stop_pending = relink_move_stop_pending_;
         lock.unlock();
-        if (!pending) {
+        if (!abort_pending && !move_stop_pending) {
             return;
         }
         auto& protocol = BisqueProtocolWrapper::instance();
         try {
-            protocol.abort();
-            protocol.stop_open_loop_motion();
+            if (abort_pending) {
+                protocol.abort();
+            }
+            if (move_stop_pending) {
+                protocol.stop_open_loop_motion();
+            }
         } catch (const std::exception& e) {
             protocol.disconnect();
             throw AlpacaException(
@@ -1795,7 +1803,8 @@ private:
                 AlpacaError::DriverException);
         }
         lock.lock();
-        relink_stop_pending_ = false;
+        relink_abort_pending_ = false;
+        relink_move_stop_pending_ = false;
         lock.unlock();
         ALPACA_LOG_INFO("Bisque", "Connect: stopped the motion a lost link left running");
     }
@@ -1968,11 +1977,14 @@ private:
                 if (!axis_over[axis]) {
                     continue;
                 }
-                if (failure.empty()) {
-                    manual_axis_slewing_[axis] = false;
-                } else {
+                if (!failure.empty()) {
                     manual_axis_deadline_[axis] = now + kFailedStopRetry;
                 }
+            }
+            if (failure.empty()) {
+                // DoCommand(10) stops open loop motion on both axes, so neither still moves.
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
             }
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
             const std::string axes = axis_over[0] && axis_over[1] ? "axes 0 and 1" : axis_over[0] ? "axis 0" : "axis 1";
@@ -2060,12 +2072,13 @@ private:
     mutable bool manual_axis_slewing_[2] = {false, false};
     // #2410, under mutex_: when an async slew or a MoveAxis is stopped (enforce_motion_bounds()), the failure
     // Slewing raises until the next motion command or a connect, and the stop a lost link leaves for the next
-    // connect. relink_stop_pending_ survives a disconnect and a connect that fails.
+    // connect. The relink records survive a disconnect and a connect that fails.
     util::TaskClock::clock::time_point slew_deadline_ = util::TaskClock::clock::time_point::max();
     util::TaskClock::clock::time_point manual_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
                                                                    util::TaskClock::clock::time_point::max()};
     std::string motion_error_;
-    bool relink_stop_pending_ = false;
+    bool relink_abort_pending_ = false;
+    bool relink_move_stop_pending_ = false;
     mutable bool pulse_guiding_ = false;
     std::string pulse_guide_error_;
     uint64_t pulse_request_ = 0;

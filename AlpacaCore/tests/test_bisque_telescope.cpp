@@ -1957,10 +1957,9 @@ TEST_CASE("Bisque link loss - a MoveAxis the lost link left running is stopped f
     REQUIRE_NOTHROW(rig.driver->set_connected(true));
     pause_poll(*rig.driver);
     const auto since = ledger_since(rig.mount, before);
-    REQUIRE(since.size() >= 3);
-    CHECK(since[0] == "Abort");
-    CHECK(since[1] == "MoveStop");
-    CHECK(since[2] == "IsParked");
+    REQUIRE(since.size() >= 2);
+    CHECK(since[0] == "MoveStop");  // a MoveAxis only: no Abort()
+    CHECK(since[1] == "IsParked");
 }
 
 TEST_CASE("Bisque link loss - the stop is kept across the client's disconnect of the lost link",
@@ -1973,9 +1972,8 @@ TEST_CASE("Bisque link loss - the stop is kept across the client's disconnect of
     REQUIRE_NOTHROW(rig.driver->set_connected(true));
     pause_poll(*rig.driver);
     const auto since = ledger_since(rig.mount, before);
-    REQUIRE(since.size() >= 2);
-    CHECK(since[0] == "Abort");
-    CHECK(since[1] == "MoveStop");
+    REQUIRE_FALSE(since.empty());
+    CHECK(since[0] == "MoveStop");
     // Sent once: the connect after that one sends no stop.
     REQUIRE_NOTHROW(rig.driver->set_connected(false));
     const auto again = rig.mount.ledger().size();
@@ -2033,8 +2031,8 @@ TEST_CASE("Bisque link loss - a connect whose stop fails fails, and the next con
     pause_poll(*rig.driver);
     const auto since = ledger_since(rig.mount, before);
     REQUIRE(since.size() >= 2);
-    CHECK(since[0] == "Abort");
-    CHECK(since[1] == "MoveStop");
+    CHECK(since[0] == "MoveStop");
+    CHECK(since[1] == "IsParked");
 }
 
 TEST_CASE("Bisque disconnect - a MoveAxis stop that fails is sent by the next connect",
@@ -2049,8 +2047,8 @@ TEST_CASE("Bisque disconnect - a MoveAxis stop that fails is sent by the next co
     pause_poll(*rig.driver);
     const auto since = ledger_since(rig.mount, before);
     REQUIRE(since.size() >= 2);
-    CHECK(since[0] == "Abort");
-    CHECK(since[1] == "MoveStop");
+    CHECK(since[0] == "MoveStop");
+    CHECK(since[1] == "IsParked");
 }
 
 TEST_CASE("Bisque motion safety - a stop that fails is named in the failure, and Slewing raises it",
@@ -2108,4 +2106,44 @@ TEST_CASE("Bisque AbortSlew - a stop it cannot verify fails, and Slewing raises 
     require_alpaca_error([&] { rig.driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
     CHECK(contains(slewing_failure(*rig.driver), "the stop could not be verified"));
     rig.mount.ignore_aborts = 0;
+}
+
+TEST_CASE("Bisque link loss - a slew the lost link left running gets Abort() first from the reconnect",
+          "[bisque][telescope][goto-safety][taskclock][link-lost]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    lose_link(rig);
+    const auto before = rig.mount.ledger().size();
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    const auto since = ledger_since(rig.mount, before);
+    REQUIRE(since.size() >= 2);
+    CHECK(since[0] == "Abort");  // a slew only: no DoCommand(10)
+    CHECK(since[1] == "IsParked");
+}
+
+TEST_CASE("Bisque AbortSlew - a running MoveAxis is stopped too", "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK(rig.mount.move_stops.load() == 1);
+    CHECK_FALSE(rig.driver->get_slewing());
+    // With nothing moving, AbortSlew sends Abort() alone.
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK(rig.mount.move_stops.load() == 1);
+}
+
+TEST_CASE("Bisque MoveAxis - a cap stop on one axis clears both, since DoCommand(10) stops both",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.clock.advance(std::chrono::seconds(30));
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.5));
+    rig.clock.advance(std::chrono::seconds(31));
+    poll_now(*rig.driver);  // axis 0 is past its cap
+    CHECK(rig.mount.move_stops.load() == 1);
+    rig.clock.advance(std::chrono::seconds(30));
+    poll_now(*rig.driver);  // axis 1's cap would have passed: no second stop
+    CHECK(rig.mount.move_stops.load() == 1);
 }
