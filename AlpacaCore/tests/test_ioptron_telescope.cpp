@@ -1712,6 +1712,61 @@ TEST_CASE("iOptron Link - a reconnect over a lost link stops the motion that was
     driver->set_connected(false);
 }
 
+// Issue #2396 (AB-9): the GOTO branch of the relink stop. An async GOTO still slewing when the link was lost is
+// stopped by the reconnect's first command, :Q#, as a MoveAxis is.
+TEST_CASE("iOptron Link - a reconnect over a lost link stops the GOTO that was running",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+    REQUIRE(mount.count(":Q#") == 0);
+
+    mount.set_fail_reads(false);
+    const auto sent = mount.commands().size();
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto log = mount.commands();
+    REQUIRE(log.size() > sent);
+    CHECK(log[sent] == ":Q#");
+    driver->set_connected(false);
+}
+
+// #2257, AGENTS.md: InvalidValue precedes the connection check, so a disconnected driver refuses an out-of-range
+// guide rate on every setter path with InvalidValue, not NotConnected.
+TEST_CASE("iOptron Telescope Driver - a disconnected driver refuses an out-of-range guide rate with InvalidValue",
+          "[ioptron][telescope][unit][guide-rate]") {
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(1));
+    REQUIRE_FALSE(driver->get_connected());
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    require_alpaca_error([&]() { driver->set_guide_rate({0.95 * kSidereal, 0.5 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.5 * kSidereal, 0.05 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.95 * kSidereal); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(0.05 * kSidereal); },
+                         alpacacore::AlpacaError::InvalidValue);
+    // In range, the connection check answers.
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.5 * kSidereal); },
+                         alpacacore::AlpacaError::NotConnected);
+}
+
 // #627: the NaN path of iOptron's site latitude and longitude setters, over a
 // connected driver. The disconnected range case is in Target Range Validation.
 TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",

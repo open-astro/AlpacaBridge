@@ -1003,16 +1003,26 @@ public:
         return cached_guide_rate_;
     }
 
-    // #2257: the static check (finite, > 0) runs before the connection check.
-    static void validate_guide_rate_value(double value) {
+    // #2257: the static checks (finite, > 0, inside the mount's range) run before the connection check, and out
+    // of range is refused, never clamped. The range is 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate;
+    // kEps absorbs rounding at a bound, which set_guide_rate_locked() then clamps inside it.
+    static void validate_guide_rate_value(double value, bool ra_axis) {
         if (!std::isfinite(value) || value <= 0.0) {
             throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
+        }
+        constexpr double kEps = 1e-9;
+        const double fraction = value / kSiderealRateDegPerSec;
+        const double low = ra_axis ? 0.01 : 0.10;
+        const double high = ra_axis ? 0.90 : 0.99;
+        if (fraction < low - kEps || fraction > high + kEps) {
+            throw AlpacaException("GuideRate must be 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate",
+                                  AlpacaError::InvalidValue);
         }
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        validate_guide_rate_value(rate.ra);
-        validate_guide_rate_value(rate.dec);
+        validate_guide_rate_value(rate.ra, true);
+        validate_guide_rate_value(rate.dec, false);
         StateLock lock(lock_gate_);
         check_connected();
         set_guide_rate_locked(rate);
@@ -1025,7 +1035,7 @@ public:
     void set_guide_rate_declination(double value) override { set_one_guide_rate_axis(false, value); }
 
     void set_one_guide_rate_axis(bool ra_axis, double value) {
-        validate_guide_rate_value(value);
+        validate_guide_rate_value(value, ra_axis);
         StateLock lock(lock_gate_);
         check_connected();
         if (!guide_rate_valid_) read_guide_rate_locked();
@@ -1039,17 +1049,11 @@ public:
     }
 
     void set_guide_rate_locked(const GuideRate& rate) {
-        // Out of range is refused, never clamped (#2257); the clamp below only absorbs rounding inside kEps of a
-        // bound, because the protocol wrapper refuses a fraction past its bounds.
+        // validate_guide_rate_value() refused out of range (#2257); the clamp below only absorbs rounding inside
+        // its kEps of a bound, because the protocol wrapper refuses a fraction past its bounds.
         const Wire protocol = wire();
         double ra_fraction = rate.ra / kSiderealRateDegPerSec;
         double dec_fraction = rate.dec / kSiderealRateDegPerSec;
-        constexpr double kEps = 1e-9;
-        if (ra_fraction < 0.01 - kEps || ra_fraction > 0.90 + kEps || dec_fraction < 0.10 - kEps ||
-            dec_fraction > 0.99 + kEps) {
-            throw AlpacaException("GuideRate must be 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate",
-                                  AlpacaError::InvalidValue);
-        }
         ra_fraction = std::clamp(ra_fraction, 0.01, 0.90);
         dec_fraction = std::clamp(dec_fraction, 0.10, 0.99);
         protocol.set_guide_rates(ra_fraction, dec_fraction);
@@ -2702,7 +2706,13 @@ private:
                 if (async_ctx->stop_reason() == util::StopReason::None) {
                     last_slew_error_ = failure;
                 }
-                ALPACA_LOG_WARN("iOptron", failure);
+                // Decision 0007 rule 9: a refusal answers the client's own target, so it is INFO; a missing or
+                // unknown reply comes from the link and stays WARN.
+                if (reply == GotoReply::Refused) {
+                    ALPACA_LOG_INFO("iOptron", failure);
+                } else {
+                    ALPACA_LOG_WARN("iOptron", failure);
+                }
                 return;
             }
             if (reply == GotoReply::Refused) {
@@ -2766,11 +2776,30 @@ private:
         dispatch_slew_command_locked(ra, dec, nullptr, "SlewToCoordinates");
     }
 
+    // Issue #2396: a synchronous GOTO that fails after its dispatch (the 300 s bound, a far miss, failed position
+    // reads) ends the slew state, hold included, and sends :Q# (best effort), as an unconfirmed GOTO does, so a
+    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error.
+    [[noreturn]] void fail_synchronous_slew(std::string failure) {
+        StateLock lock(lock_gate_);
+        slew_in_progress_ = false;
+        clear_slew_hold_locked();
+        try {
+            wire().stop_slewing();
+            failure += "; the mount was sent a stop";
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", "Stop after a failed synchronous slew failed: " + std::string(e.what()));
+            failure += "; the stop could not be sent, so the mount may still be moving";
+        }
+        status_cache_valid_ = false;
+        position_cache_valid_ = false;
+        throw AlpacaException(failure);
+    }
+
     void wait_for_slew_completion(const char* label) {
         const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
             if (clock_.now() > deadline) {
-                throw AlpacaException(std::string(label) + " timed out waiting for slew to complete");
+                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete");
             }
             clock_.sleep_for(kSlewPollInterval);
         }
@@ -2816,9 +2845,7 @@ private:
                 // slew on the position from before it.
                 if (!target_reached.has_value()) {
                     if (++failed_reads >= kDeviceFaultThreshold) {
-                        StateLock lock(lock_gate_, StateLock::Mode::State);
-                        slew_in_progress_ = false;
-                        throw AlpacaException(std::string(label) +
+                        fail_synchronous_slew(std::string(label) +
                                               " failed: the mount position could not be read to confirm the landing");
                     }
                     prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
@@ -2848,9 +2875,7 @@ private:
                                                  3600.0 * std::cos(target_dec * std::numbers::pi / 180.0);
                     const double dec_arcsec = std::abs(cur_dec - target_dec) * 3600.0;
                     if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
-                        StateLock lock(lock_gate_, StateLock::Mode::State);
-                        slew_in_progress_ = false;
-                        throw AlpacaException(std::string(label) + " failed: the mount stopped " +
+                        fail_synchronous_slew(std::string(label) + " failed: the mount stopped " +
                                               std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) +
                                               " arcsec (RA) and " +
                                               std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
@@ -2865,9 +2890,7 @@ private:
                 clock_.sleep_for(kSlewPollInterval);
             }
             if (!landed) {
-                StateLock lock(lock_gate_, StateLock::Mode::State);
-                slew_in_progress_ = false;
-                throw AlpacaException(std::string(label) + " timed out waiting for the mount to land on the target");
+                fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target");
             }
         }
 

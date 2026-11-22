@@ -699,18 +699,44 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO that settles far from the ta
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+        const int stops_before = mount.count(":Q#");
         const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
         if (landing_error > 600.0) {
             int code = 0;
             const std::string message = message_of(error, &code);
             CHECK(code == alpacacore::AlpacaError::DriverException);
             CHECK(contains(message, "SlewToCoordinates failed: the mount stopped"));
+            CHECK(contains(message, "the mount was sent a stop"));
+            CHECK(mount.count(":Q#") == stops_before + 1);
         } else {
             CHECK_FALSE(error);
         }
         CHECK(read_slewing(*driver) == SlewingRead::False);
         driver->set_connected(false);
     }
+}
+
+// Issue #2396: a synchronous GOTO the mount never finishes (status 2 past the 300 s bound) fails, and the mount is
+// sent :Q# so it does not keep moving after the throw. The slew state, hold included, ends with it.
+TEST_CASE("iOptron goto-safety - a synchronous GOTO that times out stops the mount",
+          "[ioptron][telescope][slewfailure][goto-safety]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = safety_driver(mount, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int stops_before = mount.count(":Q#");
+
+    const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    int code = 0;
+    const std::string message = message_of(error, &code);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(contains(message, "SlewToCoordinates timed out"));
+    CHECK(contains(message, "the mount was sent a stop"));
+    CHECK(mount.count(":Q#") == stops_before + 1);
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32
