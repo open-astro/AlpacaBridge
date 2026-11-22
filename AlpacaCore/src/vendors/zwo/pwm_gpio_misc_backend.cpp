@@ -63,10 +63,9 @@ bool PwmGpioMiscBackend::write(std::size_t line_index, bool high) {
     }
     const int kernel_index = kernel_indices_[line_index];
     if (!initialized_[line_index]) {
-        // Every transition needs SET_MODE then ENABLE (which calls gpiod_direction_output_raw) before a
-        // level: without them the module logs "NOT in GPIO OUTPUT mode" and leaves the pad alone. Once per
-        // line since open(): the sequence is not repeated per toggle, which would triple the ioctls of a
-        // PWM edge.
+        // A line needs SET_MODE then ENABLE (which calls gpiod_direction_output_raw) before its first
+        // level: without them the module logs "NOT in GPIO OUTPUT mode" and leaves the pad alone. Sent once
+        // per line since open(), not before every toggle, which would triple the ioctls of a PWM edge.
         work_mode_t mode{};
         mode.index = kernel_index;
         mode.mode = PWM_GPIO_MODE_GPIO;

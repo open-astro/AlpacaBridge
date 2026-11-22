@@ -404,7 +404,7 @@ notes carry only the pin map and per-board deltas.
   ERROR and set the per-port stop flag so the thread exits cleanly instead of looping
   while the ASCOM API reports success (the engine does it for every backend, and `set_value` on
   the stopped port answers `DriverException` until the next open). Two-phase shutdown: signal stop under the
-  mutex, join outside it, release/close back under it (the classic
+  mutex, join outside it, settle and release under the I/O lock (the classic
   join-under-the-same-mutex deadlock otherwise).
   These per-port periodic workers are not operation-slot bodies; a cancellable one-shot
   or polling body added to a GPIO driver uses the slot (Threads & shutdown in [driver-lifecycle](driver-lifecycle.instructions.md)).

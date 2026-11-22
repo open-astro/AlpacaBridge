@@ -72,6 +72,8 @@ struct IoctlStub {
     std::map<std::int32_t, std::int32_t> last_level;  // kernel index -> raw level of its last SET_LEVEL
     int off_writes = 0;                               // raw level 1 == logical OFF
     int requests = 0;                                 // every stubbed SET_MODE, ENABLE and SET_LEVEL
+    std::vector<std::int32_t> set_modes;              // kernel index of each SET_MODE, in order
+    std::vector<std::int32_t> enables;                // kernel index of each ENABLE, in order
 };
 
 IoctlStub& ioctl_stub();
