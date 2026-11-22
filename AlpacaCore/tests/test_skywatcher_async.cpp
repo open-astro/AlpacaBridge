@@ -6367,3 +6367,103 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA) during the pulse rate check is not ov
     driver->set_tracking(false);
     driver->set_connected(false);
 }
+
+// open-astro#2407 (#2396 AB-9): the MoveAxis dead-man. A jog with no new MoveAxis call for kMaxMoveAxisDuration
+// (60 s) is stopped and the next Slewing read raises why; a new MoveAxis call restarts the cap.
+TEST_CASE("SkyWatcher async - a MoveAxis with no new call is stopped after 60 s",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);  // Dec jog
+    REQUIRE(mount.axis_running(2));
+    REQUIRE(advance_through(clock, std::chrono::seconds(30), std::chrono::milliseconds(1000)));
+    driver->move_axis(1, 1.0);  // a new call: the cap runs from here
+    REQUIRE(advance_through(clock, std::chrono::seconds(59), std::chrono::milliseconds(1000)));
+    CHECK(mount.axis_running(2));  // 89 s since the first call, 59 s since the last: still wanted
+    CHECK(driver->get_slewing());
+    REQUIRE(run_clock_until(clock, [&] { return !mount.axis_running(2); }, std::chrono::seconds(3)));
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+    driver->abort_slew();  // clears the stored error
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// open-astro#2407: SiteLongitude and UTCDate set the sidereal time a goto aims by and the limit guard measures by,
+// so they are refused while a driver motion runs and accepted again once it ends.
+TEST_CASE("SkyWatcher async - SiteLongitude and UTCDate are refused while a MoveAxis runs",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    struct ProbeGuard {
+        ProbeGuard() {
+            sw::detail::set_host_synchronized_probe([] { return false; });
+        }
+        ~ProbeGuard() { sw::detail::set_host_synchronized_probe(nullptr); }
+    } probe;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    require_alpaca_error([&] { driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_site_longitude() == Catch::Approx(-0.0015));
+    driver->abort_slew();
+    REQUIRE_NOTHROW(driver->set_site_longitude(10.0));
+    REQUIRE_NOTHROW(driver->set_utc_date(std::chrono::system_clock::now()));
+    driver->set_connected(false);
+}
+
+// open-astro#2407 (#2396 AB-4): an acked ":L" is not an axis at rest. AbortSlew reads the axes back and sends
+// ":L" again while one still runs, at most three stops in all; a mount that runs on past them raises through
+// Slewing.
+TEST_CASE("SkyWatcher async - AbortSlew sends the stop again while the axis still runs",
+          "[skywatcher][async][abort][goto-safety]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    const int stops_before = mount.stop_count(2);
+    mount.ignore_instant_stops(2, 1);
+    driver->abort_slew();
+    REQUIRE(run_clock_until(clock, [&] { return !mount.axis_running(2); }, std::chrono::milliseconds(3000)));
+    CHECK(mount.stop_count(2) - stops_before == 2);
+    // Let the check body read the stopped axis and end (it is the only waiter besides the poll).
+    for (int i = 0; i < 8 && clock.wait_for_waiters(kPollerWaiter + 1, std::chrono::milliseconds(200)); ++i) {
+        REQUIRE(step_clock(clock, std::chrono::milliseconds(250)));
+    }
+    CHECK(mount.stop_count(2) - stops_before == 2);  // verified: no more stops
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AbortSlew that three stops do not stop raises through Slewing",
+          "[skywatcher][async][abort][goto-safety]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    const int stops_before = mount.stop_count(2);
+    mount.ignore_instant_stops(2, 10);
+    driver->abort_slew();
+    bool raised = false;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            try {
+                (void)driver->get_slewing();
+            } catch (const alpacacore::AlpacaException& e) {
+                raised = std::string(e.what()).find("still reports motion after 3 stops") != std::string::npos;
+            }
+            return raised;
+        },
+        std::chrono::milliseconds(4000)));
+    CHECK(mount.stop_count(2) - stops_before == 3);
+    driver->set_connected(false);
+}

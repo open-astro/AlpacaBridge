@@ -339,4 +339,37 @@ TEST_CASE("SkyWatcher async - count-frame FindHome rejects a short landing", "[s
     driver->set_connected(false);
 }
 
+// open-astro#2407 (#2396 AB-7): a goto whose landing stays far off after three re-gotos is a failed slew. It used
+// to break out of the refinement and report success. Every landing here stops 1 degree short in Dec and creeps in
+// far slower than the refinement looks again.
+TEST_CASE("SkyWatcher async - a slew that does not converge after three re-gotos fails and stops",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.land_short_by(2, 10, 1.0, 3600000);
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(target_ra, 40.0));
+    // Until the slew ends either way: the old code ended it as a landing (Slewing false, no error).
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        std::chrono::milliseconds(60000)));
+    REQUIRE(last == SlewingRead::Threw);
+    CHECK(message.find("did not converge") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_tracking());  // the failure stop leaves the drive off
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
