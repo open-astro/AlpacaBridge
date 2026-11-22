@@ -220,12 +220,9 @@ public:
           tracking_rate_valid_(false),
           tracking_state_cached_(false),
           tracking_state_valid_(false),
-          tracking_state_at_(std::chrono::steady_clock::time_point{}),
           cached_equatorial_(),
           cached_status_(),
           park_state_cached_(),
-          cached_equatorial_at_(std::chrono::steady_clock::time_point{}),
-          park_state_at_(std::chrono::steady_clock::time_point{}),
           poll_stop_(false),
           poll_pause_(false),
           timezone_offset_minutes_(0),
@@ -395,10 +392,8 @@ public:
                     parked_cached_ = false;
                     park_command_started_ = std::chrono::steady_clock::time_point{};
                     park_state_cached_.reset();
-                    park_state_at_ = std::chrono::steady_clock::time_point{};
                     tracking_state_valid_ = false;
                     tracking_rate_valid_ = false;
-                    tracking_state_at_ = std::chrono::steady_clock::time_point{};
                     manual_axis_tracking_restore_[0] = std::nullopt;
                     manual_axis_tracking_restore_[1] = std::nullopt;
                     target_ra_hours_ = 0.0;
@@ -474,10 +469,7 @@ public:
                 cached_equatorial_.reset();
                 cached_status_.reset();
                 park_state_cached_.reset();
-                cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
-                park_state_at_ = std::chrono::steady_clock::time_point{};
                 tracking_state_valid_ = false;
-                tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
             park_command_active_ = false;
@@ -492,9 +484,7 @@ public:
                 // TTL elapses.
                 parked_cached_ = false;
                 park_state_cached_.reset();
-                park_state_at_ = std::chrono::steady_clock::time_point{};
                 tracking_state_valid_ = false;
-                tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             tracking_rate_valid_ = false;
             manual_axis_tracking_restore_[0] = std::nullopt;
@@ -947,14 +937,12 @@ public:
             ensure_not_parked("Tracking");
         }
         auto& protocol = protocol_;
-        const auto now = clock_.now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!tracking) {
                 goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
             }
-            if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
-                tracking_state_cached_ == tracking) {
+            if (const auto frame = fresh_frame_locked(); frame && frame->tracking == tracking) {
                 return;  // a no-op write changes nothing, so it must not drop the poll in flight
             }
             snapshot_.write([](PolledFrame&) {});
@@ -1008,7 +996,6 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             tracking_state_cached_ = tracking;
             tracking_state_valid_ = true;
-            tracking_state_at_ = clock_.now();
             write_frame_locked();
             return;
         }
@@ -1017,7 +1004,6 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             tracking_state_cached_ = tracking;
             tracking_state_valid_ = true;
-            tracking_state_at_ = clock_.now();
             write_frame_locked();
             return;
         }
@@ -1719,7 +1705,7 @@ public:
         park_command_active_ = false;
         park_motion_seen_ = false;
         park_state_cached_ = false;
-        park_state_at_ = std::chrono::steady_clock::time_point{};
+        write_frame_locked();
         // Re-armed from the command's return, as before: completion still counts this guard (rule 3, open).
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         // open-astro#575: a fresh initiator is a clean start -- a client
@@ -1845,8 +1831,9 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_equatorial_.has_value() && (clock_.now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
-                const auto& eq = cached_equatorial_.value();
+            const auto reading = snapshot_.read();
+            if (reading && reading->value.equatorial) {
+                const auto& eq = *reading->value.equatorial;
                 ALPACA_LOG_DEBUG(
                     "ZWO",
                     "PulseGuide pre dir=" + std::to_string(direction) +
@@ -2089,7 +2076,6 @@ public:
             park_command_active_ = false;
             park_motion_seen_ = false;
             cached_equatorial_.reset();
-            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
             write_frame_locked();
         }
 
@@ -2353,7 +2339,6 @@ public:
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the Sync keeps no offset when the read fails
             // No offset change; the cached position is dropped below.
         }
-        const auto now = clock_.now();
         if (has_raw) {
             const double ra_delta = util::wrap_hour_angle(target_ra - raw.ra_hours);
             const double dec_delta = target_dec - raw.dec_degrees;
@@ -2364,12 +2349,10 @@ public:
             }
             dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
             cached_equatorial_ = raw;
-            cached_equatorial_at_ = now;
             write_frame_locked();
         } else {
             std::lock_guard<std::mutex> lock(mutex_);
             cached_equatorial_.reset();
-            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
             write_frame_locked();
         }
     }
@@ -2433,11 +2416,11 @@ public:
             unpark_in_progress_ = false;
             // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
             // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
-            // read (true, within kFastParkTtl) would otherwise make operations like
+            // read (true) would otherwise make operations like
             // set_tracking(true)/slew throw InvalidWhileParked right after a
-            // successful unpark.
+            // successful unpark. The frame carries it: ensure_not_parked() reads frame.parked.
             park_state_cached_ = false;
-            park_state_at_ = clock_.now();
+            write_frame_locked();
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that unparks after a failed GOTO must not be told the OLD
             // goto failed.
@@ -2454,10 +2437,9 @@ public:
 
 private:
     static constexpr auto kSnapshotMaxAge = std::chrono::seconds(5);
-    // Longer TTL for equatorial cache so RA/Dec reads meet FAST target over high-latency (e.g. WiFi) links.
-    static constexpr auto kFastEquatorialTtlForRead = std::chrono::seconds(5);
-    static constexpr auto kFastTrackingTtl = std::chrono::seconds(2);
-    static constexpr auto kFastParkTtl = std::chrono::seconds(2);
+    // A frame's tracking and park flags decide a command only while its mandatory sample is this young (decision
+    // 0010 rule 5); a client write never renews the sample.
+    static constexpr auto kFreshMandatoryAge = std::chrono::seconds(2);
 
     enum class ParkEvaluation {
         Unknown,
@@ -2781,13 +2763,12 @@ private:
         // Park transitions are always driven by our own park()/unpark() code,
         // which updates parked_cached_ immediately.  Use the cached value to
         // avoid mount round-trips that add ~500ms+ latency on Wi-Fi links.
-        // If a fresh park_state_cached_ is available, prefer it; otherwise
+        // If the frame's mandatory sample is fresh, prefer its parked flag; otherwise
         // fall back to parked_cached_ rather than querying the mount.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const auto now = clock_.now();
-            if (park_state_cached_.has_value() && (now - park_state_at_) <= kFastParkTtl) {
-                if (park_state_cached_.value()) {
+            if (const auto frame = fresh_frame_locked(); frame && frame->parked.has_value()) {
+                if (*frame->parked) {
                     throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                           AlpacaError::InvalidWhileParked);
                 }
@@ -2973,6 +2954,14 @@ private:
         return reading->value;
     }
 
+    // The frame, when its mandatory sample is at most kFreshMandatoryAge old. Under mutex_.
+    std::optional<PolledFrame> fresh_frame_locked() const {
+        const auto reading = snapshot_.read();
+        if (!reading || !reading->value.mandatory_at) return std::nullopt;
+        if (clock_.now() - *reading->value.mandatory_at > kFreshMandatoryAge) return std::nullopt;
+        return reading->value;
+    }
+
     PolledFrame read_frame() const {
         check_connected();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -3070,7 +3059,6 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_.load() || token != snapshot_.begin_poll()) return;
-            const auto now = clock_.now();
             // Frame, GOTO completion and Park evaluation must all use this mandatory sample's guard deadline.
             if (slew_hold_.active(*frame.mandatory_at)) frame.status->stop_or_tracking = false;
             if (park_command_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
@@ -3080,10 +3068,8 @@ private:
             if (!snapshot_.publish(token, frame)) return;
             cached_status_ = status;  // Control paths keep raw telemetry, not the guarded client frame.
             cached_equatorial_ = eq;
-            cached_equatorial_at_ = now;
             tracking_state_cached_ = *frame.tracking;
             tracking_state_valid_ = true;
-            tracking_state_at_ = now;
             last_mandatory_at_ = *frame.mandatory_at;
             restored = health_.on_reply();
             // Setup/retries are not arrival; after MS acceptance, completion still needs the final pair.
@@ -3133,7 +3119,6 @@ private:
         frame.parked = evaluation == ParkEvaluation::Parked || (!unpark_in_progress_ && parked_cached_);
         if (!snapshot_.publish(token, frame)) return;
         park_state_cached_ = frame.parked;
-        park_state_at_ = *frame.mandatory_at;
     }
 
     void refresh_mount_time(bool only_if_unset = false) {
@@ -3356,7 +3341,6 @@ private:
                     }
                 }
                 cached_equatorial_ = eq;
-                cached_equatorial_at_ = clock_.now();
                 snapshot_.write([&](PolledFrame& frame) { frame.equatorial = eq; });
             } catch (const std::exception&) {
                 // A failed reconciliation is not a new measurement.
@@ -3747,12 +3731,9 @@ private:
     mutable bool tracking_rate_valid_;
     mutable bool tracking_state_cached_;
     mutable bool tracking_state_valid_;
-    mutable std::chrono::steady_clock::time_point tracking_state_at_;
     mutable std::optional<EquatorialCoordinates> cached_equatorial_;
     mutable std::optional<StatusInfo> cached_status_;
     mutable std::optional<bool> park_state_cached_;
-    mutable std::chrono::steady_clock::time_point cached_equatorial_at_;
-    mutable std::chrono::steady_clock::time_point park_state_at_;
     mutable std::atomic<bool> poll_stop_;
     std::atomic<bool> poll_pause_;
 

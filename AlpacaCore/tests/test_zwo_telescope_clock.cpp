@@ -1818,4 +1818,53 @@ TEST_CASE("ZWO telescope clock - Sync ignores a position sampled before the sync
     CHECK(rig.driver->get_declination() == Catch::Approx(46.0).margin(1e-3));
 }
 
+// open-astro#2492: a no-op Tracking write is skipped only while the frame's mandatory sample is 2 s old or less; a
+// client write never renews that age. The poll is paused by a pulse, so the sample ages while the first write
+// publishes its own Tracking value into the frame.
+// Falsified by: zwo_telescope_driver.cpp set_tracking() skipping on a stamp that the client's own write renews
+// instead of the frame's mandatory age (the repeated Tracking=false sends no ":Td", count stays at 1).
+TEST_CASE("ZWO telescope clock - a repeated Tracking write is sent once the mandatory sample is over 2 s old (2492)",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.advance(250ms);  // a fresh mandatory sample, Tracking on
+    REQUIRE(rig.driver->get_tracking());
+    const int enables = rig.mount.count(":Te");
+    rig.driver->set_tracking(true);
+    CHECK(rig.mount.count(":Te") == enables);  // equal to the frame, sample fresh: nothing sent
+
+    rig.driver->pulse_guide(0, 3000);  // pauses the poll, so the mandatory sample ages
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    for (int i = 0; i < 22; ++i) rig.advance(100ms);  // 2200 ms; the pulse ends at 3500 ms
+    const int disables = rig.mount.count(":Td");
+    rig.driver->set_tracking(false);  // a client write: the frame now says off
+    CHECK(rig.mount.count(":Td") == disables + 1);
+    rig.driver->set_tracking(false);  // equal to the frame, but the sample is over 2 s old
+    CHECK(rig.mount.count(":Td") == disables + 2);
+}
+
+// open-astro#2492: ensure_not_parked reads the frame's parked flag while the mandatory sample is fresh. Pins; both
+// pass on the cache-lifetime code too.
+TEST_CASE("ZWO telescope clock - a slew after Unpark is allowed at once and refused while the frame says parked (2492)",
+          "[zwo][telescope][unit][clock]") {
+    SECTION("unparked") {
+        Rig rig;
+        rig.mount.set_park_state(2);
+        rig.connect();
+        rig.advance(250ms);
+        REQUIRE(rig.driver->get_at_park());
+        rig.driver->unpark();
+        CHECK_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 30.0));
+    }
+    SECTION("parked") {
+        Rig rig;
+        rig.mount.set_park_state(2);
+        rig.connect();
+        rig.advance(250ms);
+        REQUIRE(rig.driver->get_at_park());
+        require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(6.0, 30.0); },
+                             AlpacaError::InvalidWhileParked);
+    }
+}
+
 #endif  // !_WIN32
