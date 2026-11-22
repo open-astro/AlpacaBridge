@@ -20,6 +20,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
@@ -29,9 +30,12 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -74,6 +78,9 @@ struct FakeSynScanState {
     std::atomic<int> cancel_count{0};
     std::mutex landed_mutex;
     std::string landed;
+    // Runs on the server thread before each reply (unset: nothing), so a case can act while a command is in flight.
+    std::mutex before_reply_mutex;
+    std::function<void(const std::string&)> before_reply;
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -102,9 +109,18 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         st->requests.fetch_add(1);
+        {
+            std::function<void(const std::string&)> hook;
+            {
+                std::lock_guard<std::mutex> lock(st->before_reply_mutex);
+                hook = st->before_reply;
+            }
+            if (hook) hook(chunk);
+        }
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
+        if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R' || chunk[0] == 'W' ||
+            chunk[0] == 'H') {
             st->record(chunk);
         }
         if (chunk[0] == 'T' && st->reject_tracking.load()) return "";
@@ -1438,4 +1454,298 @@ TEST_CASE("SynScan async - a deadline stop that fails says the mount may still b
     CHECK(message.find("the mount may still be moving") != std::string::npos);
     CHECK(message.find("the mount was stopped") == std::string::npos);
     driver->set_connected(false);
+}
+
+// #2412 (#2396 AB-9): the MoveAxis bound. A MoveAxis that no new non-zero MoveAxis renews within 60 s is stopped by
+// the driver on its own slot (no client needs to poll), and Slewing raises it until the next motion command or a
+// reconnect. The status poll is paused, so the bound body is the only thing on the task clock.
+namespace {
+
+namespace sc_bound = alpacacore::vendor::synscan;
+
+struct MoveAxisBoundRig {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<FakeSynScanState> st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server{synscan_responder(st)};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::atomic<int> infos{0};
+    std::atomic<int> warns{0};
+    alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
+    std::atomic<std::thread::id> bound_thread{};
+
+    MoveAxisBoundRig() {
+        st->clock = &clock;
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (component != "SynScan" || message.find("MoveAxis on axis") == std::string_view::npos) return;
+                if (level == alpacacore::logging::LogLevel::Info) ++infos;
+                if (level == alpacacore::logging::LogLevel::Warn || level == alpacacore::logging::LogLevel::Error) {
+                    ++warns;
+                }
+            });
+        REQUIRE(server.ok());
+        driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        sc_bound::set_status_poll_paused_for_testing(*driver, true);
+        // Names the bound body's thread, so start_move() waits for that body (not any waiter) to park.
+        sc_bound::set_motion_bound_spawn_for_testing(*driver, [this](std::function<void()> body) {
+            std::thread thread(std::move(body));
+            bound_thread.store(thread.get_id());
+            return thread;
+        });
+    }
+    ~MoveAxisBoundRig() {
+        st->mute.store(false);
+        driver->set_connected(false);
+        alpacacore::logging::set_log_sink(previous_sink);
+    }
+    MoveAxisBoundRig(const MoveAxisBoundRig&) = delete;
+    MoveAxisBoundRig& operator=(const MoveAxisBoundRig&) = delete;
+
+    // Starts a MoveAxis and waits until the bound body's own thread is parked on the clock. Not wait_for_waiters(): the
+    // paused status poll parks and wakes on the same clock, so a count can be met before the bound body waits, and a
+    // step that lands between its read of the clock and its wait moves its deadline.
+    void start_move(int axis) {
+        REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (bound_thread.load() == std::thread::id{} && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        REQUIRE(clock.wait_for_waiter_thread(bound_thread.load(), std::chrono::seconds(5)));
+    }
+
+    // In 5 s steps, polling the handset after each one: the status poll is paused, and a frame older than the
+    // snapshot bound would read as a lost link.
+    void advance(std::chrono::seconds by) {
+        for (auto left = by; left.count() > 0; left -= std::chrono::seconds(5)) {
+            clock.advance(std::min(left, std::chrono::seconds(5)));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
+            sc_bound::poll_status_now_for_testing(*driver);
+        }
+    }
+    // Zero-rate variable-rate commands; one axis stop sends kStopCommands of them.
+    int stops(int device) {
+        const auto commands = st->command_snapshot();
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& c) {
+            return is_variable_rate_command(c, device) && is_zero_rate_command(c);
+        }));
+    }
+    int starts(int device) {
+        const auto commands = st->command_snapshot();
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& c) {
+            return is_variable_rate_command(c, device) && !is_zero_rate_command(c);
+        }));
+    }
+};
+
+constexpr int kStopCommands = 2;  // the wrapper's stop: direction 6 and 7 at rate 0
+constexpr int kRaMotor = 16;
+constexpr int kDecMotor = 17;
+
+}  // namespace
+
+TEST_CASE("SynScan MoveAxis - a MoveAxis not renewed for 60 s is stopped and Slewing raises it",
+          "[synscan][telescope][goto-safety]") {
+    const int axis = GENERATE(0, 1);
+    const int motor = axis == 0 ? kRaMotor : kDecMotor;
+    MoveAxisBoundRig rig;
+    rig.start_move(axis);
+    rig.advance(std::chrono::seconds(59));
+    CHECK(rig.stops(motor) == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+
+    rig.advance(std::chrono::seconds(2));
+    CHECK(rig.stops(motor) == kStopCommands);
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s, the longest allowed; the driver stopped it") != std::string::npos);
+    CHECK(rig.infos.load() == 1);  // a client can cause it: INFO, never WARN (decision 0007 rule 9)
+    CHECK(rig.warns.load() == 0);
+    rig.advance(std::chrono::seconds(60));
+    CHECK(rig.stops(motor) == kStopCommands);  // acted once: nothing more is sent for this move
+
+    // The next motion command clears it.
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+TEST_CASE("SynScan MoveAxis - each non-zero MoveAxis restarts the 60 s bound", "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    rig.advance(std::chrono::seconds(40));
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 2.0));  // renewed at 40 s
+    rig.advance(std::chrono::seconds(40));           // 80 s from the first, 40 s from the renewal
+    CHECK(rig.stops(kRaMotor) == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+    rig.advance(std::chrono::seconds(21));
+    CHECK(rig.stops(kRaMotor) == kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
+}
+
+TEST_CASE("SynScan MoveAxis - a bound stop that fails is not retried and sends no start",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    const int starts = rig.starts(kRaMotor);
+    REQUIRE(rig.server.drop_connections());  // the stop's write meets a dropped link
+    rig.advance(std::chrono::seconds(61));
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.warns.load() == 1);  // a stop that could not be sent is a device failure
+    CHECK(rig.infos.load() == 0);
+    const int requests = rig.st->requests.load();
+    rig.advance(std::chrono::seconds(120));
+    CHECK(rig.st->requests.load() == requests);  // nothing more was sent
+    CHECK(rig.starts(kRaMotor) == starts);
+}
+
+TEST_CASE("SynScan MoveAxis - a bound failure does not outlive a reconnect", "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    rig.advance(std::chrono::seconds(61));
+    REQUIRE(read_slewing(*rig.driver) == SlewingRead::Threw);
+    rig.driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*rig.driver, true, std::chrono::seconds(10)));
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// #2412: site, time and Sync writes change the handset's limit and pointing maths, so they are refused while motion
+// the driver started is under way, with nothing sent.
+TEST_CASE("SynScan - site, time and Sync writes are refused while the mount moves",
+          "[synscan][telescope][goto-safety]") {
+    const bool goto_motion = GENERATE(false, true);
+    MoveAxisBoundRig rig;
+    if (goto_motion) {
+        rig.st->goto_hangs.store(true);  // the GOTO body keeps waiting on it
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    } else {
+        rig.start_move(0);
+    }
+    const int requests = rig.st->requests.load();
+    require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->sync_to_coordinates(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.st->requests.load() == requests);
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
+    CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+}
+
+TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and fails the MoveAxis",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    sc_bound::set_motion_bound_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    try {
+        rig.driver->move_axis(1, 1.0);
+        FAIL("MoveAxis returned although its time limit could not start");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(rig.stops(kDecMotor) == kStopCommands);  // fails closed: the move just started is stopped
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// The second check of a site or UTCDate write runs at the write's own wire turn: a MoveAxis that set its flags while
+// the write waited for its turn (queued behind it) is refused against, and the write sends nothing.
+TEST_CASE("SynScan - a site or time write is refused at its wire turn by a MoveAxis queued meanwhile",
+          "[synscan][telescope][goto-safety]") {
+    const bool utc = GENERATE(false, true);
+    MoveAxisBoundRig rig;
+    std::promise<void> move_queued;
+    std::atomic<int> hook_calls{0};
+    std::atomic<bool> queued_in_time{false};  // set on the driver's thread; checked here (no REQUIRE off-thread)
+    std::thread mover;
+    struct ClearHook {
+        alpacacore::TelescopeDriver& driver;
+        std::thread& mover;
+        ~ClearHook() {
+            sc_bound::set_wire_turn_wait_hook_for_testing(driver, nullptr);
+            if (mover.joinable()) mover.join();
+        }
+    } clear_hook{*rig.driver, mover};
+    sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, [&] {
+        const int call = hook_calls.fetch_add(1);
+        if (call == 0) {
+            // The write's turn wait: start a MoveAxis, and wait until it waits for its own turn behind the write, its
+            // flags already set.
+            mover = std::thread([&] { (void)rig.driver->move_axis(0, 1.0); });
+            queued_in_time.store(move_queued.get_future().wait_for(std::chrono::seconds(5)) ==
+                                 std::future_status::ready);
+        } else if (call == 1) {
+            move_queued.set_value();
+        }
+    });
+    const auto writes = [&] { return rig.st->command_count('W') + rig.st->command_count('H'); };
+    const int before = writes();
+    if (utc) {
+        require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    } else {
+        require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+    mover.join();
+    CHECK(queued_in_time.load());
+    CHECK(writes() == before);
+    CHECK(rig.starts(kRaMotor) == 1);  // the MoveAxis went out after the refused write
+}
+
+// Decision 0016 rule 6: the bound's stop releases mutex_ while it is on the wire. A renewing MoveAxis on the same axis
+// that lands then keeps its own flags: Slewing stays true behind it and the bound stops it at its own 60 s.
+TEST_CASE("SynScan MoveAxis - a renewal that lands while the bound's stop is on the wire stays bounded",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    std::promise<void> renewal_queued;
+    std::atomic<bool> queued_in_time{false};
+    std::atomic<bool> fired{false};
+    std::atomic<std::thread::id> renewer_id{};  // set by the renewal's own thread before it calls MoveAxis
+    std::thread renewer;
+    struct Cleanup {
+        MoveAxisBoundRig& rig;
+        std::thread& renewer;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+                rig.st->before_reply = nullptr;
+            }
+            sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, nullptr);
+            if (renewer.joinable()) renewer.join();
+        }
+    } cleanup{rig, renewer};
+    // The renewal's turn wait signals it has set its flags and queued behind the stop.
+    sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, [&] {
+        if (std::this_thread::get_id() == renewer_id.load()) renewal_queued.set_value();
+    });
+    {
+        std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+        rig.st->before_reply = [&](const std::string& chunk) {
+            // The bound's first stop command is on the wire: land a renewal now, before the handset answers.
+            if (is_variable_rate_command(chunk, kRaMotor) && is_zero_rate_command(chunk) && !fired.exchange(true)) {
+                renewer = std::thread([&] {
+                    renewer_id.store(std::this_thread::get_id());
+                    (void)rig.driver->move_axis(0, 2.0);
+                });
+                queued_in_time.store(renewal_queued.get_future().wait_for(std::chrono::seconds(5)) ==
+                                     std::future_status::ready);
+            }
+        };
+    }
+    const int starts = rig.starts(kRaMotor);
+    rig.advance(std::chrono::seconds(61));
+    renewer.join();
+    CHECK(queued_in_time.load());
+    CHECK(rig.starts(kRaMotor) == starts + 1);              // the renewal's rate went out after the stop
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);  // the renewed move, not the stopped one
+    const int stops = rig.stops(kRaMotor);
+    rig.advance(std::chrono::seconds(61));  // the renewal's own 60 s
+    CHECK(rig.stops(kRaMotor) == stops + kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
 }

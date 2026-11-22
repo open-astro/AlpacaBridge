@@ -58,6 +58,9 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+/// The same for the MoveAxis bound's slot (#2412).
+void set_motion_bound_spawn_for_testing(TelescopeDriver& driver,
+                                        std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test seams of the status poll (decision 0010): the poll's own module seams (util::PolledState). Pausing makes the
 /// poll wait its ticks on the task clock and probe nothing; poll_status_now runs one full tick (alt/az, pier side and
