@@ -1932,16 +1932,30 @@ TEST_CASE("ZWO goto-safety - AbortSlew sends :Q again while the mount still move
     }
 }
 
-TEST_CASE("ZWO goto-safety - site and time writes are refused while a GOTO runs",
+TEST_CASE("ZWO goto-safety - site and time writes are refused while the driver moves the mount",
           "[zwo][telescope][async][goto-safety]") {
     Rig rig;
     rig.connect();
-    start_held_goto(rig);
+    const std::string motion =
+        GENERATE(std::string("GOTO"), std::string("MoveAxis"), std::string("Park"), std::string("FindHome"));
+    CAPTURE(motion);
+    rig.mount.hold_running(true);
+    if (motion == "GOTO") {
+        start_held_goto(rig);
+    } else if (motion == "MoveAxis") {
+        REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    } else if (motion == "Park") {
+        REQUIRE_NOTHROW(rig.driver->park());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->find_home());
+    }
+    run_polls(rig, std::chrono::seconds(8));  // past every forced Slewing window: the command's own state refuses
     const int site_before = rig.mount.count(":SMGE");
     const int time_before = rig.mount.count(":SMTI");
     using alpacacore::test::require_alpaca_error;
     require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
     require_alpaca_error([&] { rig.driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_site_elevation(100.0); }, alpacacore::AlpacaError::InvalidOperation);
     require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
                          alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.mount.count(":SMGE") == site_before);

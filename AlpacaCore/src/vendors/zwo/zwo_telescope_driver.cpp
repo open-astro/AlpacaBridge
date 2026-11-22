@@ -1664,6 +1664,7 @@ public:
         // that calls FindHome after a failed GOTO must not be told the OLD
         // goto failed while it's homing.
         clear_last_slew_error_locked();
+        home_command_active_ = true;  // #2408: until the poll sees it end, for refuse_while_moving()
     }
 
     void park() override {
@@ -2679,7 +2680,8 @@ private:
     // a GOTO, a MoveAxis or a Park/FindHome this driver started.
     void refuse_while_moving(const char* property) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (goto_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_command_active_) {
+        if (goto_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_command_active_ ||
+            home_command_active_) {
             throw AlpacaException(std::string(property) + " cannot be written while the mount is moving",
                                   AlpacaError::InvalidOperation);
         }
@@ -2869,6 +2871,7 @@ private:
             if (!goto_setup_pending_ && status->stop_or_tracking && slew_force_until_ <= *frame.mandatory_at) {
                 if (goto_active_) note_goto_landed_locked(*eq);
                 goto_active_ = false;
+                home_command_active_ = false;  // the same stopped sample past the force window ends a FindHome
             }
         }
         if (restored) ALPACA_LOG_INFO("ZWO", "Mount communications restored");
@@ -3111,6 +3114,7 @@ private:
         last_slew_error_.clear();
         park_failed_ = false;
         abort_stops_sent_ = 0;  // a newer command or a connect owns the motion: no AbortSlew is verified any more
+        home_command_active_ = false;  // FindHome sets it again after its own clear
         ++slew_error_epoch_;
         write_frame_locked();
     }
@@ -3197,8 +3201,10 @@ private:
             }
         }
         // Verified needs a status read taken after the last ":Q" had a full interval to act; with none yet, wait.
-        if (abort_stops_sent_ > 0 && now >= abort_verify_at_ && last_mandatory_at_ >= abort_verify_at_) {
-            if (cached_status_ && cached_status_->stop_or_tracking) {
+        // A read with no status is not evidence either way, so it waits too.
+        if (abort_stops_sent_ > 0 && now >= abort_verify_at_ && last_mandatory_at_ >= abort_verify_at_ &&
+            cached_status_) {
+            if (cached_status_->stop_or_tracking) {
                 abort_stops_sent_ = 0;
                 return BoundAction::None;
             }
@@ -3228,6 +3234,7 @@ private:
                     fence_goto();
                     protocol_.abort_motion();
                     std::lock_guard<std::mutex> lock(mutex_);
+                    goto_accepted_at_.reset();  // this GOTO's bound is spent
                     last_slew_error_ =
                         "The slew did not end within " +
                         std::to_string(std::chrono::duration_cast<std::chrono::minutes>(kDefaultSlewTimeout).count()) +
@@ -3548,6 +3555,8 @@ private:
     std::chrono::steady_clock::time_point abort_verify_at_{};
     // A link that dropped while a GOTO or a MoveAxis ran: the next connect stops the mount first (#2396 AB-9).
     mutable bool relink_stop_pending_ = false;
+    // A FindHome this driver started that the poll has not yet seen end (refuse_while_moving()).
+    mutable bool home_command_active_ = false;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, logged and forgotten by the setup body) used
     // to leave Slewing read FALSE once slew_force_until_ expired --
