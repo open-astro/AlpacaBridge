@@ -6400,9 +6400,9 @@ TEST_CASE("SkyWatcher async - a MoveAxis with no new call is stopped after 60 s"
     driver->set_connected(false);
 }
 
-// open-astro#2407: SiteLongitude and UTCDate set the sidereal time a goto aims by and the limit guard measures by,
-// so they are refused while a driver motion runs and accepted again once it ends.
-TEST_CASE("SkyWatcher async - SiteLongitude and UTCDate are refused while a MoveAxis runs",
+// open-astro#2407: SiteLongitude sets the sidereal time a goto aims by and the limit guard measures by, so it is
+// refused while a driver motion runs and accepted again once it ends. UTCDate is not (decision 0001 rule 2).
+TEST_CASE("SkyWatcher async - SiteLongitude is refused while a MoveAxis runs",
           "[skywatcher][async][moveaxis][goto-safety]") {
     struct ProbeGuard {
         ProbeGuard() {
@@ -6417,12 +6417,10 @@ TEST_CASE("SkyWatcher async - SiteLongitude and UTCDate are refused while a Move
     driver->move_axis(1, 1.0);
     REQUIRE(mount.axis_running(2));
     require_alpaca_error([&] { driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
-    require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
-                         alpacacore::AlpacaError::InvalidOperation);
     CHECK(driver->get_site_longitude() == Catch::Approx(-0.0015));
+    REQUIRE_NOTHROW(driver->set_utc_date(std::chrono::system_clock::now()));  // rule 2: accepted while undisciplined
     driver->abort_slew();
     REQUIRE_NOTHROW(driver->set_site_longitude(10.0));
-    REQUIRE_NOTHROW(driver->set_utc_date(std::chrono::system_clock::now()));
     driver->set_connected(false);
 }
 

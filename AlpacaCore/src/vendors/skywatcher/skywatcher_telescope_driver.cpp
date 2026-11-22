@@ -759,6 +759,7 @@ public:
             try {
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
+                relink_stop_pending_ = false;  // both stops acked: nothing this driver ran is owed a stop
             } catch (...) {
                 // Best effort. A driver motion this stop did not reach is stopped by the next connect
                 // (open-astro#2407).
@@ -1508,7 +1509,6 @@ public:
                 "UTCDate cannot be set: the host clock is NTP-synchronized, and the mount takes its time from it",
                 AlpacaError::PropertyNotImplemented);
         }
-        refuse_time_base_write_while_moving_locked("UTCDate");
         {
             // One snapshot: the readers never see the new offset with the old anchors.
             std::lock_guard<std::mutex> clock_lock(client_clock_mutex_);
@@ -3140,10 +3140,13 @@ private:
 
     // open-astro#521: a Sky-Watcher axis keeps running until something tells it
     // to stop, so motion outlives the link that started it. On the way back in,
-    // decide from the LENGTH of the outage rather than by a flat rule: a USB
-    // re-enumeration or a briefly disturbed connector is a glitch and the slew
-    // the client asked for is still wanted, while a long gap means nobody has
-    // been in control of a moving mount.
+    // motion this driver started (a GoTo, Park, FindHome or MoveAxis under way
+    // at the loss, an unconfirmed stop, any GOTO-mode axis after a loss) is
+    // stopped whatever the outage length (open-astro#2407): its client lost the
+    // link with it. Only motion the driver cannot attribute (a speed-mode axis,
+    // most likely tracking) is decided from the LENGTH of the outage: a USB
+    // re-enumeration or a briefly disturbed connector is a glitch, while a long
+    // gap means nobody has been in control of a moving mount.
     //
     // Confirmed on an EQM-35 Pro (2026-09-17): with RA turning at 0.5 deg/s the
     // cable was pulled and replaced, ":f1" then read "=111" (speed mode,
@@ -3291,6 +3294,7 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Failed to stop surviving motion on axis " + std::to_string(channel) + ": " + e.what());
+            relink_stop_pending_ = true;  // still owed (open-astro#2407)
             return;
         }
         while (clock_.now() < deadline) {
@@ -6564,9 +6568,10 @@ private:
         return errors;
     }
 
-    // open-astro#2407: SiteLongitude and UTCDate set the sidereal time a GoTo aims by, its re-gotos re-aim by and
-    // the limit guard measures by. Changed mid-motion they move the target under a slew in flight, so they are
-    // refused until the GoTo, Park, FindHome or MoveAxis ends. Pulses and tracking do not block them.
+    // open-astro#2407: SiteLongitude sets the sidereal time a GoTo aims by, its re-gotos re-aim by and the limit
+    // guard measures by. Changed mid-motion it moves the target under a slew in flight, so it is refused until the
+    // GoTo, Park, FindHome or MoveAxis ends. Pulses and tracking do not block it. UTCDate is not refused: decision
+    // 0001 rule 2 accepts every write on an undisciplined host.
     void refuse_time_base_write_while_moving_locked(const char* what) const {
         if (connected_ && driver_motion_active_locked()) {
             throw AlpacaException(std::string(what) +

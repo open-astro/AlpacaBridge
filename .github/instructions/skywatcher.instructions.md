@@ -376,7 +376,8 @@ datagrams before each send so replies cannot get off-by-one.
   - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
     failure stop, cancelled-body stop or cap stop that did not reach the board, an AbortSlew check that ran out
     of stops, or a failed disconnect stop (judged on the flags sampled before `cancel_async_tasks()`, since a
-    cancelled body clears them) sets `relink_stop_pending_`
+    cancelled body clears them) sets `relink_stop_pending_`; a relink stop that fails sets it again, and a
+    disconnect whose two stops are acked clears it
     (it survives `reset_runtime_state_locked()`), and the next connect stops every axis it finds running,
     however short the outage. A GOTO-mode axis found running after a link loss is stopped too: it is never
     tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
@@ -388,9 +389,10 @@ datagrams before each send so replies cannot get off-by-one.
     failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
     keeps the old bound. The RA part is measured on the sky (times cos(dec)), so a good landing near the pole is
     not a miss. Every re-goto runs `check_target_altitude_locked()` like the first leg.
-  - *Time base.* SiteLongitude and UTCDate are refused with InvalidOperation while a GoTo, Park, FindHome or
-    MoveAxis runs (`refuse_time_base_write_while_moving_locked()`): they set the LST the slew aims by. Pulses
-    and tracking do not block them.
+  - *Time base.* SiteLongitude is refused with InvalidOperation while a GoTo, Park, FindHome or MoveAxis runs
+    (`refuse_time_base_write_while_moving_locked()`): it sets the LST the slew aims by. Pulses and tracking do
+    not block it. UTCDate is not refused: [decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md)
+    rule 2 accepts every write on an undisciplined host.
   - *Verified AbortSlew.* After the `:L` pair, `abort_verify_` reads both axes every 250 ms; an axis that
     should be at rest (RA unless the abort restored tracking, Dec unless it restarted a DeclinationRate) and
     still runs gets `:L` again, three stops in all within 3 s. Not verified by then, Slewing raises "the mount
