@@ -82,7 +82,7 @@ private:
     std::string consumer_;
     gpiod_chip* chip_ = nullptr;
     gpiod_line_request* request_ = nullptr;
-    std::vector<unsigned int> lines_;
+    std::vector<unsigned int> lines_{};
 };
 
 }  // namespace alpacacore::util

@@ -70,9 +70,10 @@ void SoftPwmPorts::open() {
     }
     std::vector<unsigned int> lines;
     for (std::size_t i = 0; i < states_.size(); ++i) {
-        if (states_[i]->claimed) {
+        const auto& line = config_.ports[i].line;
+        if (states_[i]->claimed && line) {
             states_[i]->line_index = lines.size();
-            lines.push_back(*config_.ports[i].line);
+            lines.push_back(*line);
         }
     }
     std::vector<int> levels;
@@ -298,7 +299,6 @@ void SoftPwmPorts::pwm_loop(std::size_t index) {
         if (!drive(true)) {
             return;
         }
-        last_level = 1;
         if (wait_until(start + on)) {
             break;
         }
