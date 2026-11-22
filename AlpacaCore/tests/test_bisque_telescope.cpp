@@ -1050,7 +1050,7 @@ TEST_CASE("Bisque PulseGuide - the maximum duration is accepted and one more is 
     REQUIRE_NOTHROW(driver->set_connected(true));
     pause_poll(*driver);
 
-    constexpr int kMaxMs = 30000;
+    constexpr int kMaxMs = 25000;
     require_alpaca_error([&] { driver->pulse_guide(2, kMaxMs + 1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->pulse_guide(2, std::numeric_limits<int>::max()); },
                          alpacacore::AlpacaError::InvalidValue);
@@ -1060,15 +1060,14 @@ TEST_CASE("Bisque PulseGuide - the maximum duration is accepted and one more is 
     driver->set_connected(false);
 }
 
-TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX's home loop",
-          "[bisque][telescope][findhome]") {
-    // FindHome runs a JavaScript loop in TheSkyX that answers only once the
-    // mount is home; its response bound is 60 s, not the 300 ms default here.
-    alpacacore::test::FakeMountServer server([](const std::string& command) -> std::string {
-        if (command.find("FindHome") != std::string::npos) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            return "|No error. Error = 0.OK#";
-        }
+TEST_CASE("Bisque FindHome - polls IsSlewComplete until TheSkyX has homed", "[bisque][telescope][findhome]") {
+    // FindHome is sent asynchronously and answers at once; the home is over when IsSlewComplete says so, however
+    // long that takes (the 300 ms response bound here applies to each short exchange, not to the home).
+    std::atomic<int> polls{0};
+    alpacacore::test::FakeMountServer server([&polls](const std::string& command) -> std::string {
+        if (command.find("FindHome") != std::string::npos) return "|No error. Error = 0.OK#";
+        if (command.find("IsSlewComplete") != std::string::npos)
+            return ++polls > 2 ? "|No error. Error = 0.1#" : "|No error. Error = 0.0#";
         return bisque_guide_responder(std::chrono::milliseconds(0), "")(command);
     });
     REQUIRE(server.ok());
@@ -1077,6 +1076,7 @@ TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX
     pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->find_home());
+    CHECK(polls.load() == 3);
     CHECK(driver->get_at_home());
     driver->set_connected(false);
 }
@@ -2196,7 +2196,7 @@ TEST_CASE("Bisque motion owner - PulseGuide during a slew, a Park or a FindHome 
         motion = std::async(std::launch::async, [&] { rig.driver->park(); });
         REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
     } else {
-        rig.mount.find_home_ms = 1500;
+        rig.mount.find_home_ms = 1000000;  // homing until the case ends it
         motion = std::async(std::launch::async, [&] { rig.driver->find_home(); });
         REQUIRE(wait_real([&] { return rig.mount.find_home_commands.load() == 1; }));
     }
@@ -2223,7 +2223,8 @@ TEST_CASE("Bisque motion owner - PulseGuide during a slew, a Park or a FindHome 
     }
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     if (leg == 3) {
-        REQUIRE(motion.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        rig.mount.find_home_ms = 0;
+        REQUIRE(advance_until(rig.clock, [&] { return ready(motion); }));  // FindHome polls on the task clock
         REQUIRE_NOTHROW(motion.get());
     } else {
         REQUIRE_NOTHROW(rig.driver->abort_slew());
@@ -2264,15 +2265,15 @@ TEST_CASE("Bisque motion owner - a refused slew, a landing or a failed FindHome 
 }
 
 // A MoveAxis or a Park claims an axis FindHome owns, and an AbortSlew or a MoveAxis stop cancels it, while TheSkyX
-// still runs the home loop. Both wait on the socket behind it; once FindHome's reply comes, the home is no longer this
-// call's to report, so AtHome stays false, as a Park retired the same way never sets AtPark (#2062).
+// still homes. The home's poll sees the claim or the stop and returns without reporting the home, so AtHome stays
+// false, as a Park retired the same way never sets AtPark (#2062).
 TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindHome leaves AtHome false (#2263)",
           "[bisque][telescope][motion-owner]") {
     ClockedBisque rig;
     const int leg = GENERATE(0, 1, 2, 3);  // MoveAxis, Park, AbortSlew, MoveAxis stop
     CAPTURE(leg);
     // The second command must reach its claim inside this real-time window; it takes no wire turn before it.
-    rig.mount.find_home_ms = 1500;
+    rig.mount.find_home_ms = 1000000;  // the home ends when the second command claims the axes
     auto homed = std::async(std::launch::async, [&] { rig.driver->find_home(); });
     REQUIRE(wait_real([&] { return rig.mount.find_home_commands.load() == 1; }));
     auto second = std::async(std::launch::async, [&] {
@@ -2286,7 +2287,7 @@ TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindH
             rig.driver->move_axis(0, 0.0);
         }
     });
-    REQUIRE(homed.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(advance_until(rig.clock, [&] { return ready(homed); }));  // FindHome polls on the task clock
     CHECK_NOTHROW(homed.get());
     CHECK(advance_until(rig.clock, [&] { return ready(second); }));
     CHECK_NOTHROW(second.get());

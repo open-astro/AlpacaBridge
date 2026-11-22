@@ -40,9 +40,9 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
- * `find_home_ms`, `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the FindHome,
- * SetTracking, GetRaDec, IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`),
- * as a TheSkyX stuck in one call.
+ * `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the SetTracking, GetRaDec,
+ * IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in
+ * one call. `find_home_ms` is how long an asynchronous FindHome runs: IsSlewComplete answers 0 until it has passed.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -132,11 +132,14 @@ private:
         }
         if (has(command, "FindHome")) {
             ++find_home_commands;
-            if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
             if (fail_find_home.load() > 0) {
                 --fail_find_home;
                 return "|No error. Error = 0.TypeError: FindHome failed#";
             }
+            // Asynchronous, as TheSkyX: IsSlewComplete answers 0 until find_home_ms of real time have passed since
+            // this command; a case can end the home at once by setting find_home_ms to 0.
+            home_started_ = std::chrono::steady_clock::now();
+            homing_ = true;
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
@@ -196,6 +199,11 @@ private:
         }
         if (has(command, "IsSlewComplete")) {
             ++slew_complete_queries;
+            if (homing_ &&
+                std::chrono::steady_clock::now() - home_started_ < std::chrono::milliseconds(find_home_ms.load())) {
+                return "|No error. Error = 0.0#";
+            }
+            homing_ = false;
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }
@@ -227,6 +235,8 @@ private:
     }
 
     std::atomic<bool> parking_{false};
+    std::chrono::steady_clock::time_point home_started_{};  // handler thread only, with homing_
+    bool homing_ = false;
     double target_ra_ = 0.0;  // written and read on the server's handler thread only
     double target_dec_ = 0.0;
 };

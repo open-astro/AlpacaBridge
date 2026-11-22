@@ -91,12 +91,18 @@ constexpr double kMaxMoveAxisRateDegPerSec =
 // Default guide rate: 50% of sidereal, in degrees per second.
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealRateArcsecPerSec / 3600.0;
 
-// Bisque's limits and orders for the telescope command gate (#2258). PulseGuide is capped at 30 s (see pulse_guide());
+// The guide holds the wire for up to duration + 1 s, so no tick publishes meanwhile; a frame up to a poll period old
+// at its start must still be under util::kLinkStalenessBound at its end, or a getter would read a lost link.
+constexpr int kPulseGuideMaxMs = 25000;
+static_assert(std::chrono::milliseconds(kPulseGuideMaxMs + 1000 + 1000) < util::kLinkStalenessBound,
+              "a pulse must end inside the link-loss bound");
+
+// Bisque's limits and orders for the telescope command gate (#2258). PulseGuide is capped at 25 s (see pulse_guide());
 // MoveAxis moves axes 0 and 1 at any finite rate (the nearest of the nine presets); the guide rate is 0 to 1x sidereal
 // on both axes (open-astro#775). Every family checks the link fault before the parked check (check_link_locked()).
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
-    limits.pulse_guide_max_ms = 30000;
+    limits.pulse_guide_max_ms = kPulseGuideMaxMs;
     limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
     limits.move_axis_axes = 2;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
@@ -106,7 +112,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.guide_rate_dec_min = 0.0;
     limits.guide_rate_dec_max = kSiderealRateArcsecPerSec / 3600.0;
     limits.texts.pulse_direction = "PulseGuide direction or duration is invalid";
-    limits.texts.pulse_duration = "PulseGuide duration must be at most 30000 ms";
+    limits.texts.pulse_duration = "PulseGuide duration must be at most 25000 ms";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
     limits.tracking_rate_max = 0;  // TODO: support solar/lunar/custom rates via SetTracking
     limits.texts.tracking_rate = "Only sidereal tracking rate is currently supported";
@@ -723,8 +729,25 @@ public:
         }
         const HomeGuard guard{*this};
         auto& protocol = BisqueProtocolWrapper::instance();
-        // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
+        // The send returns at once; the poll below is short exchanges, so the status poll keeps publishing for as
+        // long as TheSkyX homes (a 60 s exchange would age the frame past the 30 s loss bound).
         protocol.find_home();
+        const auto start = clock_.now();
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (motion_owner_.stop_reason(claim) != util::StopReason::None) return;
+            }
+            if (clock_.now() - start > std::chrono::seconds(60)) {
+                throw AlpacaException("FindHome timed out after 60 seconds");
+            }
+            try {
+                if (protocol.is_slew_complete()) break;
+            } catch (...) {
+            }
+            clock_.sleep_for(std::chrono::seconds(1));
+            check_connected_now();
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // A MoveAxis, slew or Park claimed the axes while TheSkyX homed, or a stop cancelled the home: the mount
@@ -800,15 +823,15 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        if (duration < 0) {  // the gate's duration text is the 30 s cap's; a negative one keeps the shared text
+        if (duration < 0) {  // the gate's duration text is the 25 s cap's; a negative one keeps the shared text
             throw AlpacaException(kCommandLimits.texts.pulse_direction, AlpacaError::InvalidValue);
         }
         // Cap (kCommandLimits.pulse_guide_max_ms): DirectGuide is a synchronous MoveTelescope that holds the
         // protocol wrapper (and so the socket) until TheSkyX replies, and
         // AbortSlew cannot interrupt it without interleaving replies on the
         // same socket. Real guiding pulses are milliseconds to a few seconds;
-        // 30 s is well above any guide client's longest pulse, and bounds how
-        // long an AbortSlew or any other command can wait behind a guide.
+        // 25 s is well above any guide client's longest pulse, bounds how
+        // long an AbortSlew or any other command can wait behind a guide, and keeps the frame under the loss bound.
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         std::unique_lock<std::mutex> lock(mutex_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
