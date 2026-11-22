@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -104,6 +105,13 @@ struct FakeCelestronState {
     std::atomic<int> cancel_first_seq{0};
     std::atomic<int> goto_requests{0};
     std::atomic<int> e_hold_ms{0};
+    // Every AUX pass-through frame ('P') the handset received, in order (the #2458 rate-0 stop cases).
+    std::mutex command_mutex;
+    std::vector<std::string> commands;
+    void note_passthrough(const std::string& frame) {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        commands.push_back(frame);
+    }
     std::mutex goto_text_m;
     std::string last_goto_text;
     void note_goto(const std::string& text) {
@@ -216,6 +224,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 't':  // tracking mode query
                 return st->tracking_on.load() ? std::string("\x02#") : std::string("\x00#", 2);
             case 'P': {  // AUX passthrough: P len dev op ...
+                st->note_passthrough(chunk);
                 const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
                 if (op == 0x0B) {
                     st->level_start_count.fetch_add(1);
@@ -1386,6 +1395,131 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn
     rig.driver->slew_to_coordinates_async(kTargetRa, 20.0);
     REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 3; }, 5000));
     CHECK(rig.st->goto_text() == after_learning);  // slew 2's measurement was dropped
+}
+
+// ---- A one-axis MoveAxis stop during a GOTO (#2458) ----
+
+namespace {
+
+// Rate-0 frames (fixed 36/37 or variable 6/7, both data bytes zero) sent to the RA (axis 0) or DEC (axis 1) motor. One
+// stop can send more than one frame (a variable-rate stop zeroes both directions), so cases compare against a baseline.
+int zero_rate_stops(FakeCelestronState& st, int axis) {
+    const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
+    std::lock_guard<std::mutex> lock(st.command_mutex);
+    int n = 0;
+    for (const auto& c : st.commands) {
+        if (c.size() < 6 || static_cast<unsigned char>(c[2]) != device) continue;
+        const auto op = static_cast<unsigned char>(c[3]);
+        if ((op == 6 || op == 7 || op == 36 || op == 37) && c[4] == '\0' && c[5] == '\0') ++n;
+    }
+    return n;
+}
+
+}  // namespace
+
+// The mount's GOTO drives both axes, so MoveAxis(axis, 0) during an async slew stops both, as AbortSlew does. A rate 0
+// on its own axis alone left the other axis under the GOTO while Slewing read false.
+TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both axes (#2458)",
+          "[celestron][telescope][initiator-supersede]") {
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    SupersedeRig rig;
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(rig.driver->get_slewing());
+    const int cancels = rig.st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*rig.st, 0);
+    const int dec_stops = zero_rate_stops(*rig.st, 1);
+    rig.driver->move_axis(axis, 0.0);
+    CHECK(rig.st->cancel_goto_count.load() == cancels + 1);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*rig.st, 1) > dec_stops);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// A blocking SlewToCoordinates waits with no slew body, so its GOTO is known only by the Slewing it published: a
+// one-axis stop then stops both axes too, and the waiting slew reports it was superseded.
+TEST_CASE("Celestron MoveAxis - a one-axis stop during a blocking slew stops both axes (#2458)",
+          "[celestron][telescope][initiator-supersede]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    st->tracking_on.store(true);
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    std::atomic<bool> done{false};
+    std::atomic<int> code{-1};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(5.0, 20.0);
+            code.store(0);
+        } catch (const alpacacore::AlpacaException& e) {
+            code.store(static_cast<int>(e.error_code()));
+        }
+        done.store(true);
+    });
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
+    const int cancels = st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*st, 0);
+    const int dec_stops = zero_rate_stops(*st, 1);
+    driver->move_axis(1, 0.0);
+    CHECK(st->cancel_goto_count.load() == cancels + 1);
+    CHECK(zero_rate_stops(*st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*st, 1) > dec_stops);
+    const bool finished = advance_until(clock, [&] { return done.load(); }, 2);
+    if (!finished &&
+        !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+        std::terminate();  // the slewer is stuck off the clock: joining it would hang
+    }
+    slewer.join();
+    REQUIRE(finished);
+    CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// With no GOTO running, a stop is still its own axis's: a jog on the other axis keeps running.
+TEST_CASE("Celestron MoveAxis - a one-axis stop with no slew running leaves a jog on the other axis alone (#2458)",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.driver->move_axis(1, 0.5);
+    const int cancels = rig.st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*rig.st, 0);
+    const int dec_stops = zero_rate_stops(*rig.st, 1);
+    rig.driver->move_axis(0, 0.0);
+    CHECK(rig.st->cancel_goto_count.load() == cancels);
+    CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*rig.st, 1) == dec_stops);
+    CHECK(rig.driver->get_slewing());  // the DEC jog still runs
+    rig.driver->move_axis(1, 0.0);
+}
+
+// A stop that fails may leave the GOTO running on either axis: the MoveAxis reports the failure, and Slewing raises it
+// (as after a failed AbortSlew) rather than reading false.
+TEST_CASE("Celestron MoveAxis - a failed one-axis stop during an async slew never reads Slewing false (#2458)",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig(500);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    rig.st->reject_stop.store(true);
+    int code = -1;
+    try {
+        rig.driver->move_axis(0, 0.0);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = static_cast<int>(ex.error_code());
+    }
+    CHECK(code == static_cast<int>(alpacacore::AlpacaError::DriverException));
+    CHECK(rig.st->cancel_goto_count.load() == 0);
+    try {
+        const bool slewing = rig.driver->get_slewing();
+        CHECK(slewing);  // a completion value is acceptable only while it still says moving
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).rfind("MoveAxis stop failed: ", 0) == 0);
+    }
+    rig.st->reject_stop.store(false);
+    rig.driver->abort_slew();
 }
 
 // Case A: park GOTO acked, mount never moves, 3 h of RA (45 deg) from the saved park position.

@@ -160,6 +160,21 @@ public:
         ignore_park_while_tracking_ = on;
     }
 
+    /// ":SMMC" moves the mount's own coordinates to the sync position, as an LX200-style sync does (#2492). Off by
+    /// default: the mount keeps its position and only answers.
+    void set_sync_applies(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sync_applies_ = on;
+    }
+
+    /// How the mount takes ":Rg" (#2462): every payload (the default), only the x15 encoding (a payload above 1.0,
+    /// stored as sent; ":Ggr#" answers it and the wrapper divides it by 15), or none (the rate never changes).
+    enum class GuideRateEncoding { Any, ScaledOnly, None };
+    void set_guide_rate_encoding(GuideRateEncoding encoding) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        guide_rate_encoding_ = encoding;
+    }
+
     /// The next command that starts with @p prefix waits @p delay in real time before it is answered (one shot).
     void delay_next(std::string prefix, std::chrono::milliseconds delay) {
         std::lock_guard<std::mutex> lock(delay_mutex_);
@@ -527,7 +542,12 @@ private:
             return {};
         }
         if (starts(":Rg")) {
-            guide_rate_ = command.substr(3);
+            const std::string payload = command.substr(3);
+            const bool scaled = std::atof(payload.c_str()) > 1.0;
+            if (guide_rate_encoding_ == GuideRateEncoding::Any ||
+                (guide_rate_encoding_ == GuideRateEncoding::ScaledOnly && scaled)) {
+                guide_rate_ = payload;
+            }
             return {};
         }
         if (command == ":Te") {
@@ -558,7 +578,15 @@ private:
             park_state_ = 0;
             return "1#";
         }
-        if (starts(":SMMC")) return "N/A#";  // the wrapper accepts an empty or N/A answer to a sync
+        if (starts(":SMMC")) {
+            const auto amp = command.find('&');
+            if (sync_applies_ && amp != std::string::npos) {
+                settle_locked();
+                ra_hours_ = sexagesimal(command.substr(5, amp - 5));
+                dec_degrees_ = sexagesimal(command.substr(amp + 1));
+            }
+            return "N/A#";  // the wrapper accepts an empty or N/A answer to a sync
+        }
         if (command == ":Sp01" || command == ":CM") return "1#";
         return {};
     }
@@ -601,6 +629,8 @@ private:
     int tracking_rate_ = 0;
     double move_rate_ = 0.0;
     std::string guide_rate_ = "0.50";
+    GuideRateEncoding guide_rate_encoding_ = GuideRateEncoding::Any;
+    bool sync_applies_ = false;
     int park_state_ = 0;
     bool park_pending_ = false;
     bool home_pending_ = false;

@@ -68,6 +68,10 @@ struct FakeSynScanState {
     // The position a precise GOTO landed on; empty until the first one (#1105). With land_on_goto false the mount
     // never moves, so the driver's landing check fails the slew after one repeat GOTO.
     std::atomic<bool> land_on_goto{true};
+    // true: a GOTO reports itself in progress until a cancel ('M') ends it, so the driver's wait times out (#2412).
+    std::atomic<bool> goto_hangs{false};
+    std::atomic<bool> goto_cancelled{false};
+    std::atomic<int> cancel_count{0};
     std::mutex landed_mutex;
     std::string landed;
     std::mutex command_mutex;
@@ -89,6 +93,7 @@ struct FakeSynScanState {
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
+        if (goto_hangs.load()) return !goto_cancelled.load();
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return !goto_stopped.load() && now() - started < kGotoDuration;
     }
@@ -128,6 +133,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 }
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_stopped.store(false);
+                st->goto_cancelled.store(false);
                 st->goto_count.fetch_add(1);
                 return "#";
             case 'L':
@@ -138,6 +144,9 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 }
                 return "#";
             case 'M':  // cancel goto
+                st->goto_cancelled.store(true);
+                st->cancel_count.fetch_add(1);
+                return "#";
             case 'P':  // passthrough
                 // A variable-rate move on the RA motor replaces tracking on the handset, and so does its stop.
                 if (chunk.size() >= 6 && chunk[1] == 3 && static_cast<unsigned char>(chunk[2]) == 16) {
@@ -1290,5 +1299,143 @@ TEST_CASE("SynScan MoveAxis - a Dec jog does not hide a keypad change from the n
     driver->move_axis(0, 0.0);
     CHECK(st->command_count('T') == writes_before);
     driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+// #2412: a GOTO the handset still reports in progress after the 120 s slew deadline made the wait throw and send no
+// stop, so the mount kept driving after the client was told the slew failed. The deadline now stops the mount (cancel
+// GOTO, both axes to rate 0, the tracking restore) and keeps the error for Slewing until the next motion command or a
+// reconnect; a stop that fails says the mount may still be moving.
+namespace {
+constexpr auto kSlewDeadline = std::chrono::seconds(120);  // the driver's kSlewTimeout
+
+// Steps virtual time in 1 s steps until `pred` holds, for at most `budget` of virtual time.
+bool advance_virtual_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
+                           std::chrono::seconds budget = std::chrono::seconds(200)) {
+    return advance_until(clock, pred, std::chrono::seconds(1), static_cast<int>(budget.count()));
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> connect_with_hanging_goto(const std::shared_ptr<FakeSynScanState>& st,
+                                                                       alpacacore::test::FakeMountServer& server,
+                                                                       alpacacore::test::FakeTaskClock& clock) {
+    st->clock = &clock;
+    st->goto_hangs.store(true);
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_tracking());
+    return driver;
+}
+}  // namespace
+
+TEST_CASE("SynScan async - a GOTO past its deadline stops the mount and keeps the timeout for Slewing (#2412)",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(st, server, clock);
+    const int tracking_writes_before = st->command_count('T');
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_virtual_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+
+    std::string message;
+    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
+    // The kept text itself: the async body passes the deadline's error on, it does not re-record it as a dispatch
+    // failure (which would also clear Slewing behind a stop that failed).
+    CHECK(message == "Slew timed out after 120 s; the mount was stopped");
+    CHECK(st->cancel_count.load() >= 1);  // the GOTO was cancelled on the wire
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(st->command_count('T') == tracking_writes_before + 1);  // the RA stop's tracking restore
+    CHECK(driver->get_tracking());
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);  // kept, not one-shot
+
+    // The next motion command clears it.
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan SlewToCoordinates - a blocking GOTO past its deadline stops the mount and keeps the error (#2412)",
+          "[synscan][telescope][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(st, server, clock);
+
+    std::atomic<bool> done{false};
+    std::string thrown;
+    int thrown_code = 0;
+    std::thread caller([&] {
+        try {
+            driver->slew_to_coordinates(5.5, 20.0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            thrown = ex.what();
+            thrown_code = ex.error_code();
+        }
+        done.store(true);
+    });
+    const bool began = wait_until([&] { return st->goto_count.load() > 0 || done.load(); }, 5000);
+    const bool finished = began && advance_virtual_until(clock, [&] { return done.load(); });
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    caller.join();
+    REQUIRE(finished);
+    CHECK(thrown_code == alpacacore::AlpacaError::DriverException);
+    CHECK(thrown.find("Slew timed out") != std::string::npos);
+    CHECK(thrown.find("the mount was stopped") != std::string::npos);
+    CHECK(st->cancel_count.load() >= 1);
+    CHECK_FALSE(st->goto_in_progress());
+
+    // Slewing raises the kept error rather than reading true (or false) behind the blocking caller's error.
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == thrown);
+
+    // A reconnect clears it.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a deadline stop that fails says the mount may still be moving (#2412)",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(st, server, clock);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    const auto started = clock.now();
+    // Up to just short of the deadline, then the link goes: the status reads that follow fail and keep the last
+    // answer (in progress), and the stops at the deadline meet a closed peer. The SynScan stops are blind sends, so
+    // only a dead link can fail them.
+    REQUIRE(
+        advance_virtual_until(clock, [&] { return clock.now() - started >= kSlewDeadline - std::chrono::seconds(3); }));
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);
+    REQUIRE(server.drop_connections());
+    // The dead link latches a fault, which Slewing raises too; the kept slew error takes precedence once it exists.
+    std::string message;
+    REQUIRE(advance_virtual_until(
+        clock,
+        [&] {
+            message.clear();
+            return read_slewing(*driver, &message) != SlewingRead::True &&
+                   message.find("Slew timed out") != std::string::npos;
+        },
+        std::chrono::seconds(30)));
+    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
+    // The kept text, not re-recorded by the async body's dispatch-failure path, which would clear Slewing on a mount
+    // that may still be moving.
+    CHECK(message.rfind("Slew timed out after 120 s; stopping after failure failed: ", 0) == 0);
+    CHECK(message.find("the mount may still be moving") != std::string::npos);
+    CHECK(message.find("the mount was stopped") == std::string::npos);
     driver->set_connected(false);
 }
