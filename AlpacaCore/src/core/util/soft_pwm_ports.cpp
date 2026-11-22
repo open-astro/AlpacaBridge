@@ -287,8 +287,8 @@ void SoftPwmPorts::pwm_loop(std::size_t index) {
             s.cv.wait(lock, [&s, duty] { return s.stop || s.value != duty; });
             continue;
         }
-        // Edges are absolute (the sleep_until of the rule), so the latency of a write does not drift the
-        // duty; a worker that fell a whole period behind restarts at now instead of bursting to catch up.
+        // Edges are absolute deadlines (the rule's bit-bang on absolute edges), so the latency of a write does not
+        // drift the duty; a worker that fell a whole period behind restarts at now instead of bursting to catch up.
         const auto now = clock_.now();
         auto start = next_edge.value_or(now);
         if (now - start > period_) {
