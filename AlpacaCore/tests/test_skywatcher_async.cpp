@@ -7029,3 +7029,143 @@ TEST_CASE("SkyWatcher async - a refused slew start that superseded a pulse stops
     sw::set_slew_spawn_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
+
+// #2503 (maintainer decision of 2026-11-22, as #2467 for SynScan and #2506 for ZWO): a PulseGuide on the axis a
+// non-zero MoveAxis is driving is refused with InvalidOperation and changes nothing: no frame reaches the board,
+// IsPulseGuiding stays false and the jog runs on. It is refused from the jog's claim, while its dispatch stop-waits
+// the axis with the locks released (the "claim gap" leg: the axis reads running, so the MoveAxis parks there), not
+// only once its flag is set. A pulse on the other axis is still accepted and leaves the jog running, and the refusal
+// ends with the jog.
+// Falsified by: skywatcher_telescope_driver.cpp pulse_guide(): dropping the jog refusal (every leg), or refusing on
+// the jog's flag alone without jog_pending_ (the claim-gap leg).
+TEST_CASE("SkyWatcher async - PulseGuide on the axis a MoveAxis is driving is refused and changes nothing (#2503)",
+          "[skywatcher][async][pulseguide][motion-owner][goto-safety]") {
+    const int axis = GENERATE(0, 1);
+    const std::string when = GENERATE(as<std::string>{}, "jogging", "claim gap");
+    CAPTURE(axis, when);
+    const int channel = axis + 1;
+    const int other_channel = 3 - channel;
+    const int direction = axis == 0 ? 2 : 0;        // East on RA, North on Dec
+    const int other_direction = axis == 0 ? 0 : 2;  // North on Dec, East on RA
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+
+    int code = 0;
+    const auto pulse = [&](int dir) {
+        try {
+            driver->pulse_guide(dir, 1000);
+        } catch (const alpacacore::AlpacaException& ex) {
+            code = ex.error_code();
+        }
+    };
+    std::size_t sent_before = 0;
+    if (when == "jogging") {
+        driver->move_axis(axis, 1.0);
+        REQUIRE(mount.axis_running(channel));
+        sent_before = mount.motion_log().size();
+        pulse(direction);
+    } else {
+        mount.hold_running(channel, true);  // the jog's dispatch stop-wait polls with the locks released
+        std::atomic<bool> threw{false};
+        std::atomic<bool> done{false};
+        std::thread mover([&] {
+            try {
+                driver->move_axis(axis, 1.0);
+            } catch (const alpacacore::AlpacaException&) {
+                threw = true;
+            }
+            done = true;
+        });
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the jog, parked in its stop-wait
+        sent_before = mount.motion_log().size();
+        pulse(direction);
+        const bool parked_nothing_sent = mount.motion_log().size() == sent_before;
+        mount.hold_running(channel, false);
+        const bool jog_returned =
+            run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(2000));
+        mover.join();
+        REQUIRE(jog_returned);
+        CHECK(parked_nothing_sent);
+        CHECK_FALSE(threw.load());  // the refused pulse did not take the jog's claim
+        REQUIRE(mount.axis_running(channel));
+        sent_before = mount.motion_log().size();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    const int starts = mount.start_count(channel);
+    const int stops = mount.stop_count(channel);
+    const int other_starts = mount.start_count(other_channel);
+    // Past the refused pulse's duration. Only the status poll waits on the clock, so step it directly.
+    for (int i = 0; i < 6; ++i) {
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(kRendezvous);
+    }
+    CHECK(mount.motion_log().size() == sent_before);  // nothing at all reached the board
+    CHECK(mount.axis_running(channel));               // the jog still runs
+    CHECK(driver->get_slewing());
+
+    // The other axis is not refused, and its pulse leaves the jog alone.
+    REQUIRE_NOTHROW(driver->pulse_guide(other_direction, 500));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    CHECK(mount.start_count(other_channel) > other_starts);
+    CHECK(mount.start_count(channel) == starts);
+    CHECK(mount.stop_count(channel) == stops);
+    CHECK(mount.axis_running(channel));
+
+    // The refusal ends with the jog.
+    driver->move_axis(axis, 0.0);
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(5000)));
+    REQUIRE_NOTHROW(driver->pulse_guide(direction, 500));
+    CHECK(driver->get_is_pulse_guiding());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    driver->set_connected(false);
+}
+
+// #2503: a jog that lands between a SlewToCoordinatesAsync's or FindHome's start and its body (the slot thread is
+// held back) makes a one-axis claim that takes an axis from the slew claim, so slew_running() reads false while
+// Slewing reads true and the body is still to dispatch. A pulse on the other axis there is refused with
+// InvalidOperation and sends nothing: the body would otherwise dispatch both axes over the running pulse.
+// Falsified by: skywatcher_telescope_driver.cpp pulse_guide(): dropping the own_slew_in_flight_locked() term from the
+// slew refusal.
+TEST_CASE("SkyWatcher async - a jog between a GOTO's or FindHome's start and its body leaves PulseGuide refused (#2503)",
+          "[skywatcher][async][pulseguide][motion-owner][goto-safety]") {
+    const std::string op = GENERATE(as<std::string>{}, "goto", "home");
+    CAPTURE(op);
+    SlotGate gate;  // declared before the driver, which joins the held slew thread
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->set_tracking(true);
+    gate.close();
+    sw::set_slew_spawn_for_testing(*driver, gate.spawn());
+    if (op == "goto") {
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0), 40.0);
+    } else {
+        driver->find_home();
+    }
+    driver->move_axis(0, 1.0);  // RA jog in the gap: initiator_mutex_ is free, the body is held
+    CHECK(mount.axis_running(1));
+    CHECK(driver->get_slewing());
+    const std::size_t sent_before = mount.motion_log().size();
+    const int dec_starts = mount.start_count(2);
+    // Not a REQUIRE: the held slew thread must be released before the driver joins it.
+    int code = 0;
+    try {
+        driver->pulse_guide(0, 1000);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(mount.motion_log().size() == sent_before);
+    CHECK(mount.start_count(2) == dec_starts);
+    driver->abort_slew();
+    gate.release();
+    sw::set_slew_spawn_for_testing(*driver, nullptr);
+    driver->set_connected(false);
+}
