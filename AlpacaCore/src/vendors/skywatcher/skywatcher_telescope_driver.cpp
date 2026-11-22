@@ -2785,7 +2785,6 @@ public:
         }
         if (started) {
             start_limit_guard();
-            start_move_axis_cap();
         }
         if (!need_stop_task) {
             return;
@@ -4180,6 +4179,7 @@ private:
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return false;
             }
+            enforce_move_axis_cap_locked();  // open-astro#2407
             ra_cpr = axis_params_[0].counts_per_revolution;
             dec_cpr = axis_params_[1].counts_per_revolution;
         }
@@ -6271,61 +6271,23 @@ private:
         }
     }
 
-    // open-astro#2407 (#2396 AB-9): one body watches both axes' MoveAxis caps on the task clock. A newer
-    // MoveAxis call on the axis (stop_generation_ moves on), or anything that ends the jog
-    // (manual_axis_slewing_ false), disarms that axis's cap; an expired one stops the axis.
-    void start_move_axis_cap() {
-        try {
-            move_axis_cap_.start([this](util::OperationContext& ctx) { run_move_axis_cap(ctx); });
-        } catch (const std::exception& e) {
-            // Fail closed: a jog nothing bounds is not left running.
-            ALPACA_LOG_ERROR("SkyWatcher", std::string("MoveAxis cap did not start; stopping the jog: ") + e.what());
-            StateLock lock(lock_gate_);
-            for (int axis = 0; axis < 2; ++axis) {
-                if (move_axis_cap_armed_[axis] && connected_) {
-                    stop_capped_move_axis_locked(axis, "the MoveAxis cap did not start");
-                }
+    // open-astro#2407 (#2396 AB-9): the MoveAxis dead-man, run by every status poll (kStatusPollPeriod), so it
+    // adds no clock waiter of its own. A newer MoveAxis call on the axis (stop_generation_ moves on), or anything
+    // that ends the jog (manual_axis_slewing_ false), disarms that axis's cap; an expired one stops the axis.
+    // Caller holds the operation lock and mutex_.
+    void enforce_move_axis_cap_locked() {
+        const auto now = clock_.now();
+        for (int axis = 0; axis < 2; ++axis) {
+            if (!move_axis_cap_armed_[axis]) {
+                continue;
             }
-        }
-    }
-
-    void run_move_axis_cap(util::OperationContext& ctx) {
-        for (;;) {
-            std::chrono::nanoseconds wait{0};
-            {
-                StateLock lock(lock_gate_);
-                if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
-                    return;
-                }
-                const auto now = clock_.now();
-                bool armed = false;
-                auto earliest = now;
-                for (int axis = 0; axis < 2; ++axis) {
-                    if (!move_axis_cap_armed_[axis]) {
-                        continue;
-                    }
-                    if (!manual_axis_slewing_[axis] || stop_generation_[axis].current() != move_axis_cap_owner_[axis]) {
-                        move_axis_cap_armed_[axis] = false;
-                        continue;
-                    }
-                    if (now >= move_axis_cap_deadline_[axis]) {
-                        stop_capped_move_axis_locked(axis, "MoveAxis ran for " +
-                                                               std::to_string(kMaxMoveAxisDuration.count()) +
-                                                               " s with no new MoveAxis call");
-                        continue;
-                    }
-                    if (!armed || move_axis_cap_deadline_[axis] < earliest) {
-                        earliest = move_axis_cap_deadline_[axis];
-                    }
-                    armed = true;
-                }
-                if (!armed) {
-                    return;
-                }
-                wait = std::min<std::chrono::nanoseconds>(earliest - now, std::chrono::seconds(1));
+            if (!manual_axis_slewing_[axis] || stop_generation_[axis].current() != move_axis_cap_owner_[axis]) {
+                move_axis_cap_armed_[axis] = false;
+                continue;
             }
-            if (!ctx.wait_for(wait)) {
-                return;
+            if (now >= move_axis_cap_deadline_[axis]) {
+                stop_capped_move_axis_locked(axis, "MoveAxis ran for " + std::to_string(kMaxMoveAxisDuration.count()) +
+                                                       " s with no new MoveAxis call");
             }
         }
     }
@@ -6431,7 +6393,6 @@ private:
         // First: the limit guard stops motion through move_axis(), which
         // spawns a stop task, so it must be gone before those are joined.
         limit_guard_.cancel_all_and_join();
-        move_axis_cap_.cancel_all_and_join();
         abort_verify_.cancel_all_and_join();
         // The status poll (decision 0010) only reads, but its exchanges must
         // be done before a disconnect closes the transport.
@@ -7139,13 +7100,11 @@ private:
     util::OperationGeneration stop_generation_[2];
     util::AsyncOperation stop_ops_[2] = {{"SkyWatcher MoveAxis stop (RA)", stop_generation_[0], clock_},
                                          {"SkyWatcher MoveAxis stop (Dec)", stop_generation_[1], clock_}};
-    // open-astro#2407: the MoveAxis dead-man (run_move_axis_cap()). Armed state under mutex_. After
-    // stop_generation_, which its body reads, so it joins before that dies.
+    // open-astro#2407: the MoveAxis dead-man (enforce_move_axis_cap_locked(), run by the status poll). Under
+    // mutex_.
     std::chrono::steady_clock::time_point move_axis_cap_deadline_[2]{};
     std::uint64_t move_axis_cap_owner_[2] = {0, 0};
     bool move_axis_cap_armed_[2] = {false, false};
-    util::OperationGeneration move_axis_cap_generation_;
-    util::AsyncOperation move_axis_cap_{"SkyWatcher MoveAxis cap", move_axis_cap_generation_, clock_};
     // open-astro#2407: the AbortSlew stop check (run_abort_verify()).
     util::OperationGeneration abort_verify_generation_;
     util::AsyncOperation abort_verify_{"SkyWatcher AbortSlew stop check", abort_verify_generation_, clock_};

@@ -73,10 +73,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 // The seam between "the poll is parked on the clock" and the case moving time:
 // a step wakes the poll once; waiting for the woken thread lets it finish (or
 // give up on a silent board) before the next one.
-// `waiters`: the driver threads parked on the clock before the step. The poll is one; a MoveAxis adds its 60 s
-// cap body (open-astro#2407), and a step that counted only one could then run ahead of a poll still in its exchange.
-void step(FakeTaskClock& clock, std::chrono::nanoseconds d, std::size_t waiters = 1) {
-    REQUIRE(clock.wait_for_waiters(waiters, kRendezvous));
+void step(FakeTaskClock& clock, std::chrono::nanoseconds d) {
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
     clock.advance(d);
     clock.wait_for_woken_settled(std::chrono::seconds(10));
 }
@@ -528,7 +526,7 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     // status poll alone latches the fault (decision 0009, stage one) ...
     mount.set_silent(true);
     for (int i = 0; i < 6 && driver->get_link_fault().empty(); ++i) {
-        step(clock, milliseconds(150), /*waiters=*/2);  // the poll and the Dec MoveAxis cap
+        step(clock, milliseconds(150));
     }
     REQUIRE_FALSE(driver->get_link_fault().empty());
     CHECK(driver->get_connected());  // faulted, not lost

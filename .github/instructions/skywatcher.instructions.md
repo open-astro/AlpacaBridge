@@ -380,7 +380,7 @@ datagrams before each send so replies cannot get off-by-one.
     tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
     cannot attribute (tracking, most likely); a first connect with no loss stamp still stops nothing.
   - *MoveAxis cap.* One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at most
-    (`move_axis_cap_`, task clock); a new MoveAxis call on the axis restarts it. On expiry the axis gets `:L`,
+    (`enforce_move_axis_cap_locked()`, run by every status poll, so it adds no clock waiter); a new MoveAxis call on the axis restarts it. On expiry the axis gets `:L`,
     RA's drive stays off (no tracking restore: the client that owned the jog is gone) and Slewing raises.
   - *Non-convergence.* A landing still more than `kFarMissArcsec` (600") off after the three re-gotos is a
     failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
