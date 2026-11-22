@@ -1527,16 +1527,35 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
     // read is the control path's, not a poll's: the frame keeps the age of the last poll (the connect's).
     rig.clock().advance(std::chrono::seconds(3));
     rig.fake().st->shifted = true;
-    const auto idle = rig.clock().waiter_count();  // the paused poll body
+    // The hook runs on the slew body's thread, so the case can wait for that thread alone: the paused poll body is a
+    // waiter on the same clock and must not stand in for it.
+    std::mutex body_mutex;
+    std::optional<std::thread::id> body;
+    cel::set_slew_body_hook_for_testing(driver, [&](const cel::SlewBodyStopReason&) {
+        std::lock_guard<std::mutex> lock(body_mutex);
+        body = std::this_thread::get_id();
+    });
     driver.slew_to_coordinates_async(5.0, 20.0);
     CHECK(driver.get_slewing());
-    REQUIRE(rig.clock().wait_for_waiters(idle + 1, std::chrono::seconds(5)));  // the body is parked
-    // The body polls every 250 ms: step it by that, once per advance(), and wait for it to park again (a new wait)
-    // or end before the next step, so the frame ages by the slew's length only.
+    const auto bound = std::chrono::seconds(5);
+    const auto body_id = [&] {
+        for (int i = 0; i < 500; ++i) {
+            {
+                std::lock_guard<std::mutex> lock(body_mutex);
+                if (body) return *body;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return std::thread::id{};
+    }();
+    REQUIRE(body_id != std::thread::id{});
+    REQUIRE(rig.clock().wait_for_waiter_thread(body_id, bound));  // the body is parked
+    cel::set_slew_body_hook_for_testing(driver, nullptr);
+    // The body polls every 250 ms: step it by that, once per advance(), and let every woken waiter settle before the
+    // next step, so the frame ages by the slew's length only.
     for (int i = 0; i < 200 && driver.get_slewing(); ++i) {
-        const auto waits = rig.clock().wait_count();
         rig.clock().advance(std::chrono::milliseconds(250));
-        (void)rig.clock().wait_for_wait_count(waits + 1, std::chrono::milliseconds(200));
+        REQUIRE(rig.clock().wait_for_woken_settled(bound));
     }
     REQUIRE_FALSE(driver.get_slewing());
     CHECK(std::abs(driver.get_right_ascension() - 3.25) > 1e-3);  // the frame the slew end measured, not the sync's
