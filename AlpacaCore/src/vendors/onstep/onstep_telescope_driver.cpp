@@ -96,6 +96,17 @@ constexpr double kAltitudeLimitMarginDeg = 1.0;
 // open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
 // time limit (10 s by default) does not end it. Tests advance a FakeTaskClock.
 constexpr auto kMoveAxisResendInterval = std::chrono::seconds(7);
+// #2406 (motion fails closed, #2396): a GOTO the mount still shows this long after its :MS# is stopped with
+// AbortSlew's stops, and Slewing raises the failure. The status poll checks it for an async slew, and the
+// synchronous slew's wait uses the same bound.
+constexpr auto kGotoTimeout = std::chrono::seconds(120);
+// #2406 (#2396 AB-9): a MoveAxis runs at most this long. Then the re-send stops its axis and Slewing raises.
+constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
+// #2406 (#2396 AB-4): while :GU# still shows motion after an AbortSlew, the status poll sends the stops again
+// every kAbortStopRound, kAbortStopRounds rounds in all (the AbortSlew included); motion after the last one makes
+// Slewing raise.
+constexpr auto kAbortStopRound = std::chrono::seconds(2);
+constexpr int kAbortStopRounds = 3;
 // open-astro#1430: how long Park and FindHome wait for the motion they stopped
 // to end, and how long they retry a park or home OnStepX refuses as "in motion"
 // (an axis brakes for about 0.4 s at 0.5 deg/s on the HM-17; a home that just
@@ -960,6 +971,7 @@ public:
             clear_pulse_guides_locked();
             tracking_before_slew_ = false;
             status_read_since_move_ = false;
+            begin_motion_command_locked();  // no stored motion failure or stop check outlives a session (#2406)
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             site_read_warned_ = false;
 
@@ -1653,6 +1665,7 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("SiteLatitude");  // as the other writes (#1626)
+        refuse_while_moving_locked("SiteLatitude");
         // Read the mount's pair first while it is not known, so the longitude is
         // the mount's and not a default. A failed read here is logged and leaves
         // it unknown, so the poll asks again; it does not refuse the write, whose
@@ -1678,6 +1691,7 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("SiteLongitude");  // as the other writes (#1626)
+        refuse_while_moving_locked("SiteLongitude");
         // See set_site_latitude(): the mount's latitude first, while unknown.
         ensure_site_info_cached_locked();
         wire().set_longitude(longitude);
@@ -1696,7 +1710,32 @@ public:
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
         raise_motion_error_locked(std::nullopt);
+        if (!bound_error_.empty()) {
+            throw AlpacaException(bound_error_, AlpacaError::DriverException);
+        }
         return get_slewing_locked();
+    }
+
+    // #2406: the next motion command ends the stored failure and the AbortSlew stop check.
+    void begin_motion_command_locked(bool keep_goto_bound = false) const {
+        bound_error_.clear();
+        abort_stop_rounds_ = 0;
+        if (!keep_goto_bound) {
+            goto_deadline_.reset();
+        }
+    }
+
+    // #2406 (#2396 AB-10): a site or time write changes the firmware's limit and pier maths, so none goes out while
+    // a motion of this driver runs: a GOTO until it lands, a MoveAxis, a Park or FindHome being started. Only the
+    // driver's own state is read, so a :GU# the driver cannot parse refuses nothing; a motion from a hand
+    // controller is not seen. A pulse guide does not count.
+    void refuse_while_moving_locked(const char* who) const {
+        const bool moving = slew_hold_.active(clock_.now()) || goto_deadline_.has_value() || manual_axis_slewing_[0] ||
+                            manual_axis_slewing_[1] || park_home_request_;
+        if (moving) {
+            throw AlpacaException(std::string(who) + " is not allowed while the mount is moving",
+                                  AlpacaError::InvalidOperation);
+        }
     }
 
     double get_target_declination() const override {
@@ -1847,6 +1886,7 @@ public:
         // Here, not in set_utc_date_locked(): the connect's own time sync runs
         // right after link_health_.reset(), where the check cannot fire (#1626).
         refuse_while_faulted_locked("UTCDate");
+        refuse_while_moving_locked("UTCDate");
         set_utc_date_locked(utc);
         // A host clock re-sync decided before this write sends nothing (#2419). Bumped once the write landed, still
         // under the operation lock the re-sync's own write takes, so the two never interleave.
@@ -1872,6 +1912,7 @@ public:
         check_connected();
         refuse_while_faulted_locked("FindHome");
         check_not_parked_locked("FindHome");
+        begin_motion_command_locked();
         refresh_status_locked();  // a control-path read, written through (decision 0010)
         if (const MountStatus status = frame_status_locked(); status.is_at_home || status.is_homing) {
             motion_error_.reset();  // a new command: an earlier failure is not this call's
@@ -1885,6 +1926,7 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Park");
+        begin_motion_command_locked();
         refresh_status_locked();  // a control-path read, written through (decision 0010)
         if (const MountStatus status = frame_status_locked(); status.is_parked || status.is_parking) {
             motion_error_.reset();  // a new command: an earlier failure is not this call's
@@ -2089,6 +2131,8 @@ public:
         const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
         util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        // A MoveAxis is not refused while a GOTO runs, so it keeps that GOTO's bound (and its site-write refusal).
+        begin_motion_command_locked(/*keep_goto_bound=*/true);
         const Wire protocol = wire();
 
         // Direction codes: 0=North(Dec+), 1=South(Dec-), 2=East(RA+), 3=West(RA-).
@@ -2128,6 +2172,7 @@ public:
             manual_axis_rate_[axis] = std::abs(rate);
             manual_axis_resend_[axis] = true;
             manual_axis_resend_due_[axis] = clock_.now() + kMoveAxisResendInterval;
+            manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
             status_read_since_move_ = false;  // a :GU# from before the move must not end it (#1378)
             drop_poll_in_flight_locked();     // nor a poll tick that sampled before it
             drop_offset_model_locked();       // #2241: a frame measured after the move anchors it again
@@ -2282,6 +2327,7 @@ public:
         } drop_watch{this};
         supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
         watched_motion_ = watched_slew;
+        begin_motion_command_locked();
         // Every stop on its own, so one lost command cannot skip the others (#781).
         const std::string stop_error = send_stops_locked(true, {0, 1, 2, 3});
         if (!stop_error.empty()) {
@@ -2294,6 +2340,10 @@ public:
         slew_hold_.clear();
         clear_manual_motion_locked();
         clear_pulse_guides_locked();    // :Q# ends every guide, a pulse guide included (Guide::stop())
+        // #2406 (#2396 AB-4): a stop the mount did not hear counted as done. The status poll now checks it: while
+        // :GU# still shows motion it sends the stops again (check_abort_stop_locked()).
+        abort_stop_rounds_ = 1;
+        abort_next_round_ = clock_.now() + kAbortStopRound;
         drop_poll_in_flight_locked();   // a tick that sampled the motion before the stops is dropped
         // #2241: and the rate-offset model with it.
         drop_offset_model_locked();
@@ -2655,12 +2705,12 @@ private:
                         return;
                     }
                     if (!wants_resend(0) && !wants_resend(1)) {
-                        return;  // stopped, even if the stop failed: nothing left to keep going
+                        return;  // stopped or capped, even if the stop failed: nothing left to keep going
                     }
                     auto earliest = std::chrono::steady_clock::time_point::max();
                     for (int axis = 0; axis < 2; ++axis) {
                         if (wants_resend(axis)) {
-                            earliest = std::min(earliest, manual_axis_resend_due_[axis]);
+                            earliest = std::min({earliest, manual_axis_resend_due_[axis], manual_axis_deadline_[axis]});
                         }
                     }
                     wait = std::max(earliest - clock_.now(), std::chrono::steady_clock::duration::zero());
@@ -2676,6 +2726,14 @@ private:
                     return;
                 }
                 const auto now = clock_.now();
+                for (int axis = 0; axis < 2; ++axis) {
+                    if (wants_resend(axis) && manual_axis_deadline_[axis] <= now) {
+                        stop_capped_move_locked(axis);
+                    }
+                }
+                if (!wants_resend(0) && !wants_resend(1)) {
+                    return;
+                }
                 bool due[2] = {false, false};
                 for (int axis = 0; axis < 2; ++axis) {
                     due[axis] = wants_resend(axis) && manual_axis_resend_due_[axis] <= now;
@@ -2686,7 +2744,8 @@ private:
                 const bool keep_going = resend_tick_locked(ctx, due);
                 // Due again a full interval after this tick ends, whatever it
                 // did: a skipped tick never spins, and mutex_ is free between
-                // ticks.
+                // ticks. An axis capped above has left `due` (its re-send
+                // flag is off), so its deadline is never waited on again.
                 const auto next = clock_.now() + kMoveAxisResendInterval;
                 for (int axis = 0; axis < 2; ++axis) {
                     if (due[axis]) {
@@ -2698,6 +2757,28 @@ private:
                 }
             }
         });
+    }
+
+    // #2406 (#2396 AB-9): a MoveAxis past kMaxMoveAxisDuration. Its axis is stopped as MoveAxis(axis, 0) stops it,
+    // and Slewing raises the failure. The axis is never re-sent afterwards, even when the stop fails: its re-send
+    // flag is dropped first (stop_axis_locked()), so the body neither re-sends the start nor tries the stop
+    // again, and OnStepX's guide time limit ends a move nothing re-sends. A stop that fails keeps the axis reading
+    // as moving (#742). Under the operation lock the re-send tick holds.
+    void stop_capped_move_locked(int axis) {
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
+        bound_error_ = "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
+                       " s, the longest allowed; the driver stopped it";
+        const std::string stop_error = stop_axis_locked(axis);
+        if (stop_error.empty()) {
+            manual_axis_slewing_[axis] = false;
+            ALPACA_LOG_INFO("OnStep", bound_error_);  // a client can cause it: decision 0007 rule 9
+        } else {
+            bound_error_ += "; the stop failed: " + stop_error;
+            ALPACA_LOG_ERROR("OnStep", bound_error_);  // the stop itself failed: a device failure
+        }
+        if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
+            clear_manual_motion_locked();  // cancel() from its own body is allowed
+        }
     }
 
     // One re-send tick for the axes in `due` (#1378). False ends the body.
@@ -3550,7 +3631,12 @@ private:
 
         void check_connected() const { driver.check_connected(); }
         // A non-stop first needs a status read since the connect; a stop refuses only a status that reads parked.
-        void check_not_parked(bool stop) const { driver.check_not_parked_locked(who, stop); }
+        // #2435: a MoveAxis stop is never refused, parked or not (motion fails closed): its :Qe#/:Qw# or :Qn#/:Qs#
+        // are harmless on a parked mount.
+        void check_not_parked(bool stop) const {
+            if (stop) return;
+            driver.check_not_parked_locked(who, stop);
+        }
         void check_no_fault() const { driver.refuse_while_faulted_locked(who); }
         // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation (open-astro#1274). Read as the
         // getter does, from the polled frame (a control-path :GU# read only while the frame has no status), so a
@@ -3937,6 +4023,7 @@ private:
         refuse_while_faulted_locked(context);
         refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
         supersede_park_or_home_locked();            // a newer motion command wins (#1430)
+        begin_motion_command_locked();
         const Wire protocol = wire();
         prepare(protocol);
         // Decision 0022 rule 2: armed before the GOTO goes out, cleared when it does not start.
@@ -3950,8 +4037,12 @@ private:
         }
         if (reply.empty() || reply[0] != '0') {
             slew_hold_.clear();
+            if (reply.empty()) {
+                stop_unconfirmed_goto_locked(context);  // no digit: the mount may have started it
+            }
             throw slew_refused(context, reply, command);
         }
+        goto_deadline_ = clock_.now() + kGotoTimeout;
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
         watch_motion_locked(MotionKind::Slew, context);  // #2296: before the write-through, from the status read
@@ -4048,11 +4139,20 @@ private:
     // again on return/throw.
     template <typename Predicate>
     void wait_for_condition_locked(StateLock& lock, Predicate done) const {
-        const auto timeout = std::chrono::seconds(120);
         const auto start = clock_.now();
-        while (!done()) {
-            if (clock_.now() - start > timeout) {
-                throw AlpacaException("Operation timed out waiting for mount status");
+        for (;;) {
+            // Before done(): a GOTO the status poll stopped at its bound reads as ended on the next :GU#, and must
+            // fail the slew, not land it (#2406).
+            if (!bound_error_.empty()) {
+                throw AlpacaException(bound_error_, AlpacaError::DriverException);
+            }
+            if (done()) {
+                return;
+            }
+            if (clock_.now() - start > kGotoTimeout) {
+                // #2406: a timeout that sends no stop left the GOTO running. Stop it first; Slewing then raises.
+                stop_overdue_goto_locked();
+                throw AlpacaException(bound_error_, AlpacaError::DriverException);
             }
             lock.unlock();
             clock_.sleep_for(std::chrono::milliseconds(250));
@@ -4064,6 +4164,7 @@ private:
 
     void wait_for_slew_complete_locked(StateLock& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
+        goto_deadline_.reset();  // landed on the wait's own :GU#, before the next poll tick sees it (#2406)
         // Decide the restore here; the status was just read (#1230). A slew the mount stopped owes none (#2296).
         finish_slew_tracking_from_frame_locked();
         // The control path ends the motion: publish where the mount stopped, so the position read right after
@@ -4588,6 +4689,7 @@ private:
             }
             try {
                 finish_slew_if_ended_locked(frame);
+                check_motion_bounds_locked(frame.status);
                 if (full && !site_known_locked()) {
                     ensure_site_info_cached_locked();  // a site the connect could not read (#1783)
                 }
@@ -4662,12 +4764,82 @@ private:
             return;
         }
         slew_hold_.clear();  // landed: a frame with no GOTO (decision 0022 rules 2, 3)
+        goto_deadline_.reset();
         if (!tracking_before_slew_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_home_request_) {
             return;
         }
         if (finish_slew_tracking_locked(frame.status.is_tracking)) {
             frame.status.is_tracking = true;
         }
+    }
+
+    // #2406: the bounds the status poll enforces on each frame, under the operation lock its :GU# took: a GOTO past
+    // kGotoTimeout is stopped, and an AbortSlew the mount did not obey is sent again.
+    void check_motion_bounds_locked(const MountStatus& status) const {
+        if (goto_deadline_ && status.is_slewing && clock_.now() >= *goto_deadline_) {
+            stop_overdue_goto_locked();
+        }
+        check_abort_stop_locked(status);
+    }
+
+    // #2406 (#2396 AB-4): `status` from a :GU# after the AbortSlew. No motion ends the check. Motion when a round is
+    // due sends the stops again, up to kAbortStopRounds in all; motion after the last round is a stored failure.
+    void check_abort_stop_locked(const MountStatus& status) const {
+        if (abort_stop_rounds_ == 0) {
+            return;
+        }
+        const bool moving =
+            status.is_slewing || status.is_homing || (status.is_guide_active && !status.is_pulse_guide_active);
+        if (!moving) {
+            abort_stop_rounds_ = 0;
+            return;
+        }
+        if (clock_.now() < abort_next_round_) {
+            return;
+        }
+        if (abort_stop_rounds_ >= kAbortStopRounds) {
+            abort_stop_rounds_ = 0;
+            // Appended, so a GOTO the 120 s bound stopped still says so.
+            const std::string text =
+                "AbortSlew: the mount still reports motion after " + std::to_string(kAbortStopRounds) + " stops";
+            bound_error_ = bound_error_.empty() ? text : bound_error_ + "; " + text;
+            ALPACA_LOG_ERROR("OnStep", bound_error_);
+            return;
+        }
+        ++abort_stop_rounds_;
+        abort_next_round_ = clock_.now() + kAbortStopRound;
+        ALPACA_LOG_WARN("OnStep", "AbortSlew: the mount still reports motion; sending the stops again (round " +
+                                      std::to_string(abort_stop_rounds_) + ")");
+        (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {
+            ALPACA_LOG_ERROR("OnStep", std::string("AbortSlew re-send failed (") + what + "): " + error);
+        });
+    }
+
+    // #2406: a GOTO past kGotoTimeout. AbortSlew's stops go out, the stop is checked as after an AbortSlew, and
+    // Slewing raises the failure.
+    void stop_overdue_goto_locked() const {
+        goto_deadline_.reset();
+        slew_hold_.clear();
+        tracking_before_slew_ = false;
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kGotoTimeout).count();
+        bound_error_ = "The GOTO did not end within " + std::to_string(seconds) + " s; the driver stopped it";
+        ALPACA_LOG_ERROR("OnStep", bound_error_);
+        (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {
+            ALPACA_LOG_ERROR("OnStep", std::string("Stop of an overdue GOTO failed (") + what + "): " + error);
+        });
+        abort_stop_rounds_ = 1;
+        abort_next_round_ = clock_.now() + kAbortStopRound;
+    }
+
+    // #2406: a :MS# with no digit before its reply timeout may still have started the GOTO, so :Q# goes out (best
+    // effort, logged) before the refusal is reported. (A thrown exchange gets none: it throws when :MS# could not be
+    // written or the link is lost.)
+    void stop_unconfirmed_goto_locked(const char* context) const {
+        ALPACA_LOG_WARN("OnStep", std::string(context) + ": no :MS# reply; sending :Q# in case the GOTO started");
+        (void)send_stops_locked(true, {}, [context](const char* what, const std::string& error) {
+            ALPACA_LOG_ERROR("OnStep",
+                             std::string(context) + ": stop after an unanswered :MS# failed (" + what + "): " + error);
+        });
     }
 
     void run_status_poller(util::OperationContext& ctx, std::chrono::nanoseconds first_wait) {
@@ -5109,6 +5281,19 @@ private:
     mutable bool status_read_since_move_ = false;
     // Set only by a coordinate slew; consumed when that slew completes (#1218).
     mutable bool tracking_before_slew_ = false;
+    // #2406: kGotoTimeout from the running GOTO's :MS#; cleared when it lands, by the next motion command, an
+    // AbortSlew and a connect. A fail-safe timeout, not a hold window: Slewing's hold stays slew_hold_ (decision 0022
+    // rule 1). Under mutex_.
+    mutable std::optional<std::chrono::steady_clock::time_point> goto_deadline_;
+    // #2406: kMaxMoveAxisDuration from each axis's MoveAxis start. Under mutex_.
+    std::chrono::steady_clock::time_point manual_axis_deadline_[2]{};
+    // #2406: a motion the driver had to stop itself (a GOTO past kGotoTimeout, a MoveAxis past its cap, a mount
+    // still moving after AbortSlew's last round). Slewing raises it as DriverException until the next motion
+    // command, AbortSlew or connect (an async failure keeps its error, ascom-contract). Under mutex_.
+    mutable std::string bound_error_;
+    // #2406: the AbortSlew stop rounds sent while :GU# still shows motion; 0 when no stop is being checked.
+    mutable int abort_stop_rounds_ = 0;
+    mutable std::chrono::steady_clock::time_point abort_next_round_{};
 
     bool does_refraction_ = false;
     // From :GXEE# at connect on OnStepX; empty when unknown or disconnected.

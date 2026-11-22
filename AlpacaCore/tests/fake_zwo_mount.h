@@ -127,6 +127,12 @@ public:
     /// Every command waits this long (real time) before it is answered.
     void set_reply_delay(std::chrono::milliseconds delay) { reply_delay_ms_.store(static_cast<int>(delay.count())); }
 
+    /// The next @p n ":Q" are received and counted but stop nothing, as a mount that misses a stop (#2408).
+    void ignore_stops(int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ignored_stops_ = n;
+    }
+
     /// The mount keeps reporting "slewing" past slew_end until cleared (a GOTO that never settles).
     void hold_running(bool on) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -509,6 +515,10 @@ private:
             start_slew_locked();
             return "0#";
         }
+        if (command == ":Q" && ignored_stops_ > 0) {
+            --ignored_stops_;
+            return {};
+        }
         if (command == ":Q") {
             // TODO: no rig evidence confirms that ":Q" stops jogs; the fake clears them so an abort leaves nothing
             // moving. Confirm on an AM mount before a test relies on it.
@@ -620,6 +630,7 @@ private:
     std::vector<Rule> rules_;
     bool moving_ = false;
     bool hold_running_ = false;
+    int ignored_stops_ = 0;
     bool slew_active_ = false;
     util::TaskClock::clock::time_point slew_end_{};
     double ra_hours_ = 12.0, dec_degrees_ = 45.0;

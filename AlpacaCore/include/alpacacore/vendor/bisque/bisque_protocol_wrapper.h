@@ -13,6 +13,7 @@
 #pragma once
 
 #include <chrono>
+#include <exception>
 #include <memory>
 #include <string>
 
@@ -109,5 +110,10 @@ private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
+
+// True when `e` is TheSkyX answering a wrapped command with its error text: the script ran and failed, so the
+// command started nothing. False for a reply that never came, a send that failed or a closed socket, after which
+// TheSkyX may still have taken the command (#2410).
+bool is_theskyx_refusal(const std::exception& e);
 
 } // namespace alpacacore::vendor::bisque

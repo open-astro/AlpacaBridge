@@ -104,6 +104,8 @@ public:
 
     /// The handset answers nothing at all, every command, the stops included.
     std::atomic<bool> silent{false};
+    /// Rate-0 variable-rate moves on the RA motor (0x10) that arrived while silent.
+    std::atomic<int> muted_ra_stops{0};
     /// Flips silent on at the next GOTO, which then goes unanswered too (#742).
     std::atomic<bool> silent_from_goto{false};
     /// A GOTO is acknowledged, but the mount never moves: L and MC_SLEW_DONE say idle.
@@ -185,7 +187,7 @@ public:
     /// Every T write, answered or not.
     std::atomic<int> t_count{0};
 
-    /// Log of the T, P and M commands, in wire order.
+    /// Log of the T, P, M, W and H commands, in wire order.
     std::mutex command_mutex;
     std::vector<std::string> commands;
 
@@ -303,8 +305,16 @@ private:
 
     std::string answer(const std::string& chunk) {
         requests.fetch_add(1);
-        if (silent.load() || chunk.empty()) return "";
-        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M') {
+        if (silent.load()) {
+            // MoveAxis(0, 0)'s stop: the variable-rate move (0x06) at rate 0 on the RA motor (#2409).
+            if (chunk.size() >= 6 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[2]) == 0x10 &&
+                static_cast<unsigned char>(chunk[3]) == 0x06 && chunk[4] == 0 && chunk[5] == 0) {
+                muted_ra_stops.fetch_add(1);
+            }
+            return "";
+        }
+        if (chunk.empty()) return "";
+        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'W' || chunk[0] == 'H') {
             std::lock_guard<std::mutex> lock(command_mutex);
             commands.push_back(chunk);
         }
