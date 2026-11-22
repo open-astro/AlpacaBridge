@@ -537,6 +537,13 @@ public:
         // below goes through Wire, with mutex_ free; io_mutex_ is held from the first state write to the end.
         std::lock_guard<std::mutex> transition(transition_mutex_);
         bool relink = false;
+        // open-astro#2407: what ran before cancel_async_tasks(). A cancelled slew body clears goto_in_progress_ and
+        // the Park/FindHome flags on its way out, so the disconnect branch's failed-stop catch reads this sample.
+        bool driver_motion_before_cancel = false;
+        if (!connected) {
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            driver_motion_before_cancel = connected_ && driver_motion_active_locked();
+        }
         if (connected) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             relink = connected_ && link_lost_locked();
@@ -755,6 +762,9 @@ public:
             } catch (...) {
                 // Best effort. A driver motion this stop did not reach is stopped by the next connect
                 // (open-astro#2407).
+                if (driver_motion_before_cancel) {
+                    relink_stop_pending_ = true;
+                }
                 note_motion_at_link_loss_locked();
             }
             session_open_.store(false);
@@ -5361,8 +5371,9 @@ private:
                 // kFarMissArcsec is a failed slew, not a landing (open-astro#2407, #2396 AB-7): the throw reaches
                 // the slew's failure path, which stops both axes before Slewing raises it.
                 const double axis_deg_per_second = kHoursToDegrees * kLstHoursPerSecond;
-                const double ra_miss_arcsec =
-                    std::abs(landing_lead_seconds_locked(ra, dec)) * axis_deg_per_second * 3600.0;
+                // On the sky: an RA-axis angle shrinks by cos(dec), so a good landing near the pole is not a miss.
+                const double ra_miss_arcsec = std::abs(landing_lead_seconds_locked(ra, dec)) * axis_deg_per_second *
+                                              3600.0 * std::cos(dec * std::numbers::pi / 180.0);
                 const double dec_miss_arcsec = std::abs(dec_target - cached_dec_axis_deg_) * 3600.0;
                 const double miss_arcsec = std::max(ra_miss_arcsec, dec_miss_arcsec);
                 if (miss_arcsec > kFarMissArcsec) {
@@ -6266,8 +6277,9 @@ private:
             protocol.instant_stop(kAxisDec);
             cmd_axis_rate_deg_s_[0] = 0.0;
             cmd_axis_rate_deg_s_[1] = 0.0;
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
-            // Best effort; the axes were already stopped by the aborter.
+        } catch (...) {
+            // Best effort; the aborter already stopped the axes, or the next connect does (open-astro#2407).
+            relink_stop_pending_ = true;
         }
     }
 
@@ -6318,7 +6330,8 @@ private:
             "Axis " + std::to_string(axis) + " stopped: " + why +
             (stop_error.empty() ? std::string{}
                                 : "; the stop failed (" + stop_error + "), the mount may still be moving");
-        ALPACA_LOG_WARN("SkyWatcher", last_slew_error_);
+        // INFO (decision 0007 rule 9): any client jog of 60 s reaches it, and Slewing reports it.
+        ALPACA_LOG_INFO("SkyWatcher", last_slew_error_);
     }
 
     // open-astro#2407 (#2396 AB-4): an accepted ":L" is not an axis at rest. After AbortSlew the body reads both
@@ -6337,6 +6350,8 @@ private:
                 [this, abort_generation](util::OperationContext& ctx) { run_abort_verify(ctx, abort_generation); });
         } catch (const std::exception& e) {
             ALPACA_LOG_ERROR("SkyWatcher", std::string("AbortSlew stop check did not start: ") + e.what());
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            relink_stop_pending_ = true;  // unverified: the next connect still owes a stop
         }
     }
 

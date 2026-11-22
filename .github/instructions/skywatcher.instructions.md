@@ -374,7 +374,9 @@ datagrams before each send so replies cannot get off-by-one.
   stops the axes (#2407)` and its timeout and synchronous siblings.
 - **The rest of #2407's motion-safety rules** (#2396 AB-4, AB-7, AB-9; all fake-only, no Sky-Watcher hardware):
   - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
-    failure stop that did not reach the board, or a failed disconnect stop sets `relink_stop_pending_`
+    failure stop, cancelled-body stop or cap stop that did not reach the board, an AbortSlew check that ran out
+    of stops, or a failed disconnect stop (judged on the flags sampled before `cancel_async_tasks()`, since a
+    cancelled body clears them) sets `relink_stop_pending_`
     (it survives `reset_runtime_state_locked()`), and the next connect stops every axis it finds running,
     however short the outage. A GOTO-mode axis found running after a link loss is stopped too: it is never
     tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
@@ -384,7 +386,8 @@ datagrams before each send so replies cannot get off-by-one.
     RA's drive stays off (no tracking restore: the client that owned the jog is gone) and Slewing raises.
   - *Non-convergence.* A landing still more than `kFarMissArcsec` (600") off after the three re-gotos is a
     failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
-    keeps the old bound. Every re-goto runs `check_target_altitude_locked()` like the first leg.
+    keeps the old bound. The RA part is measured on the sky (times cos(dec)), so a good landing near the pole is
+    not a miss. Every re-goto runs `check_target_altitude_locked()` like the first leg.
   - *Time base.* SiteLongitude and UTCDate are refused with InvalidOperation while a GoTo, Park, FindHome or
     MoveAxis runs (`refuse_time_base_write_while_moving_locked()`): they set the LST the slew aims by. Pulses
     and tracking do not block them.
@@ -393,7 +396,8 @@ datagrams before each send so replies cannot get off-by-one.
     still runs gets `:L` again, three stops in all within 3 s. Not verified by then, Slewing raises "the mount
     still reports motion after 3 stops" and the next connect owes a stop. A newer motion command ends the check.
   - Tests: the `[goto-safety]` cases in `test_skywatcher_async.cpp`, `test_skywatcher_async_slew_failure.cpp`
-    and `test_skywatcher_serial.cpp` (fake knob `ignore_instant_stops()`).
+    and `test_skywatcher_serial.cpp` (fake knobs `ignore_instant_stops()` and `reject_ramped_stops()`; the
+    owed-stop cases pause the status poll where its Slewing frame would also mark a driver motion).
 - **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
   (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
   (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:

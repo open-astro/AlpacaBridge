@@ -22,6 +22,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <chrono>
@@ -368,6 +369,144 @@ TEST_CASE("SkyWatcher async - a slew that does not converge after three re-gotos
     CHECK_FALSE(mount.axis_running(1));
     CHECK_FALSE(mount.axis_running(2));
     CHECK_FALSE(driver->get_tracking());  // the failure stop leaves the drive off
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
+// open-astro#2407: a stop the board never saw is owed to the next connect. These cases disconnect while the board
+// refuses every ":K" on RA (RA first, so the throw ends the pair), then connect again with no link-loss stamp:
+// only the owed stop (relink_stop_pending_) can stop the axis, since a connect with no stamp preserves motion.
+namespace {
+
+void reconnect_through_refused_disconnect_stop(alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount) {
+    mount.reject_ramped_stops(1, 10);
+    driver.set_connected(false);
+    const bool still_running = mount.axis_running(1) || mount.axis_running(2);
+    REQUIRE(still_running);           // the disconnect left an axis running
+    mount.reject_ramped_stops(1, 0);  // the board takes stops again
+    mount.reject_instant_stop(1, 0);
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher async - a GoTo whose disconnect stop failed is stopped by the next connect",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    // No status poll: its frame would publish RA's GOTO-mode motion as Slewing after the cancel, which the
+    // disconnect would also read. Paused, only the sample taken before the cancel says a GoTo was under way.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(5000)));
+    mount.reject_instant_stop(1, 10);  // the cancelled body's ":L" fails too, as on a faulted link
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a goto failure stop the board refused is owed to the next connect",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    // No status poll: its frame would publish RA's GOTO-mode motion as Slewing, which the disconnect also reads
+    // as a driver motion. Paused, only the refused failure stop says the axis may still run.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    mount.reject_start_motion(2, 1);  // the body throws with RA on its way, as in the #2511 case above
+    mount.reject_instant_stop(1, 1);  // and the failure stop on RA is refused
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    REQUIRE(mount.axis_running(1));
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - an AbortSlew the board ignored is owed to the next connect",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.ignore_instant_stops(2, 10);
+    driver->abort_slew();
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver) == SlewingRead::Threw; }, std::chrono::milliseconds(4000)));
+    REQUIRE(mount.axis_running(2));
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to the next connect",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.reject_instant_stop(2, 10);  // the cap's ":L" is refused
+    // The cap is checked by the status poll, the one thread parked on the clock while the jog runs.
+    for (int i = 0; i < 62; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
+        clock.advance(std::chrono::seconds(1));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    std::string message;
+    REQUIRE(read_slewing(*driver, &message) != SlewingRead::True);
+    CHECK(message.find("the stop failed") != std::string::npos);
+    REQUIRE(mount.axis_running(2));
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// open-astro#2407: every re-goto checks the altitude floor, as the first leg does. The first leg lands 1 degree
+// short in Dec; a latitude write while it lands puts the target below the floor, so the re-goto is refused.
+TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor is refused",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    alpacacore::util::MotionLimits limits;
+    limits.min_altitude_deg = 0.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0, {}, limits, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+    mount.land_short_by(2, 10, 1.0, 3600000);
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0));
+    driver->set_site_latitude(-60.0);  // Dec +40 two hours west is now below the horizon
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        std::chrono::milliseconds(60000)));
+    REQUIRE(last == SlewingRead::Threw);
+    CHECK(message.find("Slew re-goto") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
     REQUIRE_NOTHROW(driver->abort_slew());
     driver->set_connected(false);
 }
