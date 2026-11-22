@@ -126,10 +126,7 @@ author must do. Read the docstring before changing a gate.
   every merge, so a nightly `.deb` that fails the check is never published.
 - **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
-  row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount` and its serial
-  motor board over `FakeSkyWatcherSerialBoard`, the ZWO EAF, OnStepX, iOptron iEAF, iFR and QHY Q-Focuser
-  focusers, the ZWO EFW, QHYCFW3 and Player One Phoenix filter wheels, the iOptron iGuider and GPhoto
-  cameras, the ZWO CAA, OnStepX and iOptron iFR rotators and the Gemini Pro flat panel over their fakes), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
+  row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
   libgphoto2 first for a vendor that needs it; a telescope row takes about 20 minutes on the arm64 runner, a
   focuser, filter wheel or camera row under a minute). On a PR the `runs` job keeps only the rows the PR's
   files reach: a shared file the `paths:` list names (the core, the HTTP layer, the server, the run list, the

@@ -543,7 +543,8 @@ TEST_CASE("ZWO CAA Rotator Driver - State machine", "[zwo][rotator][unit][fake-s
 
 // The fake's scripted move (the ConformU host sets moving_reads, conformu_rotator_factories.h): IsMoving stays true
 // for that many status reads after a move of any kind, then the unit has arrived; Halt ends the window.
-// Falsified by: fake_zwo_caa_sdk.h get_motion_status() dropping its moving_left_ decrement (IsMoving never ends).
+// Falsified by: fake_zwo_caa_sdk.h get_motion_status() dropping its moving_left_ decrement (IsMoving never ends), or
+// move_mechanical() dropping its moving_left_ = moving_reads (a mechanical move reports not moving).
 TEST_CASE("FakeZWOCAASDK - moving_reads holds IsMoving for N status reads", "[zwo][rotator][unit][fake-sdk]") {
     alpacacore::test::TempSyncOffsetDir dir;
     alpacacore::test::FakeTaskClock clock;
@@ -565,6 +566,9 @@ TEST_CASE("FakeZWOCAASDK - moving_reads holds IsMoving for N status reads", "[zw
     CHECK(driver->get_is_moving());
     driver->halt();
     CHECK_FALSE(driver->get_is_moving());
+
+    driver->move_mechanical(45.0);
+    CHECK(driver->get_is_moving());
 }
 
 // Falsified by: zwo_rotator_driver.cpp move_mechanical() dropping its
