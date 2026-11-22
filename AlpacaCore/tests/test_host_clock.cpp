@@ -580,7 +580,7 @@ TEST_CASE("HostClock - a client step writes the system time to the RTC (#296)", 
     CHECK(f.rtc_writes == 1);
 }
 
-TEST_CASE("HostClock - Sync Time (mark_stepped) writes the RTC (#296)", "[util][hostclock][unit]") {
+TEST_CASE("HostClock - mark_stepped writes the RTC (#296)", "[util][hostclock][unit]") {
     Fake f;
     auto c = f.clock();
     c.mark_stepped();

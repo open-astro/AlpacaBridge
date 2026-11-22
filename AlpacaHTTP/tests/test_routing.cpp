@@ -7889,9 +7889,11 @@ int main() {
     }
 
     // synctime management endpoint: GET reads the clock, POST validates the
-    // epoch range before touching it. The actual clock_settime() succeeds only
-    // with CAP_SYS_TIME, so the happy-path set is validated on hardware; here
-    // we pin the routing, the read path, and every rejection path.
+    // epoch range before touching it. A default Router still uses the real
+    // hooks, whose clock_settime() succeeds only with CAP_SYS_TIME, so this
+    // block pins the routing, the read path, and every rejection path; the
+    // "Sync Time via HostClock" case above covers the successful set with fake
+    // hooks.
     {
         alpacahttp::Router router;
 
