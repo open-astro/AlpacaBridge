@@ -21,6 +21,7 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
@@ -1105,10 +1106,8 @@ public:
         try {
             // sync_time_on_connect_ is fixed at construction.
             if (!sync_time_on_connect_ || !util::HostClockTrust::trusted()) return;
-            const std::string why = event.kind == util::HostClockEvent::Kind::Stepped
-                                        ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                        : std::string("Host clock became trusted");
-            clock_resync_pending_.store(true);
+            const std::string why = util::HostClockWriteGate::describe(event);
+            host_clock_gate_.owe(event);
             do {
                 std::unique_lock<std::mutex> gate(clock_resync_gate_mutex_, std::try_to_lock);
                 if (!gate.owns_lock()) {
@@ -1116,8 +1115,8 @@ public:
                     return;  // the holder looks at the flag after it lets go
                 }
                 // One body covers this change and any left pending before it.
-                if (clock_resync_pending_.exchange(false)) start_clock_resync_gate_locked(why);
-            } while (clock_resync_pending_.load());
+                if (host_clock_gate_.take_owed()) start_clock_resync_gate_locked(why);
+            } while (host_clock_gate_.owed());
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -1144,7 +1143,7 @@ private:
     // Under the gate: a change on_host_clock_changed() left pending during a set_connected(). A disconnect's exit
     // finds the mount disconnected and drops it.
     void start_pending_clock_resync_gate_locked() noexcept {
-        if (!clock_resync_pending_.exchange(false)) return;
+        if (!host_clock_gate_.take_owed()) return;
         if (!util::HostClockTrust::trusted()) return;
         start_clock_resync_gate_locked("Host clock changed during a connect or disconnect");
     }
@@ -1160,7 +1159,7 @@ private:
                 if (!gate.owns_lock()) return;
                 start_pending_clock_resync_gate_locked();
                 run_clock_resync_hook(ClockResyncStep::ExitChecked);
-            } while (clock_resync_pending_.load());
+            } while (host_clock_gate_.owed());
         } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor's body (only the test hook can throw)
         }
     }
@@ -2950,11 +2949,9 @@ private:
         // confirmed by a client or a Sync Time, or seen to step). A Pi with no RTC boots on its last-shutdown time,
         // which the hand controller would then point by. The site write above does not depend on it, and the mount's
         // own clock is read below instead, as with syncTimeOnConnect off.
-        if (sync_time_on_connect_ && !util::HostClockTrust::trusted()) {
-            ALPACA_LOG_WARN("Celestron",
-                            "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                            "leaving the mount clock alone until the host clock is set or a client writes UTCDate");
-        } else if (sync_time_on_connect_) {
+        // Untrusted, the gate logs the skip (#2480).
+        host_clock_gate_.begin_connect();
+        if (sync_time_on_connect_ && host_clock_gate_.may_write()) {
             fail_if_link_released();  // set_time() on a released port would throw a plain DriverException
             time_write = prepare_time_write(std::chrono::system_clock::now());
             protocol.set_time(time_write->info);
@@ -4754,7 +4751,8 @@ private:
     // start(), so a re-sync starts only in a settled connected session and none starts behind a disconnect's join.
     // Lock order: transition_mutex_, this, initiator_mutex_. No body takes it.
     std::mutex clock_resync_gate_mutex_;
-    std::atomic<bool> clock_resync_pending_{false};  // a change seen while set_connected() held the gate
+    // A change seen while set_connected() held the gate (owed), and the connect's untrusted-clock warning (#2480).
+    util::HostClockWriteGate host_clock_gate_{"Celestron"};
     // Declared last, so it is destroyed (and joins) first: its body touches the members above.
     util::OperationGeneration clock_resync_generation_;
     util::AsyncOperation clock_resync_{"Celestron clock re-sync", clock_resync_generation_, clock_};

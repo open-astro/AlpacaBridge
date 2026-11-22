@@ -21,6 +21,7 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
@@ -660,8 +661,9 @@ public:
             published_connected_ = true;  // the connect is complete (#910)
             lock.unlock();
             // The connect's body reads the host clock's trust itself, so a change seen during the connect needs
-            // no re-sync of its own (#2419).
-            resync_pending_.store(false);
+            // no re-sync of its own (#2419), and its decision is this connection's first (#2480).
+            host_clock_gate_.drop_owed();
+            host_clock_gate_.begin_connect();
             // After the locks are released: the body takes both.
             start_clock_sync();
             return;
@@ -3759,10 +3761,8 @@ private:
         // sync_time_on_connect_ is fixed at construction; published_connected_ is lock-free.
         if (!sync_time_on_connect_ || !published_connected_.load()) return;
         try {
-            resync_pending_.store(true);
-            drain_pending_resync(event.kind == util::HostClockEvent::Kind::Stepped
-                                     ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                     : std::string("Host clock became trusted"));
+            host_clock_gate_.owe(event);
+            drain_pending_resync(util::HostClockWriteGate::describe(event));
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -3772,13 +3772,13 @@ private:
     // A change seen while disconnected is dropped. Call with no driver lock held.
     void drain_pending_resync(const std::string& why) noexcept {
         try {
-            while (resync_pending_.load()) {
+            while (host_clock_gate_.owed()) {
                 std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
                 if (!transition.owns_lock()) {
                     if (host_clock_busy_hook_) host_clock_busy_hook_();  // test seam: no driver lock held
                     return;                                              // its holder drains as it lets go
                 }
-                if (!resync_pending_.exchange(false)) return;
+                if (!host_clock_gate_.take_owed()) return;
                 start_resync_transition_locked(why);
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
@@ -3895,14 +3895,12 @@ private:
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
-        if (do_clock_sync && !util::HostClockTrust::trusted()) {
+        // A re-sync stops silently; the connect's pass asks the gate, which warns (#2480).
+        if (do_clock_sync &&
+            !(resync ? util::HostClockTrust::trusted()
+                     : host_clock_gate_.may_write(mount_utc ? format_utc(*mount_utc) : std::string("unknown")))) {
             do_clock_sync = false;
             if (resync) return;
-            ALPACA_LOG_WARN("iOptron",
-                            "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                            "leaving the mount clock (" +
-                                (mount_utc ? format_utc(*mount_utc) : std::string("unknown")) +
-                                ") alone until the host clock is set or a client writes UTCDate");
         }
         if (resync && !do_clock_sync) return;
 
@@ -4512,9 +4510,9 @@ private:
     // Test seam (issue #2419): runs before each attempt of the clock sync's UTC write, before its exchange, with no
     // driver lock held.
     std::function<void()> clock_sync_before_utc_exchange_hook_;
-    // Issue #2419: a host clock change not acted on yet: stored before on_host_clock_changed() tries
-    // transition_mutex_, drained by whoever holds that lock as it lets go.
-    std::atomic<bool> resync_pending_{false};
+    // Issue #2419: a host clock change not acted on yet (owed): stored before on_host_clock_changed() tries
+    // transition_mutex_, drained by whoever holds that lock as it lets go. Also the connect's untrusted warning.
+    util::HostClockWriteGate host_clock_gate_{"iOptron"};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
     // re-sync that superseded the connect's pass runs that pass in its place.
     bool clock_sync_connect_pass_done_ = false;

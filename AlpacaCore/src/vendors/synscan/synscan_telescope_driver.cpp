@@ -19,6 +19,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
@@ -470,7 +471,8 @@ public:
         // A host clock change seen before this connect is covered by the connect's own trust check: a reconnect never
         // inherits a pending re-sync (open-astro#2419).
         notify_connect_start_for_testing();
-        resync_pending_.store(false);
+        host_clock_gate_.drop_owed();
+        host_clock_gate_.begin_connect();
         auto& protocol = SynScanProtocolWrapper::instance();
         try {
             connect_session(protocol);
@@ -2352,13 +2354,10 @@ private:
             // or confirmed in this process). A Pi with no RTC boots on the time of its last shutdown, and the handset
             // aims every GOTO by its clock. The site write above does not depend on it, and the mount clock is still
             // read below for UTCDate. on_host_clock_changed() writes it once the host clock is trusted.
-            if (without_lock(lock, [] { return util::HostClockTrust::trusted(); })) {
+            // Untrusted, the gate logs the skip (#2480).
+            if (without_lock(lock, [this] { return host_clock_gate_.may_write(); })) {
                 fail_if_link_released(protocol);  // set_time() on a released port would throw a plain DriverException
                 sync_mount_time(lock);
-            } else {
-                ALPACA_LOG_WARN("SynScan",
-                                "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                                "leaving the mount clock alone until the host clock is set or a client writes UTCDate");
             }
         }
         ensure_utc_cached(lock);
@@ -4495,9 +4494,7 @@ public:
     // wait up to kStaleReapTimeout when earlier bodies are stuck on a blocked link (#2432).
     void on_host_clock_changed(const util::HostClockEvent& event) noexcept override {
         if (!sync_time_on_connect_) return;  // fixed at construction
-        resync_stepped_.store(event.kind == util::HostClockEvent::Kind::Stepped);
-        resync_step_ms_.store(static_cast<int64_t>(event.step.count()));
-        resync_pending_.store(true);
+        host_clock_gate_.owe(event);
         drain_pending_resync();
     }
 
@@ -4507,10 +4504,10 @@ private:
     // while disconnected is dropped. Call with no driver lock held.
     void drain_pending_resync() noexcept {
         try {
-            while (resync_pending_.load()) {
+            while (host_clock_gate_.owed()) {
                 std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
                 if (!transition.owns_lock()) return;  // its holder drains as it lets go
-                if (!resync_pending_.exchange(false)) return;
+                if (!host_clock_gate_.take_owed()) return;
                 start_clock_resync_transition_locked();
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
@@ -4522,9 +4519,7 @@ private:
     void start_clock_resync_transition_locked() noexcept {
         try {
             if (!connected_.load() || link_lost()) return;
-            const std::string why = resync_stepped_.load()
-                                        ? "Host clock stepped by " + std::to_string(resync_step_ms_.load()) + " ms"
-                                        : std::string("Host clock became trusted");
+            const std::string why = host_clock_gate_.owed_why();
             // A client UTCDate write after this point is newer than the re-sync and keeps the mount clock.
             const uint64_t decided_generation = utc_write_generation_.load();
             ++clock_resync_starts_;
@@ -4824,10 +4819,9 @@ private:
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     const bool sync_time_on_connect_;
-    // open-astro#2419: the host clock re-sync. A change on_host_clock_changed() has not acted on yet, and what it was.
-    std::atomic<bool> resync_pending_{false};
-    std::atomic<bool> resync_stepped_{false};
-    std::atomic<int64_t> resync_step_ms_{0};
+    // open-astro#2419: the host clock re-sync. A change on_host_clock_changed() has not acted on yet (owed), and
+    // what it was; also the connect's untrusted-clock warning (#2480).
+    util::HostClockWriteGate host_clock_gate_{"SynScan"};
     // Bumped by each successful client UTCDate write (under config_write_mutex_ and mutex_); a re-sync decided at an
     // older value writes nothing.
     std::atomic<uint64_t> utc_write_generation_{0};

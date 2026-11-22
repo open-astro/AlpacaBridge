@@ -18,6 +18,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
@@ -355,7 +356,7 @@ public:
         // A change seen before this call took the lock is this call's to cover: a connect (or the redundant refresh)
         // reads the trust and writes the host time itself, and a disconnect drops it. So a reconnect never inherits a
         // change seen during an earlier disconnect whose own pick-up lost the lock to it.
-        clock_resync_pending_.store(false);
+        host_clock_gate_.drop_owed();
 
         if (!connected) {
             connected_.store(false);
@@ -477,6 +478,7 @@ public:
                 // log a line per poll for a client that re-sends both.
                 client_disagreement_warned_ = false;
                 host_clock_warned_ = false;
+                host_clock_gate_.begin_connect();  // the untrusted-clock WARN, once per real connection (#2480)
                 cached_equatorial_.reset();
                 cached_status_.reset();
                 park_state_cached_.reset();
@@ -578,8 +580,9 @@ public:
         };
         // `client_writes_seen`: utc_client_writes_ when the link went up. A client UTCDate write that landed since
         // is newer than the host clock and wins: the sync skips the time write (the site still goes out).
-        // `fresh_connect` is false for the redundant Connected=true refresh, which logs the untrusted skip at DEBUG.
-        auto sync_mount_time_if_configured = [&](std::uint64_t client_writes_seen, bool fresh_connect) {
+        // The redundant Connected=true refresh logs the untrusted skip at DEBUG: host_clock_gate_ warns once per real
+        // connection (#2480).
+        auto sync_mount_time_if_configured = [&](std::uint64_t client_writes_seen) {
             if (!sync_time_on_connect_) {
                 return;
             }
@@ -588,7 +591,7 @@ public:
             // or confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
             // shutdown. Read before any driver lock: the probe asks the kernel. The site write below does not
             // depend on it, and the connect still seeds UTCDate from the mount clock (refresh_mount_time()).
-            const bool host_clock_trusted = util::HostClockTrust::trusted();
+            const bool host_clock_trusted = host_clock_gate_.may_write();
             const auto now = std::chrono::system_clock::now();
             {
                 // Snapshot and send under the site write lock, so a concurrent setter's value is not re-sent stale.
@@ -607,17 +610,7 @@ public:
                 }
             }
 
-            if (!host_clock_trusted) {
-                const std::string text =
-                    "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); leaving the "
-                    "mount clock alone until the host clock is set or a client writes UTCDate";
-                if (fresh_connect) {
-                    ALPACA_LOG_WARN("ZWO", text);
-                } else {
-                    ALPACA_LOG_DEBUG("ZWO", text);
-                }
-                return;
-            }
+            if (!host_clock_trusted) return;
 
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
@@ -657,7 +650,7 @@ public:
             apply_or_load_site_info();
             apply_pending_elevation();
             try {
-                sync_mount_time_if_configured(client_writes_seen, false);
+                sync_mount_time_if_configured(client_writes_seen);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
@@ -770,7 +763,7 @@ public:
                 }
 
                 try {
-                    sync_mount_time_if_configured(client_writes_seen, true);
+                    sync_mount_time_if_configured(client_writes_seen);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
@@ -820,15 +813,13 @@ public:
             std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
             if (!transition.owns_lock()) {
                 if (clock_resync_hook_) clock_resync_hook_("deferred");  // test seam: between the try_lock and the flag
-                clock_resync_pending_.store(true);
+                host_clock_gate_.owe(event);
                 // The holder may have looked for the flag and released the lock before the store: look again here,
                 // so the change is never lost (and, while disconnected, is dropped now, not left for a reconnect).
                 pick_up_pending_clock_resync(false);
                 return;
             }
-            start_clock_resync_locked(event.kind == util::HostClockEvent::Kind::Stepped
-                                          ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                          : std::string("Host clock became trusted"));
+            start_clock_resync_locked(util::HostClockWriteGate::describe(event));
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -3758,10 +3749,10 @@ private:
             if (from_set_connected && clock_resync_hook_) clock_resync_hook_("released");  // test seam, no lock held
         } catch (...) {  // NOLINT(bugprone-empty-catch): a test seam must not escape a destructor
         }
-        if (!clock_resync_pending_.load()) return;
+        if (!host_clock_gate_.owed()) return;
         std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
         if (!transition.owns_lock()) return;
-        if (!clock_resync_pending_.exchange(false)) return;
+        if (!host_clock_gate_.take_owed()) return;
         start_clock_resync_locked("Host clock changed during a connect or disconnect");
     }
 
@@ -4081,8 +4072,9 @@ private:
     util::OperationGeneration pulse_generation_[2];  // #2263: one per axis, shared with neither the other axis nor GOTO
     util::OperationGeneration teardown_generation_;
     util::OperationGeneration clock_resync_generation_;
-    // open-astro#2419: a host clock change on_host_clock_changed() saw while transition_mutex_ was held.
-    std::atomic<bool> clock_resync_pending_{false};
+    // open-astro#2419: a host clock change on_host_clock_changed() saw while transition_mutex_ was held (owed), and
+    // the connect's untrusted-clock warning (#2480).
+    util::HostClockWriteGate host_clock_gate_{"ZWO"};
     std::function<void(std::string_view)> clock_resync_hook_;  // test seam; set before connecting
     // Declared last, so they are destroyed (and join) before any member their bodies touch; the teardown slot
     // first, because its body joins the pulse slot.
