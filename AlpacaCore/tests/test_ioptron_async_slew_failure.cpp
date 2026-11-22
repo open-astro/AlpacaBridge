@@ -777,6 +777,39 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO that times out stops the mou
     driver->set_connected(false);
 }
 
+// Issue #2396: a synchronous wait that another client's GOTO superseded does not own the mount. When it times out,
+// it sends no :Q# and leaves the newer GOTO's state alone: the newer GOTO keeps slewing.
+TEST_CASE("iOptron goto-safety - a superseded synchronous GOTO that times out does not stop the newer GOTO",
+          "[ioptron][telescope][slewfailure][goto-safety]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);  // an accepted GOTO reads status 2 (slewing) until it is stopped
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = safety_driver(mount, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int stops_before = mount.count(":Q#");
+
+    const std::exception_ptr error = run_stepping_clock(clock, [&] {
+        auto newer = std::async(std::launch::async, [&] {
+            // No REQUIRE off the test thread; the count check below catches a GOTO that never went out.
+            if (wait_until([&] { return mount.count(":MS1#") == 1; }, 10000)) {
+                driver->slew_to_coordinates_async(6.0, 25.0);  // another client
+            }
+        });
+        driver->slew_to_coordinates(5.5, 20.0);
+    });
+    int code = 0;
+    const std::string message = message_of(error, &code);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(contains(message, "SlewToCoordinates timed out"));
+    CHECK(contains(message, "a newer motion owns the mount, so no stop was sent"));
+    CHECK(mount.count(":MS1#") == 2);
+    CHECK(mount.count(":Q#") == stops_before);
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
 // Issue #2396: a failed position read is no landing sample, and three in a row fail a synchronous slew. The mount is
 // sent :Q# once, so it does not keep moving after the throw.
 TEST_CASE("iOptron goto-safety - a synchronous GOTO whose landing position cannot be read fails and stops the mount",

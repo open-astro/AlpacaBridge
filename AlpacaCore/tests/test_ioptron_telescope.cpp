@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <limits>
@@ -1786,6 +1787,158 @@ TEST_CASE("iOptron Link - a reconnect whose stop for the running GOTO cannot be 
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(io::iOptronProtocolWrapper::instance().is_connected());  // the port is closed
     driver->set_connected(false);
+}
+
+namespace {
+
+// A serial port path the test can re-point: a symlink to one PtyIoptronMount's slave, then to another (a mount
+// plugged back in), or to nothing (a node that is gone, so the open fails).
+class MovablePort {
+public:
+    MovablePort() {
+        static std::atomic<int> serial{0};
+        path_ = std::filesystem::temp_directory_path() /
+                ("ioptron-relink-" + std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1)));
+        std::filesystem::remove(path_);
+    }
+    ~MovablePort() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    MovablePort(const MovablePort&) = delete;
+    MovablePort& operator=(const MovablePort&) = delete;
+    void point_at(const std::string& target) {
+        std::filesystem::remove(path_);
+        std::filesystem::create_symlink(target, path_);
+    }
+    void point_nowhere() {
+        std::filesystem::remove(path_);
+        std::filesystem::create_symlink(path_.string() + "-gone", path_);
+    }
+    std::string path() const { return path_.string(); }
+
+private:
+    std::filesystem::path path_;
+};
+
+// An async GOTO left slewing (status 2) on `mount`, then a fault that stands past the staleness bound loses the link.
+void lose_link_with_goto_running(alpacacore::TelescopeDriver& driver, PtyIoptronMount& mount, FakeTaskClock& clock) {
+    driver.slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
+    REQUIRE(driver.get_slewing());
+    mount.model().set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(driver);
+    }
+    REQUIRE(contains(sync_failure(driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver.get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver.get_connected());
+}
+
+// The first command a fresh mount received after the driver's open (the open itself sends none).
+std::string first_command(PtyIoptronMount& mount) {
+    const auto log = mount.model().commands();
+    return log.empty() ? std::string() : log.front();
+}
+
+}  // namespace
+
+// Issue #2396 (AB-9): the relink stop survives a Connect that failed on the :Q# itself. The cable is pulled on the
+// first reconnect's :Q#; once the mount is back, the next Connect still sends :Q# first.
+TEST_CASE("iOptron Link - a relink stop that could not be sent is sent by the next Connect",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    MovablePort port;
+    PtyIoptronMount first;
+    first.model().set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    port.point_at(first.slave_path());
+    auto driver = link_driver(serial_endpoint(port.path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    lose_link_with_goto_running(*driver, first, clock);
+
+    first.model().set_fail_reads(false);
+    first.unplug_on(on_command(":Q#"));
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    REQUIRE(first.unplugged());
+    CHECK_FALSE(driver->get_connected());
+
+    PtyIoptronMount second;  // the mount, plugged back in
+    port.point_at(second.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(first_command(second) == ":Q#");
+    CHECK(second.model().count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): the relink stop survives a Connect that failed at the open (the node is gone). The next Connect
+// that opens the port sends :Q# first.
+TEST_CASE("iOptron Link - a relink stop survives a reconnect that fails at the open",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    MovablePort port;
+    PtyIoptronMount first;
+    first.model().set_goto_tracks_off(true);
+    port.point_at(first.slave_path());
+    auto driver = link_driver(serial_endpoint(port.path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    lose_link_with_goto_running(*driver, first, clock);
+
+    port.point_nowhere();
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(first.model().count(":Q#") == 0);
+
+    PtyIoptronMount second;
+    port.point_at(second.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(first_command(second) == ":Q#");
+    CHECK(second.model().count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9), the Disconnect rule: a client Disconnect over a live link leaves no pending stop, so a GOTO the
+// client left running is not stopped by a later, unrelated Connect.
+TEST_CASE("iOptron Link - a Disconnect over a live link leaves no relink stop for the next Connect",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+// A serial hangup during a per-axis setter's :AG# re-read (the connect read failed) is a lost link: NotConnected,
+// not "GuideRate is unknown".
+TEST_CASE("iOptron Link - a hangup on a guide rate setter's re-read loses the link",
+          "[ioptron][telescope][unit][fake][link-lost][guide-rate]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    mount.model().set_guide_rate_reply("");  // the connect read fails
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":AG#"));
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.5 * 360.0 / 86164.0905); },
+                         AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    CHECK(mount.model().count(":RG") == 0);
 }
 
 // #2257, AGENTS.md: InvalidValue precedes the connection check, so a disconnected driver refuses an out-of-range

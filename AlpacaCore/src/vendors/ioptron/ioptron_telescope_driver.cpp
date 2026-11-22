@@ -436,11 +436,16 @@ public:
         if (set_connected_entry_hook_) set_connected_entry_hook_();  // test seam: transition_mutex_ held
         const Wire protocol = wire();
         // Issue #2396 (AB-9): a GOTO or a MoveAxis that was running when the link dropped is stopped as the first
-        // command of the reconnect, never forgotten. Read before the reap below, which ends the slew body.
-        bool stop_after_relink = false;
-        if (connected && connected_ && link_lost()) {
+        // command of the next Connect that opens the port, never forgotten. The record is taken here, before the reap
+        // below ends the slew body, on a Connect or a Disconnect over the lost link, and it is kept in
+        // relink_stop_pending_ until the :Q# is sent: a Connect that fails (at the open, or on the :Q# itself) leaves
+        // it for the next one, although the session reset or the teardown has cleared the motion flags. A Disconnect
+        // over a live link records nothing (the client left the motion running on a link it could still command).
+        if (connected_ && link_lost()) {
             StateLock state(lock_gate_, StateLock::Mode::State);
-            stop_after_relink = slew_in_progress_ || axis_move_active_primary_ || axis_move_active_secondary_;
+            if (slew_in_progress_ || axis_move_active_primary_ || axis_move_active_secondary_) {
+                relink_stop_pending_ = true;
+            }
         }
         if (!connected || (connected_ && link_lost())) {
             // A disconnect, or a connect over a lost link (decision 0009 rule 4), ends the session's bodies
@@ -529,9 +534,10 @@ public:
                     "iOptron");
             });
             ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
-            if (stop_after_relink) {
+            if (relink_stop_pending_) {
                 try {
                     protocol.stop_slewing();
+                    relink_stop_pending_ = false;
                     ALPACA_LOG_WARN("iOptron", "Reconnected over a lost link with motion running; sent :Q#");
                 } catch (const std::exception& e) {
                     protocol.disconnect();
@@ -1039,6 +1045,9 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         if (!guide_rate_valid_) read_guide_rate_locked();
+        // A serial hangup during the re-read lost the link: NotConnected, not "unknown". Here and not in
+        // read_guide_rate_locked(), whose connect-path caller closes the port on a lost link before it throws.
+        if (!guide_rate_valid_) throw_if_link_lost();
         if (!guide_rate_valid_) {
             throw AlpacaException("GuideRate is unknown: the mount's guide rate (:AG#) could not be read",
                                   AlpacaError::DriverException);
@@ -1972,6 +1981,7 @@ public:
     
     void slew_to_coordinates(double ra, double dec) override {
         util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        std::uint64_t generation = 0;
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
@@ -1980,8 +1990,9 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
+            generation = slew_operation_generation_;
         }
-        wait_for_slew_completion("SlewToCoordinates");
+        wait_for_slew_completion("SlewToCoordinates", generation);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -2123,6 +2134,7 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
+        std::uint64_t generation = 0;
         validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
             StateLock lock(lock_gate_);
@@ -2139,8 +2151,9 @@ public:
             ra_hours = converted.first;
             dec_degrees = converted.second;
             start_slew_to_coordinates_locked(ra_hours, dec_degrees);
+            generation = slew_operation_generation_;
         }
-        wait_for_slew_completion("SlewToAltAz");
+        wait_for_slew_completion("SlewToAltAz", generation);
     }
     
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -2782,9 +2795,15 @@ private:
 
     // Issue #2396: a synchronous GOTO that fails after its dispatch (the 300 s bound, a far miss, failed position
     // reads) ends the slew state, hold included, and sends :Q# (best effort), as an unconfirmed GOTO does, so a
-    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error.
-    [[noreturn]] void fail_synchronous_slew(std::string failure) {
+    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p generation is
+    // slew_operation_generation_ after this GOTO's dispatch: when a newer motion (another client's GOTO, a MoveAxis,
+    // Park, AbortSlew or a reconnect) has bumped it, the mount is that motion's, and neither the stop nor the state
+    // clear runs.
+    [[noreturn]] void fail_synchronous_slew(std::string failure, std::uint64_t generation) {
         StateLock lock(lock_gate_);
+        if (generation != slew_operation_generation_) {
+            throw AlpacaException(failure + "; a newer motion owns the mount, so no stop was sent");
+        }
         slew_in_progress_ = false;
         clear_slew_hold_locked();
         try {
@@ -2799,11 +2818,11 @@ private:
         throw AlpacaException(failure);
     }
 
-    void wait_for_slew_completion(const char* label) {
+    void wait_for_slew_completion(const char* label, std::uint64_t generation) {
         const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
             if (clock_.now() > deadline) {
-                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete");
+                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", generation);
             }
             clock_.sleep_for(kSlewPollInterval);
         }
@@ -2849,8 +2868,9 @@ private:
                 // slew on the position from before it.
                 if (!target_reached.has_value()) {
                     if (++failed_reads >= kDeviceFaultThreshold) {
-                        fail_synchronous_slew(std::string(label) +
-                                              " failed: the mount position could not be read to confirm the landing");
+                        fail_synchronous_slew(
+                            std::string(label) + " failed: the mount position could not be read to confirm the landing",
+                            generation);
                     }
                     prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
                     stable_count = 0;
@@ -2880,10 +2900,11 @@ private:
                     const double dec_arcsec = std::abs(cur_dec - target_dec) * 3600.0;
                     if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
                         fail_synchronous_slew(std::string(label) + " failed: the mount stopped " +
-                                              std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) +
-                                              " arcsec (RA) and " +
-                                              std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
-                                              " arcsec (Dec) from the target");
+                                                  std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) +
+                                                  " arcsec (RA) and " +
+                                                  std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
+                                                  " arcsec (Dec) from the target",
+                                              generation);
                     }
                     ALPACA_LOG_INFO("iOptron", std::string(label) +
                                     ": position stabilized but target not reached");
@@ -2894,7 +2915,8 @@ private:
                 clock_.sleep_for(kSlewPollInterval);
             }
             if (!landed) {
-                fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target");
+                fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target",
+                                      generation);
             }
         }
 
@@ -2902,9 +2924,11 @@ private:
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         StateLock lock(lock_gate_, StateLock::Mode::State);
-        slew_in_progress_ = false;
+        if (generation == slew_operation_generation_) {
+            slew_in_progress_ = false;  // a newer motion owns slew_in_progress_ otherwise
+        }
     }
-    
+
     void refresh_position_cache_locked(bool force = false) const {
         auto now = clock_.now();
         if (!force && (position_cache_fresh_locked() || serve_as_is_locked(position_cache_valid_))) {
@@ -4096,6 +4120,9 @@ private:
 
     mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
+    // Issue #2396 (AB-9): a GOTO or MoveAxis was running when the link was lost and no :Q# has reached the mount
+    // since; the next Connect that opens the port sends it first. Under mutex_.
+    bool relink_stop_pending_ = false;
     // Under mutex_: a fresh status showed the mount stopped while slew_in_progress_ was still set (nobody read
     // Slewing). Reset by every GOTO initiator, by dispatch_slew_command_locked() and by a settle trim dispatch.
     mutable bool goto_seen_stopped_ = false;
