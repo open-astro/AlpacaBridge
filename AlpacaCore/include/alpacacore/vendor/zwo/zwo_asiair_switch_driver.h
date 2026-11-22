@@ -14,7 +14,6 @@
 
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 
 #include <cstdint>
 #include <memory>
@@ -22,6 +21,12 @@
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
+
+struct AsiairPortConfig {
+    std::string name;
+    std::uint32_t gpio_line;
+    bool pwm_enabled;
+};
 
 struct AsiairSwitchConfig {
     std::string gpio_chip_path = "/dev/gpiochip0";

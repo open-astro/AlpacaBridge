@@ -10,6 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+// The soft-PWM engine under both switch drivers has its own case at the end (issue #1757), on the fake backend.
+//
 // Connect/disconnect/operate concurrency stress for the two ZWO ASIAIR switch drivers (issue #1862): the ASIAIR
 // Pro (and Plus Pi CM4) over the libgpiod stub chip and the ASIAIR Plus RK3568 over the ioctl stub, both in
 // zwo_asiair_stubs.h. Each connect really succeeds before the storm, so the storm reaches the boolean writes, the
@@ -19,17 +21,22 @@
 // hang, an unreleased claim or a TSan report.
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/soft_pwm_ports.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_gpio_line_backend.h"
+#include "fake_task_clock.h"
 #include "power_port_test_dir.h"
 #include "zwo_asiair_stubs.h"
 
@@ -187,4 +194,75 @@ TEST_CASE("ZWO ASIAIR Plus switch - destruction mid-operation (PWM worker live)"
         std::lock_guard<std::mutex> lock(st.m);
         CHECK(st.last_level[7] == 0);
     }
+}
+
+// Issue #1757: util::SoftPwmPorts, the engine under both drivers, over FakeGpioLineBackend on a virtual clock that a
+// ticker thread keeps advancing, so the PWM workers really cycle. Four threads storm set_value() and get_value()
+// on boolean and PWM ports while the main thread opens and closes the engine: every call either answers or throws
+// NotConnected, and the backend sees no write outside an open/close pair (a write through a released request is
+// what the libgpiod stub chip refuses). Under TSan this is the data-race check on the engine's three locks.
+// Falsified by: soft_pwm_ports.cpp set_value() dropping the open check before its backend write (a write outside
+// an open/close pair: 164-248 failed checks per run). The io_mutex_ window has its own case,
+// "SoftPwmPorts - close waits for a boolean write in flight".
+TEST_CASE("SoftPwmPorts - set_value storm during close", "[util][soft-pwm][stress]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeGpioLineBackend backend(clock);
+    alpacacore::util::PortsConfig cfg;
+    cfg.device_path = "/dev/gpiochip-fake";
+    cfg.ports = {{"A", 12u, true, false}, {"B", 13u, true, false}, {"C", 26u, true, true}, {"D", 18u, true, true}};
+    cfg.pwm_frequency_hz = 1000;
+    cfg.model_name = "Fake Board";
+    cfg.log_category = "SOFT_PWM_TEST";
+    alpacacore::util::SoftPwmPorts ports(cfg, backend, clock);
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    std::atomic<bool> done{false};
+    std::thread ticker([&] {
+        while (!done.load()) {
+            clock.advance(std::chrono::milliseconds(1));
+            std::this_thread::yield();
+        }
+    });
+    std::vector<std::thread> setters;
+    for (int t = 0; t < 4; ++t) {
+        setters.emplace_back([&, t] {
+            for (int i = 0; !done.load(); ++i) {
+                guard([&] { ports.set_value(static_cast<std::size_t>(t % 2), (i + t) % 2); });
+                guard([&] { ports.set_value(2, (i * 7 + t) % 101); });
+                guard([&] { ports.set_value(3, i % 2 == 0 ? 0 : 100); });
+                guard([&] { static_cast<void>(ports.get_value(static_cast<std::size_t>(i % 4))); });
+                std::this_thread::yield();
+            }
+        });
+    }
+    for (int cycle = 0; cycle < 100; ++cycle) {
+        ports.open();
+        std::this_thread::yield();
+        ports.close();
+    }
+    done.store(true);
+    for (auto& t : setters) {
+        t.join();
+    }
+    ticker.join();
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK_FALSE(ports.is_open());
+    // No write outside an open/close pair, and every open was closed.
+    bool open = false;
+    for (const auto& e : backend.events()) {
+        using Kind = alpacacore::test::FakeGpioLineBackend::Event::Kind;
+        if (e.kind == Kind::Open) {
+            CHECK_FALSE(open);
+            open = true;
+        } else if (e.kind == Kind::Close) {
+            CHECK(open);
+            open = false;
+        } else {
+            CHECK(open);
+        }
+    }
+    CHECK_FALSE(open);
 }

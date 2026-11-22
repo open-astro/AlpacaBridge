@@ -14,7 +14,6 @@
 
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 
 #include <cstdint>
 #include <memory>
@@ -22,6 +21,11 @@
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
+
+struct AsiairPlusPortConfig {
+    std::string name;
+    bool pwm_enabled;
+};
 
 struct AsiairPlusSwitchConfig {
     std::string device_path = "/dev/pwm-gpio-misc";
