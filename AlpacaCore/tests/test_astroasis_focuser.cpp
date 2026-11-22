@@ -771,7 +771,8 @@ TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Move trave
     REQUIRE(rig.connect());
 
     rig.driver().move(5000);  // 3766 steps from 1234: 3.8 s at this rate
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // real time the fake's motor travels first
+    // real time the fake's motor travels first
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     rig.tick();
     CHECK(rig.driver().get_is_moving());
     CHECK(rig.driver().get_position() > 1234);
@@ -800,14 +801,16 @@ TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Halt stops
     REQUIRE(rig.connect());
 
     rig.driver().move(5000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // real time the motor travels before the halt
+    // real time the motor travels before the halt
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     rig.driver().halt();
     rig.tick();
     CHECK_FALSE(rig.driver().get_is_moving());
     const int stopped = rig.driver().get_position();
     CHECK(stopped > 1234);
     CHECK(stopped < 5000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // real time a running motor would travel
+    // real time a running motor would travel
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     rig.tick();
     CHECK(rig.driver().get_position() == stopped);
 }

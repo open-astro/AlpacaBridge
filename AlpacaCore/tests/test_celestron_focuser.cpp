@@ -924,7 +924,8 @@ TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Move t
     const std::uint32_t start = rig.fake().raw_position();
 
     rig.driver().move(5000);  // raw 56000, 26000 counts away: 2.6 s at this rate
-    std::this_thread::sleep_for(100ms);  // real time the fake's motor travels before the mid-travel check
+    // real time the fake's motor travels before the mid-travel check
+    std::this_thread::sleep_for(100ms);
     CHECK(rig.fake().moving());
     CHECK(rig.fake().raw_position() > start);
     CHECK(rig.fake().raw_position() < 56000U);
@@ -951,13 +952,15 @@ TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Halt s
     const std::uint32_t start = rig.fake().raw_position();
 
     rig.driver().move(5000);
-    std::this_thread::sleep_for(100ms);  // real time the motor travels before the halt
+    // real time the motor travels before the halt
+    std::this_thread::sleep_for(100ms);
     rig.driver().halt();
     CHECK_FALSE(rig.fake().moving());
     const std::uint32_t stopped = rig.fake().raw_position();
     CHECK(stopped > start);
     CHECK(stopped < 56000U);
-    std::this_thread::sleep_for(50ms);  // real time a running motor would travel
+    // real time a running motor would travel
+    std::this_thread::sleep_for(50ms);
     CHECK(rig.fake().raw_position() == stopped);
 }
 
