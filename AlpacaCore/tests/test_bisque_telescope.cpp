@@ -1060,6 +1060,7 @@ TEST_CASE("Bisque PulseGuide - the maximum duration is accepted and one more is 
     driver->set_connected(false);
 }
 
+// Falsified by: bisque_telescope_driver.cpp, find_home: return after the send without polling IsSlewComplete.
 TEST_CASE("Bisque FindHome - polls IsSlewComplete until TheSkyX has homed", "[bisque][telescope][findhome]") {
     // FindHome is sent asynchronously and answers at once; the home is over when IsSlewComplete says so, however
     // long that takes (the 300 ms response bound here applies to each short exchange, not to the home).
