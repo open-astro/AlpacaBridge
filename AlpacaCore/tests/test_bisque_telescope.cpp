@@ -2195,3 +2195,44 @@ TEST_CASE("Bisque motion safety - a stop whose session ended meanwhile writes no
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
     rig.mount.ignore_aborts = 0;
 }
+
+TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session ended meanwhile writes nothing",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
+        rig.driver->set_connected(false);
+        rig.driver->set_connected(true);
+        pause_poll(*rig.driver);
+    });
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.ignore_aborts = 1000;  // every Abort() fails, so the old session would store a failure
+
+    // The 300 s bound: its tick ends quietly.
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.clock.advance(std::chrono::seconds(301));
+    poll_now(*rig.driver);
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    // The MoveAxis cap: the stop works, and the old session's "stopped it" is not written into the new one. (The
+    // disconnect sends its own stop for the running axis first.)
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.clock.advance(std::chrono::seconds(61));
+    poll_now(*rig.driver);
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    // AbortSlew: it fails, but the new session keeps its own state.
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    require_alpaca_error([&] { rig.driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.mount.fail_abort = true;
+    require_alpaca_error([&] { rig.driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(slewing_failure(*rig.driver).empty());
+    rig.mount.fail_abort = false;
+
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
+    rig.mount.ignore_aborts = 0;
+}

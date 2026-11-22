@@ -1120,6 +1120,7 @@ public:
         // #2410: what was moving, so a stop that fails or is not verified keeps reporting it (fail closed).
         const bool slew_was_active = slewing_cached_;
         const bool axes_were_active[2] = {manual_axis_slewing_[0], manual_axis_slewing_[1]};
+        const uint64_t session = session_;
         begin_motion_command_locked();
         ++slew_epoch_;
         parking_ = false;  // a park poll still running no longer blocks slews
@@ -1151,9 +1152,11 @@ public:
         } catch (...) {
             error = std::current_exception();
         }
+        run_stop_sent_hook();
         if (error) {
             lock.lock();
-            if (slew_was_active || axes_were_active[0] || axes_were_active[1]) {
+            // A disconnect or connect since: the state is the new session's (decision 0016 rule 6).
+            if (session == session_ && (slew_was_active || axes_were_active[0] || axes_were_active[1])) {
                 // The mount may still be moving: keep reporting it, and raise the failure from Slewing.
                 restore_motion_after_failed_stop_locked(slew_was_active, axes_were_active);
                 motion_error_ = "AbortSlew failed: " + exception_text(error);
@@ -1170,6 +1173,9 @@ public:
             return;
         }
         lock.lock();
+        if (session != session_) {
+            throw AlpacaException("AbortSlew: " + failure, AlpacaError::DriverException);
+        }
         restore_motion_after_failed_stop_locked(slew_was_active, axes_were_active);
         motion_error_ = "AbortSlew: " + failure;
         throw AlpacaException(motion_error_, AlpacaError::DriverException);
@@ -1857,14 +1863,18 @@ private:
         }
     }
 
-    // Abort() and its verification; "" once the stop is verified. Same locking as verify_abort().
+    // Abort() and its verification; "" once the stop is verified. Same locking as verify_abort(). Every caller
+    // re-checks session_ after it, since a disconnect and reconnect can land during the exchange.
     std::string send_verified_abort() {
+        std::string failure;
         try {
             BisqueProtocolWrapper::instance().abort();
+            failure = verify_abort(1);
         } catch (const std::exception& e) {
-            return std::string("Abort failed: ") + e.what();
+            failure = std::string("Abort failed: ") + e.what();
         }
-        return verify_abort(1);
+        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
+        return failure;
     }
 
     // SlewToRaDec with initiator_mutex_ held and `lock` (mutex_) released. A TheSkyX error reply means the slew did
@@ -1890,7 +1900,6 @@ private:
         const uint64_t session = session_;
         lock.unlock();
         const std::string stop_failure = send_verified_abort();
-        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
         lock.lock();
         const std::string unconfirmed = std::string(who) + ": TheSkyX did not confirm the slew (" + why + ")";
         if (session != session_) {
@@ -1922,7 +1931,6 @@ private:
         const uint64_t session = session_;
         lock.unlock();
         const std::string stop_failure = send_verified_abort();
-        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
         lock.lock();
         if (session != session_) {
             throw AlpacaException(kTimedOut);  // the state is the new session's (decision 0016 rule 6)
@@ -1956,6 +1964,7 @@ private:
             return;
         }
         const auto now = clock_.now();
+        const uint64_t session = session_;
         // A synchronous wait owns its slew and has its own 120 s deadline.
         const bool slew_over = slewing_cached_ && slew_waiters_ == 0 && now >= slew_deadline_;
         const bool axis_over[2] = {manual_axis_slewing_[0] && now >= manual_axis_deadline_[0],
@@ -1969,8 +1978,8 @@ private:
             const std::string what = "The slew did not end within " + std::to_string(seconds) + " s";
             const std::string failure = send_verified_abort();
             lock.lock();
-            if (!connected_ || link_lost_) {
-                return;
+            if (!connected_ || link_lost_ || session != session_) {
+                return;  // a lost link leaves the stop to the next connect; a new session owns its own state
             }
             if (failure.empty()) {
                 slewing_cached_ = false;
@@ -1991,8 +2000,9 @@ private:
             } catch (const std::exception& e) {
                 failure = e.what();
             }
+            run_stop_sent_hook();
             lock.lock();
-            if (!connected_ || link_lost_) {
+            if (!connected_ || link_lost_ || session != session_) {
                 return;
             }
             for (int axis = 0; axis < 2; ++axis) {
