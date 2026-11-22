@@ -348,7 +348,7 @@ inline ContractEntry contract_entry_zwo_switch_asiair() {
                              },
                              kSrcAgents),
                          DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                         "util::PowerPortSwitchDriver<OwnedSoftPwmPorts<GpiodLineBackend>>: MaxSwitch is the configured "
+                         "util::PowerPortSwitchDriver over SoftPwmPorts: MaxSwitch is the configured "
                          "port count; CanWrite is true and CanAsync false, both after validate_id only"),
         1.0);
 }
@@ -362,7 +362,7 @@ inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
                              },
                              kSrcAgents),
                          DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                         "util::PowerPortSwitchDriver<OwnedSoftPwmPorts<PwmGpioMiscBackend>>: MaxSwitch is the configured "
+                         "util::PowerPortSwitchDriver over SoftPwmPorts: MaxSwitch is the configured "
                          "port count; CanWrite is true and CanAsync false, both after validate_id only"),
         1.0);
 }
