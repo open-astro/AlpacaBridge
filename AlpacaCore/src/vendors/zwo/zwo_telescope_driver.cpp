@@ -58,7 +58,7 @@ constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
 // A guide-rate readback this close to the sent multiple confirms the write (the wrapper's own match bound).
 constexpr double kGuideRateReadbackTolerance = 0.02;
 // The ZWO AM limits for the command gate (#2258): the connected check reads the fault, so it runs before parked; a
-// MoveAxis stop (move_axis() keeps its own |rate| < 1e-9 test) skips it. set_guide_rate() keeps the "0.10-0.90 x"
+// MoveAxis stop skips it. set_guide_rate() keeps the "0.10-0.90 x"
 // check, which is on the larger axis, and refuses 0 (#2462).
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
@@ -66,6 +66,9 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: was a silent clamp to 60 s
     limits.move_axis_axes = 2;
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    // ZWO's stop is |rate| < 1e-9, strictly under. The gate's test is <=, so the epsilon is the largest double under
+    // 1e-9 (std::nextafter(1e-9, 0.0), not constexpr before C++23): 1e-9 itself stays a move (#2415).
+    limits.move_axis_stop_epsilon = 0x1.12e0be826d694p-30;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
     limits.stop_checks_fault = false;
     limits.slew_order = util::ParkedFaultOrder::FaultFirst;
@@ -1377,9 +1380,7 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        util::check_move_axis_arguments(kCommandLimits, axis, rate);
-        const bool stop = std::abs(rate) < 1e-9;  // ZWO's own stop test: strictly under, not the gate's <=
-        util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
+        const bool stop = util::check_move_axis(kCommandLimits, axis, rate, GateChecks{*this, "MoveAxis"});
 
         // open-astro#720: a pending GOTO setup must not send ":MS" after the
         // stop or the jog below. One fence covers both branches. open-astro#2073:
