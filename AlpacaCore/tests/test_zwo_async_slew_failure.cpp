@@ -1912,6 +1912,33 @@ TEST_CASE("ZWO goto-safety - a MoveAxis that is not renewed is stopped after 60 
     CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
 }
 
+TEST_CASE("ZWO goto-safety - a Park or FindHome after a jog is not stopped by the MoveAxis dead-man",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const bool home = GENERATE(false, true);
+    CAPTURE(home);
+    rig.mount.set_slew_duration(std::chrono::seconds(30));
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));  // left running: the client never sends MoveAxis(0, 0)
+    if (home) {
+        REQUIRE_NOTHROW(rig.driver->find_home());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->park());
+    }
+    CHECK(rig.mount.count(":Qe") == 1);  // the command stopped the jog's axis before it started
+    CHECK_FALSE(rig.mount.jogging());
+    const int stops_before = count_exact(rig.mount, ":Q");
+    run_polls(rig, std::chrono::seconds(64));             // past the jog's 60 s dead-man
+    CHECK(count_exact(rig.mount, ":Q") == stops_before);  // nothing stopped the Park or the home search
+    CHECK(rig.mount.count(":Qe") == 1);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    if (home) {
+        CHECK(rig.driver->get_at_home());
+    } else {
+        CHECK(rig.driver->get_at_park());
+    }
+}
+
 TEST_CASE("ZWO goto-safety - AbortSlew sends :Q again while the mount still moves, up to three",
           "[zwo][telescope][async][goto-safety]") {
     Rig rig;

@@ -1651,6 +1651,7 @@ public:
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
         reset_position_offsets();
+        clear_jog_for_initiator();
         if (initiator_hook_) initiator_hook_("FindHome");
         protocol_.go_home();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1680,6 +1681,7 @@ public:
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
         reset_position_offsets();
+        clear_jog_for_initiator();
         if (initiator_hook_) initiator_hook_("Park");
         if (get_at_park()) {
             return;
@@ -2124,7 +2126,8 @@ public:
                                         "GOTO rejected by mount (e7: time and position not synchronized); "
                                         "verify SiteLatitude/SiteLongitude and UTCDate.");
                     } else if (is_ms_target_under_horizon_error(ex)) {
-                        ALPACA_LOG_WARN("ZWO",
+                        // The client chose the target, so this is a client-caused failure (decision 0007 rule 9).
+                        ALPACA_LOG_INFO("ZWO",
                                         "GOTO rejected by mount (e5: target under horizon); "
                                         "verify SiteLatitude/SiteLongitude and UTCDate.");
                     } else {
@@ -3184,8 +3187,8 @@ private:
     }
 
     // #2408 (#2396 AB-4, AB-8, AB-9): run by the poll loop after each poll, so each bound holds while no client polls.
-    // It decides under mutex_, then acts under initiator_mutex_, the lock every motion initiator holds, after deciding
-    // again: a command that came in between owns the motion and is left alone.
+    // It decides under mutex_, then acts under initiator_mutex_ (try_lock: a held lock waits for the next poll), the
+    // lock every motion initiator holds, after deciding again: a command that came in between owns the motion.
     enum class BoundAction : std::uint8_t { None, GotoOverdue, AxisOverdue, AbortResend, AbortFailed };
 
     BoundAction decide_bound_locked(int& axis) {
@@ -3219,7 +3222,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (decide_bound_locked(axis) == BoundAction::None) return;
         }
-        std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
+        // try_lock, as the host clock re-sync body does: a Park or another initiator holding it across its wire time
+        // keeps the poll running, and the bound is decided again on the next poll.
+        std::unique_lock<std::mutex> initiator_lock(initiator_mutex_, std::try_to_lock);
+        if (!initiator_lock.owns_lock()) return;
         BoundAction action = BoundAction::None;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -3290,6 +3296,30 @@ private:
         } catch (const std::exception& e) {
             // The next poll decides again; a stop that never reaches the mount keeps the bound due.
             ALPACA_LOG_ERROR("ZWO", std::string("Could not stop the mount for a motion bound: ") + e.what());
+        }
+    }
+
+    // #2408: Park and FindHome take over from a jog the client left running, as SlewAsync and AbortSlew do, so the
+    // MoveAxis dead-man and refuse_while_moving() no longer act on it. The jogging axes get their directional stops
+    // first (no ":Q", which would also stop what the command starts next), so the command does not start under a jog.
+    // Under initiator_mutex_.
+    void clear_jog_for_initiator() {
+        std::array<bool, 2> jogging{};
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            jogging = manual_axis_slewing_;
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            manual_axis_tracking_restore_[0] = std::nullopt;
+            manual_axis_tracking_restore_[1] = std::nullopt;
+        }
+        if (jogging[0]) {
+            protocol_.stop_move_east();
+            protocol_.stop_move_west();
+        }
+        if (jogging[1]) {
+            protocol_.stop_move_north();
+            protocol_.stop_move_south();
         }
     }
 
@@ -3614,8 +3644,8 @@ private:
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
     // Lock order: first, then pulse_start_mutex_, target_write_mutex_, pulse_mutex_, the protocol mutex and mutex_
     // last. Not a state lock: no getter takes it, so it may be held across wire I/O. Never taken by a body,
-    // fence_goto(), a getter or set_connected(), except the host clock re-sync body, which only try_locks it
-    // (run_clock_resync()) and so never waits for it.
+    // fence_goto(), a getter or set_connected(), except the host clock re-sync body (run_clock_resync()) and the poll
+    // body's motion bounds (enforce_motion_bounds(), #2408), which only try_lock it and so never wait for it.
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
