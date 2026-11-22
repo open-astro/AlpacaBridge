@@ -46,9 +46,10 @@ namespace alpacacore::test {
 // The *_entered flags and `busy` are atomics a test polls from another thread; close_rotator_link()
 // sets closed_while_busy when it runs while a delayed call is still in flight.
 
-// KNOWN PARITY GAPS: move_absolute() settles a move at once (position/degree jump to the target and
-// the moving flag stays whatever a test set), where the real CAAIsMoving reports motion until the unit
-// arrives. A test that needs a moving window sets `moving` itself.
+// KNOWN PARITY GAPS: a move puts the position/degree at the target at once, where the real CAAGetDegree
+// follows the unit as it turns. The moving flag stays whatever a test set unless `moving_reads` scripts the window:
+// the real CAAIsMoving reports motion until the unit arrives, which moving_reads counts in reads of
+// get_motion_status() (as the EFW fake does for its wheel). At 0 (the default) a move is over at once.
 class FakeZWOCAASDK final : public vendor::zwo::ZWOCAASDK {
 public:
     using Info = vendor::zwo::ZWOCAARotatorInfo;
@@ -86,6 +87,9 @@ public:
     // Atomic: the contract sweep sets and clears them while the driver polls (tier 3).
     std::atomic<bool> fail_reads{false};
     std::atomic<bool> moving{false};
+    // A move (absolute, relative or mechanical) reports moving for this many get_motion_status() reads, then the
+    // unit has arrived; stop() ends the window.
+    int moving_reads{0};
     // Every real open throws while set (a connect that must fail).
     bool fail_open{false};
     // A real open sleeps this long before returning (a connect held open).
@@ -168,7 +172,9 @@ public:
             if (fail_reads) {
                 throw AlpacaException("link down", AlpacaError::DriverException);
             }
-            return vendor::zwo::ZWOCAAMotionStatus{moving, false};
+            const bool in_move = moving_left_ > 0;
+            if (in_move) --moving_left_;
+            return vendor::zwo::ZWOCAAMotionStatus{moving || in_move, false};
         });
     }
     double get_degree(int rotator_id) override {
@@ -190,6 +196,7 @@ public:
             ++move_calls;
             last_move_id = rotator_id;
             degree += angle;
+            moving_left_ = moving_reads;
         });
     }
     void move_absolute(int rotator_id, double angle) override {
@@ -201,6 +208,7 @@ public:
             last_move_id = rotator_id;
             last_move_absolute = angle;
             degree = angle;
+            moving_left_ = moving_reads;
         });
     }
     void move_mechanical(int rotator_id, double angle) override {
@@ -212,6 +220,7 @@ public:
             last_move_id = rotator_id;
             last_move_mechanical = angle;
             degree = reverse ? 360.0 - angle : angle;
+            moving_left_ = moving_reads;
         });
     }
     void stop(int rotator_id) override {
@@ -220,6 +229,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_unit(rotator_id);
             moving = false;
+            moving_left_ = 0;
         });
     }
     void sync_degree(int rotator_id, double angle) override {
@@ -319,6 +329,8 @@ private:
             throw AlpacaException("CAA_ERROR_INVALID_ID", AlpacaError::NotConnected);
         }
     }
+
+    int moving_left_{0};  // reads of get_motion_status() still to report moving; under mutex_
 
     // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.
     struct InFlight {
