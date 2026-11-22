@@ -362,8 +362,8 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a stalled upstream latches
     require_alpaca_error([&] { (void)oc.get_temperature(); }, AlpacaError::DriverException);
     require_alpaca_error([&] { (void)oc.get_average_period(); }, AlpacaError::DriverException);
     CHECK(oc.get_sensor_description("Temperature") == "Temperature sensor");  // static metadata still answers
-    // Lost only at util::kLinkStalenessBound after the latch.
-    rig.poll(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    // Lost when no poll has refreshed the frame for util::kLinkStalenessBound: 30 s after the Connect's frame.
+    rig.poll(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(4));
     CHECK(oc.get_connected());
     rig.poll(std::chrono::seconds(1));
     CHECK_FALSE(oc.get_connected());
@@ -376,13 +376,39 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - the staleness bound is thr
     Rig rig(std::chrono::seconds(20));
     rig.connect();
     rig.http.fail_next(1000);
-    for (int i = 0; i < 3; ++i) rig.poll(std::chrono::seconds(20));
-    REQUIRE_FALSE(rig.driver->get_link_fault().empty());
     rig.poll(std::chrono::seconds(20));
     rig.poll(std::chrono::seconds(20));
-    CHECK(rig.driver->get_connected());  // 40 s after the latch, past 30 s but under 60 s
+    CHECK(rig.driver->get_connected());  // the frame is 40 s old, past 30 s but under 60 s
     rig.poll(std::chrono::seconds(20));
-    CHECK_FALSE(rig.driver->get_connected());
+    CHECK_FALSE(rig.driver->get_connected());  // 60 s: three periods with no answer
+    CHECK_FALSE(rig.driver->get_link_fault().empty());
+}
+
+// Issue #2496: the loss bound is max(util::kLinkStalenessBound, 3 x period) and runs from the last answer.
+// Falsified by: remotealpaca_observingconditions_driver.cpp loss_bound() return util::kLinkStalenessBound only.
+TEST_CASE(
+    "Remote Alpaca ObservingConditions Driver - a 60 s poll serves and is lost three periods after its last answer",
+    "[remotealpaca][observingconditions][unit]") {
+    Rig rig(std::chrono::seconds(60));
+    rig.connect();
+    auto& oc = *rig.driver;
+    CHECK(oc.get_temperature() == 19.0);
+    rig.upstream.set_sensor("Temperature", 3.25);
+    rig.poll(std::chrono::seconds(60));
+    CHECK(oc.get_temperature() == 3.25);  // the last answer
+
+    rig.http.fail_next(1000);  // the upstream stops answering
+    rig.poll(std::chrono::seconds(31));
+    CHECK(oc.get_connected());  // past util::kLinkStalenessBound: still served
+    CHECK(oc.get_temperature() == 3.25);
+    rig.poll(std::chrono::seconds(29));
+    rig.poll(std::chrono::seconds(60));
+    CHECK(oc.get_connected());  // 120 s, two failed polls
+    CHECK(oc.get_temperature() == 3.25);
+    rig.poll(std::chrono::seconds(60));
+    CHECK_FALSE(oc.get_connected());  // 180 s: three periods with no answer
+    require_alpaca_error([&] { (void)oc.get_temperature(); }, AlpacaError::NotConnected);
+    CHECK(oc.get_device_state().empty());
 }
 
 TEST_CASE(
