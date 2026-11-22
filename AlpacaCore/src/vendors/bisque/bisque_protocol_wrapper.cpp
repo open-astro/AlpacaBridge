@@ -335,12 +335,13 @@ public:
     }
 
     void find_home() {
-        // FindHome with loop-wait (up to 60 seconds).
+        // Asynchronous send, as park(): the caller polls IsSlewComplete, so no exchange holds the link for the whole
+        // home and the status poll keeps publishing frames (decision 0010 rule 7).
+        // TODO: confirm on a Paramount that IsSlewComplete reports a FindHome started with Asynchronous = true.
         send_ok_command_internal(
-            "sky6RASCOMTele.FindHome();"
-            "while(!sky6RASCOMTele.IsSlewComplete) {"
-            "sky6Web.Sleep(1000);}",
-            60000);
+            "sky6RASCOMTele.Asynchronous = true;"
+            "sky6RASCOMTele.FindHome();",
+            0);
     }
 
     int get_pier_side() {

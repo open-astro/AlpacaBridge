@@ -40,9 +40,10 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
- * `find_home_ms`, `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the FindHome,
- * SetTracking, GetRaDec, IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`),
- * as a TheSkyX stuck in one call.
+ * `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the SetTracking, GetRaDec,
+ * IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in
+ * one call. `find_home_ms` is how long a FindHome runs: after an asynchronous one IsSlewComplete answers 0 until it has
+ * passed; any other FindHome holds its reply that long, as TheSkyX's in-script home loop holds the link.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -58,6 +59,10 @@ namespace alpacacore::test {
  * `on_slew_command`, when set, runs on the server thread before a SlewToRaDec is answered, while the driver waits
  * for the reply; set it before the slew and leave it alone while one is in flight.
  *
+ * `on_position_read`, when set, runs on the server thread before every GetRaDec is answered, while the driver holds
+ * its wire lock for the exchange; a case that blocks in it holds the tick that asked. Set it while no exchange is in
+ * flight and leave it alone until the reads it holds are released.
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -66,10 +71,14 @@ public:
     std::atomic<int> park_polls_needed{0};
     std::atomic<int> slew_polls_needed{0};
     std::atomic<int> fail_slew_polls{0};
+    /// While > 0 and a park is in flight, every IsParked query answers a TheSkyX error (and the count drops by one),
+    /// so the connect's IsParked never uses it up.
+    std::atomic<int> fail_park_polls{0};
     /// While > 0, every IsTracking query answers a TheSkyX error (and the count drops by one).
     std::atomic<int> fail_tracking_reads{0};
     std::atomic<int> fail_slew_commands{0};
     std::function<void()> on_slew_command;
+    std::function<void()> on_position_read;
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -115,6 +124,10 @@ public:
 private:
     static bool has(const std::string& command, const char* text) { return command.find(text) != std::string::npos; }
 
+    bool home_running() const {
+        return std::chrono::steady_clock::now() - home_started_ < std::chrono::milliseconds(find_home_ms.load());
+    }
+
     std::string answer(const std::string& command) {
         ++transactions;
         if (has(command, "ConnectAndDoNotUnpark")) return reject_connection ? "0#" : "1#";
@@ -127,10 +140,18 @@ private:
         }
         if (has(command, "FindHome")) {
             ++find_home_commands;
-            if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
             if (fail_find_home.load() > 0) {
                 --fail_find_home;
                 return "|No error. Error = 0.TypeError: FindHome failed#";
+            }
+            // As TheSkyX: an asynchronous FindHome answers at once and IsSlewComplete answers 0 until find_home_ms of
+            // real time have passed; any other (no Asynchronous = true, or an in-script IsSlewComplete loop) holds
+            // the reply that long. A case can end the home at once by setting find_home_ms to 0.
+            home_started_ = std::chrono::steady_clock::now();
+            if (has(command, "Asynchronous = true") && !has(command, "IsSlewComplete")) {
+                homing_ = true;
+            } else {
+                while (home_running()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             return "|No error. Error = 0.OK#";
         }
@@ -138,6 +159,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(set_tracking_ms.load()));
         }
         if (has(command, "GetRaDec")) {
+            if (on_position_read) on_position_read();
             if (position_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(position_ms.load()));
             ++position_reads;
             return "|No error. Error = 0." + std::to_string(ra_hours.load()) + "," +
@@ -156,6 +178,10 @@ private:
         }
         if (has(command, "IsParked")) {
             if (is_parked_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(is_parked_ms.load()));
+            if (parking_ && fail_park_polls.load() > 0) {
+                --fail_park_polls;
+                return "|No error. Error = 1.IsParked unavailable#";
+            }
             if (parking_ && ++park_polls > park_polls_needed.load()) {
                 parking_ = false;
                 parked = true;
@@ -193,6 +219,10 @@ private:
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }
+            if (homing_ && home_running()) {
+                return "|No error. Error = 0.0#";
+            }
+            homing_ = false;
             if (fail_slew_polls.load() > 0) {
                 --fail_slew_polls;
                 return "|No error. Error = 1.IsSlewComplete unavailable#";
@@ -221,6 +251,8 @@ private:
     }
 
     std::atomic<bool> parking_{false};
+    std::chrono::steady_clock::time_point home_started_{};  // handler thread only, with homing_
+    bool homing_ = false;
     double target_ra_ = 0.0;  // written and read on the server's handler thread only
     double target_dec_ = 0.0;
 };
