@@ -668,12 +668,15 @@ std::thread run_while_parked(alpacacore::test::FakeBisqueMount& mount, Body body
     return worker;
 }
 
-// A FindHome polls on the task clock, so a case that waits for it moves the clock on until it returns.
-static void advance_until_done(Rig& rig, const std::atomic<bool>& done) {
+// A FindHome polls on the task clock, so a case that waits for it moves the clock on until it returns. The clock moves
+// only while the home's thread sleeps on it, one poll per step, so a slow runner cannot push it past the 60 s deadline.
+static void advance_until_done(Rig& rig, const std::atomic<bool>& done, std::thread::id home_thread) {
     const auto deadline = std::chrono::steady_clock::now() + seconds(10);
     while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-        rig.clock.advance(seconds(1));
-        std::this_thread::sleep_for(milliseconds(5));
+        if (rig.clock.wait_for_waiter_thread(home_thread, milliseconds(10))) {
+            rig.clock.advance(seconds(1));
+            static_cast<void>(rig.clock.wait_for_woken_settled(milliseconds(100)));
+        }
     }
 }
 
@@ -701,7 +704,7 @@ TEST_CASE("Bisque snapshot - Name, Connected and RightAscension answer while Fin
     CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < budget);
     rig.mount.find_home_ms = 0;  // TheSkyX arrives home: the next IsSlewComplete reports it
     rig.mount.slew_complete_ms = 0;
-    advance_until_done(rig, done);
+    advance_until_done(rig, done, worker.get_id());
     worker.join();
     // The control path read the mount after FindHome: a read right after sees it.
     CHECK(rig.driver->get_at_home());
@@ -738,7 +741,7 @@ TEST_CASE("Bisque snapshot - a FindHome past the link-loss bound does not read a
     CHECK_NOTHROW((void)rig.driver->get_right_ascension());
     CHECK(rig.driver->get_connected());
     rig.mount.find_home_ms = 0;
-    advance_until_done(rig, done);
+    advance_until_done(rig, done, worker.get_id());
     worker.join();
     CHECK(rig.driver->get_at_home());
 }
