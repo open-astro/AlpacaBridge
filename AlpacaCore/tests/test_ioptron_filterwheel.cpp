@@ -452,6 +452,37 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a FocusOffsets write during connec
     driver->set_connected(false);
 }
 
+// Issue #2553: a move that passed the connection check, then waited for mutex_ while a Disconnect cleared the slot
+// count, threw DriverException "slot count unavailable" instead of NotConnected (seen 1 in ~300 loaded storms). A
+// FocusOffsets write of a huge list holds mutex_ while it copies the list (then it is refused: wrong length), so the
+// Disconnect queues on mutex_ first and the move second, behind the passed check; the futex wakes them in that
+// order. The sleeps only order the queue: a late one makes the move win the lock and the round pass, never fail.
+// Falsified by: ioptron_filterwheel_driver.cpp set_position() reading the slot count under mutex_ without
+// re-checking the connection there (the move throws DriverException, not NotConnected).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a move racing a Disconnect is NotConnected and not a missing slot count",
+          "[ioptron][filterwheel][unit]") {
+    ConnectedIefw wheel;
+    const std::vector<int> huge(std::size_t{16} << 20, 0);  // 64 MB: the copy holds mutex_ for tens of ms
+    for (int round = 0; round < 5; ++round) {
+        INFO("round " << round);
+        REQUIRE_NOTHROW(wheel.driver->set_connected(true));
+        auto holder = std::async(std::launch::async, [&] {
+            return alpacacore::test::worker_code_of([&] { wheel.driver->set_focus_offsets(huge); });
+        });
+        std::this_thread::sleep_for(5ms);
+        auto disconnect = std::async(std::launch::async, [&] {
+            return alpacacore::test::worker_code_of([&] { wheel.driver->set_connected(false); });
+        });
+        std::this_thread::sleep_for(5ms);
+        std::string message;
+        const int move = alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }, &message);
+        holder.get();  // InvalidValue (wrong length), or 0 if a late start let the Disconnect lock first
+        CHECK(disconnect.get() == 0);
+        INFO("move threw " << move << ": " << message);
+        CHECK((move == 0 || move == static_cast<int>(alpacacore::AlpacaError::NotConnected)));
+    }
+}
+
 // Since #1723 the unplugged :WM write also loses the link, so the read after it is refused twice over: by the
 // connection check before the cache, and by the invalidate in set_position()'s outer catch. The invalidate alone
 // now guards a write that fails with the link up (ETIMEDOUT on a stalled adapter), which the pty fake cannot produce.
