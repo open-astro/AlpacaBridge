@@ -1303,6 +1303,10 @@ struct Tier2Host {
     // A telescope row whose fake accepts park() but never reports AtPark says why here, and the parked
     // InvalidValue case (#2257) then skips it.
     const char* at_park_unreachable = nullptr;
+    // The connectable driver built on the caller's task clock, for a row whose driver is `adopted` in decision 0005
+    // and whose Park waits on a driver timer. The parked case builds it on a FakeTaskClock and steps that clock until
+    // AtPark (0005 rule 2); empty means the case waits for AtPark in real time.
+    std::function<Hosted(alpacacore::util::TaskClock&)> connectable_on_clock = nullptr;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -1369,14 +1373,15 @@ ConnectObservation connect_and_observe(AlpacaDriver& d, std::chrono::millisecond
     return o;
 }
 
-Hosted connected_host(const Tier2Host& h) {
-    Hosted hosted = h.connectable(false);
+Hosted connected(Hosted hosted) {
     REQUIRE(hosted.driver != nullptr);
     const auto o = connect_and_observe(*hosted.driver);
     REQUIRE(o.settled);
     REQUIRE(hosted.driver->get_connected());
     return hosted;
 }
+
+Hosted connected_host(const Tier2Host& h) { return connected(h.connectable(false)); }
 
 // Case 1. Connect returns at once; Connecting reads true, then false; Connected reads true only
 // after. A connect that fails leaves Connected false and keeps the driver's reason.
@@ -1504,11 +1509,13 @@ Hosted connected_host(const Tier2Host& h) {
     for (const auto& p : probes) check_invalid_value_probe(h.id, ProbeState::Connected, p);
 }
 
-// #2468: how long a fake's Park may take to reach AtPark (the ZWO driver holds Slewing for 5 s after ":hP#",
-// zwo_telescope_driver.cpp park()), and how long one parked probe may take. Every probe is refused before it reaches
-// the wire, so it returns in milliseconds; a probe a driver accepted could start a blocking slew, and the bound ends
-// the case there instead of stalling the sweep.
+// #2468: how long a fake's Park may take to reach AtPark, in real time, and how long one parked probe may take. A row
+// with connectable_on_clock steps a FakeTaskClock through its driver's park timers (the ZWO driver holds Slewing for
+// 5 s after ":hP#", zwo_telescope_driver.cpp park()), so the bound only stops a park that never lands. Every probe is
+// refused before it reaches the wire, so it returns in milliseconds; a probe a driver accepted could start a blocking
+// slew, and the bound ends the case there instead of stalling the sweep.
 constexpr std::chrono::seconds kParkLandBound{15};
+constexpr std::chrono::milliseconds kParkClockStep{250};
 constexpr std::chrono::seconds kParkedProbeBound{5};
 
 // #2257: the same probes while connected and parked. The case parks the mount itself and waits for AtPark.
@@ -1520,13 +1527,21 @@ constexpr std::chrono::seconds kParkedProbeBound{5};
         CHECK(std::string(skip).size() > 0);
         return;
     }
-    Hosted hosted = connected_host(h);
+    // Declared before the Hosted, so the clock outlives the driver that holds it.
+    const auto clock = h.connectable_on_clock ? std::make_shared<alpacacore::test::FakeTaskClock>() : nullptr;
+    Hosted hosted = clock ? connected(h.connectable_on_clock(*clock)) : connected_host(h);
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     REQUIRE(t.get_can_park());
     t.park();
-    // Real time: the tier-2 hosts run on the default task clock or on none (Sky-Watcher, CGX).
     const auto deadline = Clock::now() + kParkLandBound;
-    while (!t.get_at_park() && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while (!t.get_at_park() && Clock::now() < deadline) {
+        if (!clock) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } else if (clock->wait_for_waiters(1, std::chrono::milliseconds(100))) {
+            clock->advance(kParkClockStep);
+            (void)clock->wait_for_woken_settled(std::chrono::seconds(2));
+        }
+    }
     REQUIRE(t.get_at_park());
     for (const auto& [name, fn] : invalid_value_probes(t, h.type)) {
         INFO(h.id << " parked " << name);
@@ -1894,6 +1909,19 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, [make](int port) { return make(port, false); }); };
     return h;
 }
+
+// A FakeMountServer row on the default clock, with connectable_on_clock building `Over(port, false, clock)` on the
+// caller's clock over the same responder.
+template <auto Over>
+Tier2Host mount_server_host_on_clock(const char* id, const char* vendor,
+                                     alpacacore::test::FakeMountServer::Responder r) {
+    Tier2Host h = mount_server_host(id, vendor, id, r, on_default_clock<Over>);
+    h.connectable_on_clock = [id, vendor, r](alpacacore::util::TaskClock& clock) {
+        return mount_server_host(id, vendor, id, r, [&clock](int port, bool hold) { return Over(port, hold, clock); })
+            .connectable(false);
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -1909,10 +1937,11 @@ std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold, alpacacore
 
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
 // Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed, and once it has seen
-// ":hP#" its ":Gps#" answers 2 (park completed), so a Park lands (#2468).
+// ":hP#" its ":Gps#" answers 2 (park completed), so a Park lands (#2468); the parked case steps the driver's 5 s
+// slew hold and park settle on a FakeTaskClock (connectable_on_clock).
 Tier2Host tier2_host_zwo_telescope() {
-    Tier2Host h = mount_server_host(
-        "zwo_telescope", "zwo", "zwo_telescope",
+    return mount_server_host_on_clock<zwo_telescope_over>(
+        "zwo_telescope", "zwo",
         [parked = std::make_shared<std::atomic<bool>>(false)](const std::string& chunk) -> std::string {
             if (chunk.find(":hP#") != std::string::npos) parked->store(true);
             if (chunk.find(":Gps#") != std::string::npos) return parked->load() ? "2#" : "0#";
@@ -1927,9 +1956,7 @@ Tier2Host tier2_host_zwo_telescope() {
                     chunk.find(":Sd") != std::string::npos)
                        ? "1#"
                        : "0#";
-        },
-        on_default_clock<zwo_telescope_over>);
-    return h;
+        });
 }
 
 Tier2Host tier2_host_zwo_camera() {
@@ -2187,7 +2214,8 @@ std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold, alpacac
 // Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
 // :GU# and :hP#. The default "0#" has no 'N', so :GU# would report a GOTO that
 // never ends, and Park stops running motion and waits for it first (#1430).
-// Once :hP# is accepted, :GU# reports parked, so a Park lands (#2468).
+// Once :hP# is accepted, :GU# reports parked, so a Park lands (#2468); the parked case steps the driver's status poll
+// on a FakeTaskClock (connectable_on_clock).
 Tier2Host tier2_host_onstep_telescope() {
     auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder(),
                         parked = std::make_shared<std::atomic<bool>>(false)](const std::string& chunk) {
@@ -2200,9 +2228,7 @@ Tier2Host tier2_host_onstep_telescope() {
         }
         return fallback(chunk);
     };
-    Tier2Host h = mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
-                                    on_default_clock<onstep_telescope_over>);
-    return h;
+    return mount_server_host_on_clock<onstep_telescope_over>("onstep_telescope", "onstep", idle_onstep);
 }
 
 // An OnStepX with focuser 1 (OnStepX Focuser.command.cpp, af1d26bf; the controller of test_onstep_focuser.cpp, cut
