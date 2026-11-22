@@ -7820,7 +7820,7 @@ int main() {
     }
 
     {
-        // case: Sync Time goes through HostClock, so the fake hooks set the clock, write the RTC and latch trust (#2479)
+        // case: Sync Time via HostClock: fake hooks set the clock, write the RTC, latch trust (#2479)
         using alpacacore::util::HostClock;
         using alpacacore::util::HostClockTrust;
         HostClockTrustRestore untrusted(false);
