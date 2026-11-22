@@ -35,7 +35,8 @@ namespace alpacacore::util {
  * host clock is trusted when the kernel reports it NTP-disciplined (the
  * ClientUtcWarning probe seam, so a test can force either answer), or once
  * this process has seen something set it: a client's UTCDate write that
- * stepped or confirmed it, the web UI's Sync Time, or a realtime step the
+ * stepped or confirmed it, or the web UI's Sync Time (both marked by HostClock,
+ * open-astro#2479), or a realtime step the
  * server's timer observed (an external clock_settime, such as Ara's time
  * push, or NTP's first step). A clock the kernel loaded from a hardware RTC
  * at boot does NOT count: nothing on an NTP-less host verifies the RTC.
@@ -43,7 +44,7 @@ namespace alpacacore::util {
  * The latch never clears: a clock that something has set only gets better.
  * It is deliberately separate from HostClock's stepped_ flag, which drives
  * the router's ClockSource readout and connect-time warning. Never call
- * HostClock::mark_stepped() for an observed step: it writes the hardware
+ * HostClock::set_from_operator() or mark_stepped() for an observed step: it writes the hardware
  * RTC, and an observed step's time is not verified.
  */
 class HostClockTrust {

@@ -587,6 +587,54 @@ TEST_CASE("HostClock - Sync Time (mark_stepped) writes the RTC (#296)", "[util][
     CHECK(f.rtc_writes == 1);
 }
 
+TEST_CASE("HostClock - Sync Time sets the clock, writes the RTC and marks trust (#2479)", "[util][hostclock][unit]") {
+    alpacacore::util::HostClockTrust::reset_for_testing();
+    Fake f;
+    f.synchronized = true;  // the operator's request wins over NTP, unlike a client's
+    auto c = f.clock();
+    const auto r = c.set_from_operator(kNow + milliseconds(200), kNow);
+    CHECK(r.outcome == Outcome::Stepped);
+    REQUIRE(f.sets.size() == 1);
+    CHECK(f.sets[0] == kNow + milliseconds(200));
+    CHECK(f.rtc_writes == 1);
+    CHECK(alpacacore::util::HostClockTrust::latched());
+    alpacacore::util::HostClockTrust::reset_for_testing();
+}
+
+TEST_CASE("HostClock - a refused Sync Time latches the failure and trusts nothing (#2479)", "[util][hostclock][unit]") {
+    alpacacore::util::HostClockTrust::reset_for_testing();
+    Fake f;
+    f.set_ok = false;
+    auto c = f.clock();
+    const auto r = c.set_from_operator(kNow + seconds(120), kNow);
+    CHECK(r.outcome == Outcome::Failed);
+    CHECK(r.error == "EPERM");
+    CHECK(c.step_ever_failed());
+    CHECK(f.rtc_writes == 0);
+    CHECK_FALSE(alpacacore::util::HostClockTrust::latched());
+}
+
+TEST_CASE("HostClock - a UTCDate step marks trust only when it stepped or confirmed (#2479)",
+          "[util][hostclock][unit]") {
+    using alpacacore::util::HostClockTrust;
+    HostClockTrust::reset_for_testing();
+    Fake f;
+    auto c = f.clock();
+    CHECK(c.step_from_client(system_clock::time_point(seconds(HostClock::kMinEpoch - 1)), kNow).outcome ==
+          Outcome::SkippedOutOfRange);
+    CHECK_FALSE(HostClockTrust::latched());
+    f.set_ok = false;
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Failed);
+    CHECK_FALSE(HostClockTrust::latched());
+    CHECK(c.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
+    CHECK(HostClockTrust::latched());
+    HostClockTrust::reset_for_testing();
+    f.set_ok = true;
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(HostClockTrust::latched());
+    HostClockTrust::reset_for_testing();
+}
+
 TEST_CASE("HostClock - no RTC write unless the step happened (#296)", "[util][hostclock][unit]") {
     Fake f;
     auto c = f.clock();
@@ -607,6 +655,8 @@ TEST_CASE("HostClock - no RTC write unless the step happened (#296)", "[util][ho
 TEST_CASE("HostClock - a failed RTC write leaves the step result alone and warns once (#296)",
           "[util][hostclock][unit]") {
     using alpacacore::logging::LogLevel;
+    // A step now logs the trust latch once (#2479); latch it first so this test counts RTC lines only.
+    alpacacore::util::HostClockTrust::mark_set("test");
     const auto old_sink = alpacacore::logging::get_log_sink();
     int warns = 0;
     int infos = 0;
@@ -629,6 +679,7 @@ TEST_CASE("HostClock - a failed RTC write leaves the step result alone and warns
     c.mark_stepped();
     CHECK(infos == 1);
     alpacacore::logging::set_log_sink(old_sink);
+    alpacacore::util::HostClockTrust::reset_for_testing();
 }
 
 TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][hostclock][unit]") {

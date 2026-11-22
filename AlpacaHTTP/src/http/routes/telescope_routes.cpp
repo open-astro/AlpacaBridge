@@ -290,12 +290,8 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                                              std::to_string(telescope->get_device_number()) + ": host clock " +
                                              alpacacore::util::HostClock::outcome_name(step.outcome) +
                                              " (client - host = " + std::to_string(step.delta.count()) + " ms)";
-                    // open-astro#2419: a client set the host clock, or confirmed
-                    // it to within 1 s, so a mount that keeps its own clock may
-                    // take it. The timer's step or trust-edge check re-syncs it.
-                    if (step.outcome == Outcome::Stepped || step.outcome == Outcome::SkippedSmall) {
-                        alpacacore::util::HostClockTrust::mark_set("client UTCDate");
-                    }
+                    // open-astro#2419: HostClock marks the host clock trusted for a
+                    // mount's own clock when this write stepped or confirmed it (#2479).
                     if (step.outcome == Outcome::Stepped) {
                         util::log_info(what);
                     } else if (step.outcome == Outcome::Failed) {
