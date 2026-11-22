@@ -363,7 +363,8 @@ TEST_CASE("Celestron Slewing - a direct hardware status-poll failure is propagat
         FAIL("Slewing returned the cached state after three status polls failed");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        CHECK(std::string(ex.what()).find("invalid response") != std::string::npos);
+        // The module's fixed fault text: the exchange error can carry handset reply bytes (CWE-117).
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
     }
     CHECK(st->slew_status_polls.load() - polls_before == 3);
     CHECK(st->cancel_goto_count.load() == 0);  // an idle status GET does not stop a mount

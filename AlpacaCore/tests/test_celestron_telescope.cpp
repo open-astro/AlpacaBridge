@@ -1374,14 +1374,168 @@ TEST_CASE("Celestron snapshot - a link whose location never reads still samples 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     cel::set_status_poll_paused_for_testing(*driver, true);
-    clock.advance(std::chrono::seconds(31));
-    (void)cel::poll_status_now_for_testing(*driver);  // the site read fails and ends this tick
+    // In steps with a good tick between, so no frame ages past the loss bound while the site retry falls due.
+    for (int step = 0; step < 3; ++step) {
+        clock.advance(std::chrono::seconds(10));
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    clock.advance(std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);  // the site read fails and fails this tick
     clock.advance(std::chrono::seconds(4));           // the next full tick
     const int before = st->transactions.load();
     (void)cel::poll_status_now_for_testing(*driver);
     // The site is not retried yet, so this tick samples instead of paying another location timeout.
     CHECK(st->transactions.load() - before > 1);
     driver->set_connected(false);
+}
+
+// Decision 0010 rule 7 (#2493): the position and status frame is one util::PolledState. Every case below runs on a
+// PolledRig (driver_rig.h) over the snapshot fake: the rig owns the clock, the fake mount and the driver.
+namespace {
+
+struct PolledMount {
+    std::shared_ptr<SnapshotMount> st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server{[state = st](const std::string& c) { return snapshot_reply(*state, c); }};
+};
+
+struct PolledMountRig : alpacacore::test::PolledRig<PolledMount, alpacacore::TelescopeDriver> {
+    using Base = alpacacore::test::PolledRig<PolledMount, alpacacore::TelescopeDriver>;
+    explicit PolledMountRig(bool with_site = true)
+        : Base(
+              {std::chrono::seconds(1), std::chrono::milliseconds(3000)},
+              [with_site](PolledMount& fake, FakeTaskClock& clock) {
+                  cel::ConnectionInfo info;
+                  info.type = cel::ConnectionType::Network;
+                  info.host = "127.0.0.1";
+                  info.tcp_port = fake.server.port();
+                  info.response_timeout_ms = 300;
+                  if (!with_site) {
+                      return cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt,
+                                                                       std::nullopt, false,
+                                                                       cel::CelestronAlignmentSetting::Auto, clock);
+                  }
+                  return cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                                   cel::CelestronAlignmentSetting::Auto, clock);
+              },
+              cel::set_status_poll_paused_for_testing,
+              [](alpacacore::TelescopeDriver& driver) { (void)cel::poll_status_now_for_testing(driver); }) {}
+};
+
+}  // namespace
+
+TEST_CASE("Celestron PolledState - a getter returns from the frame while the mount holds every reply for 200 ms",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.fake().server.ok());
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    REQUIRE(driver.get_connected());
+    const int before = rig.fake().st->transactions.load();
+    rig.fake().st->latency_ms = 200;
+    const std::vector<std::pair<const char*, std::function<void()>>> reads = {
+        {"RightAscension", [&] { (void)driver.get_right_ascension(); }},
+        {"Declination", [&] { (void)driver.get_declination(); }},
+        {"Azimuth", [&] { (void)driver.get_azimuth(); }},
+        {"Altitude", [&] { (void)driver.get_altitude(); }},
+        {"Slewing", [&] { (void)driver.get_slewing(); }},
+        {"Tracking", [&] { (void)driver.get_tracking(); }},
+        {"SideOfPier", [&] { (void)driver.get_side_of_pier(); }},
+        {"DeviceState", [&] { (void)driver.get_device_state(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        CAPTURE(name);
+        CHECK(timed(read) < std::chrono::milliseconds(20));
+    }
+    CHECK(rig.fake().st->transactions.load() == before);
+}
+
+TEST_CASE("Celestron PolledState - three failed probes latch the fault and one good probe clears it",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    rig.pause(true);
+    const double ra_at_connect = driver.get_right_ascension();
+    rig.fake().st->mute = true;
+    for (int i = 0; i < 2; ++i) rig.poll_now();
+    CHECK(driver.get_link_fault().empty());  // two failures: not yet
+    CHECK(driver.get_right_ascension() == ra_at_connect);
+    rig.poll_now();
+    CHECK_FALSE(driver.get_link_fault().empty());
+    CHECK(driver.get_connected());  // a young fault keeps Connected
+    rig.expect_error(alpacacore::AlpacaError::DriverException, [&] { (void)driver.get_right_ascension(); });
+    rig.fake().st->mute = false;
+    rig.poll_now();
+    CHECK(driver.get_link_fault().empty());
+    CHECK(driver.get_right_ascension() == ra_at_connect);
+}
+
+TEST_CASE("Celestron PolledState - a fault standing for the staleness bound drops Connected once",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    rig.pause(true);
+    rig.fake().st->mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll_now();
+    REQUIRE_FALSE(driver.get_link_fault().empty());
+    REQUIRE(driver.get_connected());
+    rig.clock().advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    rig.poll_now();
+    CHECK_FALSE(driver.get_connected());
+    rig.expect_error(alpacacore::AlpacaError::NotConnected, [&] { (void)driver.get_right_ascension(); });
+    // The loss is final until a reconnect: a later tick reaches the mount no more, and Connected stays false.
+    rig.fake().st->mute = false;
+    const int before = rig.fake().st->transactions.load();
+    rig.poll_now();
+    CHECK(rig.fake().st->transactions.load() == before);
+    CHECK_FALSE(driver.get_connected());
+}
+
+TEST_CASE("Celestron PolledState - a sync and a slew end read back the written state before the next poll",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    rig.pause(true);
+    // The mount reports its own position, which neither the sync nor the slew below moves: only a write through the
+    // frame can make the getter answer with the written value.
+    driver.sync_to_coordinates(3.25, 41.5);
+    CHECK(std::abs(driver.get_right_ascension() - 3.25) < 1e-3);
+    CHECK(std::abs(driver.get_declination() - 41.5) < 1e-3);
+
+    // A slew that ends: Slewing is written false with the position the mount stopped at, with no poll between. The
+    // read is the control path's, not a poll's: the frame keeps the age of the last poll (the connect's).
+    rig.clock().advance(std::chrono::seconds(3));
+    rig.fake().st->shifted = true;
+    driver.slew_to_coordinates_async(5.0, 20.0);
+    CHECK(driver.get_slewing());
+    for (int i = 0; i < 200 && driver.get_slewing(); ++i) {
+        rig.clock().advance(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE_FALSE(driver.get_slewing());
+    CHECK(std::abs(driver.get_right_ascension() - 3.25) > 1e-3);  // the frame the slew end measured, not the sync's
+    CHECK(std::abs(driver.get_declination() - 41.5) > 1e-3);
+    const auto age = std::chrono::system_clock::now() - parse_timestamp(time_stamp_of(driver));
+    CHECK(age > std::chrono::milliseconds(2500));
+}
+
+TEST_CASE("Celestron PolledState - a site read that times out fails the tick and counts toward the loss",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig(false);
+    rig.fake().st->w_fail = true;  // the location never reads: not at connect, not in the poll
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    REQUIRE(driver.get_connected());
+    rig.pause(true);
+    // The site retry falls due and the frame is past the loss bound: the tick that times out on the site read is a
+    // failed probe, so the loss verdict reads the frame's age and drops Connected, with no sample attempted.
+    rig.clock().advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    const int before = rig.fake().st->transactions.load();
+    rig.poll_now();
+    CHECK(rig.fake().st->transactions.load() - before == 1);  // the location query alone: no second timeout
+    CHECK_FALSE(driver.get_connected());
 }
 
 TEST_CASE("Celestron snapshot - past the staleness bound DeviceState is empty with no TimeStamp",
