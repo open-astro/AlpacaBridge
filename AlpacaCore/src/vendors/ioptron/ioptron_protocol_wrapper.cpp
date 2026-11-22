@@ -68,6 +68,12 @@ constexpr std::size_t kMaxReplyLen = 65536;
 // send_command_blind()). Tuned on the HAE29C (2026-07-14) for :SG/:SDS/:SUT/:Q/:ST/:MP/:MH, which do ack.
 constexpr std::chrono::milliseconds kBlindAckWaitSerial{300};
 constexpr std::chrono::milliseconds kBlindAckWaitNetwork{50};
+// After a reply timed out, the next command first waits this long for the late reply and discards it, so it is not
+// read as that command's own reply. Over Wi-Fi a lost segment is resent after a TCP retransmit timeout, so a
+// reply can arrive seconds late; read as the next command's reply it put the link one reply behind (a :GLS# reply
+// parsed as :GEP# moved Dec by degrees with the mount still, and the status reads that followed failed and latched
+// the fault). Paid only on the command after a timeout; capped by the reply timeout (late_reply_drain_ms()).
+constexpr int kLateReplyDrainMs = 1000;
 // The pulse-guide commands (:ZS/:ZQ/:ZE/:ZC) get no response in the v3 spec, and the HAE29C sends none
 // (2026-11-03), so the blind default made every PulseGuide wait out the full 300 ms (issue #2421). The
 // short window still drains an ack from firmware that sends one (TCP has no flush before the next
@@ -957,6 +963,7 @@ public:
         
         if (success) {
             connected_ = true;
+            reply_overdue_ = false;
             link_lost_.store(false);
             std::string conn_type = (info.type == ConnectionType::Serial ? "Serial" : "Network");
             ALPACA_LOG_INFO("iOptron", "Connected to mount via " + conn_type);
@@ -1039,9 +1046,16 @@ public:
         // anything in the receive buffer before our write is by definition
         // not this command's response, and a leaked byte prepended to the
         // response garbles fixed-offset parsing (:GPC/:GLS field slicing).
+        // The same on both transports: a TCP socket keeps a late reply queued just as a serial buffer does. After a
+        // timeout the late reply may not have arrived yet, so the drain first waits for it (kLateReplyDrainMs).
+        const bool reply_overdue = reply_overdue_;
+        reply_overdue_ = false;
         if (connection_type_ == ConnectionType::Serial) {
 #ifndef _WIN32
             if (link_) {
+                if (reply_overdue) {
+                    drain_serial_stale(late_reply_drain_ms());
+                }
                 tcflush(link_.fd(), TCIFLUSH);
             }
 #else
@@ -1049,6 +1063,8 @@ public:
                 PurgeComm(serial_handle_, PURGE_RXCLEAR);
             }
 #endif
+        } else {
+            drain_network_stale(reply_overdue ? late_reply_drain_ms() : 0);
         }
 
         // Send command
@@ -1073,6 +1089,13 @@ public:
                                        " (" + std::to_string(elapsed.count()) + " ms)");
         
         return response;
+    }
+
+    // kLateReplyDrainMs, or the reply timeout when that is shorter: a link configured to give up on a reply that
+    // soon has no use for one later still.
+    int late_reply_drain_ms() const {
+        const int timeout_ms = connection_info_.response_timeout_ms > 0 ? connection_info_.response_timeout_ms : 5000;
+        return std::min(kLateReplyDrainMs, timeout_ms);
     }
 
     void send_command_blind(const std::string& command, std::chrono::milliseconds serial_ack_wait = kBlindAckWaitSerial,
@@ -1608,6 +1631,8 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("iOptron mount response too long");
             case util::ReadOutcome::Timeout:
+                // The reply may still come; the next send_command() drains it first.
+                reply_overdue_ = true;
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for mount response");
             default:
@@ -1687,6 +1712,8 @@ public:
 private:
     mutable std::mutex mutex_;
     bool connected_;
+    // Set when a reply timed out, cleared by the next send_command(), which drains the late reply first. Under mutex_.
+    bool reply_overdue_ = false;
     std::atomic<bool> link_lost_{false};  // set by latch_link_lost_locked(), cleared by the next connect()
     // The loss reason for the driver's get_link_fault() (decision 0009 rule 5), cleared by disconnect(), which
     // the driver runs before it reconnects over a lost link. Its own leaf mutex, never held across an exchange, so a
@@ -1782,11 +1809,17 @@ Position iOptronProtocolWrapper::get_position() {
     std::string response = send_command(":GEP");
 
     response = strip_status_prefix(std::move(response));
-    
-    if (response.length() < 20) {
-        throw AlpacaException("Invalid position response from mount");
+
+    // Exactly sign + 17 digits + pier digit + pointing digit. A reply of any other shape is not a :GEP# reply (a
+    // late :GLS# reply is 23 characters and also starts with a sign); parsed anyway, its fields moved the reported
+    // position by degrees while the mount stood still.
+    const auto is_digit = [](char ch) { return ch >= '0' && ch <= '9'; };
+    if (response.length() != 20 || (response[0] != '+' && response[0] != '-') ||
+        !std::all_of(response.begin() + 1, response.begin() + 18, is_digit) || response[18] < '0' ||
+        response[18] > '2' || response[19] < '0' || response[19] > '1') {
+        throw AlpacaException("Invalid position response from mount: \"" + response + "\"");
     }
-    
+
     // Parse :GEP# response: sTTTTTTTTTTTTTTTTTnn#
     // Sign + 8 digits: Dec (0.01 arc-seconds)
     // 9 digits: RA (0.01 arc-seconds)
@@ -1798,6 +1831,10 @@ Position iOptronProtocolWrapper::get_position() {
     
     int64_t dec_value = pimpl_->parse_signed_int(dec_str);
     int64_t ra_value = parse_int64_field(ra_str, ":GEP RA");
+    // 0.01 arcsec of a 360 degree circle.
+    if (ra_value >= 129600000) {
+        throw AlpacaException("Invalid position response from mount (RA out of range): \"" + response + "\"");
+    }
 
     Position pos;
     pos.dec_degrees = pimpl_->ioptron_format_to_dec(dec_value);
