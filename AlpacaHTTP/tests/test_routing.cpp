@@ -7819,10 +7819,81 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9813);
     }
 
+    {
+        // case: Sync Time via HostClock: fake hooks set the clock, write the RTC, latch trust (#2479)
+        using alpacacore::util::HostClock;
+        using alpacacore::util::HostClockTrust;
+        HostClockTrustRestore untrusted(false);
+        const auto clock_field = [](const nlohmann::json& desc, const char* key) -> nlohmann::json {
+            if (desc.is_discarded() || !desc.contains("Value") || !desc["Value"].contains(key)) {
+                return nlohmann::json();
+            }
+            return desc["Value"][key];
+        };
+        const auto sync_time = [](alpacahttp::Router& r) {
+            return nlohmann::json::parse(
+                route_request(r, "POST", "/management/v1/synctime", R"({"Epoch": 978307200})").body(), nullptr, false);
+        };
+        // Set: the epoch reaches the setter, the RTC is written, trust latches.
+        {
+            int rtc_writes = 0;
+            int set_calls = 0;
+            std::chrono::system_clock::time_point set_to{};
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point tp, std::string&) {
+                                                  ++set_calls;
+                                                  set_to = tp;
+                                                  return true;
+                                              },
+                                              [] { return false; },
+                                              [&](std::string& device, std::string&) {
+                                                  ++rtc_writes;
+                                                  device = "/dev/rtc0";
+                                                  return HostClock::RtcWrite::Written;
+                                              });
+            const auto json = sync_time(clock_router);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            EXPECT(json.value("Value", int64_t{0}) == 978307200);
+            EXPECT(set_calls == 1);
+            EXPECT(set_to == std::chrono::system_clock::time_point(std::chrono::seconds(978307200)));
+            EXPECT(rtc_writes == 1);
+            EXPECT(HostClockTrust::latched());
+            const auto desc = nlohmann::json::parse(
+                route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
+            EXPECT(clock_field(desc, "ClockSource") == "client");
+        }
+        HostClockTrust::reset_for_testing();
+        // Refused: the setter's error text goes back, nothing is trusted or written.
+        {
+            int rtc_writes = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks(
+                [] { return false; },
+                [](std::chrono::system_clock::time_point, std::string& error) {
+                    error = "clock_settime failed (requires CAP_SYS_TIME): Operation not permitted";
+                    return false;
+                },
+                [] { return false; },
+                [&](std::string&, std::string&) {
+                    ++rtc_writes;
+                    return HostClock::RtcWrite::Written;
+                });
+            const auto json = sync_time(clock_router);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == alpacacore::AlpacaError::DriverException);
+            EXPECT(json.value("ErrorMessage", std::string()) ==
+                   "clock_settime failed (requires CAP_SYS_TIME): Operation not permitted");
+            EXPECT(rtc_writes == 0);
+            EXPECT(!HostClockTrust::latched());
+        }
+    }
+
     // synctime management endpoint: GET reads the clock, POST validates the
-    // epoch range before touching it. The actual clock_settime() succeeds only
-    // with CAP_SYS_TIME, so the happy-path set is validated on hardware; here
-    // we pin the routing, the read path, and every rejection path.
+    // epoch range before touching it. A default Router still uses the real
+    // hooks, whose clock_settime() succeeds only with CAP_SYS_TIME, so this
+    // block pins the routing, the read path, and every rejection path; the
+    // "Sync Time via HostClock" case above covers the successful set with fake
+    // hooks.
     {
         alpacahttp::Router router;
 

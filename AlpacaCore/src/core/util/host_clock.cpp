@@ -11,7 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/rtc.h>
@@ -148,6 +150,20 @@ HostClock::RtcWrite HostClock::kernel_write_rtc(std::string& device, std::string
         return RtcWrite::Failed;
     }
 }
+
+bool HostClock::kernel_set_time(std::chrono::system_clock::time_point tp, std::string& error) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+    struct timespec ts {};
+    ts.tv_sec = static_cast<time_t>(ns / 1000000000LL);
+    ts.tv_nsec = static_cast<long>(ns % 1000000000LL);
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+        error = std::string("clock_settime failed (requires CAP_SYS_TIME): ") + errno_string(errno);
+        return false;
+    }
+    return true;
+}
+
+void HostClock::mark_trusted(const char* why) noexcept { HostClockTrust::mark_set(why); }
 
 void HostClock::write_rtc_after_step(const Hooks& hooks, std::optional<std::chrono::milliseconds> delta) {
     {

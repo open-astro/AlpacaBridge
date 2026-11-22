@@ -117,14 +117,12 @@ public:
     bool sync_system_clock_from_clients() const { return host_clock_.enabled(); }
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
-    // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
-    // read), so the #289 wiring -- the UTCDate PUT stepping
-    // the clock before the driver sees the value, and the connect-time
-    // warning -- can be driven in a test without touching the real system
-    // clock. NOT the synctime endpoint: handle_sync_time() calls
-    // clock_settime() directly and only its mark_stepped()/mark_step_failed()
-    // bookkeeping goes through this object, so a test must never POST it an
-    // in-range epoch even with the hooks installed.
+    // four probes are fakes (adjtimex, clock_settime, the sysfs RTC read and
+    // the RTC write), so every path that sets the clock -- the UTCDate PUT
+    // (#289) and the synctime POST (#2479) -- and the connect-time warning can
+    // be driven in a test without touching the real system clock. Both
+    // paths set the clock, write the RTC and latch HostClockTrust inside
+    // HostClock, so a test asserts all three through these hooks.
     //
     // open-astro#399: this replaces only the clock's PROBES, in place. The
     // HostClock object is never destroyed, so -- unlike the version that
@@ -141,7 +139,9 @@ public:
     // Router.
     void set_host_clock_hooks(
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
-        alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
+        alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; },
+        alpacacore::util::HostClock::WriteRtcFn write_rtc =
+            [](std::string&, std::string&) { return alpacacore::util::HostClock::RtcWrite::NoDevice; });
 
     // open-astro#670: test seam for the wall clock GET /management/v1/synctime
     // reports. Production never sets it; the default is system_clock::now.

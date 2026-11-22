@@ -1208,8 +1208,9 @@ void Router::check_host_clock(std::chrono::system_clock::time_point sys, std::ch
         }
         util::log_info("Host clock stepped by " + std::to_string(step->count()) + " ms (now " + text + ")");
         // Something set the clock (an outside clock_settime, NTP's first step).
-        // Never host_clock_.mark_stepped() here: that writes the hardware RTC
-        // with a time nothing has verified.
+        // Marked here, not in HostClock: HostClock only marks a set it made,
+        // and an observed step must never reach its RTC write, which would
+        // store a time nothing has verified.
         HostClockTrust::mark_set("host clock step");
         event = HostClockEvent{HostClockEvent::Kind::Stepped, *step};
     }
@@ -1273,8 +1274,9 @@ void Router::set_config_path(std::string config_path) {
 // longer has to save and restore them.
 void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn is_synchronized,
                                   alpacacore::util::HostClock::SetTimeFn set_time,
-                                  alpacacore::util::HostClock::HasRtcFn has_rtc) {
-    host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc));
+                                  alpacacore::util::HostClock::HasRtcFn has_rtc,
+                                  alpacacore::util::HostClock::WriteRtcFn write_rtc) {
+    host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc), std::move(write_rtc));
 }
 
 // open-astro#675: the HostClock::set_hooks() shape (#399). A plain
@@ -4892,25 +4894,18 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         return response;
     }
 
-    struct timespec ts {};
-    ts.tv_sec = static_cast<time_t>(epoch_seconds);
-    ts.tv_nsec = 0;
-    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        // open-astro#292: an operator who only ever presses Sync Time would
-        // otherwise never trip the latch, and the connect line would keep
-        // claiming the clock is about to be corrected.
-        host_clock_.mark_step_failed();
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-            std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
+    // open-astro#2479: HostClock sets the clock, writes the RTC and marks the
+    // host clock trusted (ClockSource, connect-time warning, mount clocks).
+    const auto set =
+        host_clock_.set_from_operator(std::chrono::system_clock::time_point(std::chrono::seconds(epoch_seconds)));
+    if (set.outcome == HostClock::Outcome::Failed) {
+        // open-astro#292: HostClock latched the failure, so the connect line
+        // stops claiming the clock is about to be corrected.
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR, set.error);
         response.set_body(alpaca_response);
         return response;
     }
-    // The clock is now client-set for the management readout and the
-    // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
-    host_clock_.mark_stepped();
-    // open-astro#2419: and trusted for a mount's own clock.
-    alpacacore::util::HostClockTrust::mark_set("Sync Time");
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;

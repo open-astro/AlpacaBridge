@@ -200,8 +200,8 @@ public:
     // loaded the clock from a hardware RTC at boot -- open-astro#292), or
     // "none". The RTC answer is a cached atomic read since open-astro#314,
     // never a bus transaction: the probe runs on the server's timer thread,
-    // so this cannot queue behind an I2C RTC. (A stepping step_from_client()
-    // or mark_stepped() does pay one RTC write, #296.)
+    // so this cannot queue behind an I2C RTC. (A stepping step_from_client(),
+    // set_from_operator() or mark_stepped() does pay one RTC write, #296.)
     std::string source() const {
         if (synchronized()) {
             return "ntp";
@@ -281,9 +281,8 @@ public:
 
     /**
      * The same refusal, observed by a path that sets the clock itself rather
-     * than through step_from_client() (the /management/v1/synctime endpoint).
-     * Without this an operator who only ever presses Sync Time on a host with
-     * no CAP_SYS_TIME never trips the latch.
+     * than through HostClock. Sync Time no longer needs it (set_from_operator()
+     * latches its own failure, open-astro#2479).
      */
     void mark_step_failed() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -329,6 +328,8 @@ public:
         }
         if (r.delta < kMinStep && r.delta > -kMinStep) {
             r.outcome = Outcome::SkippedSmall;
+            // The client confirmed the host clock to within 1 s.
+            mark_trusted("client UTCDate");
             return r;
         }
         std::string error;
@@ -345,14 +346,48 @@ public:
         }
         r.outcome = Outcome::Stepped;
         write_rtc_after_step(*snapshot, r.delta);
+        mark_trusted("client UTCDate");
         return r;
     }
 
     /**
-     * Something other than a UTCDate write set the system clock through
-     * this process (the web UI's Sync Time button). clock_settime does not
-     * clear STA_UNSYNC, so without this the readout would keep saying the
-     * clock was never set and the connect-time warning would keep firing.
+     * The operator pressed Sync Time (/management/v1/synctime): set the system
+     * clock to `requested`, write the RTC and mark the host clock trusted
+     * (open-astro#2479). Unlike step_from_client() it skips the synchronized,
+     * small-delta and enabled() checks: the operator asked for this time. The
+     * caller checks the kMinEpoch..kMaxEpoch window. Returns Stepped or Failed
+     * (`error` set); a failure latches step_ever_failed() and trusts nothing.
+     * Never throws.
+     */
+    Result set_from_operator(std::chrono::system_clock::time_point requested,
+                             std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) {
+        Result r{};
+        r.delta = std::chrono::duration_cast<std::chrono::milliseconds>(requested - now);
+        const auto snapshot = hooks();
+        std::string error;
+        if (!snapshot->set_time(requested, error)) {
+            r.outcome = Outcome::Failed;
+            r.error = error;
+            std::lock_guard<std::mutex> lock(mutex_);
+            step_failed_ = true;
+            return r;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stepped_ = true;
+        }
+        r.outcome = Outcome::Stepped;
+        write_rtc_after_step(*snapshot, r.delta);
+        mark_trusted("Sync Time");
+        return r;
+    }
+
+    /**
+     * Something other than HostClock set the system clock through this
+     * process. clock_settime does not clear STA_UNSYNC, so without this the
+     * readout would keep saying the clock was never set and the connect-time
+     * warning would keep firing. Does not mark trust; Sync Time uses
+     * set_from_operator() instead (open-astro#2479).
      */
     void mark_stepped() {
         {
@@ -394,17 +429,9 @@ public:
         return (tx.status & STA_UNSYNC) == 0;
     }
 
-    static bool kernel_set_time(std::chrono::system_clock::time_point tp, std::string& error) {
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
-        struct timespec ts {};
-        ts.tv_sec = static_cast<time_t>(ns / 1000000000LL);
-        ts.tv_nsec = static_cast<long>(ns % 1000000000LL);
-        if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-            error = std::string("clock_settime failed (requires CAP_SYS_TIME): errno ") + std::to_string(errno);
-            return false;
-        }
-        return true;
-    }
+    // Never throws. On failure `error` reads "clock_settime failed (requires
+    // CAP_SYS_TIME): <strerror text>".
+    static bool kernel_set_time(std::chrono::system_clock::time_point tp, std::string& error);
 
 private:
     // open-astro#399: the three injected syscalls live in one immutable
@@ -436,6 +463,10 @@ private:
     // After a successful step: write the system time into the boot RTC, then
     // invalidate the settled probe. Never throws; a failure is logged once.
     void write_rtc_after_step(const Hooks& hooks, std::optional<std::chrono::milliseconds> delta);
+
+    // HostClockTrust::mark_set(); out of line because host_clock_trust.h
+    // includes this header.
+    static void mark_trusted(const char* why) noexcept;
 
     std::shared_ptr<const Hooks> hooks() const {
         std::lock_guard<std::mutex> lock(mutex_);
