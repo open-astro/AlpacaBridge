@@ -1049,9 +1049,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             const std::string reported = "RA " + id(models[0]) + ", Dec " + id(models[1]);
             const bool unknown_motor = family(models[0]) == 0 || family(models[0]) != family(models[1]);
             if (unknown_motor) {
-                ALPACA_LOG_WARN("Celestron CGX",
-                                "Motors report model " + reported + ", not a CGX or CGX-L pair; connected, "
-                                "motion refused");
+                ALPACA_LOG_WARN("Celestron CGX", "Motors report model " + reported +
+                                                     ", not a CGX or CGX-L pair; connected, "
+                                                     "motion refused");
             } else if (family(models[0]) == 0x18) {
                 ALPACA_LOG_INFO("Celestron CGX", "Motors report CGX-L model " + reported +
                                                      "; driven as the CGX, the CGX-L is not yet qualified on hardware");

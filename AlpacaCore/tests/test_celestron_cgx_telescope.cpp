@@ -539,9 +539,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - CGX-L motors (model 0x18xx) conn
 TEST_CASE("Celestron CGX USB Telescope Driver - a mixed CGX/CGX-L pair or another family still refuses motion",
           "[celestron][cgx][telescope]") {
     using Model = std::vector<std::uint8_t>;
-    for (const auto& [ra, dec] : std::vector<std::pair<Model, Model>>{{{0x17, 0x88}, {0x18, 0x88}},
-                                                                     {{0x18, 0x88}, {0x17, 0x88}},
-                                                                     {{0x14, 0x85}, {0x14, 0x85}}}) {
+    for (const auto& [ra, dec] : std::vector<std::pair<Model, Model>>{
+             {{0x17, 0x88}, {0x18, 0x88}}, {{0x18, 0x88}, {0x17, 0x88}}, {{0x14, 0x85}, {0x14, 0x85}}}) {
         INFO("RA " << int(ra[0]) << " " << int(ra[1]) << ", Dec " << int(dec[0]) << " " << int(dec[1]));
         alpacacore::test::FakeCelestronCgxMount mount;
         REQUIRE(mount.ok());
