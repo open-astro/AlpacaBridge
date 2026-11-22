@@ -208,9 +208,9 @@ public:
     int get_interface_version() const override { return 4; }
 
     // A lost link (decision 0009) reads as not connected until the client's Connected=true relinks.
-    // Reads published_connected_: raised only at the end of a connect, dropped when the session ends or
-    // the link is declared lost, so it takes no lock set_connected() holds and stays false while
-    // Connecting is true (#910). The blocking-driver list lives in async_connectable.h.
+    // Reads published_connected_: raised only at the end of a connect and dropped only when the session ends; a
+    // loss leaves it raised and polled_.link_lost() hides it. Neither takes a lock set_connected() holds, and it
+    // stays false while Connecting is true (#910). The blocking-driver list lives in async_connectable.h.
     bool get_connected() const override { return published_connected_.load() && !polled_.link_lost(); }
 
     std::string get_link_fault() const override { return polled_.fault(); }
@@ -1239,7 +1239,8 @@ public:
     }
 
     // Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling
-    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either.
+    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either. A pause does not
+    // survive a reconnect: the connect's polled_.start() starts the poll again, so pause after each relink.
     void set_status_poll_paused_for_testing(bool paused) {
         if (paused) {
             polled_.stop_and_join();
@@ -1785,8 +1786,8 @@ private:
     std::mutex initiator_mutex_;
     mutable std::mutex mutex_;
     bool connected_ = false;
-    // What get_connected() reads: true only once a connect has fully finished and the link is not
-    // lost. Written under mutex_ or transition_mutex_, read with no lock (#910).
+    // What get_connected() reads, with polled_.link_lost(): true once a connect has fully finished, until the
+    // session ends; a loss does not lower it. Written under mutex_ or transition_mutex_, read with no lock (#910).
     std::atomic<bool> published_connected_{false};
 
     double target_ra_hours_ = 0.0;

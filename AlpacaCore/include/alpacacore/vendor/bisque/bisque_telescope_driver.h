@@ -46,8 +46,8 @@ std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_nu
                                                                    util::TaskClock& clock = util::default_task_clock());
 
 /// Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling thread
-/// (paused or not; false when the connection is gone). `driver` must come from the factories above; anything else is
-/// ignored.
+/// (paused or not; false when the connection is gone). A pause lasts until the next connect, which starts the poll
+/// again. `driver` must come from the factories above; anything else is ignored.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,
@@ -56,9 +56,9 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// Whether the 8 s Slewing hold (decision 0022) is open now, on the driver's task clock. A Slewing read cannot tell
 /// once the slew's own flag is down, so the clear sites that lower it too (a disconnect, a landing) are pinned here.
 bool slew_hold_active_for_testing(TelescopeDriver& driver);
-/// Whether the 8 s hold was cleared rather than left to expire. A lost link is declared only once its fault has
-/// stood past util::kLinkStalenessBound (30 s), so the window has always expired by then and active() cannot show
-/// the lost-link Disconnect's clear; this reads the deadline itself.
+/// Whether the 8 s hold was cleared rather than left to expire. A lost link is declared only once its fault, or a
+/// frame no tick refreshed, has stood past util::kLinkStalenessBound (30 s), so the window has always expired by then
+/// and active() cannot show the lost-link Disconnect's clear; this reads the deadline itself.
 bool slew_hold_cleared_for_testing(TelescopeDriver& driver);
 
 } // namespace alpacacore::vendor::bisque
