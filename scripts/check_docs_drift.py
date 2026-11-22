@@ -665,6 +665,13 @@ def _matching_brace(text, open_index):
 
 IS_OPEN_BODY_RE = re.compile(r"\bis_open\s*\(\s*\)\s*const\s*\{")
 
+# Shared headers whose is_open() stands in for a vendor wrapper's, keyed by the vendor directories that build on
+# them. util::SoftPwmPorts replaced the two ZWO ASIAIR wrappers (#1757); without this entry the ZWO directory
+# would have no wrapper is_open() left to read, and "none found" classifies as locking.
+SHARED_IS_OPEN_HEADERS = {
+    "AlpacaCore/include/alpacacore/util/soft_pwm_ports.h": ("zwo",),
+}
+
 
 def _vendor_is_open_locks(vendor_dir):
     """True if any is_open() body in the vendor's wrapper sources takes a lock.
@@ -679,7 +686,10 @@ def _vendor_is_open_locks(vendor_dir):
     lock-free, so this pin fails open for those shapes.
     """
     found = False
-    for path in sorted(vendor_dir.glob("*wrapper*.cpp")):
+    paths = sorted(vendor_dir.glob("*wrapper*.cpp"))
+    paths += [ROOT / header for header, vendors in SHARED_IS_OPEN_HEADERS.items()
+              if vendor_dir.name in vendors and (ROOT / header).is_file()]
+    for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in IS_OPEN_BODY_RE.finditer(text):
             found = True
@@ -1843,6 +1853,7 @@ HELPER_FAKES = {
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
+    "fake_gpio_line_backend.h": "in-memory util::GpioLineBackend recording each write with the shared FakeTaskClock time, for the soft-PWM engine cases (#1757); the GPIO power-port drivers connect through their real backends over the libgpiod and ioctl stubs",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
     "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
     "fake_alpaca_server.h": "loopback fake upstream Alpaca server for the remotealpaca client (#1753 slice 2); no driver connects through it yet",
@@ -4286,6 +4297,19 @@ def self_test():
         bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free])])
         check("blocking list: the same header is lock-free when every served vendor's is_open() is lock-free",
               bl_scan == {"power_port_switch_driver.h": "lock-free"})
+        bl_zwo = Path(bl_tmp) / "zwo"
+        bl_zwo.mkdir()
+        bl_open = Path(bl_tmp) / "soft_pwm_ports.h"
+        SHARED_IS_OPEN_HEADERS[str(bl_open)] = ("zwo",)
+        try:
+            bl_open.write_text("bool is_open() const { std::lock_guard<std::mutex> g(m_); return open_; }\n")
+            check("blocking list: a shared is_open() header that locks makes its served vendor 'wrapper'",
+                  _vendor_is_open_locks(bl_zwo))
+            bl_open.write_text("bool is_open() const { return open_.load(); }\n")
+            check("blocking list: a lock-free shared is_open() header keeps its served vendor lock-free",
+                  not _vendor_is_open_locks(bl_zwo))
+        finally:
+            del SHARED_IS_OPEN_HEADERS[str(bl_open)]
         bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
         check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
               bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))

@@ -90,6 +90,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/atomic_file.cpp
     src/core/util/flat_number_file.cpp
     src/core/util/power_port_state_store.cpp
+    src/core/util/soft_pwm_ports.cpp
     src/core/util/rotator_sync_offset_store.cpp
     src/core/util/unique_id.cpp
     src/core/util/lock_gate.cpp

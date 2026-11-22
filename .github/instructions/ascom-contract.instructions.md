@@ -358,6 +358,17 @@ notes carry only the pin map and per-board deltas.
   board profile (strings, per-port metadata, the power-on state) and passes its own port
   wrapper's constructor arguments; the wrapper stays the vendor's. A future board adds a
   profile and a wrapper, not a driver.
+- **One engine for the port table, the values and the PWM workers**
+  ([decision 0027](../../docs/decisions/0027-gpio-soft-pwm-composition.md)):
+  `util::SoftPwmPorts` (`alpacacore/util/soft_pwm_ports.h`) is held as a member, never a base
+  class, and talks to the kernel only through a `util::GpioLineBackend` (`gpio_line_backend.h`):
+  `util::GpiodLineBackend` (libgpiod v2) or the vendor's own (`PwmGpioMiscBackend`, the ASIAIR
+  Plus RK3568 ioctl path, with its inverted polarity and its kernel index offset). The wrapper
+  type is `util::OwnedSoftPwmPorts<Backend>`. The ASIAIR Pro, Plus CM4 and Plus RK3568 are on it;
+  the iOptron iMate (`ioptron_powerbox_wrapper.cpp`) and ToupTek StellaVita
+  (`touptek_powerbox_wrapper.cpp`) wrappers still carry their own copy until the follow-up of
+  #1757. A test drives the engine over `FakeGpioLineBackend` and `FakeTaskClock`
+  (`tests/test_soft_pwm_ports.cpp`), with no real sleep.
 - **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
   `gpiod_line_request*` owns all lines together; values go through
   `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon
@@ -382,13 +393,18 @@ notes carry only the pin map and per-board deltas.
   before disconnecting. Do NOT add a drive-low-on-close path without making it opt-in
   config — it would silently flip the policy for everyone who upgrades. Documented
   user-facing in [`AlpacaCore/PowerPorts.md`](../../AlpacaCore/PowerPorts.md).
-- **Userspace soft-PWM, per-port worker threads** (`sleep_until` bit-bang): hardware
+- **Userspace soft-PWM, per-port worker threads** (a bit-bang on absolute edges): hardware
   or DMA PWM is board-specific and unavailable/unreachable on every board we ship, so
-  userspace toggling is the standard mechanism. Steady-state 0%/100% skips the
+  userspace toggling is the standard mechanism. `util::SoftPwmPorts` computes each edge as a
+  deadline from the period's start and waits for it on the `TaskClock`
+  ([decision 0005](../../docs/decisions/0005-task-clock.md)), so a write's latency does not drift
+  the duty and a test drives the edges with `FakeTaskClock`; the iMate and StellaVita wrappers
+  still use `sleep_for` until they move onto it. Steady-state 0%/100% skips the
   per-period syscall. Every line write checks the return code — on failure, log at
   ERROR and set the per-port stop flag so the thread exits cleanly instead of looping
-  while the ASCOM API reports success. Two-phase shutdown: signal stop under the
-  mutex, join outside it, release/close back under it (the classic
+  while the ASCOM API reports success (the engine does it for every backend, and `set_value` on
+  the stopped port answers `DriverException` until the next open). Two-phase shutdown: signal stop under the
+  mutex, join outside it, settle and release under the I/O lock (the classic
   join-under-the-same-mutex deadlock otherwise).
   These per-port periodic workers are not operation-slot bodies; a cancellable one-shot
   or polling body added to a GPIO driver uses the slot (Threads & shutdown in [driver-lifecycle](driver-lifecycle.instructions.md)).

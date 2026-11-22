@@ -153,6 +153,8 @@ StubDeviceFile::StubDeviceFile() {
     st.path = path;
     st.levels.clear();
     st.last_level.clear();
+    st.set_modes.clear();
+    st.enables.clear();
     st.off_writes = 0;
     st.requests = 0;
 }
@@ -310,6 +312,11 @@ int ioctl(int fd, unsigned long request, ...) {
         auto& st = alpacacore::test::ioctl_stub();
         std::lock_guard<std::mutex> lock(st.m);
         ++st.requests;
+        if (request == alpacacore::test::kSetMode) {
+            st.set_modes.push_back(*static_cast<const std::int32_t*>(arg));  // work_mode_t {index, mode}
+        } else if (request == alpacacore::test::kEnable) {
+            st.enables.push_back(*static_cast<const std::int32_t*>(arg));
+        }
         if (request == alpacacore::test::kSetLevel) {
             const auto* level = static_cast<const std::int32_t*>(arg);  // gpio_level_t {index, level}
             st.levels.push_back(level[1]);
