@@ -937,7 +937,10 @@ public:
                 pulse_position_correction_[kDecAxis].clear();
                 last_dec_read_degrees_ = dec_value;
                 last_dec_read_valid_ = true;
-                return dec_value + sync_offset_dec_degrees_;
+                // The Sync offset model adds a constant, so at the pole it would report past +-90 (Dec 90.71 at the
+                // HAE29C's home after a plate-solve Sync, 2026-11-22). Declination is -90 to 90 (ASCOM); a slew target
+                // past the pole is already clamped where the wrapper writes :Sd (set_target_dec()).
+                return std::clamp(dec_value + sync_offset_dec_degrees_, -90.0, 90.0);
             });
     }
     

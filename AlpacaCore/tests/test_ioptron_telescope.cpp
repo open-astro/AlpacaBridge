@@ -4119,6 +4119,107 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     driver->set_connected(false);
 }
 
+// Rig night 2026-11-22 (HAE29C over Wi-Fi, 6.0.0-beta.2): a reply that missed its timeout came in afterwards and
+// was read as the next command's reply, so the link stayed one reply behind. Status reads failed in a run
+// ("Invalid status response from mount", 226 in ten minutes) and a :GLS# reply parsed as :GEP# made the
+// declination jump with the mount still. The next command now drains the late reply first.
+TEST_CASE("iOptron mount wrapper - a reply that arrives after its timeout is not read as the next command's reply",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info = loopback_endpoint(mount.port());
+    info.response_timeout_ms = 1000;
+    REQUIRE(protocol.connect(info));
+
+    // Past the 1000 ms timeout and its 200 ms late-byte grace (1200 ms), inside the next command's 1000 ms drain
+    // window (until 2000 ms at the earliest): about 400 ms of slack each side.
+    mount.hold_next_reply(std::chrono::milliseconds(1600));
+    CHECK_THROWS_AS((void)protocol.get_status(), alpacacore::AlpacaException);
+    // The late :GLS# reply is drained, not read as this one.
+    const auto pos = protocol.get_position();
+    CHECK(std::abs(pos.dec_degrees) <= 90.0);
+    CHECK_NOTHROW((void)protocol.get_status());  // and the link is back in step
+    protocol.disconnect();
+}
+
+TEST_CASE("iOptron mount wrapper - a position reply of the wrong shape is refused, not parsed",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    REQUIRE(protocol.connect(loopback_endpoint(mount.port())));
+    // A :GLS# reply (23 characters, site longitude first; its latitude field is low enough that the nine digits
+    // read as RA are in range), a bad pier digit, a non-digit, an RA of 360 degrees and one digit too many. Each fails
+    // one check only.
+    const auto reply = GENERATE(std::string("+1740000003600000000000#"), std::string("+0846720000000000091#"),
+                                std::string("+084672000000x000001#"), std::string("+0846720012960000001#"),
+                                std::string("+08467200000000000011#"));
+    mount.set_position_reply(reply);
+    CHECK_THROWS_AS((void)protocol.get_position(), alpacacore::AlpacaException);
+    mount.set_position_reply("");
+    CHECK_NOTHROW((void)protocol.get_position());
+    protocol.disconnect();
+}
+
+// Rig night 2026-11-22: a plate-solve Sync left a +0.71 degree Dec offset, and at home (Dec 90) the driver then
+// reported Dec 90.71. The reported Declination is clamped to -90..90 (the :Sd write already was).
+TEST_CASE("iOptron Telescope Driver - a Sync offset never reports a Dec past the pole",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_position(6.0, 89.29);
+    driver->sync_to_coordinates(6.0, 90.0);  // offset +0.71
+    mount.set_position(6.0, 90.0);
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the position TTL
+    CHECK(driver->get_declination() == Catch::Approx(90.0));
+    mount.set_position(6.0, -89.5);
+    driver->sync_to_coordinates(6.0, -90.0);  // offset -0.5
+    mount.set_position(6.0, -90.0);
+    clock.advance(std::chrono::seconds(2));
+    CHECK(driver->get_declination() == Catch::Approx(-90.0));
+    driver->set_connected(false);
+}
+
+// The same rig night: the last Sync was taken while the link was one reply behind. A position read of the wrong
+// shape now fails the Sync instead of storing an offset from it.
+TEST_CASE("iOptron Telescope Driver - a Sync whose position read is not a position reply is refused",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_position_reply("+1740000003600000000000#");  // a :GLS#-shaped reply
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_position_reply("");
+    CHECK(sync_failure(*driver).empty());
+    driver->set_connected(false);
+}
+
+// An extra reply already queued on the socket (a stray ack, or a late reply that came after the drain window) is
+// discarded before the next command is written, so that command still reads its own reply.
+TEST_CASE("iOptron mount wrapper - bytes already queued before a command are discarded over TCP",
+          "[ioptron][telescope][unit][fake][late-reply]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    REQUIRE(protocol.connect(loopback_endpoint(mount.port())));
+    // One :GEP# answered with two position replies: the second stays queued.
+    mount.set_position_reply("+0000000000000000001#+0000000000000000001#");
+    CHECK_NOTHROW((void)protocol.get_position());
+    mount.set_position_reply("");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the second reply is on the socket
+    CHECK_NOTHROW((void)protocol.get_status());                   // reads its own :GLS# reply, not the queued :GEP# one
+    protocol.disconnect();
+}
+
 // Issue #2396 (AB-9, AB-8, AB-7): the motion bound watchdog and the async landing gate.
 namespace {
 

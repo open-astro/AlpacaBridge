@@ -167,6 +167,12 @@ public:
         latitude_field_.store(std::llround((latitude_degrees + 90.0) * 3600.0 * 100.0));
     }
 
+    /// Answer ":GEP#" with @p reply in place of the modelled position; "" restores the model.
+    void set_position_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        position_reply_ = std::move(reply);
+    }
+
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
@@ -290,6 +296,10 @@ private:
             return "0030#";  // meridian treatment: stop, 30 degrees past
         }
         if (cmd == ":GEP#") {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!position_reply_.empty()) return position_reply_;
+            }
             const long long ra = ra_units_.fetch_add(drift_units_.load()) + drift_units_.load();
             const long long dec = dec_units_.load();
             return signed_eight(dec) + nine(ra) + std::to_string(pier_side_.load()) + "1#";
@@ -382,6 +392,7 @@ private:
     std::atomic<long long> latitude_field_{0};
     std::string model_code_;
     double landing_error_arcsec_;
+    std::string position_reply_;  // under mutex_
     std::atomic<int> hold_ms_{0};
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
