@@ -134,7 +134,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shar
         st->requests.fetch_add(1);
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M') {
+        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'W' || chunk[0] == 'H') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -1510,6 +1510,121 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
     driver->set_connected(false);
     driver.reset();
     clock.set_before_block(nullptr);
+}
+
+// #2409 (#2396 AB-9): a MoveAxis left running is stopped once it has run kMaxMoveAxisDuration (60 s) with no new
+// MoveAxis, by the status poll on the task clock, and Slewing raises the stop until the next motion command.
+namespace {
+
+// Steps the fake clock `total` one second at a time, letting each woken body settle.
+void step_virtual(alpacacore::test::FakeTaskClock& clock, std::chrono::seconds total) {
+    for (auto spent = std::chrono::seconds(0); spent < total; spent += std::chrono::seconds(1)) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::seconds(1));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+}
+
+// The rate-0 fixed-rate moves the fake recorded for `axis` (device 0x10 RA, 0x11 Dec; ops 0x24/0x25, rate byte 0;
+// one stop sends both).
+int axis_stop_count(FakeCelestronState& st, int axis) {
+    const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
+    std::lock_guard<std::mutex> lock(st.command_mutex);
+    return static_cast<int>(std::count_if(st.commands.begin(), st.commands.end(), [device](const std::string& c) {
+        return c.size() >= 5 && c[0] == 'P' && static_cast<unsigned char>(c[2]) == device &&
+               (static_cast<unsigned char>(c[3]) == 0x24 || static_cast<unsigned char>(c[3]) == 0x25) &&
+               static_cast<unsigned char>(c[4]) == 0;
+    }));
+}
+
+}  // namespace
+
+TEST_CASE("Celestron MoveAxis - a MoveAxis with no new MoveAxis for 60 s is stopped and Slewing raises it",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int axis = GENERATE(0, 1);
+
+    REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+    const int stops_before = axis_stop_count(*st, axis);
+    step_virtual(clock, std::chrono::seconds(58));
+    CHECK(read_slewing(*driver) == SlewingRead::True);  // short of the bound: still running
+    CHECK(axis_stop_count(*st, axis) == stops_before);
+    step_virtual(clock, std::chrono::seconds(4));
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
+    CHECK(axis_stop_count(*st, axis) > stops_before);
+    // The next motion command clears it.
+    REQUIRE_NOTHROW(driver->move_axis(axis, 0.0));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    step_virtual(clock, std::chrono::seconds(40));
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));  // a client renewing its move
+    const int stops_before = axis_stop_count(*st, 0);
+    step_virtual(clock, std::chrono::seconds(40));  // 80 s after the first MoveAxis, 40 s after the second
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    CHECK(axis_stop_count(*st, 0) == stops_before);
+    step_virtual(clock, std::chrono::seconds(22));
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    CHECK(axis_stop_count(*st, 0) > stops_before);
+    driver->set_connected(false);
+}
+
+// #2409 (#2396 AB-10): a site or time write changes the handset's pointing and limit maths, so none goes out while a
+// motion the driver started runs: a MoveAxis on either axis, or a GOTO.
+TEST_CASE("Celestron site - site and time writes are refused while the mount moves",
+          "[celestron][telescope][async][goto-safety]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    using alpacacore::test::require_alpaca_error;
+    const auto writes_refused = [&] {
+        const int before = st->command_count('W') + st->command_count('H');
+        require_alpaca_error([&] { driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&] { driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        return st->command_count('W') + st->command_count('H') == before;  // no site or time write went out
+    };
+
+    SECTION("a MoveAxis") {
+        const int axis = GENERATE(0, 1);
+        REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+        CHECK(writes_refused());
+        REQUIRE_NOTHROW(driver->move_axis(axis, 0.0));
+    }
+    SECTION("a GOTO") {
+        st->hold_slew.store(true);
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        CHECK(writes_refused());
+        REQUIRE_NOTHROW(driver->abort_slew());
+        st->hold_slew.store(false);
+    }
+    // Stopped, the write goes out again.
+    CHECK_NOTHROW(driver->set_site_latitude(10.0));
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

@@ -50,6 +50,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <utility>
 
 namespace alpacacore::vendor::celestron {
 
@@ -95,6 +96,9 @@ constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 // location never reads; 30 s leaves one tick in about eight.
 constexpr auto kSitePollRetryDelay = std::chrono::seconds(30);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
+// #2409 (#2396 AB-9): the longest a MoveAxis runs with no new MoveAxis. The status poll stops an axis still moving
+// at its deadline (stop_overdue_move_axis()); every MoveAxis with a non-zero rate starts it again.
+constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
@@ -313,6 +317,12 @@ public:
         // Decision 0009 point 4: a lost link is relinked only by the client's Connected=true, which tears the dead
         // session down (slew bodies included) and connects afresh.
         const bool relink = connected && connected_.load() && link_lost();
+        if (relink) {
+            // #2409 (#2396 AB-9): a motion this driver started may still run on the mount; the reconnect stops it
+            // before anything else (connect_session()).
+            std::lock_guard<std::mutex> lock(mutex_);
+            relink_stop_due_ = driver_motion_active_locked();
+        }
         if (!connected || relink) {
             ilock.lock();
             // Cancel + join the status poll and the background slew/pulse task
@@ -787,6 +797,17 @@ public:
         return *site_elevation_m_;
     }
 
+    // #2409 (#2396 AB-10): a site or time write changes the handset's pointing and limit maths, so none goes out while
+    // a motion of this driver runs: a GOTO, Park or FindHome the driver started (Slewing as the driver set it) or a
+    // MoveAxis. A pulse guide does not count. Takes mutex_ briefly.
+    void refuse_while_moving(const char* who) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slewing_cached_ || manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            throw AlpacaException(std::string(who) + " is not allowed while the mount is moving",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
     void set_site_elevation(double elevation) override {
         if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
@@ -809,6 +830,7 @@ public:
     void set_site_latitude(double latitude) override {
         util::validate_latitude(latitude);
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        refuse_while_moving("SiteLatitude");
         LocationInfo info = current_location();
         info.latitude_degrees = latitude;
         CelestronProtocolWrapper::instance().set_location(info);
@@ -831,6 +853,7 @@ public:
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        refuse_while_moving("SiteLongitude");
         LocationInfo info = current_location();
         info.longitude_degrees = longitude;
         CelestronProtocolWrapper::instance().set_location(info);
@@ -1020,6 +1043,7 @@ public:
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
         check_connected();
+        refuse_while_moving("UTCDate");
         const TimeWrite write = prepare_time_write(utc);
         run_clock_resync_hook(ClockResyncStep::ClientWriting);
         // The generation bump and the stamp go in the write's own exchange (#2419): a host clock re-sync decided
@@ -1567,6 +1591,59 @@ public:
             pending = *pending_stop_;
         }
         send_failure_stop(pending.generation, pending.message, pending.home);
+    }
+
+    // #2409 (#2396 AB-9): a poll tick stops an axis whose MoveAxis ran kMaxMoveAxisDuration with no new MoveAxis, as
+    // MoveAxis(axis, 0) stops it, and keeps the failure for Slewing until the next motion command or a reconnect. A
+    // client causes it, so it is logged at INFO (decision 0007 rule 9); a stop that fails is a device failure, logged
+    // at ERROR, and is tried again on the next tick. try_lock, as the failure stops: set_connected joins the poll while
+    // it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it for the next tick.
+    void stop_overdue_move_axis() const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || !move_axis_overdue_locked().has_value()) return;
+        }
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
+        if (!ilock.owns_lock()) return;
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!connected_) return;
+        const std::optional<int> overdue = move_axis_overdue_locked();
+        if (!overdue) return;
+        const int axis = *overdue;
+        const std::uint64_t generation = motion_generation_;
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
+        const std::string message = "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
+                                    " s with no new MoveAxis; the driver stopped it";
+        std::string stop_error;
+        const bool sent = send_motion_locked(
+            lock, [this, generation] { return connected_ && motion_generation_ == generation; },
+            [&] {
+                try {
+                    CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
+                } catch (const std::exception& e) {
+                    stop_error = e.what();
+                }
+            });
+        if (!sent) return;  // a newer motion command owns the mount
+        last_home_error_.clear();
+        if (stop_error.empty()) {
+            manual_axis_slewing_[axis] = false;
+            move_axis_deadline_[axis] = util::TaskClock::clock::time_point::max();
+            last_slew_error_ = message;
+            ALPACA_LOG_INFO("Celestron", message);  // a client can cause it: decision 0007 rule 9
+        } else {
+            last_slew_error_ = message + "; the stop failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("Celestron", last_slew_error_);  // the stop itself failed: a device failure
+        }
+    }
+
+    // The first axis whose MoveAxis is past its deadline. Under mutex_.
+    std::optional<int> move_axis_overdue_locked() const {
+        const auto now = clock_.now();
+        for (int axis = 0; axis < 2; ++axis) {
+            if (manual_axis_slewing_[axis] && now >= move_axis_deadline_[axis]) return axis;
+        }
+        return std::nullopt;
     }
 
     // An initiator that took the mount from generation `superseded` and then failed before it sent anything: a stop
@@ -2455,6 +2532,8 @@ public:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         manual_axis_slewing_[axis] = moving;
+        move_axis_deadline_[axis] =
+            moving ? clock_.now() + kMaxMoveAxisDuration : util::TaskClock::clock::time_point::max();
         pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
         pulse_guide_end_time_[static_cast<std::size_t>(axis)] = util::TaskClock::clock::time_point::min();
         if (moving) {
@@ -2594,6 +2673,8 @@ private:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        move_axis_deadline_[0] = util::TaskClock::clock::time_point::max();
+        move_axis_deadline_[1] = util::TaskClock::clock::time_point::max();
         sync_completed_this_session_ = false;
         skip_next_ra_learn_ = false;
         flip_in_progress_ = false;
@@ -2627,6 +2708,19 @@ private:
                 }
             },
             "Celestron");
+        std::string relink_stop_failure;
+        if (std::exchange(relink_stop_due_, false)) {
+            // Under initiator_mutex_ (the relink's), before the poll starts: nothing else is on the wire.
+            const std::string stop_error = stop_park_slew_wire();
+            if (stop_error.empty()) {
+                ALPACA_LOG_INFO("Celestron", "Reconnect: the motion under way when the link was lost was stopped");
+            } else {
+                relink_stop_failure =
+                    "Reconnect: stopping the motion under way when the link was lost failed: " + stop_error +
+                    "; the mount may still be moving";
+                ALPACA_LOG_ERROR("Celestron", relink_stop_failure);
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             link_lost_ = false;
@@ -2654,6 +2748,7 @@ private:
             publish_link_fault_locked();
             last_site_info_attempt_ = util::TaskClock::clock::time_point::min();
             clear_motion_errors_locked();
+            last_slew_error_ = relink_stop_failure;  // Slewing raises a failed reconnect stop
         }
 
         std::string firmware;
@@ -3336,6 +3431,7 @@ private:
             home_plan = sample_plan_locked(true);
         }
         retry_pending_stop();
+        stop_overdue_move_axis();
         if (check_home) {
             // A FindHome in flight is completed here, not by a getter. The exchanges (the completion check, the
             // position read when it is done, and the stops of a third failure) run with mutex_ free; the result is
@@ -4265,6 +4361,13 @@ private:
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
+    // #2409: when each axis's MoveAxis reaches kMaxMoveAxisDuration, on the task clock. Under mutex_.
+    mutable util::TaskClock::clock::time_point move_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
+                                                                         util::TaskClock::clock::time_point::max()};
+    // #2409: a relink found driver motion under way when the link was lost; the next connect_session() that opens the
+    // port sends the stops before anything else. Kept across a failed open and a Disconnect, since the mount may still
+    // be moving then too. Under transition_mutex_.
+    bool relink_stop_due_ = false;
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
     // get_device_firmware() poll never blocks on the coarse connect lock.

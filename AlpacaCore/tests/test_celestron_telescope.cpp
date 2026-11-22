@@ -2177,6 +2177,29 @@ TEST_CASE("Celestron Link - a cable pulled during a command loses the link at on
     CHECK(std::abs(driver.get_right_ascension() - ra_at_connect) < 1e-9);
 }
 
+// #2409 (#2396 AB-9): a MoveAxis left running when the link was lost may still run on the mount. The client's
+// Connect over the lost link stops it before anything else goes out; a reconnect with nothing moving stops nothing.
+TEST_CASE("Celestron Link - a reconnect over a lost link stops a MoveAxis first",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const bool moving = GENERATE(true, false);
+    if (moving) REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    check_lost(driver);
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.mount->received();
+    REQUIRE_FALSE(received.empty());
+    // The cancel ('M') and the rate-0 moves lead the new session, ahead of the handshake.
+    CHECK((received.front() == 'M') == moving);
+    driver.set_connected(false);
+}
+
 TEST_CASE("Celestron Link - a write to a pulled mount loses the link at once and Disconnect clears the reason",
           "[celestron][telescope][unit][fake][link-lost]") {
     SerialLinkRig rig;
