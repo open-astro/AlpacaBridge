@@ -4297,6 +4297,19 @@ def self_test():
         bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free])])
         check("blocking list: the same header is lock-free when every served vendor's is_open() is lock-free",
               bl_scan == {"power_port_switch_driver.h": "lock-free"})
+        bl_zwo = Path(bl_tmp) / "zwo"
+        bl_zwo.mkdir()
+        bl_open = Path(bl_tmp) / "soft_pwm_ports.h"
+        SHARED_IS_OPEN_HEADERS[str(bl_open)] = ("zwo",)
+        try:
+            bl_open.write_text("bool is_open() const { std::lock_guard<std::mutex> g(m_); return open_; }\n")
+            check("blocking list: a shared is_open() header that locks makes its served vendor 'wrapper'",
+                  _vendor_is_open_locks(bl_zwo))
+            bl_open.write_text("bool is_open() const { return open_.load(); }\n")
+            check("blocking list: a lock-free shared is_open() header keeps its served vendor lock-free",
+                  not _vendor_is_open_locks(bl_zwo))
+        finally:
+            del SHARED_IS_OPEN_HEADERS[str(bl_open)]
         bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
         check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
               bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))
