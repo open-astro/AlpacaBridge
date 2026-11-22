@@ -600,7 +600,8 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - value ranges and unsupported me
     require_alpaca_error([&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { rig.driver->set_right_ascension_rate(0.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { rig.driver->set_side_of_pier(1); }, AlpacaError::NotImplemented);
-    CHECK(rig.driver->get_supported_actions().empty());
+    // The only action is findhomeissensorsearch (#2550): the CGX home is the AUX home switch search.
+    CHECK(rig.driver->get_supported_actions() == std::vector<std::string>{"findhomeissensorsearch"});
     require_alpaca_error([&] { static_cast<void>(rig.driver->action("gps_status", "")); },
                          AlpacaError::ActionNotImplemented);
     // Nothing above reached the wire as motion.
