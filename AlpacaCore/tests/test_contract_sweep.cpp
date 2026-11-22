@@ -576,14 +576,19 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     // #2287, iOptron.
     {"ioptron_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"ioptron_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"ioptron_telescope", kParked, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"ioptron_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"ioptron_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"ioptron_telescope", kParked, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"ioptron_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"ioptron_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"ioptron_telescope", kParked, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"ioptron_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"ioptron_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"ioptron_telescope", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"ioptron_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"ioptron_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"ioptron_telescope", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     // #2287, ZWO AM.
     {"zwo_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"zwo_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
@@ -2565,13 +2570,11 @@ Tier2Host tier2_host_ioptron_telescope() {
     h.connectable = [make](bool hold) {
         auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
         REQUIRE(mount->ok());
+        mount->set_park_lands(true);  // :MP1# reads status 6, so the parked case reaches AtPark (#2562)
         if (hold) mount->hold_next_reply(kHold);
         return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) { return make(m.port()); });
     };
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
-    h.at_park_unreachable =
-        "the :GLS# system status stays 1 (tracking) unless a test sets it, so AtPark never reads true "
-        "(fake_ioptron_mount.h)";
     return h;
 }
 
