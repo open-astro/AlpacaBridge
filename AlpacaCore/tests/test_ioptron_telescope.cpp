@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <limits>
@@ -1573,6 +1574,391 @@ TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[iopt
     require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// #2257: an out-of-range guide rate is refused with InvalidValue, never clamped, and nothing reaches the mount.
+TEST_CASE("iOptron Telescope Driver - an out-of-range guide rate is refused, not clamped",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    const auto before = driver->get_guide_rate();
+    const int writes = mount.count(":RG");
+    require_alpaca_error([&]() { driver->set_guide_rate({2.0 * kSidereal, 0.5 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.5 * kSidereal, 0.05 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount.count(":RG") == writes);
+    CHECK(driver->get_guide_rate().ra == before.ra);
+    CHECK(driver->get_guide_rate().dec == before.dec);
+
+    // Rounding just past a bound is accepted and sent inside it (the wrapper refuses past the bound).
+    REQUIRE_NOTHROW(driver->set_guide_rate_right_ascension((0.90 + 5e-10) * kSidereal));
+    CHECK(mount.count(":RG") == writes + 1);
+    driver->set_connected(false);
+}
+
+// Issue #2434: GuideRate is the mount's own rate, read with :AG# once on the connect path, never in the getter
+// (decision 0016), and not the 0.5x the driver used to assume.
+TEST_CASE("iOptron Telescope Driver - GuideRate reads the mount's rate once at connect",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("8040#");  // 0.80x RA, 0.40x Dec, set on the hand controller
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.80 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.40 * kSidereal));
+    CHECK(mount.count(":AG#") == 1);  // the reads above sent nothing
+    driver->set_connected(false);
+}
+
+// Issue #2434: a failed :AG# read at connect leaves the rate unknown; GuideRate raises rather than invent 0.5x, and
+// the connect still succeeds.
+TEST_CASE("iOptron Telescope Driver - a failed guide rate read at connect leaves GuideRate unknown",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("");  // the unparseable "0#"
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    require_alpaca_error([&]() { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::DriverException);
+    // A per-axis setter keeps the other axis's rate, so it reads :AG# again; a read that fails again raises, and
+    // nothing is sent.
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(0.5 * 360.0 / 86164.0905); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(mount.count(":AG#") == 2);
+    CHECK(mount.count(":RG") == 0);
+    driver->set_connected(false);
+}
+
+// Issue #2434: Alpaca reaches the guide rate only through the per-axis setters, so a :AG# read lost at connect must
+// not leave GuideRate unwritable for the session: the setter, a command, reads :AG# again and keeps the other axis.
+TEST_CASE("iOptron Telescope Driver - a per-axis guide rate write re-reads the rate a failed connect read lost",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("");  // the connect read fails
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_guide_rate_reply("8040#");  // the next read answers
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    REQUIRE_NOTHROW(driver->set_guide_rate_declination(0.30 * kSidereal));
+    CHECK(mount.count(":AG#") == 2);
+    CHECK(mount.count(":RG8030#") == 1);  // RA kept at the mount's 0.80x
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.80 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.30 * kSidereal));
+    driver->set_connected(false);
+}
+
+// Issue #2434: :RG# carries hundredths of the sidereal rate, so a write reads back the rounded rate that was sent.
+TEST_CASE("iOptron Telescope Driver - a guide rate write reads back the rate that was sent",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    driver->set_guide_rate({0.444 * kSidereal, 0.666 * kSidereal});
+    CHECK(mount.count(":RG4467#") == 1);
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.44 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.67 * kSidereal));
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): a MoveAxis left running when the link was lost is stopped by the reconnect, whose first
+// command is :Q#, never forgotten. The TCP fake loses the link through a fault that stands past the staleness bound.
+TEST_CASE("iOptron Link - a reconnect over a lost link stops the motion that was running",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).first);
+    REQUIRE(mount.count(":mw#") + mount.count(":me#") == 1);
+    // Three failed exchanges latch the fault (#728); the first is the status read the moving axis left stale.
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    mount.set_fail_reads(false);
+    const auto sent = mount.commands().size();
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto log = mount.commands();
+    REQUIRE(log.size() > sent);
+    CHECK(log[sent] == ":Q#");
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): the GOTO branch of the relink stop. An async GOTO still slewing when the link was lost is
+// stopped by the reconnect's first command, :Q#, as a MoveAxis is.
+TEST_CASE("iOptron Link - a reconnect over a lost link stops the GOTO that was running",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+    REQUIRE(mount.count(":Q#") == 0);
+
+    mount.set_fail_reads(false);
+    const auto sent = mount.commands().size();
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto log = mount.commands();
+    REQUIRE(log.size() > sent);
+    CHECK(log[sent] == ":Q#");
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): when the reconnect's :Q# for a GOTO left running cannot be sent, the Connect fails with that
+// reason and the port is closed, never a session that forgot the motion. Serial: the fault stands past the staleness
+// bound, then the cable is pulled on the :Q#.
+TEST_CASE("iOptron Link - a reconnect whose stop for the running GOTO cannot be sent fails",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    mount.model().set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+    mount.model().set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+    REQUIRE(mount.model().count(":Q#") == 0);
+
+    mount.model().set_fail_reads(false);
+    mount.unplug_on(on_command(":Q#"));
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(contains(message, "the stop for the motion running when the link dropped could not be sent"));
+    CHECK(mount.unplugged());
+    CHECK(mount.model().count(":Q#") == 1);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(io::iOptronProtocolWrapper::instance().is_connected());  // the port is closed
+    driver->set_connected(false);
+}
+
+namespace {
+
+// A serial port path the test can re-point: a symlink to one PtyIoptronMount's slave, then to another (a mount
+// plugged back in), or to nothing (a node that is gone, so the open fails).
+class MovablePort {
+public:
+    MovablePort() {
+        static std::atomic<int> serial{0};
+        path_ = std::filesystem::temp_directory_path() /
+                ("ioptron-relink-" + std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1)));
+        std::filesystem::remove(path_);
+    }
+    ~MovablePort() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    MovablePort(const MovablePort&) = delete;
+    MovablePort& operator=(const MovablePort&) = delete;
+    void point_at(const std::string& target) {
+        std::filesystem::remove(path_);
+        std::filesystem::create_symlink(target, path_);
+    }
+    void point_nowhere() {
+        std::filesystem::remove(path_);
+        std::filesystem::create_symlink(path_.string() + "-gone", path_);
+    }
+    std::string path() const { return path_.string(); }
+
+private:
+    std::filesystem::path path_;
+};
+
+// An async GOTO left slewing (status 2) on `mount`, then a fault that stands past the staleness bound loses the link.
+void lose_link_with_goto_running(alpacacore::TelescopeDriver& driver, PtyIoptronMount& mount, FakeTaskClock& clock) {
+    driver.slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
+    REQUIRE(driver.get_slewing());
+    mount.model().set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(driver);
+    }
+    REQUIRE(contains(sync_failure(driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver.get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver.get_connected());
+}
+
+// The first command a fresh mount received after the driver's open (the open itself sends none).
+std::string first_command(PtyIoptronMount& mount) {
+    const auto log = mount.model().commands();
+    return log.empty() ? std::string() : log.front();
+}
+
+}  // namespace
+
+// Issue #2396 (AB-9): the relink stop survives a Connect that failed on the :Q# itself. The cable is pulled on the
+// first reconnect's :Q#; once the mount is back, the next Connect still sends :Q# first.
+TEST_CASE("iOptron Link - a relink stop that could not be sent is sent by the next Connect",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    MovablePort port;
+    PtyIoptronMount first;
+    first.model().set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    port.point_at(first.slave_path());
+    auto driver = link_driver(serial_endpoint(port.path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    lose_link_with_goto_running(*driver, first, clock);
+
+    first.model().set_fail_reads(false);
+    first.unplug_on(on_command(":Q#"));
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    REQUIRE(first.unplugged());
+    CHECK_FALSE(driver->get_connected());
+
+    PtyIoptronMount second;  // the mount, plugged back in
+    port.point_at(second.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(first_command(second) == ":Q#");
+    CHECK(second.model().count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): the relink stop survives a Connect that failed at the open (the node is gone). The next Connect
+// that opens the port sends :Q# first.
+TEST_CASE("iOptron Link - a relink stop survives a reconnect that fails at the open",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    MovablePort port;
+    PtyIoptronMount first;
+    first.model().set_goto_tracks_off(true);
+    port.point_at(first.slave_path());
+    auto driver = link_driver(serial_endpoint(port.path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    lose_link_with_goto_running(*driver, first, clock);
+
+    port.point_nowhere();
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(first.model().count(":Q#") == 0);
+
+    PtyIoptronMount second;
+    port.point_at(second.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(first_command(second) == ":Q#");
+    CHECK(second.model().count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9), the Disconnect rule: a client Disconnect over a live link leaves no pending stop, so a GOTO the
+// client left running is not stopped by a later, unrelated Connect.
+TEST_CASE("iOptron Link - a Disconnect over a live link leaves no relink stop for the next Connect",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+// A serial hangup during a per-axis setter's :AG# re-read (the connect read failed) is a lost link: NotConnected,
+// not "GuideRate is unknown".
+TEST_CASE("iOptron Link - a hangup on a guide rate setter's re-read loses the link",
+          "[ioptron][telescope][unit][fake][link-lost][guide-rate]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    mount.model().set_guide_rate_reply("");  // the connect read fails
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":AG#"));
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.5 * 360.0 / 86164.0905); },
+                         AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    CHECK(mount.model().count(":RG") == 0);
+}
+
+// #2257, AGENTS.md: InvalidValue precedes the connection check, so a disconnected driver refuses an out-of-range
+// guide rate on every setter path with InvalidValue, not NotConnected.
+TEST_CASE("iOptron Telescope Driver - a disconnected driver refuses an out-of-range guide rate with InvalidValue",
+          "[ioptron][telescope][unit][guide-rate]") {
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(1));
+    REQUIRE_FALSE(driver->get_connected());
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    require_alpaca_error([&]() { driver->set_guide_rate({0.95 * kSidereal, 0.5 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.5 * kSidereal, 0.05 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.95 * kSidereal); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(0.05 * kSidereal); },
+                         alpacacore::AlpacaError::InvalidValue);
+    // In range, the connection check answers.
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.5 * kSidereal); },
+                         alpacacore::AlpacaError::NotConnected);
 }
 
 // #627: the NaN path of iOptron's site latitude and longitude setters, over a

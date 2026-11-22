@@ -62,7 +62,7 @@ class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::Asy
     //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
     // io_mutex_ keeps one command's exchanges and state writes together: every member that reaches the mount
     // (a command, a getter whose TTL cache has lapsed, the connect and the close) holds it for the whole call.
-    // Some sequences must not be split: :SRA#/:Sd# set the target the :MS1#/:MS2# after them uses, and a
+    // Some sequences must not be split: :SRA#/:Sd# set the target the :MS1# after them uses, and a
     // Park's :MP1# is followed by its park-position read. mutex_ is never held ACROSS an exchange: every call
     // through Wire drops it for the exchange and takes it back after. The protocol wrapper's own lock
     // serialises the wire itself; the slew and clock-sync bodies take the two locks like a command does.
@@ -150,11 +150,8 @@ private:
         void set_target_dec(double dec_degrees) const {
             call([&](auto& p) { p.set_target_dec(dec_degrees); });
         }
-        bool slew_to_ra_dec() const {
+        GotoReply slew_to_ra_dec() const {
             return call([](auto& p) { return p.slew_to_ra_dec(); });
-        }
-        bool slew_to_ra_dec_cw_up() const {
-            return call([](auto& p) { return p.slew_to_ra_dec_cw_up(); });
         }
         void stop_slewing() const {
             call([](auto& p) { p.stop_slewing(); });
@@ -438,6 +435,18 @@ public:
         } exit_hook{set_connected_exit_hook_};
         if (set_connected_entry_hook_) set_connected_entry_hook_();  // test seam: transition_mutex_ held
         const Wire protocol = wire();
+        // Issue #2396 (AB-9): a GOTO or a MoveAxis that was running when the link dropped is stopped as the first
+        // command of the next Connect that opens the port, never forgotten. The record is taken here, before the reap
+        // below ends the slew body, on a Connect or a Disconnect over the lost link, and it is kept in
+        // relink_stop_pending_ until the :Q# is sent: a Connect that fails (at the open, or on the :Q# itself) leaves
+        // it for the next one, although the session reset or the teardown has cleared the motion flags. A Disconnect
+        // over a live link records nothing (the client left the motion running on a link it could still command).
+        if (connected_ && link_lost()) {
+            StateLock state(lock_gate_, StateLock::Mode::State);
+            if (slew_in_progress_ || axis_move_active_primary_ || axis_move_active_secondary_) {
+                relink_stop_pending_ = true;
+            }
+        }
         if (!connected || (connected_ && link_lost())) {
             // A disconnect, or a connect over a lost link (decision 0009 rule 4), ends the session's bodies
             // first, with no driver lock held: the clock-sync body and the slew dispatch take both locks, so a
@@ -525,6 +534,19 @@ public:
                     "iOptron");
             });
             ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
+            if (relink_stop_pending_) {
+                try {
+                    protocol.stop_slewing();
+                    relink_stop_pending_ = false;
+                    ALPACA_LOG_WARN("iOptron", "Reconnected over a lost link with motion running; sent :Q#");
+                } catch (const std::exception& e) {
+                    protocol.disconnect();
+                    throw AlpacaException(
+                        std::string("Failed to connect to iOptron mount: the stop for the motion running when the "
+                                    "link dropped could not be sent: ") +
+                        e.what());
+                }
+            }
             site_info_valid_ = false;
             position_cache_valid_ = false;
             altaz_cache_valid_ = false;
@@ -542,10 +564,6 @@ public:
             dec_guide_inverted_ = true;
             dec_guide_calibration_side_ = -1;
             dec_guide_calibration_in_progress_.store(false);
-            guide_rate_calibration_attempted_ = false;
-            guide_rate_calibrated_ = false;
-            guide_rate_scale_ra_ = 1.0;
-            guide_rate_scale_dec_ = 1.0;
             axis_move_active_primary_ = false;
             axis_move_active_secondary_ = false;
             tracking_state_before_move_.reset();
@@ -586,6 +604,7 @@ public:
             // The caches are primed before connected_ is published: a getter that arrives during these reads
             // answers NotConnected at once (check_connected_before_lock()) instead of waiting behind them.
             prefetch_mount_state_locked();
+            read_guide_rate_locked();
             try {
                 mount_info_ = protocol.get_mount_info();
             } catch (const std::exception& e) {
@@ -638,10 +657,6 @@ public:
         dec_guide_inverted_ = true;
         dec_guide_calibration_side_ = -1;
         dec_guide_calibration_in_progress_.store(false);
-        guide_rate_calibration_attempted_ = false;
-        guide_rate_calibrated_ = false;
-        guide_rate_scale_ra_ = 1.0;
-        guide_rate_scale_dec_ = 1.0;
         utc_query_supported_ = true;
         sync_offset_ra_hours_ = 0.0;
         sync_offset_dec_degrees_ = 0.0;
@@ -980,45 +995,84 @@ public:
     void set_focal_length(double meters) override {
         focal_length_m_ = meters;
     }
-    
+
+    // Issue #2434: the mount's own rate, read with :AG once on the connect path (read_guide_rate_locked())
+    // and never here (decision 0016), or the rate the last write sent. A failed read leaves it unknown, and this
+    // raises rather than invent a rate.
     GuideRate get_guide_rate() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        
-        try {
-            if (guide_rate_valid_) {
-                return cached_guide_rate_;
-            }
-            cached_guide_rate_.ra = kDefaultGuideRateFraction * kSiderealRateDegPerSec;
-            cached_guide_rate_.dec = kDefaultGuideRateFraction * kSiderealRateDegPerSec;
-            guide_rate_valid_ = true;
-            return cached_guide_rate_;
-        } catch (const std::exception& e) {
-            record_device_fault_locked("GuideRate", e.what());
-            throw AlpacaException(std::string("Failed to read guide rates: ") + e.what(),
+        if (!guide_rate_valid_) {
+            throw AlpacaException("GuideRate is unknown: the mount's guide rate (:AG#) could not be read at connect",
                                   AlpacaError::DriverException);
         }
+        return cached_guide_rate_;
     }
-    
-    void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+
+    // #2257: the static checks (finite, > 0, inside the mount's range) run before the connection check, and out
+    // of range is refused, never clamped. The range is 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate;
+    // kEps absorbs rounding at a bound, which set_guide_rate_locked() then clamps inside it.
+    static void validate_guide_rate_value(double value, bool ra_axis) {
+        if (!std::isfinite(value) || value <= 0.0) {
+            throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
         }
+        constexpr double kEps = 1e-9;
+        const double fraction = value / kSiderealRateDegPerSec;
+        const double low = ra_axis ? 0.01 : 0.10;
+        const double high = ra_axis ? 0.90 : 0.99;
+        if (fraction < low - kEps || fraction > high + kEps) {
+            throw AlpacaException("GuideRate must be 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate",
+                                  AlpacaError::InvalidValue);
+        }
+    }
+
+    void set_guide_rate(const GuideRate& rate) override {
+        validate_guide_rate_value(rate.ra, true);
+        validate_guide_rate_value(rate.dec, false);
         StateLock lock(lock_gate_);
         check_connected();
-        
-        const double scale_ra = guide_rate_calibrated_ ? guide_rate_scale_ra_ : 1.0;
-        const double scale_dec = guide_rate_calibrated_ ? guide_rate_scale_dec_ : 1.0;
+        set_guide_rate_locked(rate);
+    }
+
+    // The per-axis setters keep the other axis's rate. They are commands, so when that rate is unknown (the :AG#
+    // read at connect failed) they read :AG# again here, not in the getter (decision 0016); a read that fails again
+    // raises and nothing is written. The argument check precedes the connection check (#2257).
+    void set_guide_rate_right_ascension(double value) override { set_one_guide_rate_axis(true, value); }
+    void set_guide_rate_declination(double value) override { set_one_guide_rate_axis(false, value); }
+
+    void set_one_guide_rate_axis(bool ra_axis, double value) {
+        validate_guide_rate_value(value, ra_axis);
+        StateLock lock(lock_gate_);
+        check_connected();
+        if (!guide_rate_valid_) read_guide_rate_locked();
+        // A serial hangup during the re-read lost the link: NotConnected, not "unknown". Here and not in
+        // read_guide_rate_locked(), whose connect-path caller closes the port on a lost link before it throws.
+        if (!guide_rate_valid_) throw_if_link_lost();
+        if (!guide_rate_valid_) {
+            throw AlpacaException("GuideRate is unknown: the mount's guide rate (:AG#) could not be read",
+                                  AlpacaError::DriverException);
+        }
+        GuideRate rate = cached_guide_rate_;
+        (ra_axis ? rate.ra : rate.dec) = value;
+        set_guide_rate_locked(rate);
+    }
+
+    void set_guide_rate_locked(const GuideRate& rate) {
+        // validate_guide_rate_value() refused out of range (#2257); the clamp below only absorbs rounding inside
+        // its kEps of a bound, because the protocol wrapper refuses a fraction past its bounds.
         const Wire protocol = wire();
-        double ra_fraction = rate.ra / (kSiderealRateDegPerSec * scale_ra);
-        double dec_fraction = rate.dec / (kSiderealRateDegPerSec * scale_dec);
+        double ra_fraction = rate.ra / kSiderealRateDegPerSec;
+        double dec_fraction = rate.dec / kSiderealRateDegPerSec;
         ra_fraction = std::clamp(ra_fraction, 0.01, 0.90);
         dec_fraction = std::clamp(dec_fraction, 0.10, 0.99);
         protocol.set_guide_rates(ra_fraction, dec_fraction);
-        cached_guide_rate_ = rate;
+        // Issue #2434: :RG# carries hundredths of the sidereal rate, so the cache keeps the rate that was sent, not
+        // the request.
+        cached_guide_rate_.ra = std::round(ra_fraction * 100.0) / 100.0 * kSiderealRateDegPerSec;
+        cached_guide_rate_.dec = std::round(dec_fraction * 100.0) / 100.0 * kSiderealRateDegPerSec;
         guide_rate_valid_ = true;
     }
-    
+
     double get_right_ascension() const override {
         return serve_cached_or_refill(
             [&] { return pulse_position_hold_[kRaAxis].active(clock_.now()) || position_cache_fresh_locked(); },
@@ -1722,7 +1776,7 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
-        // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
+        // open-astro#768: fence the async slew dispatch first, so no :MS1#
         // can reach the mount after the stop below. Runs without mutex_ held
         // (the dispatch body takes it), like every other reap site. Taking
         // the handoff lock can wait for a concurrent initiator's in-flight
@@ -1730,14 +1784,15 @@ public:
         reap_slew_dispatch();
         StateLock lock(lock_gate_);
         // open-astro#728: a latched fault must not stop a client stopping the
-        // mount. Skip the latch check, the parked check (a status read) and the
-        // cached slewing flag, none of which can be trusted on a faulted link,
-        // and send the stop; a sent stop clears the latch. A parked mount is
-        // sent the stop too: InvalidWhileParked is not raised while latched.
+        // mount. Skip the latch check and the cached slewing flag, neither of
+        // which can be trusted on a faulted link, and send the stop; a sent stop
+        // clears the latch. InvalidWhileParked is not raised while latched.
+        // Issue #2395 (AB-3): the stop goes out before the parked check, which
+        // may read the status; InvalidWhileParked comes only from a read that
+        // succeeded, so a failed read never keeps the stop off the wire.
         const bool faulted = connected_ && device_faulted_;
         if (!faulted) {
             check_connected();
-            ensure_not_parked_locked("AbortSlew");
         }
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
@@ -1756,6 +1811,7 @@ public:
             throw AlpacaException(std::string("AbortSlew failed: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        const bool parked = !faulted && parked_per_successful_read_locked();
         // Issue #2000, ITelescopeV4 AbortSlew: an equatorial slew ends with Tracking on, and an aborted MoveAxis
         // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
         // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
@@ -1776,6 +1832,9 @@ public:
         tracking_state_before_move_.reset();
         status_cache_valid_ = false;
         clear_slew_hold_locked();
+        if (parked) {
+            throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
+        }
         if (restore_tracking.has_value()) {
             try {
                 if (*restore_tracking) {
@@ -1922,6 +1981,7 @@ public:
     
     void slew_to_coordinates(double ra, double dec) override {
         util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        std::uint64_t generation = 0;
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
@@ -1930,8 +1990,9 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
+            generation = slew_operation_generation_;
         }
-        wait_for_slew_completion("SlewToCoordinates");
+        wait_for_slew_completion("SlewToCoordinates", generation);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -2073,6 +2134,7 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
+        std::uint64_t generation = 0;
         validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
             StateLock lock(lock_gate_);
@@ -2089,8 +2151,9 @@ public:
             ra_hours = converted.first;
             dec_degrees = converted.second;
             start_slew_to_coordinates_locked(ra_hours, dec_degrees);
+            generation = slew_operation_generation_;
         }
-        wait_for_slew_completion("SlewToAltAz");
+        wait_for_slew_completion("SlewToAltAz", generation);
     }
     
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -2142,11 +2205,11 @@ private:
     // ends 70 to 380 ms after the duration (300 ms pulses at 440-680 ms, 1 s at 1100-1280 ms, 3 s at 3350 ms). The
     // 1 s delay before it cost a guider about 0.6 s per correction.
     static constexpr std::chrono::milliseconds kPulseGuideCompletionDelay{500};
-    // The guide-rate calibration's settle after its sample pulses; kept at the old 1 s, not re-measured.
-    static constexpr std::chrono::milliseconds kGuideCalibrationSettleDelay{1000};
     static constexpr std::chrono::milliseconds kPulseGuideHoldGrace{2000};
     static constexpr std::chrono::milliseconds kPulseGuideCorrectionGrace{5000};
     static constexpr double kSlewCompletionToleranceArcsec = 60.0;
+    // Issue #2396: a synchronous GOTO whose position settles farther than this from the target failed.
+    static constexpr double kSlewFarMissArcsec = 600.0;
     static constexpr double kSiderealSeconds = 86164.0905;
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
@@ -2328,6 +2391,24 @@ private:
     std::string published_fault_text() const {
         std::lock_guard<std::mutex> lock(link_fault_mutex_);
         return link_fault_text_;
+    }
+
+    // Issue #2395 (AB-3): true only when a status that was read says parked (the cache, or a fresh read). A failed
+    // read is not "parked": AbortSlew, which runs this after its stop, then returns normally. A lost link throws.
+    bool parked_per_successful_read_locked() const {
+        if (park_override_until_ > clock_.now()) {
+            return false;
+        }
+        if (status_cache_valid_ && !cached_status_.is_parked) {
+            return false;
+        }
+        try {
+            refresh_status_cache_locked();
+        } catch (const std::exception&) {
+            throw_if_link_lost();
+            return false;
+        }
+        return cached_status_.is_parked;
     }
 
     void ensure_not_parked_locked(const char* action) const {
@@ -2584,27 +2665,50 @@ private:
 
     // `async_ctx` is the slew slot's context when the GOTO runs on its body: a rejection is then recorded in
     // last_slew_error_ and logged instead of thrown. Null: the synchronous initiators, which throw.
+    // Issue #2395: a :MS1# the mount refuses is an error, never re-sent as the counterweight-up :MS2#: the firmware
+    // is the only layer that knows the mount's limits. Issue #2396: a :MS1# with no reply or an unknown one is
+    // accepted only when a status read right after it shows the mount slewing, and the read before it did not;
+    // otherwise the mount is sent a stop (a GOTO that did arrive is stopped) and the slew fails.
     void dispatch_slew_command_locked(double ra, double dec, util::OperationContext* async_ctx, const char* label) {
         const Wire protocol = wire();
-        bool accepted = false;
+        GotoReply reply = GotoReply::Refused;
+        bool moving_before = true;
         try {
+            moving_before = mount_moving_before_goto_locked();
             protocol.set_target_ra(ra);
             protocol.set_target_dec(dec);
             // Decision 0022 rule 2: re-armed before the :MS1# goes out, so the window runs from the GOTO itself
             // and not from an initiator whose body waited for mutex_.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
             goto_seen_stopped_ = false;  // a stop seen while the body waited predates this GOTO
-            accepted = protocol.slew_to_ra_dec();
-            if (!accepted) {
-                accepted = protocol.slew_to_ra_dec_cw_up();
-            }
+            reply = protocol.slew_to_ra_dec();
         } catch (...) {
             // A dispatch that failed (the synchronous initiators throw it on): no GOTO went out.
             slew_in_progress_ = false;
             clear_slew_hold_locked();
             throw;
         }
-        if (!accepted) {
+        std::string failure;
+        if (reply == GotoReply::Refused) {
+            failure = std::string(label) + " failed: mount rejected the target";
+        } else if (reply != GotoReply::Accepted) {
+            bool stop_sent = false;
+            bool confirmed = false;
+            try {
+                confirmed = unanswered_goto_confirmed_locked(moving_before, stop_sent);
+            } catch (...) {
+                slew_in_progress_ = false;  // a link lost during the confirmation
+                clear_slew_hold_locked();
+                throw;
+            }
+            if (!confirmed) {
+                failure = std::string(label) + " failed: the mount gave " +
+                          (reply == GotoReply::NoReply ? "no reply" : "an unknown reply") +
+                          " to the GOTO (:MS1#) and its status does not confirm the slew; " +
+                          (stop_sent ? "the mount was sent a stop" : "the stop could not be sent");
+            }
+        }
+        if (!failure.empty()) {
             slew_in_progress_ = false;
             clear_slew_hold_locked();
             if (async_ctx != nullptr) {
@@ -2613,15 +2717,75 @@ private:
                 // AbortSlew cancels and joins the slot (open-astro#768), so none can
                 // record a failure after the abort cleared the error.
                 if (async_ctx->stop_reason() == util::StopReason::None) {
-                    last_slew_error_ = std::string(label) + " failed: mount rejected the target";
+                    last_slew_error_ = failure;
                 }
-                ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
+                // Decision 0007 rule 9: a refusal answers the client's own target, so it is INFO; a missing or
+                // unknown reply comes from the link and stays WARN.
+                if (reply == GotoReply::Refused) {
+                    ALPACA_LOG_INFO("iOptron", failure);
+                } else {
+                    ALPACA_LOG_WARN("iOptron", failure);
+                }
                 return;
             }
-            throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
+            if (reply == GotoReply::Refused) {
+                throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
+            }
+            throw AlpacaException(failure);
         }
         status_cache_valid_ = false;
         position_cache_valid_ = false;
+    }
+
+    // Issue #2396: the status read before the :MS1#. Motion already running that reads 2 (a GOTO, a Park, or a pulse
+    // on firmware that reports one as slewing, open-astro#843) or 4 (a meridian flip) would make the read after an
+    // unanswered :MS1# look like confirmation, so it is recorded here. A pulse that reads 3 (the HAE29C, #2186)
+    // confirms nothing either way. A failed read counts as moving: it confirms nothing, so an unanswered GOTO after
+    // it is stopped. A lost link throws NotConnected.
+    bool mount_moving_before_goto_locked() const {
+        try {
+            const MountStatus status = wire().get_status();
+            return status.system_status == 2 || status.system_status == 4;
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            ALPACA_LOG_WARN("iOptron", std::string("Status read before a GOTO failed, so a GOTO without a clear :MS1# "
+                                                   "reply will not be confirmed and the mount will be sent a stop: ") +
+                                           e.what());
+            return true;
+        }
+    }
+
+    // Issue #2396: a :MS1# that got no reply, or an unknown one, may still have reached the mount. One status read
+    // decides: slewing (2) or a meridian flip (4) is a GOTO the mount runs, unless the mount was already moving
+    // before the :MS1# (@p moving_before), when the 2 or 4 may be that older motion. Anything else, a failed read
+    // included, is not acceptance, and the mount is sent :Q#, so a GOTO that arrives or starts late is stopped,
+    // and so is the older motion. A lost link throws NotConnected.
+    bool unanswered_goto_confirmed_locked(bool moving_before, bool& stop_sent) {
+        const Wire protocol = wire();
+        try {
+            const MountStatus status = protocol.get_status();
+            if (moving_before && (status.system_status == 2 || status.system_status == 4)) {
+                ALPACA_LOG_WARN("iOptron", "GOTO with no clear :MS1# reply not confirmed: the mount reports status " +
+                                               std::to_string(status.system_status) +
+                                               ", but it was already moving before the GOTO");
+            } else if (status.system_status == 2 || status.system_status == 4) {
+                ALPACA_LOG_WARN("iOptron", "GOTO with no clear :MS1# reply confirmed: the mount reports status " +
+                                               std::to_string(status.system_status));
+                return true;
+            }
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            ALPACA_LOG_WARN("iOptron", std::string("Status read after an unanswered :MS1# failed: ") + e.what());
+        }
+        try {
+            protocol.stop_slewing();
+            stop_sent = true;
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            ALPACA_LOG_WARN("iOptron", std::string("Stop after an unanswered :MS1# failed: ") + e.what());
+        }
+        status_cache_valid_ = false;
+        return false;
     }
 
     void start_slew_to_coordinates_locked(double ra, double dec) {
@@ -2629,11 +2793,36 @@ private:
         dispatch_slew_command_locked(ra, dec, nullptr, "SlewToCoordinates");
     }
 
-    void wait_for_slew_completion(const char* label) {
+    // Issue #2396: a synchronous GOTO that fails after its dispatch (the 300 s bound, a far miss, failed position
+    // reads) ends the slew state, hold included, and sends :Q# (best effort), as an unconfirmed GOTO does, so a
+    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p generation is
+    // slew_operation_generation_ after this GOTO's dispatch: when a newer motion (another client's GOTO, a MoveAxis,
+    // Park, AbortSlew or a reconnect) has bumped it, the mount is that motion's, and neither the stop nor the state
+    // clear runs.
+    [[noreturn]] void fail_synchronous_slew(std::string failure, std::uint64_t generation) {
+        StateLock lock(lock_gate_);
+        if (generation != slew_operation_generation_) {
+            throw AlpacaException(failure + "; a newer motion owns the mount, so no stop was sent");
+        }
+        slew_in_progress_ = false;
+        clear_slew_hold_locked();
+        try {
+            wire().stop_slewing();
+            failure += "; the mount was sent a stop";
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", "Stop after a failed synchronous slew failed: " + std::string(e.what()));
+            failure += "; the stop could not be sent, so the mount may still be moving";
+        }
+        status_cache_valid_ = false;
+        position_cache_valid_ = false;
+        throw AlpacaException(failure);
+    }
+
+    void wait_for_slew_completion(const char* label, std::uint64_t generation) {
         const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
             if (clock_.now() > deadline) {
-                throw AlpacaException(std::string(label) + " timed out waiting for slew to complete");
+                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", generation);
             }
             clock_.sleep_for(kSlewPollInterval);
         }
@@ -2654,20 +2843,41 @@ private:
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
             double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
             int stable_count = 0;
+            int failed_reads = 0;
+            bool landed = false;
 
             while (clock_.now() < deadline) {
-                bool target_reached = false;
+                std::optional<bool> target_reached;
                 double cur_ra = 0, cur_dec = 0;
+                double target_ra = 0, target_dec = 0;
                 {
                     StateLock lock(lock_gate_);
                     target_reached = slew_target_reached_locked();
                     cur_ra = cached_ra_hours_;
                     cur_dec = cached_dec_degrees_;
+                    target_ra = slew_target_ra_hours_;
+                    target_dec = slew_target_dec_degrees_;
                 }
 
-                if (target_reached) {
+                if (target_reached.value_or(false)) {
+                    landed = true;
                     break;
                 }
+
+                // Issue #2396: a failed position read is no sample, so it can neither count as stable nor land the
+                // slew on the position from before it.
+                if (!target_reached.has_value()) {
+                    if (++failed_reads >= kDeviceFaultThreshold) {
+                        fail_synchronous_slew(
+                            std::string(label) + " failed: the mount position could not be read to confirm the landing",
+                            generation);
+                    }
+                    prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
+                    stable_count = 0;
+                    clock_.sleep_for(kSlewPollInterval);
+                    continue;
+                }
+                failed_reads = 0;
 
                 if (!std::isnan(prev_ra_hours)) {
                     double ra_delta = std::abs(util::shortest_ra_delta_hours(cur_ra, prev_ra_hours)) * 15.0 * 3600.0;
@@ -2682,12 +2892,31 @@ private:
                 prev_dec_degrees = cur_dec;
 
                 if (stable_count >= kRequiredStableReads) {
+                    // Issue #2396 landing gate: a mount that stopped far from the target did not land. The RA
+                    // error is taken on the sky (times cos Dec), so a GOTO near the pole, where RA is loosely
+                    // defined, is not failed for it.
+                    const double ra_sky_arcsec = std::abs(util::shortest_ra_delta_hours(cur_ra, target_ra)) * 15.0 *
+                                                 3600.0 * std::cos(target_dec * std::numbers::pi / 180.0);
+                    const double dec_arcsec = std::abs(cur_dec - target_dec) * 3600.0;
+                    if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
+                        fail_synchronous_slew(std::string(label) + " failed: the mount stopped " +
+                                                  std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) +
+                                                  " arcsec (RA) and " +
+                                                  std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
+                                                  " arcsec (Dec) from the target",
+                                              generation);
+                    }
                     ALPACA_LOG_INFO("iOptron", std::string(label) +
                                     ": position stabilized but target not reached");
+                    landed = true;
                     break;
                 }
 
                 clock_.sleep_for(kSlewPollInterval);
+            }
+            if (!landed) {
+                fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target",
+                                      generation);
             }
         }
 
@@ -2695,9 +2924,11 @@ private:
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         StateLock lock(lock_gate_, StateLock::Mode::State);
-        slew_in_progress_ = false;
+        if (generation == slew_operation_generation_) {
+            slew_in_progress_ = false;  // a newer motion owns slew_in_progress_ otherwise
+        }
     }
-    
+
     void refresh_position_cache_locked(bool force = false) const {
         auto now = clock_.now();
         if (!force && (position_cache_fresh_locked() || serve_as_is_locked(position_cache_valid_))) {
@@ -3127,90 +3358,29 @@ private:
         }
     }
 
-    GuideRate read_guide_rate_raw_locked() const {
+    // Issue #2434: one :AG# read on the connect path, and again from a per-axis setter while the rate is unknown. A
+    // failed read leaves the rate unknown (GuideRate raises) and does not fail the connect; a hangup over serial
+    // loses the link, which the connect's link check reports.
+    void read_guide_rate_locked() {
         const Wire protocol = wire();
-        auto [ra_rate, dec_rate] = protocol.get_guide_rates();
-        const double scale_ra = guide_rate_calibrated_ ? guide_rate_scale_ra_ : 1.0;
-        const double scale_dec = guide_rate_calibrated_ ? guide_rate_scale_dec_ : 1.0;
-        cached_guide_rate_.ra = ra_rate * kSiderealRateDegPerSec * scale_ra;
-        cached_guide_rate_.dec = dec_rate * kSiderealRateDegPerSec * scale_dec;
-        guide_rate_valid_ = true;
-        return cached_guide_rate_;
-    }
-
-    void calibrate_guide_rates_locked() {
-        if (guide_rate_calibration_attempted_) {
-            return;
-        }
-        guide_rate_calibration_attempted_ = true;
-
-        refresh_status_cache_locked(true);
-        if (cached_status_.is_slewing || cached_status_.is_parked) {
-            ALPACA_LOG_WARN("iOptron", "Skipping guide calibration while slewing or parked");
-            return;
-        }
-
-        const int sample_duration = 5000;
-        const auto settle_delay = kGuideCalibrationSettleDelay;
         try {
-            const Wire protocol = wire();
-            auto [original_ra_rate, original_dec_rate] = protocol.get_guide_rates();
-            const double test_ra_rate = std::clamp(0.5, 0.01, 0.90);
-            const double test_dec_rate = std::clamp(original_dec_rate, 0.10, 0.99);
-            protocol.set_guide_rates(test_ra_rate, test_dec_rate);
-            clock_.sleep_for(std::chrono::milliseconds(300));
-
-            auto read_position_stable = [&protocol, this]() {
-                Position pos = protocol.get_position();
-                for (int i = 0; i < 2; ++i) {
-                    clock_.sleep_for(std::chrono::milliseconds(200));
-                    pos = protocol.get_position();
-                }
-                return pos;
-            };
-
-            const Position baseline_start = protocol.get_position();
-            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
-            const Position baseline_end = read_position_stable();
-            const double baseline_delta_hours =
-                util::shortest_ra_delta_hours(baseline_end.ra_hours, baseline_start.ra_hours);
-
-            const Position pulse_start = protocol.get_position();
-            protocol.pulse_guide(2, sample_duration);
-            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
-            const Position pulse_end = read_position_stable();
-
-            const double pulse_delta_hours = util::shortest_ra_delta_hours(pulse_end.ra_hours, pulse_start.ra_hours);
-            const double guide_delta_hours = pulse_delta_hours - baseline_delta_hours;
-            const double ra_delta_deg = std::abs(guide_delta_hours) * 15.0;
-            const double duration_sec = sample_duration / 1000.0;
-            const double actual_rate = (duration_sec > 0.0) ? (ra_delta_deg / duration_sec) : 0.0;
-            const double requested_rate = test_ra_rate * kSiderealRateDegPerSec;
-            const double min_delta_deg = 0.0005;  // ~1.8 arcsec
-            if (requested_rate > 0.0 && actual_rate > 0.0 && ra_delta_deg >= min_delta_deg) {
-                const double scale = actual_rate / requested_rate;
-                guide_rate_scale_ra_ = std::clamp(scale, 0.1, 3.0);
-                guide_rate_calibrated_ = true;
-                ALPACA_LOG_INFO("iOptron", "Guide rate calibration: RA scale=" +
-                                             std::to_string(guide_rate_scale_ra_));
-            } else {
-                ALPACA_LOG_WARN("iOptron", "Guide rate calibration inconclusive; using defaults");
-            }
-            protocol.set_guide_rates(original_ra_rate, original_dec_rate);
-            guide_rate_valid_ = false;
+            const auto [ra_fraction, dec_fraction] = protocol.get_guide_rates();
+            cached_guide_rate_.ra = ra_fraction * kSiderealRateDegPerSec;
+            cached_guide_rate_.dec = dec_fraction * kSiderealRateDegPerSec;
+            guide_rate_valid_ = true;
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Guide rate calibration failed: ") + e.what());
+            guide_rate_valid_ = false;
+            ALPACA_LOG_WARN("iOptron", std::string("Guide rate unavailable on connect: ") + e.what());
         }
-
-        calibrate_dec_guide_locked(sample_duration);
     }
 
-    bool slew_target_reached_locked() const {
+    // Empty when the position read failed.
+    std::optional<bool> slew_target_reached_locked() const {
         try {
             refresh_position_cache_locked(true);
         } catch (const std::exception&) {
             throw_if_link_lost();  // a synchronous slew ends with NotConnected, not "position stabilized"
-            return false;
+            return std::nullopt;
         }
         const double ra_delta_hours = std::abs(util::shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
         const double dec_delta_degrees = std::abs(slew_target_dec_degrees_ - cached_dec_degrees_);
@@ -3929,10 +4099,6 @@ private:
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
     mutable GuideRate cached_guide_rate_{};
     mutable bool guide_rate_valid_;
-    mutable bool guide_rate_calibration_attempted_ = false;
-    mutable bool guide_rate_calibrated_ = false;
-    mutable double guide_rate_scale_ra_ = 1.0;
-    mutable double guide_rate_scale_dec_ = 1.0;
 
     mutable bool dec_guide_calibration_attempted_ = false;
     mutable bool dec_guide_calibrated_ = false;
@@ -3954,6 +4120,9 @@ private:
 
     mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
+    // Issue #2396 (AB-9): a GOTO or MoveAxis was running when the link was lost and no :Q# has reached the mount
+    // since; the next Connect that opens the port sends it first. Under mutex_.
+    bool relink_stop_pending_ = false;
     // Under mutex_: a fresh status showed the mount stopped while slew_in_progress_ was still set (nobody read
     // Slewing). Reset by every GOTO initiator, by dispatch_slew_command_locked() and by a settle trim dispatch.
     mutable bool goto_seen_stopped_ = false;
