@@ -101,9 +101,10 @@ Each line is a summary; the linked topic file holds the rule and its history.
 ## Core Architecture
 
 - `AlpacaCore` is vendor-neutral Alpaca logic and device behavior only:
-  - No server: no listening socket, router or inbound request parsing. An outbound client inside a
-    vendor wrapper is that vendor's wire protocol, reached through the `util::HttpClient` seam, and so
-    is a bounded, receive-only listen for a vendor's discovery beacon
+  - No server: no inbound connection accepted and no inbound request answered (no `listen` or
+    `accept`, router or inbound request parsing). An outbound client inside a vendor wrapper is that
+    vendor's wire protocol, reached through the `util::HttpClient` seam. A vendor wrapper may receive
+    a vendor's discovery broadcast on a datagram socket that reads to a deadline and sends nothing
     ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)).
   - Vendor SDKs isolated to `external/` + `src/vendors/<vendor>/` + `include/alpacacore/vendor/<vendor>/`.
 - `AlpacaHTTP` is transport/routing/config/discovery only:
@@ -185,7 +186,8 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 
 ## Out of Scope Guardrails
 
-- Do not add server code to AlpacaCore: no listening socket, router or inbound request parsing
+- Do not add server code to AlpacaCore: no `listen` or `accept`, router or inbound request parsing;
+  a bounded, receive-only read of a vendor's discovery broadcast is not server code
   ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)). Outbound vendor clients go through the `util::HttpClient` seam.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
