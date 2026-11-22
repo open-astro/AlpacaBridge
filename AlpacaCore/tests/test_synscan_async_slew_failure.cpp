@@ -20,6 +20,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
@@ -32,6 +33,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1438,4 +1441,189 @@ TEST_CASE("SynScan async - a deadline stop that fails says the mount may still b
     CHECK(message.find("the mount may still be moving") != std::string::npos);
     CHECK(message.find("the mount was stopped") == std::string::npos);
     driver->set_connected(false);
+}
+
+// #2412 (#2396 AB-9): the MoveAxis bound. A MoveAxis that no new non-zero MoveAxis renews within 60 s is stopped by
+// the driver on its own slot (no client needs to poll), and Slewing raises it until the next motion command or a
+// reconnect. The status poll is paused, so the bound body is the only thing on the task clock.
+namespace {
+
+namespace sc_bound = alpacacore::vendor::synscan;
+
+struct MoveAxisBoundRig {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<FakeSynScanState> st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server{synscan_responder(st)};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::atomic<int> infos{0};
+    std::atomic<int> warns{0};
+    alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
+    std::size_t base_waiters = 0;
+
+    MoveAxisBoundRig() {
+        st->clock = &clock;
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (component != "SynScan" || message.find("MoveAxis on axis") == std::string_view::npos) return;
+                if (level == alpacacore::logging::LogLevel::Info) ++infos;
+                if (level == alpacacore::logging::LogLevel::Warn || level == alpacacore::logging::LogLevel::Error) {
+                    ++warns;
+                }
+            });
+        REQUIRE(server.ok());
+        driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        sc_bound::set_status_poll_paused_for_testing(*driver, true);
+        base_waiters = clock.waiter_count();  // the paused poll
+    }
+    ~MoveAxisBoundRig() {
+        st->mute.store(false);
+        driver->set_connected(false);
+        alpacacore::logging::set_log_sink(previous_sink);
+    }
+    MoveAxisBoundRig(const MoveAxisBoundRig&) = delete;
+    MoveAxisBoundRig& operator=(const MoveAxisBoundRig&) = delete;
+
+    // Starts a MoveAxis and waits for the bound body to park on the clock.
+    void start_move(int axis) {
+        REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+        REQUIRE(clock.wait_for_waiters(base_waiters + 1, std::chrono::seconds(5)));
+    }
+    // In 5 s steps, polling the handset after each one: the status poll is paused, and a frame older than the
+    // snapshot bound would read as a lost link.
+    void advance(std::chrono::seconds by) {
+        for (auto left = by; left.count() > 0; left -= std::chrono::seconds(5)) {
+            clock.advance(std::min(left, std::chrono::seconds(5)));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
+            sc_bound::poll_status_now_for_testing(*driver);
+        }
+    }
+    // Zero-rate variable-rate commands; one axis stop sends kStopCommands of them.
+    int stops(int device) {
+        const auto commands = st->command_snapshot();
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& c) {
+            return is_variable_rate_command(c, device) && is_zero_rate_command(c);
+        }));
+    }
+    int starts(int device) {
+        const auto commands = st->command_snapshot();
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& c) {
+            return is_variable_rate_command(c, device) && !is_zero_rate_command(c);
+        }));
+    }
+};
+
+constexpr int kStopCommands = 2;  // the wrapper's stop: direction 6 and 7 at rate 0
+constexpr int kRaMotor = 16;
+constexpr int kDecMotor = 17;
+
+}  // namespace
+
+TEST_CASE("SynScan MoveAxis - a MoveAxis not renewed for 60 s is stopped and Slewing raises it",
+          "[synscan][telescope][goto-safety]") {
+    const int axis = GENERATE(0, 1);
+    const int motor = axis == 0 ? kRaMotor : kDecMotor;
+    MoveAxisBoundRig rig;
+    rig.start_move(axis);
+    rig.advance(std::chrono::seconds(59));
+    CHECK(rig.stops(motor) == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+
+    rig.advance(std::chrono::seconds(2));
+    CHECK(rig.stops(motor) == kStopCommands);
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s, the longest allowed; the driver stopped it") != std::string::npos);
+    CHECK(rig.infos.load() == 1);  // a client can cause it: INFO, never WARN (decision 0007 rule 9)
+    CHECK(rig.warns.load() == 0);
+    rig.advance(std::chrono::seconds(60));
+    CHECK(rig.stops(motor) == kStopCommands);  // acted once: nothing more is sent for this move
+
+    // The next motion command clears it.
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+TEST_CASE("SynScan MoveAxis - each non-zero MoveAxis restarts the 60 s bound", "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    rig.advance(std::chrono::seconds(40));
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 2.0));  // renewed at 40 s
+    rig.advance(std::chrono::seconds(40));           // 80 s from the first, 40 s from the renewal
+    CHECK(rig.stops(kRaMotor) == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+    rig.advance(std::chrono::seconds(21));
+    CHECK(rig.stops(kRaMotor) == kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
+}
+
+TEST_CASE("SynScan MoveAxis - a bound stop that fails is not retried and sends no start",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    const int starts = rig.starts(kRaMotor);
+    REQUIRE(rig.server.drop_connections());  // the stop's write meets a dropped link
+    rig.advance(std::chrono::seconds(61));
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.warns.load() == 1);  // a stop that could not be sent is a device failure
+    CHECK(rig.infos.load() == 0);
+    const int requests = rig.st->requests.load();
+    rig.advance(std::chrono::seconds(120));
+    CHECK(rig.st->requests.load() == requests);  // nothing more was sent
+    CHECK(rig.starts(kRaMotor) == starts);
+}
+
+TEST_CASE("SynScan MoveAxis - a bound failure does not outlive a reconnect", "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    rig.advance(std::chrono::seconds(61));
+    REQUIRE(read_slewing(*rig.driver) == SlewingRead::Threw);
+    rig.driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*rig.driver, true, std::chrono::seconds(10)));
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// #2412: site, time and Sync writes change the handset's limit and pointing maths, so they are refused while motion
+// the driver started is under way, with nothing sent.
+TEST_CASE("SynScan - site, time and Sync writes are refused while the mount moves",
+          "[synscan][telescope][goto-safety]") {
+    const bool goto_motion = GENERATE(false, true);
+    MoveAxisBoundRig rig;
+    if (goto_motion) {
+        rig.st->goto_hangs.store(true);  // the GOTO body keeps waiting on it
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    } else {
+        rig.start_move(0);
+    }
+    const int requests = rig.st->requests.load();
+    require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->sync_to_coordinates(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.st->requests.load() == requests);
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
+    CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+}
+
+TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and fails the MoveAxis",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    sc_bound::set_motion_bound_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    try {
+        rig.driver->move_axis(1, 1.0);
+        FAIL("MoveAxis returned although its time limit could not start");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(rig.stops(kDecMotor) == kStopCommands);  // fails closed: the move just started is stopped
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
 }
