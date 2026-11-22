@@ -22,8 +22,10 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -495,6 +497,38 @@ std::string message_of(const std::exception_ptr& error, int* code = nullptr) {
 
 bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
+// Captures the iOptron log lines with their level, for decision 0007 rule 9 checks.
+class IoptronLogCapture {
+public:
+    IoptronLogCapture() {
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Info);
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (component != "iOptron") return;
+                std::lock_guard<std::mutex> lock(mutex_);
+                lines_.push_back({level, std::string(message)});
+            });
+    }
+    ~IoptronLogCapture() {
+        alpacacore::logging::set_log_sink(previous_sink_);
+        alpacacore::logging::set_log_level(previous_level_);
+    }
+    IoptronLogCapture(const IoptronLogCapture&) = delete;
+    IoptronLogCapture& operator=(const IoptronLogCapture&) = delete;
+    int count(alpacacore::logging::LogLevel level, const std::string& text) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<int>(std::count_if(lines_.begin(), lines_.end(), [&](const auto& line) {
+            return line.first == level && line.second.find(text) != std::string::npos;
+        }));
+    }
+
+private:
+    alpacacore::logging::LogSink previous_sink_ = alpacacore::logging::get_log_sink();
+    alpacacore::logging::LogLevel previous_level_ = alpacacore::logging::get_log_level();
+    std::mutex mutex_;
+    std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> lines_;
+};
+
 // A synthetic test site (the equator at Greenwich), for the Alt/Az conversions only.
 std::unique_ptr<alpacacore::TelescopeDriver> safety_driver(alpacacore::test::FakeIoptronMount& mount,
                                                            alpacacore::test::FakeTaskClock& clock) {
@@ -549,6 +583,7 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
             clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
         }
 
+        IoptronLogCapture logs;
         const std::exception_ptr error = run_stepping_clock(clock, [&] { initiator.call(*driver); });
         if (initiator.async) {
             CHECK_FALSE(error);
@@ -556,6 +591,9 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
             REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
             // SlewToTargetAsync reports under the SlewToCoordinatesAsync label it forwards to.
             CHECK(contains(message, " failed: mount rejected the target"));
+            // Decision 0007 rule 9: the client chose the target, so the refusal is INFO, never WARN.
+            CHECK(logs.count(alpacacore::logging::LogLevel::Info, " failed: mount rejected the target") == 1);
+            CHECK(logs.count(alpacacore::logging::LogLevel::Warn, "mount rejected the target") == 0);
         } else {
             int code = 0;
             const std::string message = message_of(error, &code);
@@ -638,8 +676,8 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
 }
 
 // Issue #2396 (AB-2): a status of 2 after an unanswered :MS1# confirms nothing when the mount was already moving
-// before it (an earlier GOTO being retargeted, a Park, a pulse): the 2 may be that older motion. The GOTO fails and
-// the mount is sent :Q#, not left to finish the old motion and read as landed at the new target.
+// before it (an earlier GOTO being retargeted, a Park, a #843 pulse that reads 2): the 2 may be that older motion. The
+// GOTO fails and the mount is sent :Q#, not left to finish the old motion and read as landed at the new target.
 TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was already moving is not confirmed",
           "[ioptron][telescope][slewfailure][goto-safety]") {
     for (const bool async : {false, true}) {
@@ -736,6 +774,54 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO that times out stops the mou
     CHECK(contains(message, "the mount was sent a stop"));
     CHECK(mount.count(":Q#") == stops_before + 1);
     CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// Issue #2396: a failed position read is no landing sample, and three in a row fail a synchronous slew. The mount is
+// sent :Q# once, so it does not keep moving after the throw.
+TEST_CASE("iOptron goto-safety - a synchronous GOTO whose landing position cannot be read fails and stops the mount",
+          "[ioptron][telescope][slewfailure][goto-safety]") {
+    // HEM27: no final-approach trim, so the wait goes straight to its position reads.
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = safety_driver(mount, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    mount.fail_position_reads_after_goto(3);
+    const int stops_before = mount.count(":Q#");
+
+    const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    int code = 0;
+    const std::string message = message_of(error, &code);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(contains(message, "the mount position could not be read to confirm the landing"));
+    CHECK(contains(message, "the mount was sent a stop"));
+    CHECK(mount.count(":Q#") == stops_before + 1);
+    driver->set_connected(false);
+}
+
+// Issue #2396: Slewing goes false, but the position keeps moving (over 30 arcsec a poll, so never stable) and never
+// comes within 60 arcsec of the target. The 300 s bound of the stability wait, on the task clock, fails the slew and
+// sends :Q#.
+TEST_CASE("iOptron goto-safety - a synchronous GOTO whose position never settles times out and stops the mount",
+          "[ioptron][telescope][slewfailure][goto-safety]") {
+    // HEM27: no final-approach trim; the mount lands 3600 arcsec off and drifts further away on every read.
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/3600.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = safety_driver(mount, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    mount.set_position_drift_per_read(100.0);
+    const int stops_before = mount.count(":Q#");
+
+    const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    int code = 0;
+    const std::string message = message_of(error, &code);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(contains(message, "SlewToCoordinates timed out waiting for the mount to land on the target"));
+    CHECK(contains(message, "the mount was sent a stop"));
+    CHECK(mount.count(":Q#") == stops_before + 1);
+    mount.set_position_drift_per_read(0.0);
     driver->set_connected(false);
 }
 

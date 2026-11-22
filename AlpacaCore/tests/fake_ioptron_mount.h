@@ -80,6 +80,14 @@ public:
     /// then the reads answer again.
     void fail_next_reads(int n) { fail_next_reads_.store(n); }
 
+    /// Issue #2396: after the next accepted ":MS1#", the next @p n position reads (":GEP#" only) get the unparseable
+    /// "0#", so a synchronous slew's landing wait sees failed reads while its status reads still answer.
+    void fail_position_reads_after_goto(int n) { fail_gep_after_goto_.store(n); }
+
+    /// Issue #2396: every ":GEP#" read first moves the modelled RA by @p arcsec (0.01 arcsec units underneath), so the
+    /// position never settles. 0 (the default) keeps it still.
+    void set_position_drift_per_read(double arcsec) { drift_units_.store(std::llround(arcsec * 100.0)); }
+
     /// Issue #2434: the ":AG#" guide-rate read answers "nnnn#", RA then Dec in hundredths of sidereal; ":RG" writes
     /// it. Default "5050#" (0.50x both). An empty @p reply answers the unparseable "0#".
     void set_guide_rate_reply(std::string reply) {
@@ -238,6 +246,10 @@ private:
             fail_next_reads_.fetch_sub(1);
             return "0#";
         }
+        if (cmd == ":GEP#" && gep_failing_.load() > 0) {
+            gep_failing_.fetch_sub(1);
+            return "0#";
+        }
         if (cmd == ":AG#") {
             std::lock_guard<std::mutex> lock(mutex_);
             return guide_rate_reply_.empty() ? std::string("0#") : guide_rate_reply_;
@@ -275,7 +287,7 @@ private:
             return "0030#";  // meridian treatment: stop, 30 degrees past
         }
         if (cmd == ":GEP#") {
-            const long long ra = ra_units_.load();
+            const long long ra = ra_units_.fetch_add(drift_units_.load()) + drift_units_.load();
             const long long dec = dec_units_.load();
             return signed_eight(dec) + nine(ra) + std::to_string(pier_side_.load()) + "1#";
         }
@@ -305,6 +317,7 @@ private:
                     if (!goto_reply_moves_) return reply;  // nothing moves
                 }
             }
+            gep_failing_.store(fail_gep_after_goto_.exchange(0));
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
@@ -385,6 +398,9 @@ private:
     bool goto_reply_moves_ = false;
     bool goto_reply_set_ = false;
     std::atomic<int> fail_next_reads_{0};
+    std::atomic<int> fail_gep_after_goto_{0};
+    std::atomic<int> gep_failing_{0};
+    std::atomic<long long> drift_units_{0};
     std::string guide_rate_reply_ = "5050#";
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};

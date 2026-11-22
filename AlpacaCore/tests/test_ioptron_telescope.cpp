@@ -1747,6 +1747,47 @@ TEST_CASE("iOptron Link - a reconnect over a lost link stops the GOTO that was r
     driver->set_connected(false);
 }
 
+// Issue #2396 (AB-9): when the reconnect's :Q# for a GOTO left running cannot be sent, the Connect fails with that
+// reason and the port is closed, never a session that forgot the motion. Serial: the fault stands past the staleness
+// bound, then the cable is pulled on the :Q#.
+TEST_CASE("iOptron Link - a reconnect whose stop for the running GOTO cannot be sent fails",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    mount.model().set_goto_tracks_off(true);  // the accepted GOTO reads status 2 (slewing) until it is stopped
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
+    REQUIRE(driver->get_slewing());
+    mount.model().set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+    REQUIRE(mount.model().count(":Q#") == 0);
+
+    mount.model().set_fail_reads(false);
+    mount.unplug_on(on_command(":Q#"));
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(contains(message, "the stop for the motion running when the link dropped could not be sent"));
+    CHECK(mount.unplugged());
+    CHECK(mount.model().count(":Q#") == 1);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(io::iOptronProtocolWrapper::instance().is_connected());  // the port is closed
+    driver->set_connected(false);
+}
+
 // #2257, AGENTS.md: InvalidValue precedes the connection check, so a disconnected driver refuses an out-of-range
 // guide rate on every setter path with InvalidValue, not NotConnected.
 TEST_CASE("iOptron Telescope Driver - a disconnected driver refuses an out-of-range guide rate with InvalidValue",

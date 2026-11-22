@@ -2724,16 +2724,20 @@ private:
         position_cache_valid_ = false;
     }
 
-    // Issue #2396: the status read before the :MS1#. A GOTO, flip, Park or pulse already running (2 or 4) would make
-    // the read after an unanswered :MS1# look like confirmation, so it is recorded here. A failed read counts as
-    // moving: it confirms nothing. A lost link throws NotConnected.
+    // Issue #2396: the status read before the :MS1#. Motion already running that reads 2 (a GOTO, a Park, or a pulse
+    // on firmware that reports one as slewing, open-astro#843) or 4 (a meridian flip) would make the read after an
+    // unanswered :MS1# look like confirmation, so it is recorded here. A pulse that reads 3 (the HAE29C, #2186)
+    // confirms nothing either way. A failed read counts as moving: it confirms nothing, so an unanswered GOTO after
+    // it is stopped. A lost link throws NotConnected.
     bool mount_moving_before_goto_locked() const {
         try {
             const MountStatus status = wire().get_status();
             return status.system_status == 2 || status.system_status == 4;
         } catch (const std::exception& e) {
             throw_if_link_lost();
-            ALPACA_LOG_WARN("iOptron", std::string("Status read before a GOTO failed: ") + e.what());
+            ALPACA_LOG_WARN("iOptron", std::string("Status read before a GOTO failed, so a GOTO without a clear :MS1# "
+                                                   "reply will not be confirmed and the mount will be sent a stop: ") +
+                                           e.what());
             return true;
         }
     }
