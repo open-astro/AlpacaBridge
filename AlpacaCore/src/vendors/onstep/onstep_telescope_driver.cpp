@@ -3354,8 +3354,10 @@ private:
         }
         if (abort_stop_rounds_ >= kAbortStopRounds) {
             abort_stop_rounds_ = 0;
-            motion_error_ =
+            // Appended, so a GOTO the 120 s bound stopped still says so.
+            const std::string text =
                 "AbortSlew: the mount still reports motion after " + std::to_string(kAbortStopRounds) + " stops";
+            motion_error_ = motion_error_.empty() ? text : motion_error_ + "; " + text;
             ALPACA_LOG_ERROR("OnStep", motion_error_);
             return;
         }
@@ -3825,7 +3827,8 @@ private:
     // Set only by a coordinate slew; consumed when that slew completes (#1218).
     mutable bool tracking_before_slew_ = false;
     // #2406: kGotoTimeout from the running GOTO's :MS#; cleared when it lands, by the next motion command, an
-    // AbortSlew and a connect. Under mutex_.
+    // AbortSlew and a connect. A fail-safe timeout, not a hold window: Slewing's hold stays slew_hold_ (decision 0022
+    // rule 1). Under mutex_.
     mutable std::optional<std::chrono::steady_clock::time_point> goto_deadline_;
     // #2406: kMaxMoveAxisDuration from each axis's MoveAxis start. Under mutex_.
     std::chrono::steady_clock::time_point manual_axis_deadline_[2]{};

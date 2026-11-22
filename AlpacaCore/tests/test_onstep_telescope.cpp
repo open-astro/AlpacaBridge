@@ -4182,3 +4182,19 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis during a GOTO keeps the GOTO's b
     CHECK(rig.mount->count(":Q#") == 1);
     require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
 }
+
+TEST_CASE("OnStep Telescope Driver - site and time writes are refused while a MoveAxis runs",
+          "[onstep][telescope][unit][goto-safety]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    require_alpaca_error([&] { driver->set_site_latitude(40.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(fake.count(":St") == 0);
+    CHECK(fake.count(":SC") == 0);
+    driver->set_connected(false);
+}
