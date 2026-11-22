@@ -1962,6 +1962,8 @@ public:
             if (restore_mode > 0) {
                 ra_stop_unconfirmed_ = true;
             }
+            // Not for check_connected() after an overtaken turn (nothing was sent): the helper's connected_ guard
+            // returns first there.
             if (!rate_sent) {
                 bound_unknown_rate_outcome_locked(lock, axis, owner_generation);
             }
@@ -2543,7 +2545,9 @@ private:
         if (!motion_bound_active_) {
             try {
                 start_motion_bound(lock, axis);
-            } catch (...) {  // NOLINT(bugprone-empty-catch): start_motion_bound() already stopped the axis or tried
+            } catch (const std::exception& e) {
+                // start_motion_bound() already stopped the axis or tried; the caller's exception is the one thrown.
+                ALPACA_LOG_WARN("SynScan", std::string("MoveAxis after a failed rate command: ") + e.what());
             }
         }
     }
