@@ -31,6 +31,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <future>
 #include <mutex>
@@ -1024,22 +1025,36 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         }
         if (modern_version) {
             // Raw AUX CGX 7.17.25 returns major/minor + a big-endian build.
-            // MC_GET_MODEL identifies both motors as CGX (0x1788); a reply
-            // from each assumed switch address is not a valid identity gate.
-            // Encoder scaling and home positions are the CGX's constants (#2204): an unknown motor is added, but
+            // MC_GET_MODEL identifies the motors: 0x1788 is the verified CGX, and 0x18xx the CGX-L (INDI
+            // celestronaux formatModelString, unqualified here), which has the CGX's mechanics and 2^24-count axes.
+            // A reply from each assumed switch address is not a valid identity gate. Encoder scaling and home
+            // positions are the CGX's constants (#2204): another motor, or a pair of two families, is added, but
             // require_known_motor_model() refuses to drive it with them.
-            bool unknown_motor = false;
+            std::vector<std::vector<std::uint8_t>> models;
             for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
                 const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}});
                 if (model.payload.size() != 2) {
                     throw AlpacaException("Celestron CGX motor model reply is malformed", AlpacaError::DriverException);
                 }
-                if (model.payload != std::vector<std::uint8_t>{0x17, 0x88}) {
-                    unknown_motor = true;
-                    ALPACA_LOG_WARN("Celestron CGX",
-                                    "Motor reports unlisted model bytes " + std::to_string(model.payload[0]) + " " +
-                                        std::to_string(model.payload[1]) + "; connected, motion refused");
-                }
+                models.push_back(model.payload);
+            }
+            const auto family = [](const std::vector<std::uint8_t>& model) {
+                return model == std::vector<std::uint8_t>{0x17, 0x88} ? 0x17 : model[0] == 0x18 ? 0x18 : 0;
+            };
+            const auto id = [](const std::vector<std::uint8_t>& model) {
+                std::array<char, 8> text{};
+                std::snprintf(text.data(), text.size(), "0x%02x%02x", model[0], model[1]);
+                return std::string(text.data());
+            };
+            const std::string reported = "RA " + id(models[0]) + ", Dec " + id(models[1]);
+            const bool unknown_motor = family(models[0]) == 0 || family(models[0]) != family(models[1]);
+            if (unknown_motor) {
+                ALPACA_LOG_WARN("Celestron CGX",
+                                "Motors report model " + reported + ", not a CGX or CGX-L pair; connected, "
+                                "motion refused");
+            } else if (family(models[0]) == 0x18) {
+                ALPACA_LOG_INFO("Celestron CGX", "Motors report CGX-L model " + reported +
+                                                     "; driven as the CGX, the CGX-L is not yet qualified on hardware");
             }
             unknown_motor_model_.store(unknown_motor);
         } else {
