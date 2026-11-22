@@ -69,6 +69,7 @@
 #include <vector>
 
 #include "../core/catalog_json.h"
+#include "client_connection_ledger.h"
 #include "device_call.h"
 #include "image_payload.h"
 #include "persisted_config_store.h"
@@ -697,33 +698,17 @@ void apply_error_status(alpacahttp::Response& response, std::int32_t error_code)
 
 // Per-client Connected tracking (issue #160): identify the caller by its
 // Alpaca ClientID (query param on GET, form/JSON field on PUT), qualified by
-// the connection's peer address (issue #163) so two clients on different
-// hosts that happen to share a ClientID — or both omit it — get distinct
-// registry slots. Clients that send no ClientID share one anonymous slot per
-// peer address, so they still participate in refcounting rather than tearing
-// the device link down for everyone.
-constexpr const char* kAnonymousClientKey = "<anonymous>";
-
-// A registration not refreshed within this window is considered abandoned
-// (client crashed or vanished without PUT connected=false) and no longer
-// blocks the last-client-out disconnect. Any request from the client to the
-// device refreshes its registration, so ordinary polling keeps it alive.
-constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
-
-// open-astro#2292 (ADR 0007 rules 4 and 10): the most (address, ClientID)
-// registrations one device holds. A uint32 ClientID per request (#1738) still
-// let one host add an entry per request for the whole stale window; past this
-// a new client's Connected=true is refused until an entry leaves or goes
-// stale. A rig has a handful of clients per device.
-constexpr std::size_t kMaxClientsPerDevice = 256;
+// the connection's peer address (issue #163) through
+// ClientConnectionLedger::client_key.
 
 // The answer to a Connected=true past kMaxClientsPerDevice. Returned, not
 // thrown: a client can cause it, so it logs at DEBUG (ADR 0007 rule 9), where
 // a thrown InvalidOperation logs at ERROR.
 alpacahttp::Response refuse_full_client_registry(const alpacahttp::DeviceCall& call) {
-    const std::string message = "Connected refused: " + std::to_string(kMaxClientsPerDevice) +
-                                " clients already hold this device; a client that stops polling is dropped after 10 "
-                                "minutes";
+    const std::string message =
+        "Connected refused: " + std::to_string(alpacahttp::ClientConnectionLedger::kMaxClientsPerDevice) +
+        " clients already hold this device; a client that stops polling is dropped after 10 "
+        "minutes";
     alpacahttp::util::log_debug(message);
     return call.error(alpacacore::AlpacaError::InvalidOperation, message);
 }
@@ -794,17 +779,10 @@ ClientKey extract_client_key(const alpacahttp::Request& request) {
             }
         }
     }
-    if (!result.has_client_id) {
-        result.key = kAnonymousClientKey;
-    }
-    // Qualify by peer address (issue #163). The address is length-prefixed so
-    // the composite key decodes unambiguously — ClientID is an arbitrary
-    // client-supplied string, so any plain delimiter could be forged into a
-    // collision with another client's (address, ClientID) pair. Empty when
-    // unknown (unit tests, or getpeername failure): "0##<id>" degrades to a
-    // ClientID-only identity that no address-qualified key can collide with.
-    const std::string& addr = request.remote_address();
-    result.key = std::to_string(addr.size()) + "#" + addr + "#" + result.key;
+    // Qualify by peer address (issue #163); ClientID-less callers share one
+    // anonymous slot per address.
+    result.key = alpacahttp::ClientConnectionLedger::client_key(
+        request.remote_address(), result.has_client_id ? std::optional<std::string_view>(result.key) : std::nullopt);
     return result;
 }
 
@@ -1126,7 +1104,11 @@ Router::Router() : Router(CatalogExtension{}) {}
 Router::Router(const CatalogExtension& extend_catalog) : Router(extend_catalog, 0) {}
 
 Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port)
+    : Router(extend_catalog, listen_port, ClientClock{}) {}
+
+Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port, ClientClock client_clock)
     : machine_hostname_(read_machine_hostname()),
+      client_ledger_(std::make_unique<ClientConnectionLedger>(std::move(client_clock))),
       persisted_store_(std::make_unique<PersistedConfigStore>(std::filesystem::path("config"))) {
     listen_port_->store(listen_port, std::memory_order_release);
     learned_sink_->router = this;
@@ -2164,7 +2146,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 // Issue #1764: client activity for the web UI status dot, read
                 // from the router's per-client registry only (no driver call,
                 // no hardware). The web UI's own requests never refresh it.
-                const auto activity = client_activity(driver.get());
+                const auto activity = client_ledger_->activity(driver.get());
                 device["ActiveClients"] = activity.active_clients;
                 if (activity.last_request_age) {
                     device["LastClientRequestAgeMs"] = activity.last_request_age->count();
@@ -2396,7 +2378,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // registration so routine polling keeps it from expiring as stale
         // (issue #160). The web UI's own requests do not (issue #1764).
         if (request.get_header(kWebUiClientHeader) != kWebUiClientValue) {
-            touch_client_connection(device.get(), extract_client_key(request).key);
+            client_ledger_->touch(device.get(), extract_client_key(request).key);
         }
 
         // open-astro#547: the single device-dispatch choke point for the
@@ -2477,143 +2459,9 @@ void set_wrong_verb_text(Response& response, const char* what) {
 }
 }  // namespace
 
-namespace {
-void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients,
-                                    std::chrono::steady_clock::time_point now) {
-    const auto cutoff = now - kClientConnectionStaleAfter;
-    for (auto it = clients.begin(); it != clients.end();) {
-        if (it->second < cutoff) {
-            it = clients.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-}  // namespace
-
-std::optional<std::size_t> Router::register_client_connection(const void* device, const std::string& client_key) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto& clients = client_connections_[device];
-    const auto now = client_clock_();
-    prune_stale_client_connections(clients, now);
-    if (clients.size() >= kMaxClientsPerDevice && clients.find(client_key) == clients.end()) {
-        return std::nullopt;
-    }
-    clients[client_key] = now;
-    return clients.size();
-}
-
-std::size_t Router::unregister_client_connection(const void* device, const std::string& client_key) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto it = client_connections_.find(device);
-    if (it == client_connections_.end()) {
-        return 0;
-    }
-    it->second.erase(client_key);
-    prune_stale_client_connections(it->second, client_clock_());
-    if (it->second.empty()) {
-        client_connections_.erase(it);
-        return 0;
-    }
-    return it->second.size();
-}
-
-bool Router::client_connection_registered(const void* device, const std::string& client_key) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto it = client_connections_.find(device);
-    if (it == client_connections_.end()) {
-        return false;
-    }
-    auto client_it = it->second.find(client_key);
-    if (client_it == it->second.end()) {
-        return false;
-    }
-    // A lookup is client activity: refresh so steady polling never goes stale.
-    client_it->second = client_clock_();
-    return true;
-}
-
-void Router::touch_client_connection(const void* device, const std::string& client_key) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto it = client_connections_.find(device);
-    if (it == client_connections_.end()) {
-        return;
-    }
-    auto client_it = it->second.find(client_key);
-    if (client_it != it->second.end()) {
-        client_it->second = client_clock_();
-    }
-}
-
-Router::ClientActivity Router::client_activity(const void* device) const {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    ClientActivity activity;
-    auto it = client_connections_.find(device);
-    if (it == client_connections_.end()) {
-        return activity;
-    }
-    // Read-only: an entry past the stale window is skipped here and left for
-    // the next register/unregister to prune, as the disconnect rule does.
-    const auto now = client_clock_();
-    const auto cutoff = now - kClientConnectionStaleAfter;
-    std::optional<std::chrono::steady_clock::time_point> newest;
-    for (const auto& entry : it->second) {
-        const auto seen = entry.second;
-        if (seen < cutoff) {
-            continue;
-        }
-        ++activity.active_clients;
-        if (!newest || seen > *newest) {
-            newest = seen;
-        }
-    }
-    if (newest) {
-        activity.last_request_age = std::max(std::chrono::milliseconds{0},
-                                             std::chrono::duration_cast<std::chrono::milliseconds>(now - *newest));
-    }
-    return activity;
-}
-
-void Router::clear_client_connections(const void* device) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    client_connections_.erase(device);
-    // connection_op_mutexes_ is deliberately NOT erased: this runs while the
-    // op mutex is held (dead-link sweep inside a PUT handler), and erasing
-    // would let a concurrent op mint a fresh mutex and bypass serialization.
-    // The map is bounded by registered-device count; a recycled pointer
-    // sharing an old mutex only means harmless extra serialization.
-}
-
-void Router::purge_device_connection_state(const void* device) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    client_connections_.erase(device);
-    connection_op_mutexes_.erase(device);
-}
-
 bool Router::device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device) {
     auto& registry = alpacacore::management::DeviceRegistry::instance();
     return registry.get_device(device->get_device_type(), device->get_device_number()) == device;
-}
-
-std::shared_ptr<std::mutex> Router::device_connection_op_mutex(
-    const std::shared_ptr<alpacacore::AlpacaDriver>& device) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto it = connection_op_mutexes_.find(device.get());
-    if (it != connection_op_mutexes_.end()) {
-        return it->second;
-    }
-    // Insert only for a device the registry still resolves: a straggler op on
-    // a removed device (purge_device_connection_state already ran) gets an
-    // ephemeral mutex instead of re-inserting an entry nobody will ever reap
-    // (PR #164 review). Lock order: client_connections_mutex_ -> registry
-    // mutex; the registry never calls back into the router.
-    if (!device_is_current(device)) {
-        return std::make_shared<std::mutex>();
-    }
-    auto mutex = std::make_shared<std::mutex>();
-    connection_op_mutexes_[device.get()] = mutex;
-    return mutex;
 }
 
 Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver> device,
@@ -2664,11 +2512,12 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 // the device still looks dead and the sweep would wipe the
                 // registration just added. Never blocks a polling GET behind
                 // a slow connect.
-                const auto op_mutex = device_connection_op_mutex(device);
+                const auto op_mutex =
+                    client_ledger_->op_mutex(device.get(), [&device] { return device_is_current(device); });
                 if (op_mutex->try_lock()) {
                     std::lock_guard<std::mutex> op_lock(*op_mutex, std::adopt_lock);
                     if (!device->get_connecting() && !device->get_connected()) {
-                        clear_client_connections(device.get());
+                        client_ledger_->clear(device.get());
                     }
                 }
                 // get_connecting() first, and short-circuit: it is the one
@@ -2692,7 +2541,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 } else {
                     // Per-client semantics: a client only reads true if IT
                     // connected, not merely because another client did.
-                    value = device_connected && client_connection_registered(device.get(), client.key);
+                    value = device_connected && client_ledger_->is_registered(device.get(), client.key);
                 }
                 return call.ok(value);
             }
@@ -2710,10 +2559,11 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 // against a link that is about to drop and be left believing
                 // it holds a live connection.
                 const std::string client_key = extract_client_key(request).key;
-                const auto op_mutex = device_connection_op_mutex(device);
+                const auto op_mutex =
+                    client_ledger_->op_mutex(device.get(), [&device] { return device_is_current(device); });
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connecting() && !device->get_connected()) {
-                    clear_client_connections(device.get());
+                    client_ledger_->clear(device.get());
                 }
 
                 if (connected) {
@@ -2724,7 +2574,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         throw alpacacore::AlpacaException("Device has been removed",
                                                           alpacacore::AlpacaError::InvalidOperation);
                     }
-                    if (!register_client_connection(device.get(), client_key)) {
+                    if (!client_ledger_->register_client(device.get(), client_key)) {
                         return refuse_full_client_registry(call);
                     }
                 }
@@ -2765,7 +2615,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         device->connect();
                     } catch (const alpacacore::AlpacaException& e) {
                         // A synchronous connect() reports its own failure.
-                        unregister_client_connection(device.get(), client_key);
+                        client_ledger_->unregister_client(device.get(), client_key);
                         // ASCOM Connected: "Do not use a NotConnectedException
                         // here".
                         if (e.error_code() == alpacacore::AlpacaError::NotConnected) {
@@ -2773,7 +2623,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         }
                         throw;
                     } catch (...) {
-                        unregister_client_connection(device.get(), client_key);
+                        client_ledger_->unregister_client(device.get(), client_key);
                         throw;
                     }
                     const auto limit = connect_wait_limit();
@@ -2787,7 +2637,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         // told it failed. The base class records the
                         // disconnect against the in-flight connect and runs it
                         // when the connect returns.
-                        if (unregister_client_connection(device.get(), client_key) == 0) {
+                        if (client_ledger_->unregister_client(device.get(), client_key) == 0) {
                             device->disconnect();
                         }
                         if (stopping()) {
@@ -2803,14 +2653,14 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                     }
                     if (!device->get_connected()) {
                         // Failed connect: this client holds no live link.
-                        unregister_client_connection(device.get(), client_key);
+                        client_ledger_->unregister_client(device.get(), client_key);
                         // The driver's own words when it has them, as a
                         // DriverException: ASCOM Connected says "Do not use a
                         // NotConnectedException here" (issue #776).
                         throw alpacacore::AlpacaException(connect_failure_reason(*device),
                                                           alpacacore::AlpacaError::DriverException);
                     }
-                } else if (!connected && unregister_client_connection(device.get(), client_key) == 0) {
+                } else if (!connected && client_ledger_->unregister_client(device.get(), client_key) == 0) {
                     // A lost-link getter can report false before driver cleanup.
                     // Deliver explicit disconnect even then, as PUT /disconnect
                     // does; the driver owns idempotency and runtime-state reset.
@@ -2999,17 +2849,18 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 // connect fails, this client's registration is a phantom until
                 // the dead-link sweep clears it — harmless, since GET
                 // connected ANDs the registration with real device state.
-                const auto op_mutex = device_connection_op_mutex(device);
+                const auto op_mutex =
+                    client_ledger_->op_mutex(device.get(), [&device] { return device_is_current(device); });
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connecting() && !device->get_connected()) {
-                    clear_client_connections(device.get());
+                    client_ledger_->clear(device.get());
                 }
                 if (!device_is_current(device)) {
                     // Straggler guard — see PUT connected (PR #164 review).
                     throw alpacacore::AlpacaException("Device has been removed",
                                                       alpacacore::AlpacaError::InvalidOperation);
                 }
-                if (!register_client_connection(device.get(), extract_client_key(request).key)) {
+                if (!client_ledger_->register_client(device.get(), extract_client_key(request).key)) {
                     return refuse_full_client_registry(call);
                 }
                 // get_connecting() first (see PUT connected): a mid-task
@@ -3026,14 +2877,15 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
         }
         else if (method_name == "disconnect") {
             if (request.method() == HttpMethod::PUT) {
-                const auto op_mutex = device_connection_op_mutex(device);
+                const auto op_mutex =
+                    client_ledger_->op_mutex(device.get(), [&device] { return device_is_current(device); });
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connecting() && !device->get_connected()) {
-                    clear_client_connections(device.get());
+                    client_ledger_->clear(device.get());
                 }
                 // Last client out tears down the link; otherwise only this
                 // client's registration is dropped (issue #160).
-                if (unregister_client_connection(device.get(), extract_client_key(request).key) == 0) {
+                if (client_ledger_->unregister_client(device.get(), extract_client_key(request).key) == 0) {
                     device->disconnect();
                 }
                 return call.ok_void();
@@ -4054,9 +3906,10 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         bool was_registered = false;
         if (auto device = registry.get_device(device_type, device_number)) {
             {
-                const auto op_mutex = device_connection_op_mutex(device);
+                const auto op_mutex =
+                    client_ledger_->op_mutex(device.get(), [&device] { return device_is_current(device); });
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
-                clear_client_connections(device.get());
+                client_ledger_->clear(device.get());
                 was_registered = registry.unregister_device(device_type, device_number);
             }
             // Reap the device's registry + op-mutex entries now that it is
@@ -4065,10 +3918,10 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             // op lock is released — erasing under it is the mint-a-fresh-
             // mutex trap. Stragglers that fetched the device shared_ptr
             // pre-removal cannot re-insert entries after this: the
-            // device_is_current guards in device_connection_op_mutex and
+            // device_is_current guards in ClientConnectionLedger::op_mutex and
             // the registering handlers refuse a device the registry no
             // longer resolves (PR #164 review).
-            purge_device_connection_state(device.get());
+            client_ledger_->purge(device.get());
         } else {
             was_registered = registry.unregister_device(device_type, device_number);
         }
