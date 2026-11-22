@@ -37,8 +37,8 @@ struct AsiairPlusSwitchConfig {
 
 // Returns the default ASIAIR Plus RK3568 layout: 4 boolean ports labelled
 // "Port 1".."Port 4", PWM frequency 50 Hz, opening /dev/pwm-gpio-misc.
-// The four wrapper indices (0..3) map internally to the kernel module's
-// DC-port ioctl indices (4..7).
+// The four ports are lines 0..3 of the port table; PwmGpioMiscBackend maps them
+// onto the kernel module's DC-port ioctl indices (4..7).
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config();
 
 std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,

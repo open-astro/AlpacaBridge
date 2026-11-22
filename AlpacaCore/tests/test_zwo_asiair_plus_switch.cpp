@@ -33,7 +33,7 @@
 #include "power_port_test_dir.h"
 #include "zwo_asiair_stubs.h"
 
-// The wrapper's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of zwo_asiair_stubs.h when
+// The backend's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of zwo_asiair_stubs.h when
 // the device path is a StubDeviceFile; the default /dev/pwm-gpio-misc still reaches the real ioctl().
 namespace {
 

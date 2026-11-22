@@ -243,7 +243,7 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Unsupported method error codes",
 
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
           "[zwo][switch][asiair][unit]") {
-    // Empty ports list must fail at construction (the wrapper has nothing to manage).
+    // Empty ports list must fail at construction (the engine has nothing to manage).
     alpacacore::vendor::zwo::AsiairSwitchConfig empty_cfg;
     empty_cfg.ports.clear();
     require_alpaca_error(
