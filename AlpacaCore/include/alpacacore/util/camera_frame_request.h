@@ -35,6 +35,10 @@
 //                  check_bin_supported()            (3) InvalidValue
 //                  the driver's exposing check      (4) InvalidOperation
 //
+//   SetCCDTemperature: check_ccd_setpoint()          (1) InvalidValue, before the connection
+//                  the driver's connection check    (2) NotConnected
+//                  the driver's device range        (3) InvalidValue (ZWO/SVBONY control caps, Player One)
+//
 //   NumX/NumY:     check_frame_size(), StartX/StartY: check_frame_start(), then the connection and the exposing
 //                  checks. These setters have no device stage: StartExposure checks the frame against the sensor.
 //
@@ -77,6 +81,9 @@ struct CameraRequestTexts {
     const char* frame_above_sensor = "ROI size exceeds sensor dimensions";        ///< NumX or NumY above the sensor
     const char* frame_start_off_sensor = "Start position outside sensor bounds";  ///< StartX/StartY off the sensor
     const char* frame_beyond_sensor = "ROI extends beyond sensor bounds";  ///< StartX + NumX past the sensor edge
+    // SetCCDTemperature's static check.
+    const char* setpoint_not_finite = "Target temperature must be finite";      ///< NaN or infinite
+    const char* setpoint_out_of_bounds = "Target temperature is out of range";  ///< outside CcdSetpointBounds
 };
 
 /// Whether every text is set: a driver's kRequestTexts holds it in a static_assert, so a field cleared by mistake
@@ -87,7 +94,8 @@ constexpr bool all_texts_set(const CameraRequestTexts& texts) {
            texts.bin_not_supported != nullptr && texts.size_not_positive != nullptr &&
            texts.start_negative != nullptr && texts.frame_size_not_positive != nullptr &&
            texts.frame_above_sensor != nullptr && texts.frame_start_off_sensor != nullptr &&
-           texts.frame_beyond_sensor != nullptr;
+           texts.frame_beyond_sensor != nullptr && texts.setpoint_not_finite != nullptr &&
+           texts.setpoint_out_of_bounds != nullptr;
 }
 
 namespace camera_request_detail {
@@ -146,6 +154,29 @@ inline void check_frame_on_sensor(const CameraFrame& frame, int sensor_width, in
                                   const CameraRequestTexts& texts = {}) {
     if (const char* misfit = frame_sensor_misfit(frame, sensor_width, sensor_height, texts)) {
         camera_request_detail::refuse(misfit);
+    }
+}
+
+// --- SetCCDTemperature ---
+
+/// The static bounds of a setpoint in degrees C, as vendor data: InvalidValue at or below `above` and above
+/// `at_most`. The default has none. Never invent a bound: a driver passes one only where its SDK or the device
+/// reports it (QHY: above absolute zero, at most 60).
+struct CcdSetpointBounds {
+    double above = -std::numeric_limits<double>::infinity();
+    double at_most = std::numeric_limits<double>::infinity();
+};
+
+/// SetCCDTemperature, before the connection check: a NaN or infinite setpoint, or one outside the static bounds, is
+/// InvalidValue. A range only the connected device knows (the SDK's control caps, Player One's target_temp_min/max)
+/// is the driver's, checked after the connection check.
+inline void check_ccd_setpoint(double temperature, const CcdSetpointBounds& bounds = {},
+                               const CameraRequestTexts& texts = {}) {
+    if (!std::isfinite(temperature)) {
+        camera_request_detail::refuse(texts.setpoint_not_finite);
+    }
+    if (temperature <= bounds.above || temperature > bounds.at_most) {
+        camera_request_detail::refuse(texts.setpoint_out_of_bounds);
     }
 }
 

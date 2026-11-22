@@ -216,6 +216,12 @@ A camera member refuses in one order on every brand (#2259), so a client writes 
   StartY below 0, is `InvalidValue`; (2) `NotConnected`; (3) a bin the camera does not support is `InvalidValue`; (4) an
   exposure running or starting is `InvalidOperation`. The setters do not check the sensor size: StartExposure does
   (ConformU sets a NumX beyond the sensor and expects StartExposure to refuse it).
+- **`SetCCDTemperature(temperature)`** (#2487): (1) a NaN or infinite setpoint, or one outside a static bound, is
+  `InvalidValue`; (2) `NotConnected`; (3) a range only the connected device knows is `InvalidValue`; never clamp. A
+  range is enforced only where the SDK or device reports it: Player One `caps_.target_temp_min/max` and the ZWO and
+  SVBONY control caps (`MinValue`/`MaxValue` of the target-temperature control) at step 3, QHY's static bounds
+  (above -273.15, at most 60) at step 1. Never invent a number for a camera that reports none. A camera with no
+  cooler (GPhoto, the iGuider) does not implement the member.
 
 The contract sweep probes these disconnected, connected and while an exposure runs (started through each camera's
 tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camera that still drifts, and
@@ -225,8 +231,9 @@ deletes its rows.
 The value checks of that order live in one module, `util/camera_frame_request.h` (#2261): `check_exposure_duration`
 (StartExposure step 1), `exposure_microseconds` (step 3), `check_frame_on_sensor` (step 4; `frame_sensor_misfit` is
 the same check as a value, for a driver that answers one text or only skips an SDK write, as ZWO does), and for the
-setters `check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3). A camera
-driver calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the
+setters `check_bin`, `check_frame_size` and `check_frame_start` (step 1) and `check_bin_supported` (step 3), and for
+SetCCDTemperature `check_ccd_setpoint` (step 1; the cooled drivers ZWO, SVBONY, Player One with iCAM, ToupTek with
+Altair and QHY call it, QHY with its static `CcdSetpointBounds`). A camera driver calls them at those points and never writes its own copy. It supplies the connection and exposing checks, the
 device lookups (ExposureMin and ExposureMax, the supported bins, the sensor size at the current bin) and its own
 InvalidValue texts (`CameraRequestTexts`; the codes are the same on every camera). Only the SDK alignment above and
 vendor limits (GPhoto's 3600 s cap and nearest shutter speed, the iGuider exposure steps) stay in the driver. Every

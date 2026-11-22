@@ -727,6 +727,7 @@ public:
     }
 
     void set_set_ccd_temperature(double temperature) override {
+        util::check_ccd_setpoint(temperature);
         ensure_connected();
         set_control_value_or_throw(ZWOControlType::TargetTemperature, static_cast<long>(std::lround(temperature)));
     }

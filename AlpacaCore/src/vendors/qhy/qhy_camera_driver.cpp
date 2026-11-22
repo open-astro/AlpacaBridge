@@ -87,8 +87,12 @@ constexpr util::CameraRequestTexts kRequestTexts = [] {
     texts.frame_above_sensor = "ROI exceeds sensor area for current binning";
     texts.frame_start_off_sensor = "Start position + ROI exceeds sensor area";
     texts.frame_beyond_sensor = "Start position + ROI exceeds sensor area";
+    texts.setpoint_not_finite = "Set point must be finite";
+    texts.setpoint_out_of_bounds = "Set point is at or below absolute zero or above 60 C";
     return texts;
 }();
+// Above absolute zero, at most 60 C: the only static setpoint bounds, QHY's own.
+constexpr util::CcdSetpointBounds kSetpointBounds{-273.15, 60.0};
 static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1143,16 +1147,7 @@ public:
 
     void set_set_ccd_temperature(double temperature) override {
         // Reject physically impossible or unreasonable setpoints before locking.
-        if (temperature <= -273.15) {
-            throw AlpacaException(
-                "Set point " + std::to_string(temperature) + " is at or below absolute zero",
-                AlpacaError::InvalidValue);
-        }
-        if (temperature > 60.0) {
-            throw AlpacaException(
-                "Set point " + std::to_string(temperature) + " exceeds maximum allowed (60°C)",
-                AlpacaError::InvalidValue);
-        }
+        util::check_ccd_setpoint(temperature, kSetpointBounds, kRequestTexts);
         ensure_connected();
         check_configuration_write();
         std::lock_guard<std::mutex> io_lock(io_mutex_);

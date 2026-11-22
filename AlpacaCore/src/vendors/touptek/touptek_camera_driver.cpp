@@ -983,6 +983,7 @@ public:
         return static_cast<double>(t) / 10.0;
     }
     void set_set_ccd_temperature(double temperature) override {
+        util::check_ccd_setpoint(temperature);
         ensure_connected();
         int deci = static_cast<int>(std::lround(temperature * 10.0));
         auto& sdk = sdk_;
