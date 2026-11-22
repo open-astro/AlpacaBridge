@@ -78,6 +78,10 @@ inline std::unique_ptr<FocuserDriver> make_zwo_focuser(int device_number) {
 #ifdef FAKE_CONFORMU_CELESTRON
 inline FakeCelestronFocuser& celestron_focuser() {
     static FakeCelestronFocuser fake;
+    // A move travels over time, as the focus motor does, so ConformU's Move ends on its own. A stand-in rate: a
+    // full 60000-count range takes 6 s, well inside ConformU's 60 s focuser timeout.
+    static const bool travels = (fake.set_travel_rate(10000), true);
+    static_cast<void>(travels);
     return fake;
 }
 inline std::unique_ptr<FocuserDriver> make_celestron_focuser(int device_number) {
@@ -121,7 +125,13 @@ inline std::unique_ptr<FocuserDriver> make_ifr_focuser(int device_number) {
 
 #ifdef FAKE_CONFORMU_ASTROASIS
 inline std::shared_ptr<FakeHidState>& astroasis_state() {
-    static auto state = std::make_shared<FakeHidState>();
+    static auto state = [] {
+        auto s = std::make_shared<FakeHidState>();
+        // A Move travels over time, as the Oasis focuser does; a stand-in rate: its 50000-step range takes 10 s,
+        // well inside ConformU's 60 s focuser timeout.
+        s->travel_rate = 5000;
+        return s;
+    }();
     return state;
 }
 inline std::unique_ptr<FocuserDriver> make_astroasis_focuser(int device_number) {
