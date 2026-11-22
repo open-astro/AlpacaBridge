@@ -1034,17 +1034,19 @@ function cgxConnectionType(value) {
 // The "Find adapter" result. `adapters` is the Value of GET /management/v1/networkadapters?vendor=celestron
 // ({Host, Ssid, Module} each), or null when the search failed with `error`. One adapter fills the address at once
 // (fill); two or more are listed for the operator to pick, and none is chosen for them. A pick or a fill only
-// changes the form: Save still applies it, and the connect still checks the mount's identity.
+// changes the form: Save still applies it, and the connect still checks the mount's identity. Ssid is the adapter's
+// own access-point name, even while it is a station on another network, so the label calls it the adapter.
 function skyPortalAdapterOptions(adapters, error) {
     if (!Array.isArray(adapters)) {
         return { options: [], fill: '', status: 'Search failed: ' + (error || 'no answer') };
     }
     if (adapters.length === 0) {
         return { options: [], fill: '',
-                 status: 'No SkyPortal adapter answered in 5 s. Join this board to the adapter\'s WiFi network ' +
-                         '(Celestron-XXXX) and try again, or type its address.' };
+                 status: 'No SkyPortal adapter answered in 5 s. Put this board on the adapter\'s own WiFi ' +
+                         '(Celestron-XXXX), or the adapter on the same network as this board (this board\'s ' +
+                         'hotspot works too), and try again, or type its address.' };
     }
-    const label = a => String(a.Host) + (a.Ssid ? ' (' + a.Ssid + (a.Module ? ', ' + a.Module : '') + ')'
+    const label = a => String(a.Host) + (a.Ssid ? ' (adapter ' + a.Ssid + (a.Module ? ', ' + a.Module : '') + ')'
                                                 : (a.Module ? ' (' + a.Module + ')' : ''));
     if (adapters.length === 1) {
         return { options: [], fill: String(adapters[0].Host),
