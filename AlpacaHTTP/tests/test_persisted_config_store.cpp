@@ -263,6 +263,31 @@ int main() {
         EXPECT(!missing.changed && !missing.saved);
     }
     {
+        // case: update_fields writes only a changed field, skips an entry accept refuses, and saves only a change
+        TempDir dir;
+        PersistedConfigStore store(dir.path);
+        (void)store.load(identity);
+        auto saved = entry("zwo", "telescope", 0);
+        saved["focalLength"] = 1;  // an integer: 1.0 is the same value
+        store.add_or_replace(saved);
+        const auto accept_all = [](const nlohmann::json&) { return true; };
+        auto same = store.update_fields("telescope", 0, {{"focalLength", 1.0}}, accept_all);
+        EXPECT(!same.changed && !same.saved);
+        EXPECT(!fs::exists(store.file()));
+        auto refused =
+            store.update_fields("telescope", 0, {{"focalLength", 2.0}}, [](const nlohmann::json&) { return false; });
+        EXPECT(!refused.changed && !refused.saved);
+        EXPECT(store.snapshot()[0]["focalLength"] == 1);
+        auto changed = store.update_fields("telescope", 0, {{"focalLength", 1.0}, {"apertureDiameter", 0.2}});
+        EXPECT(changed.changed && changed.saved);
+        const auto on_disk = read_json(store.file());
+        EXPECT(on_disk.size() == 1 && on_disk[0]["focalLength"] == 1 && on_disk[0]["apertureDiameter"] == 0.2);
+        auto missing = store.update_fields("telescope", 9, {{"focalLength", 3.0}});
+        EXPECT(!missing.changed && !missing.saved);
+        EXPECT(store.not_saved_text() ==
+               "could NOT be written to " + store.file().generic_string() + " (see the error above)");
+    }
+    {
         // case: concurrent add, remove, edit and save leave a coherent list and a parsable file
         TempDir dir;
         PersistedConfigStore store(dir.path);

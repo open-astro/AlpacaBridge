@@ -119,6 +119,19 @@ public:
     using Edit = std::function<bool(nlohmann::json&)>;
     EditResult edit_by_type_and_number(const std::string& device_type, int device_number, const Edit& edit);
 
+    // Sets each member of `fields` (an object) on the entry matching the type and
+    // number, unless `accept`, when given, returns false for that entry. A member
+    // the entry already holds with an equal value is left alone, so a client that
+    // re-sends a value causes no write. A change is saved after the lock is
+    // released. `accept` runs under the list lock and must not call into this store.
+    using Accept = std::function<bool(const nlohmann::json&)>;
+    EditResult update_fields(const std::string& device_type, int device_number, const nlohmann::json& fields,
+                             const Accept& accept = {});
+
+    // The one wording of a failed save for a caller's log line: "could NOT be
+    // written to <file> (see the error above)", after save() logged the error.
+    std::string not_saved_text() const;
+
     // Holds a uniqueId reserve_unique_id() chose, and the entry-cap slot of a
     // call that adds an entry, until it is destroyed.
     class Reservation {

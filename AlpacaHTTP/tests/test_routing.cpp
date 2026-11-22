@@ -207,8 +207,7 @@ void remove_device(alpacahttp::Router& router, const std::string& vendor, const 
 // Issue open-astro/AlpacaBridge#647 helpers. roundtrip_config() above POSTs
 // /management/v1/configuredevice, which registers with ConfigSource::Api. The
 // only caller of ConfigSource::Persisted is Router::load_persisted_devices().
-// It is reached from the constructor and re-entered from a few request paths,
-// but the persisted_devices_loaded_ latch makes every later call return early,
+// It runs once, from the constructor (issue #2483: no request path calls it),
 // so a config only reaches the persisted path when a NEW Router is constructed
 // over a file that already holds it. These helpers do exactly that.
 
@@ -4332,6 +4331,90 @@ int main() {
         remove_device(router, "synscan", "telescope", 9616);
     }
 #endif
+
+    {
+        // case: each management handler that reads the saved list sees it on a fresh Router's first request (#2483)
+        // The constructor's load is the only one: every handler below runs as the first request of a new
+        // Router over the same file, so a handler that needed its own load would miss the entries.
+        // attacheddevices is the first request of a fresh Router in the "attacheddevices lists a fake port
+        // with its candidates, the configured marker and a lister error" case, so it is not repeated here.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        // stubvendor has no descriptor, so every entry fails to load and stays saved. A full list
+        // (128, PersistedConfigStore::kMaxEntries) makes configuredevice's entry cap read it.
+        nlohmann::json saved = nlohmann::json::array();
+        saved.push_back({{"vendor", "stubvendor"}, {"deviceType", "telescope"}, {"deviceNumber", 9670}});
+        for (int number = 9700; saved.size() < 128; ++number) {
+            saved.push_back({{"vendor", "stubvendor"}, {"deviceType", "focuser"}, {"deviceNumber", number}});
+        }
+        const auto file_entry = [&](const std::string& type, int number) {
+            std::ifstream in(file);
+            const auto parsed = nlohmann::json::parse(in, nullptr, false);
+            if (parsed.is_array()) {
+                for (const auto& entry : parsed) {
+                    if (entry.value("deviceType", "") == type && entry.value("deviceNumber", -1) == number) {
+                        return entry;
+                    }
+                }
+            }
+            return nlohmann::json();
+        };
+        // 128 failed loads per Router: keep them out of the test log.
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink([](alpacacore::logging::LogLevel, std::string_view, std::string_view) {});
+        const auto fresh_router = [&]() {
+            std::filesystem::create_directories(file.parent_path());
+            {
+                std::ofstream out(file, std::ios::trunc);
+                out << saved.dump();
+            }
+            return std::make_unique<alpacahttp::Router>();
+        };
+        const auto error_number = [](const alpacahttp::Response& r) {
+            const auto json = nlohmann::json::parse(r.body(), nullptr, false);
+            return json.is_discarded() ? -1 : json.value("ErrorNumber", -1);
+        };
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        {
+            // configureddevices: a live telescope at a saved number shows the saved entry's vendor.
+            auto router = fresh_router();
+            EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(9670)));
+            EXPECT(listed_entry(*router, "Telescope", 9670).value("Vendor", "") == "stubvendor");
+            EXPECT(registry.unregister_device(alpacacore::DeviceType::Telescope, 9670));
+        }
+        {
+            // faileddevices: the saved entry that did not load.
+            auto router = fresh_router();
+            EXPECT(!listed_failed_entry(*router, "focuser", 9700).is_null());
+        }
+        {
+            // configuredevice: the saved list is full, so a new device is refused before it registers.
+            auto router = fresh_router();
+            const nlohmann::json body = {{"vendor", "stubvendor"}, {"deviceType", "focuser"}, {"deviceNumber", 9699}};
+            const auto json = nlohmann::json::parse(
+                route_request(*router, "POST", "/management/v1/configuredevice", body.dump()).body(), nullptr, false);
+            EXPECT(!json.is_discarded() &&
+                   json.value("ErrorNumber", -1) == alpacahttp::util::ErrorCode::INVALID_OPERATION);
+            EXPECT(json.value("ErrorMessage", "").find("configured devices") != std::string::npos);
+        }
+        {
+            // removedevice: a saved entry with no live driver is removed from the file.
+            auto router = fresh_router();
+            const nlohmann::json body = {{"vendor", "stubvendor"}, {"deviceType", "focuser"}, {"deviceNumber", 9701}};
+            EXPECT(error_number(route_request(*router, "POST", "/management/v1/removedevice", body.dump())) == 0);
+            EXPECT(file_entry("focuser", 9701).is_null() && !file_entry("focuser", 9702).is_null());
+        }
+        {
+            // updatedevice: the optics reach the saved entry.
+            auto router = fresh_router();
+            EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(9670)));
+            const nlohmann::json body = {{"deviceType", "telescope"}, {"deviceNumber", 9670}, {"focalLength", 0.7}};
+            EXPECT(error_number(route_request(*router, "POST", "/management/v1/updatedevice", body.dump())) == 0);
+            EXPECT(std::fabs(file_entry("telescope", 9670).value("focalLength", 0.0) - 0.7) < 1e-9);
+            EXPECT(registry.unregister_device(alpacacore::DeviceType::Telescope, 9670));
+        }
+        alpacacore::logging::set_log_sink(previous_sink);
+    }
 
     {
         // case: updatedevice sets telescope optics in place (#2057)
