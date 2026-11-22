@@ -2094,7 +2094,7 @@ private:
                         return;
                     }
                     if (!wants_resend(0) && !wants_resend(1)) {
-                        return;  // stopped, even if the stop failed: nothing left to keep going
+                        return;  // stopped or capped, even if the stop failed: nothing left to keep going
                     }
                     auto earliest = std::chrono::steady_clock::time_point::max();
                     for (int axis = 0; axis < 2; ++axis) {
@@ -2133,7 +2133,8 @@ private:
                 const bool keep_going = resend_tick_locked(ctx, due);
                 // Due again a full interval after this tick ends, whatever it
                 // did: a skipped tick never spins, and mutex_ is free between
-                // ticks.
+                // ticks. An axis capped above has left `due` (its re-send
+                // flag is off), so its deadline is never waited on again.
                 const auto next = clock_.now() + kMoveAxisResendInterval;
                 for (int axis = 0; axis < 2; ++axis) {
                     if (due[axis]) {
@@ -2148,8 +2149,10 @@ private:
     }
 
     // #2406 (#2396 AB-9): a MoveAxis past kMaxMoveAxisDuration. Its axis is stopped as MoveAxis(axis, 0) stops it,
-    // and Slewing raises the failure. A stop that fails keeps the axis reading as moving (#742). Under the operation
-    // lock the re-send tick holds.
+    // and Slewing raises the failure. The axis is never re-sent afterwards, even when the stop fails: its re-send
+    // flag is dropped first (stop_axis_locked()), so the body neither re-sends the start nor tries the stop
+    // again, and OnStepX's guide time limit ends a move nothing re-sends. A stop that fails keeps the axis reading
+    // as moving (#742). Under the operation lock the re-send tick holds.
     void stop_capped_move_locked(int axis) {
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
         motion_error_ = "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
@@ -2873,9 +2876,14 @@ private:
     template <typename Predicate>
     void wait_for_condition_locked(StateLock& lock, Predicate done) const {
         const auto start = clock_.now();
-        while (!done()) {
+        for (;;) {
+            // Before done(): a GOTO the status poll stopped at its bound reads as ended on the next :GU#, and must
+            // fail the slew, not land it (#2406).
             if (!motion_error_.empty()) {
-                throw AlpacaException(motion_error_, AlpacaError::DriverException);  // the poll stopped it (#2406)
+                throw AlpacaException(motion_error_, AlpacaError::DriverException);
+            }
+            if (done()) {
+                return;
             }
             if (clock_.now() - start > kGotoTimeout) {
                 // #2406: a timeout that sends no stop left the GOTO running. Stop it first; Slewing then raises.
