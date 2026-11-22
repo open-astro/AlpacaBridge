@@ -4194,7 +4194,8 @@ TEST_CASE("iOptron motion bound - a MoveAxis renewed before its dead-man keeps r
     driver->move_axis(0, rate);  // the client renews its move
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
     clock.advance(std::chrono::seconds(40));  // 80 s after the first, 40 s after the renewal
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // The body woke at the first move's 60 s: wait until it has waited again or ended, so the check follows it.
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     CHECK(mount.count(":Q#") == 0);
     CHECK(driver->get_slewing());
 
@@ -4241,8 +4242,13 @@ TEST_CASE("iOptron motion bound - an async GOTO that landed is left alone at 300
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(301));                     // nobody polled; the mount reads tracking (1)
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the body's status read at the bound
+    const int status_reads = mount.count(":GLS#");
+    clock.advance(std::chrono::seconds(301));  // nobody polled; the mount reads tracking (1)
+    // The body's status read at the bound comes before its decision: wait for it, then for the body to end, so the
+    // negative check below follows the decision.
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":GLS#") > status_reads);
+    REQUIRE(wait_until([&] { return !io::motion_bound_watchdog_running_for_testing(*driver); }));
     CHECK(mount.count(":Q#") == 0);
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -4317,5 +4323,31 @@ TEST_CASE("iOptron async landing gate - a failed position read keeps Slewing tru
     CHECK(driver->get_slewing());  // a fresh first sample after the failed read
     clock.advance(std::chrono::milliseconds(600));
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at the 300 s bound",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/300.0);  // off the target, inside the far miss
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    // Refused: the case is about the gate's own bound, read by a client poll, not the watchdog's status read.
+    io::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_position_drift_per_read(100.0);  // reads stopped, but the position never settles
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(600));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::seconds(300));
+    CHECK(contains(slewing_failure(*driver), "did not settle within 300 s"));
+    CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
 }

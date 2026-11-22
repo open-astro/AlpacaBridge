@@ -1603,6 +1603,12 @@ public:
             landing_gate_generation_ = 0;
             return true;
         }
+        // The gate is bounded too: a mount still not settled at the GOTO's kSlewTimeout bound is stopped.
+        if (now >= slew_bound_deadline_) {
+            landing_gate_generation_ = 0;
+            stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) + " s");
+            throw AlpacaException(last_slew_error_);
+        }
         if (!landing_prev_valid_) {
             landing_prev_valid_ = true;
             landing_prev_ra_hours_ = ra;
@@ -1626,7 +1632,7 @@ public:
         const auto [ra_sky_arcsec, dec_arcsec] = target_miss_arcsec(ra, dec);
         if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
             slew_in_progress_ = false;
-            last_slew_error_ = "SlewToCoordinatesAsync failed: the mount stopped " +
+            last_slew_error_ = "Async GoTo failed: the mount stopped " +
                                std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) + " arcsec (RA) and " +
                                std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
                                " arcsec (Dec) from the target";
@@ -3359,7 +3365,7 @@ private:
 
     // Ends the bounded motion: the error is stored before the stop goes out (the exchange gives up mutex_, and a
     // reader in that gap must not take the motion for finished), then :Q#, best effort.
-    void stop_bounded_motion_locked(const std::string& failure) {
+    void stop_bounded_motion_locked(const std::string& failure) const {
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
@@ -4072,6 +4078,7 @@ public:
     void set_motion_bound_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         motion_bound_watchdog_.set_spawn_for_testing(std::move(spawn));
     }
+    bool motion_bound_watchdog_running_for_testing() const { return motion_bound_watchdog_.running(); }
     void set_zero_search_poll_for_testing(bool enabled) { zero_search_poll_enabled_.store(enabled); }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
@@ -4323,7 +4330,7 @@ private:
     // Under mutex_: the GOTO in slew_in_progress_ came from SlewToCoordinates* or SlewToTarget* (which route through
     // them), so AbortSlew turns Tracking back on (issue #2000). False for an Alt/Az slew, cleared by a superseding
     // initiator and by AbortSlew.
-    bool equatorial_slew_ = false;
+    mutable bool equatorial_slew_ = false;
     mutable DriverMotion driver_motion_ = DriverMotion::None;
     // Task-clock instant past which a zero search with no status 7 is stopped (issue #2420). Set by find_home() for a
     // zero search only (#2432) and read only while driver_motion_ is HomeSearch (the status refresh and the zero
@@ -4334,7 +4341,7 @@ private:
     // generation slew_bound_generation_ that still moves at slew_bound_deadline_ is stopped.
     std::chrono::steady_clock::time_point move_axis_deadline_{};
     std::chrono::steady_clock::time_point slew_bound_deadline_{};
-    std::uint64_t slew_bound_generation_ = 0;
+    mutable std::uint64_t slew_bound_generation_ = 0;
     // Issue #2396 (AB-7): the async landing gate (async_goto_landed_locked()), under mutex_. The gate runs for the
     // GOTO of landing_gate_generation_ (0: none) and keeps its last position sample.
     mutable std::uint64_t landing_gate_generation_ = 0;
@@ -4645,6 +4652,13 @@ void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_motion_bound_watchdog_spawn_for_testing(std::move(spawn));
     }
+}
+
+bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        return ioptron->motion_bound_watchdog_running_for_testing();
+    }
+    return false;
 }
 
 void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled) {
