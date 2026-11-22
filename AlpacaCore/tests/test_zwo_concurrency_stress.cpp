@@ -42,6 +42,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
@@ -692,6 +693,29 @@ TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[z
             driver->disconnect();
         }
         driver.reset();
+    }
+}
+
+// #2459: destruction while both axes' pulse drains wait inside a 3 s step (and, every other time, the disconnect
+// teardown runs too). The destructor cancels the drains' clock waits instead of waiting the steps out.
+// Falsified by: zwo_telescope_driver.cpp run_pulse_task(): an uncancellable clock_.sleep_for(step) in place of
+// ctx.wait_for(step), so the destructor's join waits for the step to end.
+TEST_CASE("ZWO mount - destruction with live pulse drains on both axes", "[zwo][telescope][stress]") {
+    alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
+    configure_storm_mount(mount);
+    REQUIRE(mount.ok());
+
+    for (int i = 0; i < 25; ++i) {
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE_NOTHROW(driver->pulse_guide(2, 3000));
+        REQUIRE_NOTHROW(driver->pulse_guide(0, 3000));
+        // Cumulative counts: both of this iteration's steps reached the mount, so both drains wait in their step.
+        REQUIRE(mount.wait_for_count(":Mge", i + 1, std::chrono::milliseconds(2000)));
+        REQUIRE(mount.wait_for_count(":Mgn", i + 1, std::chrono::milliseconds(2000)));
+        if ((i % 2) != 0) driver->disconnect();  // the teardown body is live at destruction too
+        const auto elapsed = alpacacore::test::timed([&] { driver.reset(); });
+        CHECK(elapsed < std::chrono::milliseconds(1500));  // half a step: a destructor that waits one out fails
     }
 }
 
