@@ -4921,6 +4921,70 @@ TEST_CASE("Celestron CGX USB Telescope Driver - the longest legitimate homes pas
     CHECK(mount.axis_physical_position(0x11) == 0U);
 }
 
+// #2468: Park takes the same one-time re-home as FindHome (supervise_home_search()). The RA search crawls the way the
+// #2213 capture's did, so the encoder moves and the INFO line's position and elapsed time can be checked.
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - Park stops and re-homes once an axis whose search crawls past the bound",
+    "[celestron][cgx][telescope][home-search]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    mount.script_home_search(0x10, {HomeLeg{1, kCrawlHomeRate, 0}});  // a crawl that never reaches the switch
+    std::mutex infos_mutex;
+    std::vector<std::string> rehome_infos;
+    struct SinkRestore {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkRestore() { alpacacore::logging::set_log_sink(previous); }
+    } restore;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level != alpacacore::logging::LogLevel::Info || message.find("re-homing") == std::string_view::npos)
+                return;
+            const std::lock_guard<std::mutex> lock(infos_mutex);
+            rehome_infos.emplace_back(message);
+        });
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    const std::uint32_t start_encoder = mount.axis_position(0x10);
+    driver->park();
+    // The fake's motion advances with the clock, one second per step, from the Park's MC_LEVEL_START on.
+    REQUIRE(
+        step_motion_until(clock, mount, [&] { return mount.count_command(0x10, 0x0b) == 2 || motion_ended(*driver); }));
+    INFO("Slewing failure: " << slewing_failure(*driver));
+    REQUIRE(mount.count_command(0x10, 0x0b) == 2);
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    CHECK(slewing_failure(*driver).empty());
+    CHECK(driver->get_at_park());
+    CHECK(driver->get_at_home());
+    CHECK(mount.stops_before_home_starts(0x10) == std::vector<int>{0, 1});
+    // The Dec search homed inside the bound: it gets no stop and no second home.
+    CHECK(mount.count_command(0x11, 0x0b) == 1);
+    CHECK(mount.count_command(0x11, 0x24) == 0);
+
+    std::vector<std::string> lines;
+    {
+        const std::lock_guard<std::mutex> lock(infos_mutex);
+        lines = rehome_infos;
+    }
+    REQUIRE(lines.size() == 1);
+    INFO("INFO line: " << lines[0]);
+    unsigned long position = 0;
+    int elapsed = 0;
+    REQUIRE(std::sscanf(lines[0].c_str(),
+                        "Home search missed the sensor; re-homing RA once from position %lu after %d s", &position,
+                        &elapsed) == 2);
+    // Stopped at the 60 s bound, give or take the one-second step; the position is where the crawl had got to then.
+    CHECK(elapsed >= 60);
+    CHECK(elapsed <= 61);
+    CHECK(position == ((start_encoder + kCrawlHomeRate * static_cast<std::uint32_t>(elapsed)) & 0x00ffffffU));
+}
+
 // Slice 5a (rig 2026-11-21): the state poll reads both encoders every 250 ms anyway, so during a home the travel guard
 // takes the poll's frames instead of reading the encoders again: over WiFi the double reads fell in the window where
 // the adapter lost requests in bursts. The guard still sees all the travel, from the poll's readings alone.

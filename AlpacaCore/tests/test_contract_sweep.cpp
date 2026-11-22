@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -206,6 +207,7 @@ using alpacacore::DeviceType;
 using alpacacore::test::contract::ContractEntry;
 namespace err = alpacacore::AlpacaError;
 using alpacacore::test::error_code_of;
+using alpacacore::test::worker_code_of;
 
 using Probe = std::pair<std::string, std::function<void()>>;
 
@@ -470,21 +472,29 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"onstep_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
+    {"onstep_telescope", kParked, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
+    {"onstep_telescope", kParked, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
 
     // Celestron CGX: CanSlew is false (only the async slew) and MoveAxis is not implemented; both check the axis first.
     {"celestron_telescope_cgx", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx_tcp", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx", kParked, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx_tcp", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx_tcp", kParked, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx", kOff, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx", kParked, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx", kParked, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     // #2287, Sky-Watcher.
     {"skywatcher_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"skywatcher_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
@@ -577,22 +587,31 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     // #2287, ZWO AM.
     {"zwo_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"zwo_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"zwo_telescope", kParked, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"zwo_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"zwo_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"zwo_telescope", kParked, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"zwo_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"zwo_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"zwo_telescope", kParked, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"zwo_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"zwo_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"zwo_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"zwo_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"zwo_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"zwo_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"zwo_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"zwo_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"zwo_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"zwo_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"zwo_telescope", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"zwo_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"zwo_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"zwo_telescope", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     // #2287, Bisque.
     {"bisque_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"bisque_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
@@ -607,35 +626,51 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope_cgx", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx", kParked, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx", kParked, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx_tcp", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
 };
 // clang-format on
 
@@ -653,10 +688,8 @@ const char* probe_state_name(ProbeState state) {
     return "?";
 }
 
-// Runs one InvalidValue probe and checks the code its exemption, if any, allows.
-void check_invalid_value_probe(const std::string& id, ProbeState state, const Probe& probe) {
-    const auto& [name, fn] = probe;
-    const int code = error_code_of(fn);
+// Judges the code a probe's call answered, against its exemption in kProbeExemptions, if any.
+void check_invalid_value_code(const std::string& id, ProbeState state, const std::string& name, int code) {
     const auto ex = std::find_if(kProbeExemptions.begin(), kProbeExemptions.end(), [&](const ProbeExemption& x) {
         return id == x.id && state == x.state && name == x.probe;
     });
@@ -670,6 +703,11 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
         INFO(id << " " << name << " is a known failure (" << ex->reason << "): delete its line once fixed");
         CHECK(code != err::InvalidValue);
     }
+}
+
+// Runs one InvalidValue probe on the test thread and judges its code.
+void check_invalid_value_probe(const std::string& id, ProbeState state, const Probe& probe) {
+    check_invalid_value_code(id, state, probe.first, error_code_of(probe.second));
 }
 
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
@@ -1466,6 +1504,13 @@ Hosted connected_host(const Tier2Host& h) {
     for (const auto& p : probes) check_invalid_value_probe(h.id, ProbeState::Connected, p);
 }
 
+// #2468: how long a fake's Park may take to reach AtPark (the ZWO driver holds Slewing for 5 s after ":hP#",
+// zwo_telescope_driver.cpp park()), and how long one parked probe may take. Every probe is refused before it reaches
+// the wire, so it returns in milliseconds; a probe a driver accepted could start a blocking slew, and the bound ends
+// the case there instead of stalling the sweep.
+constexpr std::chrono::seconds kParkLandBound{15};
+constexpr std::chrono::seconds kParkedProbeBound{5};
+
 // #2257: the same probes while connected and parked. The case parks the mount itself and waits for AtPark.
 [[maybe_unused]] void case_t2_invalid_value_parked(const Tier2Host& h) {
     REQUIRE(h.type == DeviceType::Telescope);
@@ -1479,10 +1524,22 @@ Hosted connected_host(const Tier2Host& h) {
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     REQUIRE(t.get_can_park());
     t.park();
-    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    // Real time: the tier-2 hosts run on the default task clock or on none (Sky-Watcher, CGX).
+    const auto deadline = Clock::now() + kParkLandBound;
     while (!t.get_at_park() && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     REQUIRE(t.get_at_park());
-    for (const auto& p : invalid_value_probes(t, h.type)) check_invalid_value_probe(h.id, ProbeState::Parked, p);
+    for (const auto& [name, fn] : invalid_value_probes(t, h.type)) {
+        INFO(h.id << " parked " << name);
+        auto call = std::async(std::launch::async, [&fn] { return worker_code_of(fn); });
+        if (call.wait_for(kParkedProbeBound) != std::future_status::ready) {
+            // A disconnect ends whatever the probe started, so the future's join below returns.
+            FAIL_CHECK("the probe did not return within " << kParkedProbeBound.count() << " s");
+            static_cast<void>(error_code_of([&] { hosted.driver->set_connected(false); }));
+            static_cast<void>(call.get());
+            return;
+        }
+        check_invalid_value_code(h.id, ProbeState::Parked, name, call.get());
+    }
 }
 
 // Case 4. Connected DeviceState is non-empty and carries TimeStamp (base classes, PR #625).
@@ -1851,11 +1908,14 @@ std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold, alpacacore
 }
 
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
-// Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed.
+// Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed, and once it has seen
+// ":hP#" its ":Gps#" answers 2 (park completed), so a Park lands (#2468).
 Tier2Host tier2_host_zwo_telescope() {
     Tier2Host h = mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
-        [](const std::string& chunk) -> std::string {
+        [parked = std::make_shared<std::atomic<bool>>(false)](const std::string& chunk) -> std::string {
+            if (chunk.find(":hP#") != std::string::npos) parked->store(true);
+            if (chunk.find(":Gps#") != std::string::npos) return parked->load() ? "2#" : "0#";
             if (chunk.find(":GVP#") != std::string::npos) return "AM5#";
             if (chunk.find(":GMA#") != std::string::npos) return "012345ABCDEF#";
             if (chunk.find(":GU#") != std::string::npos) return "NG#";
@@ -1869,9 +1929,6 @@ Tier2Host tier2_host_zwo_telescope() {
                        : "0#";
         },
         on_default_clock<zwo_telescope_over>);
-    h.at_park_unreachable =
-        "the fixed responder answers :GU# 'NG#' and :Gps# '0#', so the mount never moves or reports parked and Park "
-        "fails (this recipe)";
     return h;
 }
 
@@ -1998,6 +2055,7 @@ Tier2Host tier2_host_celestron_telescope() {
 Tier2Host tier2_host_celestron_cgx_telescope() {
     namespace cel = alpacacore::vendor::celestron;
     auto fake = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    fake->set_auto_complete_motions(true);  // #2468: a home search lands at once, so a Park reaches AtPark
     const auto make = [fake](int device_number) -> std::unique_ptr<AlpacaDriver> {
         cel::CelestronCgxConnectionInfo info;
         info.port_path = fake->slave_path();
@@ -2021,9 +2079,6 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
         "",
         "Firmware replies are immediate; Connecting may complete before its first poll (fake protocol timing)",
         err::InvalidOperation};
-    host.at_park_unreachable =
-        "FakeCelestronCgxMount models no park state, so AtPark never reads true "
-        "(fake_celestron_cgx_mount.h)";
     return host;
 }
 
@@ -2060,9 +2115,6 @@ Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
                    "The adapter answers at once; the connect's 200 ms backlog drain may end before the first poll "
                    "(fake_celestron_aux_tcp_adapter.h)",
                    err::InvalidOperation};
-    host.at_park_unreachable =
-        "FakeCelestronAuxTcpAdapter models no park position, so a Park never lands and AtPark never reads true "
-        "(fake_celestron_aux_tcp_adapter.h)";
     return host;
 }
 
@@ -2135,19 +2187,21 @@ std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold, alpacac
 // Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
 // :GU# and :hP#. The default "0#" has no 'N', so :GU# would report a GOTO that
 // never ends, and Park stops running motion and waits for it first (#1430).
+// Once :hP# is accepted, :GU# reports parked, so a Park lands (#2468).
 Tier2Host tier2_host_onstep_telescope() {
-    auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder()](const std::string& chunk) {
+    auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder(),
+                        parked = std::make_shared<std::atomic<bool>>(false)](const std::string& chunk) {
         if (chunk.rfind(":GU", 0) == 0) {
-            return std::string("nNp#");  // not tracking, no GOTO, not parked
+            return std::string(parked->load() ? "nNP#" : "nNp#");  // not tracking, no GOTO, parked or not
         }
         if (chunk.rfind(":hP", 0) == 0) {
+            parked->store(true);
             return std::string("1");  // park accepted (bare digit)
         }
         return fallback(chunk);
     };
     Tier2Host h = mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
                                     on_default_clock<onstep_telescope_over>);
-    h.at_park_unreachable = ":GU always answers 'nNp#' (not parked), so AtPark never reads true (idle_onstep above)";
     return h;
 }
 
