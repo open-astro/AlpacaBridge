@@ -1609,7 +1609,10 @@ public:
         // The gate is bounded too: a mount still not settled at the GOTO's kSlewTimeout bound is stopped.
         if (now >= slew_bound_deadline_) {
             landing_gate_generation_ = 0;
-            stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) + " s");
+            if (!stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) +
+                                            " s")) {
+                throw_if_link_lost();  // NotConnected; the relink stop is recorded from the flags kept
+            }
             throw AlpacaException(last_slew_error_);
         }
         if (!landing_prev_valid_) {
@@ -1639,7 +1642,7 @@ public:
                                std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) + " arcsec (RA) and " +
                                std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
                                " arcsec (Dec) from the target";
-            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            ALPACA_LOG_INFO("iOptron", last_slew_error_);  // a client-visible failure (decision 0007 rule 9)
             throw AlpacaException(last_slew_error_);
         }
         return true;
@@ -3328,7 +3331,9 @@ private:
             std::chrono::steady_clock::duration remaining{};
             {
                 StateLock lock(lock_gate_);
-                if (!connected_ || ctx.stop_reason() != util::StopReason::None) return;
+                // A lost link is the relink stop's (relink_stop_pending_, taken from the motion flags by the next
+                // Connect or Disconnect): send nothing and leave the flags for it.
+                if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None) return;
                 const bool axis_moving = axis_move_active_primary_ || axis_move_active_secondary_;
                 const bool slew_bounded = slew_in_progress_ && slew_bound_generation_ == slew_operation_generation_;
                 if (!axis_moving && !slew_bounded) return;
@@ -3367,8 +3372,25 @@ private:
     }
 
     // Ends the bounded motion: the error is stored before the stop goes out (the exchange gives up mutex_, and a
-    // reader in that gap must not take the motion for finished), then :Q#, best effort.
-    void stop_bounded_motion_locked(const std::string& failure) const {
+    // reader in that gap must not take the motion for finished), then :Q#. The motion flags are cleared only after
+    // the stop was sent or failed on a live link: a stop the link loss refused leaves them, so the next Connect or
+    // Disconnect records the relink stop (relink_stop_pending_) from them. Returns false for that case (link lost).
+    // A bound that ends the motion is a client-visible failure (INFO, decision 0007 rule 9); a stop that could not
+    // be sent is WARN.
+    bool stop_bounded_motion_locked(const std::string& failure) const {
+        last_slew_error_ = failure + "; the mount was stopped";
+        bool stop_failed = false;
+        try {
+            wire().stop_slewing();
+        } catch (const std::exception& e) {
+            if (link_lost()) {
+                last_slew_error_ = failure + "; the link was lost before the stop, so the next Connect sends it";
+                ALPACA_LOG_WARN("iOptron", last_slew_error_);
+                return false;
+            }
+            last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
+            stop_failed = true;
+        }
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
@@ -3377,16 +3399,14 @@ private:
         driver_motion_ = DriverMotion::None;
         slew_bound_generation_ = 0;
         clear_slew_hold_locked();
-        last_slew_error_ = failure + "; the mount was stopped";
-        try {
-            wire().stop_slewing();
-        } catch (const std::exception& e) {
-            throw_if_link_lost();
-            last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
+        if (stop_failed) {
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+        } else {
+            ALPACA_LOG_INFO("iOptron", last_slew_error_);
         }
-        ALPACA_LOG_WARN("iOptron", last_slew_error_);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
+        return true;
     }
 
     // Cancel and join the motion bound watchdog. Without mutex_ held; under transition_mutex_ or in the destructor.

@@ -4254,6 +4254,21 @@ std::string slewing_failure(alpacacore::TelescopeDriver& driver) {
 
 TEST_CASE("iOptron motion bound - a MoveAxis left running past its dead-man is stopped",
           "[ioptron][telescope][unit][fake][goto-safety]") {
+    // Decision 0007 rule 9: the stop is a client-visible failure, logged at INFO, never WARN or ERROR.
+    std::atomic<int> info_lines{0};
+    std::atomic<int> warn_lines{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (component != "iOptron" || message.find("MoveAxis ran for") == std::string_view::npos) return;
+            if (level == alpacacore::logging::LogLevel::Info) ++info_lines;
+            if (level == alpacacore::logging::LogLevel::Warn || level == alpacacore::logging::LogLevel::Error) {
+                ++warn_lines;
+            }
+        });
     FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     mount.set_system_status(1);
@@ -4272,6 +4287,9 @@ TEST_CASE("iOptron motion bound - a MoveAxis left running past its dead-man is s
     clock.advance(std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));  // the body has logged and ended
+    CHECK(info_lines.load() == 1);
+    CHECK(warn_lines.load() == 0);
     driver->abort_slew();  // clears the stored failure
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -4478,6 +4496,63 @@ TEST_CASE("iOptron motion bound - an async Alt/Az GOTO still slewing at 300 s is
     clock.advance(std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK(contains(slewing_failure(*driver), "The slew did not end within 300 s"));
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Review of #2523: the dead-man's :Q# over a link that drops on it. The motion flags stay set, so the reconnect records
+// the relink stop from them and sends :Q# first to the mount plugged back in.
+TEST_CASE("iOptron motion bound - a dead-man stop that the link loss refused is sent by the next Connect",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    MovablePort port;
+    PtyIoptronMount first;
+    first.model().set_system_status(1);
+    port.point_at(first.slave_path());
+    auto driver = link_driver(serial_endpoint(port.path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    first.unplug_on(on_command(":Q#"));
+    clock.advance(std::chrono::seconds(61));
+    REQUIRE(wait_until([&] { return first.unplugged(); }));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::NotConnected);
+
+    PtyIoptronMount second;  // the mount, plugged back in
+    port.point_at(second.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(first_command(second) == ":Q#");
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 300 s is stopped",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_system_status(2);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(299));
+    mount.fail_next_reads(1);  // the bound's status read fails
+    clock.advance(std::chrono::seconds(2));
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(contains(slewing_failure(*driver), "status could not be read at its 300 s bound"));
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
 }
