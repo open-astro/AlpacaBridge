@@ -1471,7 +1471,7 @@ struct MoveAxisBoundRig {
     std::atomic<int> infos{0};
     std::atomic<int> warns{0};
     alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
-    std::size_t base_waiters = 0;
+    std::atomic<std::thread::id> bound_thread{};
 
     MoveAxisBoundRig() {
         st->clock = &clock;
@@ -1487,7 +1487,12 @@ struct MoveAxisBoundRig {
         driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         sc_bound::set_status_poll_paused_for_testing(*driver, true);
-        base_waiters = clock.waiter_count();  // the paused poll
+        // Names the bound body's thread, so start_move() waits for that body (not any waiter) to park.
+        sc_bound::set_motion_bound_spawn_for_testing(*driver, [this](std::function<void()> body) {
+            std::thread thread(std::move(body));
+            bound_thread.store(thread.get_id());
+            return thread;
+        });
     }
     ~MoveAxisBoundRig() {
         st->mute.store(false);
@@ -1497,11 +1502,18 @@ struct MoveAxisBoundRig {
     MoveAxisBoundRig(const MoveAxisBoundRig&) = delete;
     MoveAxisBoundRig& operator=(const MoveAxisBoundRig&) = delete;
 
-    // Starts a MoveAxis and waits for the bound body to park on the clock.
+    // Starts a MoveAxis and waits until the bound body's own thread is parked on the clock. Not wait_for_waiters(): the
+    // paused status poll parks and wakes on the same clock, so a count can be met before the bound body waits, and a
+    // step that lands between its read of the clock and its wait moves its deadline.
     void start_move(int axis) {
         REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
-        REQUIRE(clock.wait_for_waiters(base_waiters + 1, std::chrono::seconds(5)));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (bound_thread.load() == std::thread::id{} && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        REQUIRE(clock.wait_for_waiter_thread(bound_thread.load(), std::chrono::seconds(5)));
     }
+
     // In 5 s steps, polling the handset after each one: the status poll is paused, and a frame older than the
     // snapshot bound would read as a lost link.
     void advance(std::chrono::seconds by) {
