@@ -194,6 +194,8 @@ public:
 
     void pulse_guide(int direction, int duration_ms);
     double get_guide_rate();
+    /// Sends @p guide_rate (a sidereal multiple, 0.10-0.90) and returns the mount's readback, after the x15
+    /// fallback encoding too; the caller compares it with the request. Only an unreadable readback returns the request.
     double set_guide_rate(double guide_rate);
 
     SiteInfo get_site_info();

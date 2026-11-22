@@ -1629,4 +1629,86 @@ TEST_CASE("ZWO hold window - a refused pulse drain start leaves IsPulseGuiding f
     CHECK(rig.mount.count(":Mg") == 0);
 }
 
+namespace {
+constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
+}  // namespace
+
+// open-astro#2462: a GuideRate write of 0 is refused with InvalidValue, before any connection check, on either axis;
+// the cached rate stays and nothing is sent (a stored 0 made every later PulseGuide a silent no-op).
+// Falsified by: zwo_telescope_driver.cpp set_guide_rate() range check guarded by `effective > 0.0 &&` (the old 0
+// exemption: a 0 is stored unsent, no exception).
+TEST_CASE("ZWO telescope clock - a GuideRate of 0 is refused and leaves the rate (2462)",
+          "[zwo][telescope][unit][guide-rate]") {
+    const bool ra = GENERATE(false, true);
+    const auto write_zero = [&](Rig& rig) {
+        if (ra)
+            rig.driver->set_guide_rate_right_ascension(0.0);
+        else
+            rig.driver->set_guide_rate_declination(0.0);
+    };
+    Rig rig;
+    require_alpaca_error([&] { write_zero(rig); }, AlpacaError::InvalidValue);  // disconnected: the value first
+    rig.connect();
+    const auto before = rig.driver->get_guide_rate();
+    REQUIRE(before.ra > 0.0);
+    const int sent = rig.mount.count(":Rg");
+    require_alpaca_error([&] { write_zero(rig); }, AlpacaError::InvalidValue);
+    CHECK(rig.driver->get_guide_rate().ra == before.ra);
+    CHECK(rig.driver->get_guide_rate().dec == before.dec);
+    CHECK(rig.mount.count(":Rg") == sent);
+}
+
+// open-astro#2462: a mount that takes only the x15 encoding gets the scaled resend, and GuideRate reads the rate the
+// mount reports after it.
+// Falsified by: zwo_mount_protocol_wrapper.cpp set_guide_rate() resending the unscaled rate (`send_rate(scaled / 15.0,
+// 1)`) instead of `send_rate(scaled, 1)` (the mount keeps 0.50x and the write fails).
+TEST_CASE("ZWO telescope clock - GuideRate after the x15 fallback is the mount's readback (2462)",
+          "[zwo][telescope][unit][guide-rate]") {
+    Rig rig;
+    rig.mount.set_guide_rate_encoding(FakeZwoMount::GuideRateEncoding::ScaledOnly);
+    rig.connect();
+    const int reads = rig.mount.count(":Ggr");
+    REQUIRE_NOTHROW(rig.driver->set_guide_rate_right_ascension(0.80 * kSiderealDegPerSec));
+    CHECK(rig.mount.guide_rate() == "12.0");
+    CHECK(rig.mount.count(":Ggr") == reads + 2);  // one readback per encoding
+    CHECK(rig.driver->get_guide_rate().ra / kSiderealDegPerSec == Catch::Approx(0.80).margin(0.005));
+}
+
+// open-astro#2462: a mount that takes neither encoding fails the write with DriverException, and GuideRate reads the
+// rate the mount still runs, not the request.
+// Falsified by: zwo_mount_protocol_wrapper.cpp set_guide_rate() returning `guide_rate` after the x15 send instead of
+// `get_guide_rate()` (the write passes and GuideRate reads the unsent 0.80x).
+TEST_CASE("ZWO telescope clock - a GuideRate the mount does not take fails and reads the mount's rate (2462)",
+          "[zwo][telescope][unit][guide-rate]") {
+    Rig rig;
+    rig.mount.set_guide_rate_encoding(FakeZwoMount::GuideRateEncoding::None);
+    rig.connect();
+    require_alpaca_error([&] { rig.driver->set_guide_rate_declination(0.80 * kSiderealDegPerSec); },
+                         AlpacaError::DriverException);
+    CHECK(rig.mount.guide_rate() == "0.50");
+    CHECK(rig.driver->get_guide_rate().ra / kSiderealDegPerSec == Catch::Approx(0.50).margin(0.005));
+    CHECK(rig.driver->get_guide_rate().dec / kSiderealDegPerSec == Catch::Approx(0.50).margin(0.005));
+}
+
+// open-astro#2492: Sync takes its offset from a position read after the sync command, not from the poll's sample
+// taken before it. On a mount that applies ":SMMC" to its own coordinates, RA/Dec read the sync position after the
+// next poll instead of the sync correction counted twice.
+// Falsified by: zwo_telescope_driver.cpp sync_to_pair() taking `raw` from cached_equatorial_ when set instead of
+// protocol.get_current_equatorial() (RA reads 14.0, Dec 47.0).
+TEST_CASE("ZWO telescope clock - Sync ignores a position sampled before the sync (2492)",
+          "[zwo][telescope][unit][clock][sync]") {
+    Rig rig;
+    rig.mount.set_sync_applies(true);
+    rig.connect();
+    rig.advance(250ms);  // a poll publishes the pre-sync position (12h, +45)
+    REQUIRE(rig.driver->get_right_ascension() == Catch::Approx(12.0).margin(1e-3));
+    rig.driver->sync_to_coordinates(13.0, 46.0);
+    REQUIRE(rig.mount.ra_hours() == Catch::Approx(13.0).margin(1e-3));
+    const int polls = rig.mount.count(":GD");
+    rig.advance_until([&] { return rig.mount.count(":GD") > polls + 1; }, 250ms, 5s);
+    REQUIRE(rig.mount.count(":GD") > polls + 1);
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(13.0).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(46.0).margin(1e-3));
+}
+
 #endif  // !_WIN32

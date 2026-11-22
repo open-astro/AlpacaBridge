@@ -1859,7 +1859,15 @@ double ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
 
     const double scaled = guide_rate * 15.0;
     send_rate(scaled, 1);
-    return guide_rate;
+    // open-astro#2462: return what the mount reports after the x15 send, so the caller can see a write it did not
+    // take. Only a mount that answers no readable :Ggr at all keeps the request (its connect publishes no rate, #2314).
+    try {
+        return get_guide_rate();
+    } catch (const std::exception& e) {
+        ALPACA_LOG_WARN("ZWO",
+                        std::string("Guide rate not read back after the x15 write; keeping the request: ") + e.what());
+        return guide_rate;
+    }
 }
 
 SiteInfo ZWOMountProtocolWrapper::get_site_info() {

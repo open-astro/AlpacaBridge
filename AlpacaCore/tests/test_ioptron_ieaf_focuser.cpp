@@ -392,8 +392,10 @@ void require_lost(alpacacore::FocuserDriver& driver, const std::string& old_pts)
     require_alpaca_error([&] { (void)driver.get_max_step(); }, kNotConnected);
     require_alpaca_error([&] { driver.move(1200); }, kNotConnected);
     require_alpaca_error([&] { driver.halt(); }, kNotConnected);
-    // The wrapper released the port: no claim is left on the dead node.
-    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
+    // The wrapper released the port: no claim is left on the dead node. Connected reads the wrapper's lock-free
+    // lost latch, which the read sets before the thread that met the hangup closes the port, so wait for the
+    // release (#2466, as the Gemini flat panel's #2402).
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(old_pts); }, milliseconds(1000)));
 }
 
 }  // namespace

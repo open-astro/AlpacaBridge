@@ -2506,20 +2506,42 @@ public:
         const uint64_t slew_owner = slew_generation_.bump();
         goto_in_progress_ = false;
         restoring_tracking_ = false;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that retries a rejected goto (even via the blocking
+        // SlewToCoordinates) must not be told the OLD goto failed.
+        clear_last_slew_error_locked();
+        const uint64_t slew_epoch = slew_error_epoch_;
+        bool superseded = false;
         try {
             do_slew_to_ra_dec_locked(lock, ra, dec);
             goto_in_progress_ = true;
             ilock.unlock();
-            if (!wait_for_slew_complete(lock, &owner.claim)) {
-                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
-            }
-            if (!refine_goto_landing(lock, ra, dec, &owner.claim)) {
-                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
-            }
-            if (claim_lost_locked(owner.claim)) {
+            superseded = !wait_for_slew_complete(lock, &owner.claim) ||
+                         !refine_goto_landing(lock, ra, dec, &owner.claim) || claim_lost_locked(owner.claim);
+            if (superseded) {
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }
         } catch (...) {
+            // open-astro#2407: a goto that timed out, or whose dispatch, wait or
+            // landing threw, can leave an axis running: stop both before Slewing
+            // drops. Not when superseded, or when a newer command cleared the
+            // epoch (MoveAxis, AbortSlew, a reconnect): that command owns the axes.
+            const auto failure_owns_axes = [&] {
+                return !claim_lost_locked(owner.claim) && slew_generation_.current() == slew_owner &&
+                       slew_error_epoch_ == slew_epoch;
+            };
+            if (connected_ && !superseded && failure_owns_axes()) {
+                const std::string stop_error = stop_axes_after_operation_failure_locked();
+                if (!stop_error.empty()) {
+                    ALPACA_LOG_ERROR("SkyWatcher", "Stop after slew failure failed: " + stop_error +
+                                                       "; the mount may still be moving");
+                } else if (failure_owns_axes()) {
+                    // The drive is off, and the restart after the landing is not owed.
+                    tracking_ = false;
+                    restore_tracking_after_slew_ = false;
+                    invalidate_position_cache_locked(false);
+                }
+            }
             // Failed, or superseded by a non-slew command (MoveAxis, Tracking,
             // Sync): no getter clears these flags (decision 0010), and one left
             // set keeps the axes busy and the limit guard exempt.
@@ -5488,10 +5510,6 @@ private:
     void do_slew_to_ra_dec_locked(StateLock& lock, double ra, double dec) {
         invalidate_position_cache_locked();
         slewing_cached_ = true;
-        // open-astro#575: a fresh initiator is a clean start -- a client
-        // that retries a rejected goto (even via the blocking
-        // SlewToCoordinates) must not be told the OLD goto failed.
-        clear_last_slew_error_locked();
         restore_tracking_after_slew_ = tracking_;
         // open-astro#404: the target is what the client ASKED for, so it is
         // published before dispatch on every writer (this one, the async slew
@@ -6601,6 +6619,25 @@ private:
         if (!owns_slew_state_locked(ctx)) {
             return;
         }
+        // open-astro#2407: a goto that timed out, or whose dispatch, wait or
+        // landing threw, can leave an axis running, so the failure stops both
+        // axes before Slewing drops. A newer command that cleared the epoch
+        // (MoveAxis, AbortSlew, a reconnect) owns the axes instead.
+        const auto failure_owns_axes = [&] {
+            return owns_slew_state_locked(ctx) && ctx.stop_reason() == util::StopReason::None &&
+                   slew_error_epoch_ == slew_epoch;
+        };
+        std::string stop_error;
+        bool stopped = false;
+        if (connected_ && failure_owns_axes()) {
+            stop_error = stop_axes_after_operation_failure_locked();
+            // The stop gave up mutex_ for each exchange: a newer operation
+            // may own the slot now.
+            if (!owns_slew_state_locked(ctx)) {
+                return;
+            }
+            stopped = stop_error.empty();
+        }
         goto_in_progress_ = false;
         restoring_tracking_ = false;
         // A cancelled goto (AbortSlew throws "Slew wait cancelled") must not
@@ -6608,8 +6645,21 @@ private:
         last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         set_slewing_cached_false_locked();
         slew_hold_.clear();
-        if (ctx.stop_reason() == util::StopReason::None && slew_error_epoch_ == slew_epoch) {
-            last_slew_error_ = message;
+        if (failure_owns_axes()) {
+            if (stopped) {
+                // Both axes are stopped: the drive is off, and the restart the
+                // landing would have made is not owed.
+                tracking_ = false;
+                restore_tracking_after_slew_ = false;
+                invalidate_position_cache_locked(false);
+            }
+            last_slew_error_ = stop_error.empty() ? message
+                                                  : message + "; stopping after failure failed: " + stop_error +
+                                                        "; the mount may still be moving";
+        }
+        if (!stop_error.empty()) {
+            ALPACA_LOG_ERROR("SkyWatcher",
+                             "Stop after async slew failure failed: " + stop_error + "; the mount may still be moving");
         }
         stop_axes_if_cancelled_locked();
     }

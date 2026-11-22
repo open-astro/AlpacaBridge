@@ -567,8 +567,10 @@ void require_lost(alpacacore::FilterWheelDriver& driver, const std::string& old_
     CHECK_FALSE(driver.get_device_firmware().has_value());
     require_alpaca_error([&] { (void)driver.get_position(); }, kNotConnected);
     require_alpaca_error([&] { driver.set_position(1); }, kNotConnected);
-    // The wrapper released the port: no claim is left on the dead node.
-    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
+    // The wrapper released the port: no claim is left on the dead node. Connected reads the wrapper's lock-free
+    // lost latch, which the read sets before the thread that met the hangup closes the port, so wait for the
+    // release (#2466, as the Gemini flat panel's #2402).
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(old_pts); }, milliseconds(1000)));
 }
 
 constexpr int kDriverException = static_cast<int>(alpacacore::AlpacaError::DriverException);

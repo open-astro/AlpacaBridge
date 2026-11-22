@@ -5268,6 +5268,25 @@ TEST_CASE("SkyWatcher async - a slew refused at dispatch still publishes the tar
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a synchronous goto that fails after RA started stops the axes (#2407)",
+          "[skywatcher][async]") {
+    // The blocking SlewToCoordinates half of #2407: RA's goto starts, Dec's
+    // ":J" is refused, and the call throws to the client. Slewing reads false
+    // from then on, so nothing may still be moving.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);       // equatorial slews need Tracking (open-astro#1274)
+    mount.reject_start_motion(2, 1);  // kAxisDec: RA has started its goto when this throws
+    const double lst = driver->get_sidereal_time();
+    CHECK_THROWS_AS(driver->slew_to_coordinates(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes the target (#404)",
           "[skywatcher][async]") {
     // The sync half of #404: with tracking on, the sync stops RA, writes both

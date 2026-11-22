@@ -389,6 +389,12 @@ datagrams before each send so replies cannot get off-by-one.
   it when the next body starts or on disconnect) or the landing refinement
   re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
   stops the axes if it may have dispatched; a superseded one never touches them.
+  A goto that fails (a timed-out wait, a refused dispatch, a failed landing), async or
+  synchronous, stops both axes before it drops Slewing (open-astro#2407), as a failed Park
+  or FindHome does (`fail_async_phase_locked()`). It skips the stop when it was superseded
+  or when a newer command (MoveAxis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
+  because that command owns the axes. Tests: `SkyWatcher async - a goto that fails after RA started
+  stops the axes (#2407)` and its timeout and synchronous siblings.
 - **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
   (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
   (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:

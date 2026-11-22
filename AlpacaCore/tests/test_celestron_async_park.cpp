@@ -1472,6 +1472,48 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both 
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
+// A blocking SlewToCoordinates waits with no slew body; its claim on both axes is what marks the GOTO as running, so a
+// one-axis stop then stops both axes too, and the waiting slew reports it was superseded.
+TEST_CASE("Celestron MoveAxis - a one-axis stop during a blocking slew stops both axes (#2458)",
+          "[celestron][telescope][motion-owner]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    st->tracking_on.store(true);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    std::atomic<bool> done{false};
+    std::atomic<int> code{-1};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(5.0, 20.0);
+            code.store(0);
+        } catch (const alpacacore::AlpacaException& e) {
+            code.store(static_cast<int>(e.error_code()));
+        }
+        done.store(true);
+    });
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
+    const int cancels = st->cancel_goto_count.load();
+    const int ra_stops = zero_rate_stops(*st, 0);
+    const int dec_stops = zero_rate_stops(*st, 1);
+    driver->move_axis(1, 0.0);
+    CHECK(st->cancel_goto_count.load() == cancels + 1);
+    CHECK(zero_rate_stops(*st, 0) > ra_stops);
+    CHECK(zero_rate_stops(*st, 1) > dec_stops);
+    const bool finished = advance_until(clock, [&] { return done.load(); }, 2);
+    if (!finished &&
+        !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+        std::terminate();  // the slewer is stuck off the clock: joining it would hang
+    }
+    slewer.join();
+    REQUIRE(finished);
+    CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // With no GOTO running, a stop is still its own axis's: a jog on the other axis keeps running.
 TEST_CASE("Celestron MoveAxis - a one-axis stop with no slew running leaves a jog on the other axis alone (#2458)",
           "[celestron][telescope][motion-owner]") {

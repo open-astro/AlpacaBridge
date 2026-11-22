@@ -460,7 +460,13 @@ void require_lost(alpacacore::FocuserDriver& driver, const std::string& old_pts)
     require_alpaca_error([&] { (void)driver.get_temp_comp(); }, kNotConnected);
     require_alpaca_error([&] { driver.move(500); }, kNotConnected);
     require_alpaca_error([&] { driver.halt(); }, kNotConnected);
-    // The wrapper released the port: no claim is left on the dead node.
+    // The wrapper released the port: no claim is left on the dead node. Connected reads the wrapper's lock-free
+    // lost latch, which the read sets before the thread that met the hangup closes the port, so wait for the
+    // release (#2466, as the flat panel's #2402).
+    const auto deadline = std::chrono::steady_clock::now() + 1000ms;
+    while (alpacacore::util::is_serial_port_in_use(old_pts) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(2ms);  // real time: the closing thread is the driver's own
+    }
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
 }
 

@@ -1081,6 +1081,85 @@ TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX
     driver->set_connected(false);
 }
 
+// #2461: AtHome is set only by FindHome and every motion start clears it (ITelescopeV4). Each case homes first.
+namespace {
+void home(ClockedBisque& rig) {
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    REQUIRE(rig.driver->get_at_home());
+}
+}  // namespace
+
+TEST_CASE("Bisque AtHome - SlewToCoordinatesAsync and SlewToTargetAsync clear it (#2461)",
+          "[bisque][telescope][findhome]") {
+    ClockedBisque rig;
+    home(rig);
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK_FALSE(rig.driver->get_at_home());
+
+    home(rig);
+    rig.driver->set_target_right_ascension(6.0);
+    rig.driver->set_target_declination(25.0);
+    REQUIRE_NOTHROW(rig.driver->slew_to_target_async());
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
+TEST_CASE("Bisque AtHome - a synchronous slew clears it (#2461)", "[bisque][telescope][findhome][taskclock]") {
+    ClockedBisque rig;
+    home(rig);
+    rig.mount.slew_polls_needed = 1;
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    REQUIRE_NOTHROW(slewed.get());
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
+TEST_CASE("Bisque AtHome - MoveAxis at a nonzero rate clears it and a stop does not (#2461)",
+          "[bisque][telescope][findhome]") {
+    ClockedBisque rig;
+    home(rig);
+    // A zero rate is a stop, not a motion start.
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.0));
+    CHECK(rig.driver->get_at_home());
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.5));
+    CHECK_FALSE(rig.driver->get_at_home());
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.0));
+    CHECK_FALSE(rig.driver->get_at_home());
+
+    home(rig);
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, -0.5));
+    CHECK_FALSE(rig.driver->get_at_home());
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.0));
+}
+
+TEST_CASE("Bisque AtHome - Park clears it (#2461)", "[bisque][telescope][findhome][taskclock]") {
+    ClockedBisque rig;
+    home(rig);
+    rig.mount.park_polls_needed = 1;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
+TEST_CASE("Bisque AtHome - a PulseGuide clears it (#2461)", "[bisque][telescope][findhome][pulseguiding]") {
+    ClockedBisque rig;
+    home(rig);
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 100));
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(5)) == 0);
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
+TEST_CASE("Bisque AtHome - Tracking on clears it and Tracking off does not (#2461)", "[bisque][telescope][findhome]") {
+    ClockedBisque rig;
+    home(rig);
+    REQUIRE_NOTHROW(rig.driver->set_tracking(false));
+    CHECK(rig.driver->get_at_home());
+    REQUIRE_NOTHROW(rig.driver->set_tracking(true));
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
 TEST_CASE("Bisque AbortSlew - a getter does not stall behind a pending pulse guide",
           "[bisque][telescope][pulseguiding]") {
     auto entered = std::make_shared<std::atomic<bool>>(false);

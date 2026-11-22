@@ -141,6 +141,56 @@ TEST_CASE("SkyWatcher async - a slew that fails after dispatch surfaces through 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a goto that fails after RA started stops the axes (#2407)",
+          "[skywatcher][async][slewfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
+    // RA's goto starts, then Dec's ":J" is refused: the body throws with RA
+    // still on its way, five hours of RA from the target.
+    mount.reject_start_motion(2, 1);
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    CHECK(message.find("SlewToCoordinatesAsync failed") != std::string::npos);
+    // Slewing no longer claims motion, so nothing may still be moving.
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_tracking());  // the stop ended the drive too
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a goto that times out with an axis still running stops it (#2407)",
+          "[skywatcher][async][slewfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    // Both axes are on their way: Dec then stalls, running in goto mode
+    // without moving until a stop clears it, so the 180 s wait gives up.
+    REQUIRE(run_clock_until(clock, [&] { return mount.frames_seen('J') >= 2; }, std::chrono::milliseconds(10000)));
+    mount.set_axis_running(2, true, /*speed_mode=*/false);
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(200000)));
+    CHECK(message.find("Slew timed out") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(mount.axis_running(1));
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a new slew initiator replaces the stored failure (#575)",
           "[skywatcher][async][slewfailure]") {
     alpacacore::test::FakeTaskClock clock;
@@ -158,6 +208,10 @@ TEST_CASE("SkyWatcher async - a new slew initiator replaces the stored failure (
 
     // No AbortSlew in between: the next initiator itself clears the failure
     // (a client that retries the goto must not be told the OLD goto failed).
+    // The failure stopped both axes and with them the drive (open-astro#2407),
+    // so the client switches Tracking on again first; that does not clear it.
+    driver->set_tracking(true);
+    REQUIRE(read_slewing(*driver) == SlewingRead::Threw);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(target_ra, 40.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
     REQUIRE(run_clock_until(
