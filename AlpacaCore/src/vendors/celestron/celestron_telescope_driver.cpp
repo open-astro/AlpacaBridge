@@ -1598,9 +1598,10 @@ public:
     // #2409 (#2396 AB-9): a poll tick stops an axis whose MoveAxis ran kMaxMoveAxisDuration with no new MoveAxis, as
     // MoveAxis(axis, 0) stops it, and keeps the failure for Slewing until the next motion command or a reconnect. A
     // client causes it, so it is logged at INFO (decision 0007 rule 9); a stop that fails is a device failure, logged
-    // at ERROR, and is tried again on the next tick. try_lock, as the failure stops: set_connected joins the poll while
-    // it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it for the next tick. One axis per
-    // tick: a second axis overdue at the same time is stopped on the next tick, about 1 s later.
+    // at ERROR once per overdue MoveAxis, and is tried again on every tick. try_lock, as the failure stops:
+    // set_connected joins the poll while it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it
+    // for the next tick. One axis per tick: a second axis overdue at the same time is stopped on the next tick, about 1
+    // s later.
     void stop_overdue_move_axis() const {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1632,11 +1633,16 @@ public:
         if (stop_error.empty()) {
             manual_axis_slewing_[axis] = false;
             move_axis_deadline_[axis] = util::TaskClock::clock::time_point::max();
+            move_axis_stop_failure_logged_[axis] = false;
             last_slew_error_ = message;
             ALPACA_LOG_INFO("Celestron", message);  // a client can cause it: decision 0007 rule 9
         } else {
             last_slew_error_ = message + "; the stop failed: " + stop_error + "; the mount may still be moving";
-            ALPACA_LOG_ERROR("Celestron", last_slew_error_);  // the stop itself failed: a device failure
+            // The poll retries the stop every tick until one lands; a device failure is logged once per overdue
+            // MoveAxis, not once a second (a new MoveAxis or a stop that lands re-arms it).
+            if (!std::exchange(move_axis_stop_failure_logged_[axis], true)) {
+                ALPACA_LOG_ERROR("Celestron", last_slew_error_);  // the stop itself failed: a device failure
+            }
         }
     }
 
@@ -2537,6 +2543,7 @@ public:
         manual_axis_slewing_[axis] = moving;
         move_axis_deadline_[axis] =
             moving ? clock_.now() + kMaxMoveAxisDuration : util::TaskClock::clock::time_point::max();
+        move_axis_stop_failure_logged_[axis] = false;
         pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
         pulse_guide_end_time_[static_cast<std::size_t>(axis)] = util::TaskClock::clock::time_point::min();
         if (moving) {
@@ -2678,6 +2685,8 @@ private:
         manual_axis_slewing_[1] = false;
         move_axis_deadline_[0] = util::TaskClock::clock::time_point::max();
         move_axis_deadline_[1] = util::TaskClock::clock::time_point::max();
+        move_axis_stop_failure_logged_[0] = false;
+        move_axis_stop_failure_logged_[1] = false;
         sync_completed_this_session_ = false;
         skip_next_ra_learn_ = false;
         flip_in_progress_ = false;
@@ -2723,6 +2732,10 @@ private:
                     "Reconnect: stopping the motion under way when the link was lost failed: " + stop_error +
                     "; the mount may still be moving";
                 ALPACA_LOG_ERROR("Celestron", relink_stop_failure);
+                // Still owed: a handshake step after this that throws closes the port again, and the next Connect
+                // that opens it must send the stops. A Connect that completes clears it (connected_ below), and
+                // Slewing then raises the failure in that session.
+                relink_stop_due_ = true;
             }
         }
         {
@@ -2912,6 +2925,9 @@ private:
             site_longitude_cached_ = read_site->longitude_degrees;
             site_info_valid_ = true;
         }
+        // Last step before connected_: any throw above keeps a failed relink stop owed for the next Connect, so no
+        // step that can throw goes after this line. This session reports a failed relink stop through Slewing.
+        relink_stop_due_ = false;
         connected_ = true;
     }
 
@@ -4368,9 +4384,13 @@ private:
     // #2409: when each axis's MoveAxis reaches kMaxMoveAxisDuration, on the task clock. Under mutex_.
     mutable util::TaskClock::clock::time_point move_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
                                                                          util::TaskClock::clock::time_point::max()};
+    // #2409: whether the cap stop's failure was logged for this overdue MoveAxis (logged once, not every poll tick).
+    // Under mutex_.
+    mutable bool move_axis_stop_failure_logged_[2] = {false, false};
     // #2409: a relink found driver motion under way when the link was lost; the next connect_session() that opens the
     // port sends the stops before anything else. Kept across a failed open and a Disconnect, since the mount may still
-    // be moving then too. Under transition_mutex_.
+    // be moving then too, and re-armed when the stop fails, so a handshake step that then fails keeps it for the
+    // next Connect; only a Connect that completes clears it. Under transition_mutex_.
     bool relink_stop_due_ = false;
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
