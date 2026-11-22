@@ -1908,7 +1908,7 @@ public:
         // Validation only. The pier read, the guide write and the start below run with mutex_ free (decision 0006).
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", nullptr, true});
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", true});
             // #2263: refused while a slew, Park or FindHome runs, before the pier read; the claim below asks again.
             if (motion_owner_.slew_running()) {
                 throw AlpacaException(kPulseRefusedText, AlpacaError::InvalidOperation);
@@ -2163,7 +2163,7 @@ public:
             // Gate BEFORE claiming: claiming the slew slot would end a park in
             // flight (clearing parking_) and let this slew clobber it.
             std::unique_lock<std::mutex> lock(mutex_);
-            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
+            util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinatesAsync"}, lock});
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -4043,7 +4043,6 @@ private:
     struct GateChecks {
         const CelestronTelescopeDriver& driver;
         const char* who = nullptr;
-        std::unique_lock<std::mutex>* lock = nullptr;
         bool guide_port = false;
 
         void check_connected() const {
@@ -4055,7 +4054,13 @@ private:
         }
         void check_not_parked(bool /*stop*/) const { driver.check_not_parked_locked(who); }
         void check_no_fault() const { driver.throw_if_link_faulted(); }
-        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
+    // A slew's checks add Tracking, which may release the held mutex_ `lock` to ask the mount. Only this type has
+    // check_tracking() and it cannot be built without the lock, so a missing lock does not compile (#2415).
+    struct SlewGateChecks : GateChecks {
+        std::unique_lock<std::mutex>& lock;
+
+        void check_tracking() const { driver.check_tracking_for_slew(lock, who); }
     };
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
