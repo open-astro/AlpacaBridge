@@ -649,6 +649,33 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     driver->set_connected(false);
 }
 
+// Issue #2292: get_single_frame was the one SDK call in the exposure worker outside a try/catch, so a throw from it
+// (the wrapper's NotConnected for a closed handle) left the raw std::thread body and ended the process in
+// std::terminate. It now fails the exposure with the SDK's text, like a false return.
+TEST_CASE("QHY Camera Driver - a throwing frame read fails the exposure instead of ending the process (#2292)",
+          "[qhy][camera][unit][issue2292]") {
+    auto fake = make_fake();
+    fake.frame_throw = "QHY camera not open: fake-qhy-0";
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.1, true);
+    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    std::string what;
+    try {
+        (void)driver->get_image_ready();
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        what = ex.what();
+    }
+    CHECK(what.find("QHY camera not open: fake-qhy-0") != std::string::npos);
+    // The next StartExposure clears the stored failure.
+    fake.frame_throw.reset();
+    driver->start_exposure(0.05, true);
+    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    driver->set_connected(false);
+}
+
 // ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired (issue #1477).
 TEST_CASE("QHY Camera Driver - LastExposure values follow successful images only", "[qhy][camera][unit]") {
     auto fake = make_fake();
@@ -3617,4 +3644,44 @@ TEST_CASE("QHY Camera Driver - Capability members throw NotConnected while disco
     require_alpaca_error([&] { (void)driver->get_sensor_type(); }, not_connected);
     require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, not_connected);
     require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, not_connected);
+}
+
+// Issue #2259: a StartExposure of 0 s (a bias frame) runs at ExposureMin, as on every other camera. QHY wrote 0 us
+// to the SDK. FakeQHYSDK's exposure range starts at 100 us.
+TEST_CASE("QHY Camera Driver - StartExposure below ExposureMin runs at the minimum", "[qhy][camera][unit][fakesdk]") {
+    auto fake = make_fake();
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_exposure_min() == Catch::Approx(0.0001));
+    driver->start_exposure(0.0, true);
+    driver->abort_exposure();  // joins the worker before the fake's params are read
+    driver->set_connected(false);
+    CHECK(fake.params[alpacacore::vendor::qhy::control::EXPOSURE] == Catch::Approx(100.0));
+}
+
+// Issue #2259: the StartExposure floor is the ExposureMin the driver reports, also when the SDK range reads a
+// minimum of 0 or the EXPOSURE control is not listed (ExposureMin = 1 us). A floor at the raw range minimum wrote
+// 0 us for a 0 s bias frame on those cameras.
+TEST_CASE("QHY Camera Driver - StartExposure(0) never writes 0 us when the SDK range has no minimum",
+          "[qhy][camera][unit][fakesdk]") {
+    auto fake = make_fake();
+    fake.read_directly = true;
+    if (GENERATE(false, true)) {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].min = 0.0;
+    } else {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].available = false;
+        fake.controls_available.erase(alpacacore::vendor::qhy::control::EXPOSURE);
+    }
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_exposure_min() == Catch::Approx(0.000001));
+    driver->start_exposure(0.0, true);
+    driver->abort_exposure();  // joins the worker before the fake's params are read
+    driver->set_connected(false);
+    CHECK(fake.params[alpacacore::vendor::qhy::control::EXPOSURE] == Catch::Approx(1.0));
 }

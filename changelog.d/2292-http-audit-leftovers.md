@@ -1,0 +1,5 @@
+### Fixed
+
+- **A query parameter given twice keeps its first value**, AlpacaHTTP request parsing, issue #2292. The query string kept the last copy while a PUT form body kept the first, so one request could read a duplicated parameter two ways. Both now keep the first.
+- **A far-future clock no longer prunes every log**, AlpacaHTTP logging, issue #2292. Log retention counted back from today, so a client's `synctime` to a date years ahead made every real log look older than the retention and deleted it. When the logs show a gap longer than the retention (a clock jump), the days logged since it now count as if they had followed the last day logged before it, so the earlier logs stay until that many days of newer logs exist; with no such gap, as in normal running, the cutoff still counts back from today.
+- **A Wi-Fi passphrase with a NUL byte is refused**, Wi-Fi manager, issue #2292. The 8-63 length check counted the NUL, then NetworkManager received the passphrase as a C string cut short at it. `save_profile` and `set_ap` now refuse it.

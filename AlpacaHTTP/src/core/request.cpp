@@ -182,18 +182,14 @@ void Request::parse_query_string() {
     std::istringstream iss(query_string_);
     std::string pair;
 
+    // A name given twice keeps its FIRST value, as get_form_value() does for a PUT body (#2292): one rule for both
+    // places a parameter can arrive, so a duplicate cannot read one way in a GET and another in a PUT.
     while (std::getline(iss, pair, '&')) {
         auto eq_pos = pair.find('=');
-        if (eq_pos != std::string::npos) {
-            std::string key = url_decode(pair.substr(0, eq_pos));
-            std::string value = url_decode(pair.substr(eq_pos + 1));
-            query_params_[key] = value;
-            query_params_lower_[to_lower_copy(key)] = value;
-        } else {
-            std::string key = url_decode(pair);
-            query_params_[key] = "";
-            query_params_lower_[to_lower_copy(key)] = "";
-        }
+        std::string key = url_decode(eq_pos != std::string::npos ? pair.substr(0, eq_pos) : pair);
+        std::string value = eq_pos != std::string::npos ? url_decode(pair.substr(eq_pos + 1)) : std::string();
+        query_params_lower_.try_emplace(to_lower_copy(key), value);
+        query_params_.try_emplace(std::move(key), std::move(value));
     }
 }
 

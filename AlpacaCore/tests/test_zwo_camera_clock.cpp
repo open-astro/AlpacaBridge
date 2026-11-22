@@ -252,9 +252,9 @@ TEST_CASE("ZWO camera clock - exposure retries are paced by the task clock", "[z
 
 namespace {
 
-// Exposure 1 on a camera of the given bus, downloaded at virtual time 1 s. The fake models the
-// ASI120MM (issue #1349): an exposure longer than 3 s started less than 500 ms after a download fails
-// at its end.
+// Exposure 1 on a camera of the given bus, downloaded at virtual time 1.05 s (one status poll step). The fake models
+// the ASI120MM (issue #1349): an exposure longer than 3 s started less than 500 ms after a download fails at its
+// end. Each exposure takes its length on the task clock (#2414: a frame ready sooner is refused as stale).
 struct SettleRig {
     FakeZWOSDK sdk;
     FakeTaskClock clock;
@@ -263,12 +263,13 @@ struct SettleRig {
     explicit SettleRig(bool usb3) {
         sdk.camera.is_usb3 = usb3;
         sdk.usb2_settle_clock = &clock;
+        sdk.exposure_clock = &clock;
         sdk.frame_bytes = std::vector<std::uint8_t>(16 * 8 * 2, 1);
         camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
         camera->set_connected(true);
         clock.advance(std::chrono::seconds(1));
         camera->start_exposure(0.001, true);
-        REQUIRE(alpacacore::test::wait_exposure_end(*camera));
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
         REQUIRE(camera->get_image_ready());
         static_cast<void>(camera->get_image_array());
     }
@@ -292,7 +293,7 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
         CHECK(rig.sdk.call_count("start_exposure") == 1);  // still inside the settle window
         rig.clock.advance(milliseconds(1));
     }
-    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
 
     REQUIRE(rig.sdk.call_count("start_exposure") == 2);
     const auto starts = rig.sdk.start_times();
@@ -303,13 +304,14 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
 
 namespace {
 
-// Starts exposure 2 and reports whether its body parked on the clock before the trigger. A body that wrongly waits
-// is released after the check, so a broken driver fails the case instead of hanging it.
+// Starts exposure 2 and reports whether its body parked on the clock before the trigger (in the settle; after the
+// trigger it parks in the status poll). The clock is then stepped until the exposure ends, so a broken driver fails
+// the case instead of hanging it.
 bool start_parks_on_clock(SettleRig& rig, double duration = kLongExposure) {
     rig.camera->start_exposure(duration, true);
-    const bool waited = rig.clock.wait_for_waiters(1, milliseconds(200));
-    if (waited) rig.clock.advance(milliseconds(600));
-    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
+    REQUIRE(rig.clock.wait_for_waiters(1, kRendezvous));
+    const bool waited = rig.sdk.call_count("start_exposure") == 1;
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
     return waited;
 }
 
@@ -381,11 +383,11 @@ struct WorkingRig {
 }  // namespace
 
 // Rule 4.3: the body polls the exposure status once per 50 ms wait on the task clock, and delivers the frame at the
-// first poll that reads Success.
+// first poll that reads Success. A 200 ms exposure, so the frame at the fourth step (200 ms) is not early (#2414).
 TEST_CASE("ZWO camera clock - the status poll waits on the task clock in 50 ms steps",
           "[zwo][camera][unit][clock][capture-session]") {
     WorkingRig rig;
-    rig.camera->start_exposure(1.0, true);
+    rig.camera->start_exposure(0.2, true);
     REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
     const int polls = rig.sdk.call_count("get_exposure_status");
     for (std::uint64_t step = 1; step <= 3; ++step) {
@@ -490,6 +492,6 @@ TEST_CASE("ZWO camera clock - StartExposure returns before the USB 2.0 settle en
     const auto starts = rig.sdk.start_times();
     REQUIRE(starts.size() == 2);
     CHECK(starts[1] - downloaded_at >= milliseconds(600));
-    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
     CHECK(rig.camera->get_image_ready());
 }
