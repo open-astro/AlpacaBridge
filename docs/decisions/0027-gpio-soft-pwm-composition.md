@@ -4,7 +4,7 @@ Status: proposed
 
 ## Context
 
-Four boards drive 12 V power ports from GPIO: the ZWO ASIAIR Pro and Plus CM4 (libgpiod), the ZWO ASIAIR Plus RK3568 (ioctls on `/dev/pwm-gpio-misc`), the iOptron iMate and the ToupTek StellaVita (libgpiod). Each had its own port wrapper, and the wrappers held the same engine four times: a port table, a value cache, one soft-PWM worker thread per PWM port, a two-phase close that settles each PWM line, and the claim that reads the lines and changes none ([decision 0021](0021-power-port-power-on-state.md)). Together they were about 1,800 lines, and a fix to one (the 2026 PWM race, the silent exit of the Plus worker on a failed write) had to be found and copied by hand. The Switch driver layer was already shared by [issue #2264](https://github.com/open-astro/AlpacaBridge/issues/2264) (`util::PowerPortSwitchDriver`); the wrappers were what was left.
+Four boards drive 12 V power ports from GPIO: the ZWO ASIAIR Pro and Plus CM4 (libgpiod), the ZWO ASIAIR Plus RK3568 (ioctls on `/dev/pwm-gpio-misc`), the iOptron iMate and the ToupTek StellaVita (libgpiod). Each had its own port wrapper, and the wrappers held the same engine four times: a port table, a value cache, one soft-PWM worker thread per PWM port, a two-phase close that settles each PWM line, and the claim that reads the lines and changes none ([decision 0021](0021-power-port-power-on-state.md)). Together the four source files were 1,740 lines (366, 567, 433 and 374), and a fix to one (the 2026 PWM race, the silent exit of the Plus worker on a failed write) had to be found and copied by hand. The Switch driver layer was already shared by [issue #2264](https://github.com/open-astro/AlpacaBridge/issues/2264) (`util::PowerPortSwitchDriver`); the wrappers were what was left.
 
 Only the ASIAIR Plus tests could not run a worker on a virtual clock: every GPIO case reached the hardware through a C-symbol stub in `zwo_asiair_stubs.cpp`, so PWM cases waited on real time and a duty split could only be checked statistically.
 
@@ -42,7 +42,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Consequences
 
-- The ASIAIR Pro and Plus lose about 800 lines of wrapper and gain about 350 of engine and backends; the iMate and StellaVita follow with the same saving.
+- The ASIAIR Pro and Plus lose 1,074 lines of wrapper source and header (366, 567, 61 and 80) and gain 767 lines of engine and backends, comments included; the iMate and StellaVita wrappers (433 and 374 source lines) are what the follow-up replaces.
 - The engine is core code: it builds and its cases run on every host, while the two backends need libgpiod or the ASIAIR Plus kernel module and build on arm64 only.
 - `set_value` on a PWM port whose worker stopped now answers an error where the old wrappers reported success.
 - SET_MODE and ENABLE on the RK3568 go once per line since the open, where the old boolean path sent them with every write.
