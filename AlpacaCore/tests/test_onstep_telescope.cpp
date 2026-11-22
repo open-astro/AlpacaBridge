@@ -4284,3 +4284,22 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis whose cap stop fails is never re
     alpacacore::vendor::onstep::set_move_axis_resend_before_send_hook_for_testing(*driver, {});
     driver->set_connected(false);
 }
+
+TEST_CASE("OnStep Telescope Driver - a stored motion failure does not outlive a reconnect",
+          "[onstep][telescope][unit][goto-safety]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    fake.advance(std::chrono::seconds(60));  // the cap: the axis is stopped
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+
+    fake.guide_active->store(false);
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    CHECK_NOTHROW((void)driver->get_slewing());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
