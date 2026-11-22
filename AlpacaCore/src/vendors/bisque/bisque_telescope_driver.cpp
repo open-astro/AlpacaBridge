@@ -1017,7 +1017,7 @@ public:
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates", &lock});
+        util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinates"}, lock});
         // mutex_ was released for the tracking read: a disconnect or a park may have landed meanwhile (#1838).
         check_link_locked();
         check_not_parked("SlewToCoordinates");
@@ -1045,7 +1045,7 @@ public:
         util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
-        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
+        util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinatesAsync"}, lock});
         // See slew_to_coordinates().
         check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
@@ -1371,17 +1371,21 @@ private:
     }
 
     // The command gate's state checks in Bisque's words (#2258): util/telescope_command_gate.h decides the order,
-    // these answer each step with the driver's own texts and reads. `lock` is the held mutex_ a slew's Tracking check
-    // releases for its TheSkyX read; the other families never call that check.
+    // these answer each step with the driver's own texts and reads.
     struct GateChecks {
         BisqueTelescopeDriver& driver;
         const char* who = nullptr;
-        std::unique_lock<std::mutex>* lock = nullptr;
 
         void check_connected() const { driver.check_connected(); }
         void check_not_parked(bool /*stop*/) const { driver.check_not_parked(who); }
         void check_no_fault() const { driver.check_no_fault_locked(); }
-        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
+    // A slew's checks add Tracking, which releases the held mutex_ `lock` for its TheSkyX read. Only this type has
+    // check_tracking() and it cannot be built without the lock, so a missing lock does not compile (#2415).
+    struct SlewGateChecks : GateChecks {
+        std::unique_lock<std::mutex>& lock;
+
+        void check_tracking() const { driver.check_tracking_for_slew(lock, who); }
     };
 
     void check_link_now() const {

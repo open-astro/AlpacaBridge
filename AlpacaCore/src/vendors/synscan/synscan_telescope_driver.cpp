@@ -36,7 +36,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -1622,7 +1621,7 @@ public:
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates", &lock});
+            util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinates"}, lock});
         }
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
@@ -1653,7 +1652,7 @@ public:
             // Gate BEFORE claiming: the claim ends a park in flight (clearing
             // parking_), so a slew this gate refuses must not have claimed.
             std::unique_lock<std::mutex> lock(mutex_);
-            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
+            util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinatesAsync"}, lock});
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -2507,22 +2506,25 @@ private:
     }
 
     // The command gate's state checks in SynScan's words (#2258): util/telescope_command_gate.h decides the order,
-    // these answer each step with the driver's own texts and reads. `lock` is the held mutex_ a slew's
-    // Tracking check releases for its handset read; the other families never call that check.
+    // these answer each step with the driver's own texts and reads.
     struct GateChecks {
         const SynScanTelescopeDriver& driver;
         const char* who = nullptr;
-        std::unique_lock<std::mutex>* lock = nullptr;
 
         void check_connected() const { driver.check_connected(); }
         void check_not_parked(bool /*stop*/) const { driver.check_not_parked_locked(who); }
         void check_no_fault() const { driver.throw_if_link_faulted(); }
+    };
+    // A slew's checks add Tracking, which releases the held mutex_ `lock` for its handset read. Only this type has
+    // check_tracking() and it cannot be built without the lock, so a missing lock does not compile (#2415).
+    struct SlewGateChecks : GateChecks {
+        std::unique_lock<std::mutex>& lock;
+
         // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew is requested with Tracking false. The
         // handset is asked, with mutex_ released.
         void check_tracking() const {
-            assert(lock != nullptr && "a slew's GateChecks carries its held mutex_");
-            driver.refresh_tracking_mode_locked(*lock);
-            if (!driver.get_tracking_locked(*lock)) {
+            driver.refresh_tracking_mode_locked(lock);
+            if (!driver.get_tracking_locked(lock)) {
                 throw AlpacaException(std::string(who) + " requires Tracking to be true",
                                       AlpacaError::InvalidOperation);
             }
