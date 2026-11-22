@@ -99,9 +99,13 @@ public:
     /// model). Not for a mount that is already connected.
     void set_model_code(std::string model_code) { model_code_ = std::move(model_code); }
 
+    /// The RA offset (arcsec, east positive) the next GOTO lands at, as the constructor's landing_ra_error_arcsec.
+    void set_landing_ra_error(double arcsec) { landing_error_arcsec_.store(arcsec); }
+
     /// Every reply is held for @p delay (real time) from now on, 0 to stop. Unlike hold_next_reply() it is not spent
     /// by one chunk and it never waits on a ConnectHoldGate, so a mount that answers slowly stays slow: a getter that
-    /// sends an exchange pays the delay, and the poll's three reads pay it three times.
+    /// sends an exchange pays the delay, and the poll's three reads pay it three times. A reply held by
+    /// hold_next_reply() when this is called keeps its hold alone; the replies after it pay the delay.
     void set_reply_delay(std::chrono::milliseconds delay) { reply_delay_ms_.store(static_cast<int>(delay.count())); }
 
     /// When the command @p cmd (exactly, "#" included) is received the ":GLS" system status becomes @p status, as a
@@ -287,11 +291,13 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
+        // Read before the hold, so a delay set while a reply is held applies to the replies after it only.
+        const int delay_ms = reply_delay_ms_.load();
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
             holding_.store(true);
             alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
         }
-        if (const int delay_ms = reply_delay_ms_.load(); delay_ms > 0) {
+        if (delay_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
         std::string out;
@@ -417,7 +423,7 @@ private:
                 return reply;
             }
             // Land at the target plus the firmware's final-approach error.
-            ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
+            ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_.load() * 100.0));
             dec_units_.store(pending_dec_);
             if (goto_tracks_off_.load()) system_status_.store(2);
             return reply;
@@ -631,7 +637,7 @@ private:
     std::atomic<long long> longitude_units_{0};
     std::atomic<long long> latitude_field_{0};
     std::string model_code_;
-    double landing_error_arcsec_;
+    std::atomic<double> landing_error_arcsec_;
     std::string position_reply_;  // under mutex_
     std::atomic<int> hold_ms_{0};
     std::atomic<int> reply_delay_ms_{0};

@@ -420,6 +420,39 @@ TEST_CASE("iOptron polled state - three failed polls latch a fault and one good 
     check_getters_answer_from_the_frame(driver, mount);
 }
 
+// #728 with the poll's latch: AbortSlew is the one member a latched fault does not refuse, so the stop still goes
+// out, with no status read in front of it. The sent stop is not a poll and does not clear the latch; the next good
+// poll does, with no client call (decision 0009 rule 1).
+TEST_CASE("iOptron polled state - AbortSlew sends the stop on a latch the poll set, and the next good poll clears it",
+          "[ioptron][telescope][polled][link-fault]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_alt_az(45.0, 180.0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+    age_past_connect_grace(clock);
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) tick_and_require_a_poll(clock, mount);
+    REQUIRE_FALSE(driver.get_link_fault().empty());
+
+    const int stops = mount.count(":Q#");
+    const int status_reads = mount.count(":GLS#");
+    REQUIRE_NOTHROW(driver.abort_slew());
+    CHECK(mount.count(":Q#") == stops + 1);
+    CHECK(mount.count(":GLS#") == status_reads);
+    CHECK_FALSE(driver.get_link_fault().empty());  // the stop is not a good poll
+    alpacacore::test::require_alpaca_error([&] { static_cast<void>(driver.get_tracking()); },
+                                           AlpacaError::DriverException);
+
+    mount.set_fail_reads(false);
+    tick_and_require_a_poll(clock, mount);
+    CHECK(driver.get_link_fault().empty());
+    CHECK_NOTHROW(driver.get_tracking());
+}
+
 // Issue #2491 rule 2: a frame older than max_age (1 s) is served as it is, never refused: one failed poll that
 // leaves the frame 2 s old is a stale reading, not a fault.
 TEST_CASE("iOptron polled state - a stale frame is served, never refused", "[ioptron][telescope][polled]") {
@@ -551,6 +584,45 @@ TEST_CASE("iOptron polled state - a wedged Park is finalized from the poll alone
     CHECK(sent(mount) == before);
 }
 
+// The async landing gate runs in the poll (FINDINGS 1 of the plan). A GOTO at rest far from its target is a failed
+// operation, not a failed poll: the poll stores the error for Slewing to raise (the ASCOM async "Completion
+// property"), publishes the tick's frame (DeviceState's TimeStamp is that tick) and latches no fault however many
+// ticks follow. HEM27 (0025), so no GOTO trim reads run.
+TEST_CASE("iOptron polled state - a far miss the poll decides is raised by Slewing and is not a link fault",
+          "[ioptron][telescope][polled][goto-safety]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_model_code("0025");
+    mount.set_landing_ra_error(3600.0);  // the GOTO lands 1 degree of RA east, and the status reads tracking
+    mount.set_alt_az(45.0, 180.0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+    age_past_connect_grace(clock);
+
+    const int goto_before = mount.count(":MS1#");
+    driver.slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount, goto_before));
+    const int reads = poll_reads(mount);
+    for (int i = 0; i < 24; ++i) tick(clock);  // past the 5 s dispatch window and the landing samples, polls only
+    CHECK(poll_reads(mount) >= reads + 24);
+
+    const auto before = sent(mount);
+    std::string message;
+    CHECK(alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_slewing()); }, &message) ==
+          AlpacaError::DriverException);
+    CHECK(contains(message, "from the target"));
+    CHECK(driver.get_connected());
+    CHECK(driver.get_link_fault().empty());
+    const auto state = driver.get_device_state();
+    REQUIRE_FALSE(state.empty());
+    const auto stamped = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(state));
+    CHECK(std::chrono::system_clock::now() - stamped < kPollPeriod);
+    CHECK(sent(mount) == before);
+    CHECK(mount.count(":Q#") == 0);  // at rest: no stop
+}
+
 // Issue #2491 rule 8 and decision 0010 rule 5: DeviceState's TimeStamp is when the frame was measured. A poll that
 // fails leaves the frame as it was, so after 600 ms of failed polls (two) the stamp is 600 ms in the past, not now.
 TEST_CASE("iOptron polled state - DeviceState TimeStamp is the measurement time", "[ioptron][telescope][polled]") {
@@ -577,7 +649,9 @@ TEST_CASE("iOptron polled state - DeviceState TimeStamp is the measurement time"
 
 // Issue #2491 acceptance 5 and the ticket's "Tests first": Disconnect returns within 5 s while the poll is in the
 // middle of an exchange. The poll holds the operation lock for its reads; Disconnect cancels and joins it before it
-// closes the port, so it waits for that one exchange (held 1.5 s here) and no longer.
+// closes the port, so it waits for that one exchange (held 1.5 s here) and no longer. Every reply after the held one
+// takes 4 s: a poll that went on to its next read, or to an effect's exchange, once Disconnect asked it to stop would
+// hold Disconnect past 5 s (the probe gets no cancel context, so the driver's own stop flag ends it).
 TEST_CASE("iOptron polled state - Disconnect returns within 5 s while the poll is mid-exchange",
           "[ioptron][telescope][polled]") {
     auto rig = make_tcp_rig();
@@ -589,8 +663,10 @@ TEST_CASE("iOptron polled state - Disconnect returns within 5 s while the poll i
     mount.hold_next_reply(milliseconds(1500));
     rig.clock().advance(kPollPeriod);  // wakes the poll: its first read is the held one
     REQUIRE(mount.wait_until_holding(seconds(5)));
+    mount.set_reply_delay(seconds(4));
 
     const auto elapsed = alpacacore::test::timed([&] { rig.driver().set_connected(false); });
+    mount.set_reply_delay(milliseconds(0));
     CHECK(elapsed < seconds(5));
     CHECK_FALSE(rig.driver().get_connected());
 }
