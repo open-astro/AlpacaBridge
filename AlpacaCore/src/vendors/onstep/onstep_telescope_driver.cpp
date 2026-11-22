@@ -3385,7 +3385,7 @@ private:
     }
 
     // #2406: a :MS# with no digit before its reply timeout may still have started the GOTO, so :Q# goes out (best
-    // effort, logged) before the refusal is reported. (The exchange itself throws only on a lost link.)
+    // effort, logged) before the refusal is reported. (A thrown exchange gets none: it throws when :MS# could not be written or the link is lost.)
     void stop_unconfirmed_goto_locked(const char* context) const {
         ALPACA_LOG_WARN("OnStep", std::string(context) + ": no :MS# reply; sending :Q# in case the GOTO started");
         (void)send_stops_locked(true, {}, [context](const char* what, const std::string& error) {
