@@ -1468,3 +1468,83 @@ TEST_CASE("SynScan Link - over TCP a hangup is a failed exchange, not a lost lin
 }
 
 #endif
+
+// #2412 (#2396 AB-9): motion running when the link dropped is stopped by the next Connect, with AbortSlew's stops
+// right after the echo test and before the handshake's first query, never forgotten.
+namespace {
+
+// The first `M` (cancel GOTO) the handset received after the echo, and before the version query `V`.
+bool relink_stops_first(const std::string& received) {
+    const auto stop = received.find('M');
+    const auto version = received.find('V');
+    return !received.empty() && received[0] == 'K' && stop != std::string::npos &&
+           (version == std::string::npos || stop < version) && received.find('P', stop) != std::string::npos;
+}
+
+}  // namespace
+
+TEST_CASE("SynScan Link - a MoveAxis running when the cable is pulled is stopped by the next Connect",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.handset->unplug();
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    check_lost(driver);
+
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.handset->received();
+    CHECK(relink_stops_first(received));
+    // The RA stop also stops tracking: the mode cached at the record (1) goes back before the handshake's `V`.
+    const auto stop = received.find('M');
+    const auto restore = received.find(std::string("T\x01", 2), stop == std::string::npos ? 0 : stop);
+    CHECK(restore != std::string::npos);
+    CHECK(restore < received.find('V'));
+}
+
+TEST_CASE("SynScan Link - a bound stop the link loss refused is sent by the next Connect",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(1, 1.0));
+    REQUIRE(rig.clock.wait_for_waiters(2, kSettle));  // the paused poll and the MoveAxis bound
+    rig.handset->unplug_on(on_command('P'));          // the bound's stop meets the pulled cable
+    rig.advance(seconds(61));
+    CHECK(rig.handset->unplugged());
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    CHECK(relink_stops_first(rig.handset->received()));
+}
+
+TEST_CASE("SynScan Link - a Connect after a clean Disconnect sends no relink stop",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    driver.set_connected(false);  // a live link: the client left the move on a link it could command
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    CHECK_FALSE(relink_stops_first(rig.handset->received()));
+}
+
+TEST_CASE("SynScan Link - a Disconnect over a lost link keeps the relink stop for the next Connect",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.handset->unplug();
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    driver.set_connected(false);  // the client disconnects first
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    CHECK(relink_stops_first(rig.handset->received()));
+}
