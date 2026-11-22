@@ -36,6 +36,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
@@ -641,7 +642,7 @@ TEST_CASE("ZWO Unpark during GOTO setup cancels the pending retry", "[zwo][teles
 }
 
 TEST_CASE("ZWO slow setup retries complete after an accepted GOTO", "[zwo][telescope][async][goto-setup]") {
-    const std::string rejection = GENERATE("e3", "e5", "e7");
+    const std::string rejection = GENERATE("e3", "e7");  // e5 is a refusal, never retried (#2408)
     CAPTURE(rejection);
     Rig rig;
     rig.connect();
@@ -723,8 +724,8 @@ TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][
     std::string error;
     REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10000));
     CHECK(error.find("e5") != std::string::npos);
-    CHECK(mount.count(":MS") == 2);
-    CHECK(site_writes(false) >= writes_before + 2);
+    CHECK(mount.count(":MS") == 1);  // #2408: an e5 refusal is not sent again
+    CHECK(site_writes(false) >= writes_before + 1);
     CHECK(site_writes(true) == 0);
     CHECK(std::abs(driver->get_site_longitude() - longitude) < 1e-9);
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -984,8 +985,9 @@ TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][teles
     auto& driver = rig.driver;
     rig.connect();
 
-    // The mount lands 1 degree short in Dec: the driver reports where the mount is, not the target it was given.
-    mount.set_land_short_by(3600.0);
+    // The mount lands 5 arcmin short in Dec, inside the 600 arcsec landing check (#2408): the driver reports where
+    // the mount is, not the target it was given.
+    mount.set_land_short_by(300.0);
     CHECK(std::abs(driver->get_right_ascension() - 12.0) < 1e-6);
     CHECK(std::abs(driver->get_declination() - 45.0) < 1e-6);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 22.0));
@@ -996,7 +998,7 @@ TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][teles
     REQUIRE_FALSE(driver->get_slewing());
 
     CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-6);
-    CHECK(std::abs(driver->get_declination() - 21.0) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - (22.0 - 300.0 / 3600.0)) < 1e-6);
     driver->set_connected(false);
 }
 
@@ -1007,7 +1009,7 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
     auto& clock = rig.clock;
     rig.connect();
 
-    mount.set_land_short_by(3600.0);
+    mount.set_land_short_by(300.0);  // inside the 600 arcsec landing check (#2408)
     auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(4.0, -12.0); });
     const bool sent = wait_until([&] { return mount.count(":MS") == 1; }, 5000);
     CHECK(sent);
@@ -1045,7 +1047,7 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
     REQUIRE_NOTHROW(slew.get());
 
     CHECK(std::abs(driver->get_right_ascension() - 4.0) < 1e-6);
-    CHECK(std::abs(driver->get_declination() - -13.0) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - (-12.0 - 300.0 / 3600.0)) < 1e-6);
     driver->set_connected(false);
 }
 
@@ -1783,6 +1785,189 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     CHECK(mount.count(":Sr") == 0);
     CHECK(mount.count(":Sd") == 0);
     CHECK(mount.count(":MS") == 0);
+}
+
+// ---- #2408 (#2396): motion fails closed on the ZWO AM mount ----------------------------------------------------
+
+namespace {
+
+// A GOTO the fake accepted and keeps running (hold_running), with the poll loop reading status again.
+void start_held_goto(Rig& rig) {
+    rig.mount.hold_running(true);
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
+}
+
+// Steps the poll loop through @p total in steps of at most 4 s, so every step keeps the telemetry fresh (a longer
+// silence than util::kLinkStalenessBound loses the link).
+void run_polls(Rig& rig, std::chrono::nanoseconds total, std::chrono::nanoseconds step = std::chrono::seconds(4)) {
+    for (auto left = total; left > std::chrono::nanoseconds::zero(); left -= step) rig.tick(std::min(step, left));
+}
+
+}  // namespace
+
+TEST_CASE("ZWO goto-safety - an N/A reply to :MS is not acceptance: the mount is stopped and Slewing raises",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":MS", "N/A", 1);
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    std::string message;
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    CHECK(message.find("GOTO not confirmed") != std::string::npos);
+    CHECK(rig.mount.count(":MS") == 1);  // never sent again
+}
+
+TEST_CASE("ZWO goto-safety - :MS with no reply is not acceptance: the mount is stopped and Slewing raises",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.go_silent(":MS", 1);
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    std::string message;
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    CHECK(message.find("GOTO not confirmed") != std::string::npos);
+    CHECK(rig.mount.count(":MS") == 1);
+}
+
+TEST_CASE("ZWO goto-safety - a target write with no reply fails the GOTO before :MS",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const std::string silent = GENERATE(std::string(":Sr"), std::string(":Sd"));
+    rig.mount.go_silent(silent, 1);
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    std::string message;
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    CHECK(message.find("did not confirm target") != std::string::npos);
+    CHECK(rig.mount.count(":MS") == 0);
+}
+
+TEST_CASE("ZWO goto-safety - an e5 refusal is an error and the GOTO is not sent again",
+          "[zwo][telescope][async][goto-safety]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);
+    Rig rig;
+    rig.connect();
+    const std::string refusal = "e5";
+    rig.mount.reject_goto(refusal, 1);
+    const int q_before = count_exact(rig.mount, ":Q");
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    std::string message;
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    CHECK(message.find(refusal) != std::string::npos);
+    CHECK(rig.mount.count(":MS") == 1);
+    CHECK(count_exact(rig.mount, ":Q") == q_before);  // a refused GOTO started nothing to stop
+}
+
+TEST_CASE("ZWO goto-safety - an async GOTO still running at the slew bound is stopped and Slewing raises",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    start_held_goto(rig);
+    run_polls(rig, std::chrono::minutes(14) + std::chrono::seconds(56));
+    CHECK(count_exact(rig.mount, ":Q") == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+    run_polls(rig, std::chrono::seconds(8));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("did not end within 15 min") != std::string::npos);
+}
+
+TEST_CASE("ZWO goto-safety - a GOTO that comes to rest far from its target fails",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.set_land_short_by(3600.0);  // 1 degree short in Dec
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
+    rig.tick(std::chrono::milliseconds(5500));
+    rig.tick();
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("3600 arcsec from the target") != std::string::npos);
+    CHECK(count_exact(rig.mount, ":Q") == 0);  // at rest: nothing to stop
+}
+
+TEST_CASE("ZWO goto-safety - a MoveAxis that is not renewed is stopped after 60 s",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    run_polls(rig, std::chrono::seconds(40));
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));  // renewed: the 60 s runs from here
+    run_polls(rig, std::chrono::seconds(56));
+    CHECK(rig.mount.count(":Qe") == 0);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+    run_polls(rig, std::chrono::seconds(8));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
+}
+
+TEST_CASE("ZWO goto-safety - AbortSlew sends :Q again while the mount still moves, up to three",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    start_held_goto(rig);
+    const int ignored = GENERATE(1, 10);
+    rig.mount.ignore_stops(ignored);
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    run_polls(rig, std::chrono::seconds(4), std::chrono::seconds(1));
+    if (ignored == 1) {
+        CHECK(count_exact(rig.mount, ":Q") == 2);
+        CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    } else {
+        CHECK(count_exact(rig.mount, ":Q") == 3);
+        std::string message;
+        CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+        CHECK(message.find("still reports motion after 3 stops") != std::string::npos);
+    }
+}
+
+TEST_CASE("ZWO goto-safety - site and time writes are refused while a GOTO runs",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    start_held_goto(rig);
+    const int site_before = rig.mount.count(":SMGE");
+    const int time_before = rig.mount.count(":SMTI");
+    using alpacacore::test::require_alpaca_error;
+    require_alpaca_error([&] { rig.driver->set_site_latitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_site_longitude(10.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount.count(":SMGE") == site_before);
+    CHECK(rig.mount.count(":SMTI") == time_before);
+    rig.driver->abort_slew();
+}
+
+TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a MoveAxis stops the mount first",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    REQUIRE(rig.mount.drop_link());
+    for (int i = 0; i < 40 && rig.driver->get_connected(); ++i) rig.tick();
+    REQUIRE_FALSE(rig.driver->get_connected());
+    const auto before = rig.mount.commands().size();
+    rig.connect();
+    const auto all = rig.mount.commands();
+    std::vector<std::string> after(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
+    const auto stop = std::find(after.begin(), after.end(), std::string(":Q"));
+    REQUIRE(stop != after.end());
+    // Nothing but the identity reads goes out before it.
+    for (auto it = after.begin(); it != stop; ++it) {
+        INFO(*it);
+        CHECK((it->rfind(":GV", 0) == 0 || it->rfind(":GMA", 0) == 0));
+    }
 }
 
 #endif  // _WIN32
