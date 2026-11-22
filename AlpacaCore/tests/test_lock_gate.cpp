@@ -32,9 +32,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::util::kLockGateTableSize;
 using alpacacore::util::LockGate;
 using alpacacore::util::StateLock;
@@ -63,17 +65,6 @@ bool free_elsewhere(std::mutex& m) {
         .get();
 }
 
-// The error code `fn` throws as an AlpacaException, or -1 when it throws none.
-template <typename F>
-int alpaca_error_of(F&& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return -1;
-}
-
 }  // namespace
 
 // Decision 0016 Rule 6 (#1730): with this thread's table full the gate cannot see what the thread holds, so
@@ -90,8 +81,8 @@ TEST_CASE("LockGate - a full lock table refuses before it takes any lock", "[loc
     Driver ninth;
 
     // A StateLock in either mode refuses, holding nothing.
-    CHECK(alpaca_error_of([&] { StateLock lock(ninth.gate); }) == AlpacaError::DriverException);
-    CHECK(alpaca_error_of([&] { StateLock lock(ninth.gate, StateLock::Mode::State); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { StateLock lock(ninth.gate); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { StateLock lock(ninth.gate, StateLock::Mode::State); }) == AlpacaError::DriverException);
     CHECK(free_elsewhere(ninth.io));
     CHECK(free_elsewhere(ninth.state));
     CHECK_FALSE(ninth.gate.holds_io());

@@ -674,18 +674,6 @@ namespace {
 
 using alpacacore::test::ReplugPort;
 
-// The AlpacaException code fn threw, or 0. Safe on a non-test thread.
-int alpaca_code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    } catch (...) {
-        return -1;
-    }
-    return 0;
-}
-
 constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
 
 // The members a lost link refuses, Lite and Rev2/Pro alike.
@@ -718,7 +706,7 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during a command loses the li
 
     panel.set_reply_delay(">L#", milliseconds(300));  // the panel sits on the >L# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::jthread caller([&] { code.store(alpaca_code_of([&] { driver->calibrator_on(40); })); });
+    std::jthread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->calibrator_on(40); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
     const auto pulled = std::chrono::steady_clock::now();
     panel.unplug();
@@ -826,7 +814,8 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during the connect state seed
 
     panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
     std::atomic<int> code{0};
-    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::jthread connecting(
+        [&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
     panel.unplug();
     connecting.join();
@@ -843,7 +832,8 @@ TEST_CASE("Gemini Flat Panel Slots - a cable pulled during the connect state see
 
     panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
     std::atomic<int> code{0};
-    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::jthread connecting(
+        [&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
     panel.unplug();
     connecting.join();

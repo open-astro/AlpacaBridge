@@ -24,8 +24,10 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::util::ParkedFaultOrder;
 using alpacacore::util::TelescopeCommandLimits;
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -71,17 +73,6 @@ std::string text_of(F&& call) {
         return e.what();
     }
     return "";
-}
-
-// The code `call` throws, or 0 when it passes.
-template <typename F>
-int code_of(F&& call) {
-    try {
-        call();
-    } catch (const AlpacaException& e) {
-        return e.error_code();
-    }
-    return 0;
 }
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -136,8 +127,9 @@ TEST_CASE("Telescope command gate - PulseGuide refuses in the order argument, co
     for (const Row& row : rows) {
         RecordingChecks checks{row.state, {}};
         INFO("direction " << row.direction << " duration " << row.duration);
-        CHECK(code_of([&] { alpacacore::util::check_pulse_guide(limits, row.direction, row.duration, checks); }) ==
-              row.expected);
+        CHECK(error_code_of([&] {
+                  alpacacore::util::check_pulse_guide(limits, row.direction, row.duration, checks);
+              }) == row.expected);
     }
 }
 
@@ -148,18 +140,21 @@ TEST_CASE("Telescope command gate - the parked-against-fault order is the driver
     limits.move_axis_order = ParkedFaultOrder::FaultFirst;
     limits.slew_order = ParkedFaultOrder::FaultFirst;
     RecordingChecks pulse{parked_and_faulted(), {}};
-    CHECK(code_of([&] { alpacacore::util::check_pulse_guide(limits, 0, 100, pulse); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { alpacacore::util::check_pulse_guide(limits, 0, 100, pulse); }) ==
+          AlpacaError::DriverException);
     RecordingChecks move{parked_and_faulted(), {}};
-    CHECK(code_of([&] { alpacacore::util::check_move_axis(limits, 0, 1.0, move); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { alpacacore::util::check_move_axis(limits, 0, 1.0, move); }) ==
+          AlpacaError::DriverException);
     RecordingChecks slew{parked_and_faulted(), {}};
-    CHECK(code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", slew); }) ==
+    CHECK(error_code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", slew); }) ==
           AlpacaError::DriverException);
 
     // One family's order does not leak into another's.
     limits.slew_order = ParkedFaultOrder::ParkedFirst;
     RecordingChecks slew_parked_first{parked_and_faulted(), {}};
-    CHECK(code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", slew_parked_first); }) ==
-          AlpacaError::InvalidWhileParked);
+    CHECK(error_code_of([&] {
+              alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", slew_parked_first);
+          }) == AlpacaError::InvalidWhileParked);
 }
 
 TEST_CASE("Telescope command gate - MoveAxis refuses in the order axis, rate, connected, parked, fault",
@@ -195,7 +190,7 @@ TEST_CASE("Telescope command gate - MoveAxis refuses in the order axis, rate, co
     for (const Row& row : rows) {
         RecordingChecks checks{row.state, {}};
         INFO("axis " << row.axis << " rate " << row.rate);
-        CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, row.axis, row.rate, checks); }) ==
+        CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, row.axis, row.rate, checks); }) ==
               row.expected);
         if (row.expected == AlpacaError::InvalidValue) {
             CHECK(text_of([&] { alpacacore::util::check_move_axis_arguments(limits, row.axis, row.rate); }) ==
@@ -214,27 +209,27 @@ TEST_CASE("Telescope command gate - a MoveAxis stop tells the parked check and s
         limits.stop_checks_fault = false;
         RecordingChecks checks{faulted(), {}};
         bool stop = false;
-        CHECK(code_of([&] { stop = alpacacore::util::check_move_axis(limits, 0, 1e-7, checks); }) == 0);
+        CHECK(error_code_of([&] { stop = alpacacore::util::check_move_axis(limits, 0, 1e-7, checks); }) == 0);
         CHECK(stop);
         CHECK(checks.calls == std::vector<std::string>{"connected", "parked(stop)"});
     }
     SECTION("a stop on a faulted link is refused when the driver checks the fault for stops") {
         limits.stop_checks_fault = true;
         RecordingChecks checks{faulted(), {}};
-        CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, 0, 0.0, checks); }) ==
+        CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, 0, 0.0, checks); }) ==
               AlpacaError::DriverException);
         CHECK(checks.calls == std::vector<std::string>{"connected", "parked(stop)", "fault"});
     }
     SECTION("a rate just over the epsilon is a move, not a stop") {
         limits.stop_checks_fault = false;
         RecordingChecks checks{faulted(), {}};
-        CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, 0, 2e-6, checks); }) ==
+        CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, 0, 2e-6, checks); }) ==
               AlpacaError::DriverException);
         CHECK(checks.calls == std::vector<std::string>{"connected", "parked", "fault"});
     }
     SECTION("a stop on a parked mount is still refused when the driver's parked check says so") {
         RecordingChecks checks{parked(), {}};
-        CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, 1, -0.0, checks); }) ==
+        CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, 1, -0.0, checks); }) ==
               AlpacaError::InvalidWhileParked);
     }
     CHECK(alpacacore::util::is_move_axis_stop(limits, 1e-6));
@@ -270,7 +265,7 @@ TEST_CASE("Telescope command gate - a slew refuses in the order coordinates, con
     for (const Row& row : rows) {
         RecordingChecks checks{row.state, {}};
         INFO("ra " << row.ra << " dec " << row.dec);
-        CHECK(code_of([&] {
+        CHECK(error_code_of([&] {
                   alpacacore::util::check_equatorial_slew(limits, row.ra, row.dec, "SlewToCoordinates", checks);
               }) == row.expected);
     }
@@ -299,14 +294,16 @@ TEST_CASE("Telescope command gate - a passing call runs each check once, in orde
 TEST_CASE("Telescope command gate - the default limits refuse nothing a protocol limit would", "[util][command-gate]") {
     const TelescopeCommandLimits limits;
     RecordingChecks checks;
-    CHECK(code_of([&] { alpacacore::util::check_pulse_guide(limits, 0, std::numeric_limits<int>::max(), checks); }) ==
-          0);
-    CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, 2, 1e300, checks); }) == 0);
-    CHECK(code_of([&] { (void)alpacacore::util::check_move_axis(limits, 3, 1.0, checks); }) ==
+    CHECK(error_code_of(
+              [&] { alpacacore::util::check_pulse_guide(limits, 0, std::numeric_limits<int>::max(), checks); }) == 0);
+    CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, 2, 1e300, checks); }) == 0);
+    CHECK(error_code_of([&] { (void)alpacacore::util::check_move_axis(limits, 3, 1.0, checks); }) ==
           AlpacaError::InvalidValue);  // ITelescopeV4 names three axes
     // The universal bounds stay: a negative duration and a direction outside 0-3.
-    CHECK(code_of([&] { alpacacore::util::check_pulse_guide(limits, 0, -1, checks); }) == AlpacaError::InvalidValue);
-    CHECK(code_of([&] { alpacacore::util::check_pulse_guide(limits, 4, 0, checks); }) == AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { alpacacore::util::check_pulse_guide(limits, 0, -1, checks); }) ==
+          AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { alpacacore::util::check_pulse_guide(limits, 4, 0, checks); }) ==
+          AlpacaError::InvalidValue);
     // The default epsilon makes only a zero rate a stop.
     CHECK(alpacacore::util::is_move_axis_stop(limits, 0.0));
     CHECK_FALSE(alpacacore::util::is_move_axis_stop(limits, 1e-12));
@@ -347,7 +344,8 @@ TEST_CASE("Telescope command gate - a guide-rate write refuses in the order valu
     for (const Row& row : rows) {
         RecordingChecks checks{row.state, {}};
         INFO("rate " << row.rate);
-        CHECK(code_of([&] { alpacacore::util::check_guide_rate(limits, row.axis, row.rate, checks); }) == row.expected);
+        CHECK(error_code_of([&] { alpacacore::util::check_guide_rate(limits, row.axis, row.rate, checks); }) ==
+              row.expected);
         if (row.expected == AlpacaError::InvalidValue) {
             CHECK(text_of([&] { alpacacore::util::check_guide_rate_arguments(limits, row.axis, row.rate); }) ==
                   row.text);
@@ -383,7 +381,7 @@ TEST_CASE("Telescope command gate - a TrackingRate write refuses in the order ra
     for (const Row& row : rows) {
         RecordingChecks checks{row.state, {}};
         INFO("rate " << row.rate);
-        CHECK(code_of([&] { alpacacore::util::check_tracking_rate(limits, row.rate, checks); }) == row.expected);
+        CHECK(error_code_of([&] { alpacacore::util::check_tracking_rate(limits, row.rate, checks); }) == row.expected);
         if (row.expected == AlpacaError::InvalidValue) {
             CHECK(text_of([&] { alpacacore::util::check_tracking_rate_arguments(limits, row.rate); }) == "rate");
             CHECK(checks.calls.empty());
@@ -396,7 +394,8 @@ TEST_CASE("Telescope command gate - a TrackingRate write refuses in the order ra
     // The default refuses only a negative rate.
     const TelescopeCommandLimits defaults;
     CHECK_NOTHROW(alpacacore::util::check_tracking_rate_arguments(defaults, std::numeric_limits<int>::max()));
-    CHECK(code_of([&] { alpacacore::util::check_tracking_rate_arguments(defaults, -1); }) == AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { alpacacore::util::check_tracking_rate_arguments(defaults, -1); }) ==
+          AlpacaError::InvalidValue);
 }
 
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {
@@ -414,6 +413,6 @@ TEST_CASE("Telescope command gate - a family with no fault check runs the parked
     alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "SlewToCoordinates", slew);
     CHECK(slew.calls == std::vector<std::string>{"connected", "parked", "tracking"});
     RecordingChecks parked_slew{parked_and_faulted(), {}};
-    CHECK(code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", parked_slew); }) ==
+    CHECK(error_code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", parked_slew); }) ==
           AlpacaError::InvalidWhileParked);
 }

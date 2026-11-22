@@ -53,6 +53,37 @@ TEST_CASE("driver_rig - require_alpaca_error does not swallow a non-Alpaca excep
     require_alpaca_error([] { throw std::runtime_error("boom"); }, AlpacaError::NotConnected);
 }
 
+// Falsified by: error_code_of() returning a constant or the wrong exception field instead of error_code().
+TEST_CASE("driver_rig - error_code_of returns the code of an AlpacaException", "[driver_rig]") {
+    std::string message;
+    CHECK(error_code_of([] { throw AlpacaException("boom", AlpacaError::NotConnected); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([] { throw AlpacaException("boom", AlpacaError::InvalidValue); }, &message) ==
+          AlpacaError::InvalidValue);
+    CHECK(message == "boom");
+}
+
+// Falsified by: error_code_of() returning -1 instead of 0 when fn does not throw (ASCOM "no error").
+TEST_CASE("driver_rig - error_code_of returns 0 when nothing is thrown", "[driver_rig]") {
+    std::string message = "unchanged";
+    CHECK(error_code_of([] {}) == 0);
+    CHECK(error_code_of([] {}, &message) == 0);
+    CHECK(message == "unchanged");
+}
+
+// Falsified by: error_code_of() gaining a catch (...) that turns a non-Alpaca exception into a code.
+TEST_CASE("driver_rig - error_code_of lets a non-Alpaca exception propagate", "[driver_rig]") {
+    REQUIRE_THROWS_AS(error_code_of([] { throw std::runtime_error("boom"); }), std::runtime_error);
+}
+
+// Falsified by: worker_code_of() returning 0 for a non-Alpaca exception, or dropping the Alpaca code.
+TEST_CASE("driver_rig - worker_code_of maps a non-Alpaca exception to -1", "[driver_rig]") {
+    // Called on the test thread only to pin its result; a real caller is a worker thread.
+    CHECK(worker_code_of([] { throw std::runtime_error("boom"); }) == -1);
+    CHECK(worker_code_of([] { throw AlpacaException("boom", AlpacaError::NotConnected); }) ==
+          AlpacaError::NotConnected);
+    CHECK(worker_code_of([] {}) == 0);
+}
+
 // Falsified by: timed() returning zero or the start time instead of the elapsed time.
 TEST_CASE("driver_rig - timed returns the elapsed duration of the call", "[driver_rig]") {
     const auto spent = timed([] { std::this_thread::sleep_for(std::chrono::milliseconds(20)); });

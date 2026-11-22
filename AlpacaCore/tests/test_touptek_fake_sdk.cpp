@@ -41,8 +41,10 @@
 #include "fake_touptek_sdk.h"
 
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeToupTekSDK;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 
 namespace {
 
@@ -102,17 +104,9 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
         }
     };
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
-    const auto error = [](auto&& read) {
-        try {
-            read();
-        } catch (const AlpacaException& ex) {
-            return ex.error_code();
-        }
-        return 0;
-    };
     const auto check_error = [&](int code) {
-        CHECK(error([&] { driver->get_last_exposure_duration(); }) == code);
-        CHECK(error([&] { driver->get_last_exposure_start_time(); }) == code);
+        CHECK(error_code_of([&] { driver->get_last_exposure_duration(); }) == code);
+        CHECK(error_code_of([&] { driver->get_last_exposure_start_time(); }) == code);
     };
     const auto wait_for = [](auto&& predicate) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -139,7 +133,7 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
         CHECK(driver->get_last_exposure_start_time() == prior_start);
         const int stops = fake.call_count("stop");
         driver->set_start_x(driver->get_camera_x_size() - 1);
-        CHECK(error([&] { driver->start_exposure(0.02, true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { driver->start_exposure(0.02, true); }) == alpacacore::AlpacaError::InvalidValue);
         CHECK(fake.call_count("stop") == stops);
         CHECK(driver->get_last_exposure_duration() == 0.01);
         CHECK(driver->get_last_exposure_start_time() == prior_start);
@@ -168,11 +162,12 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
         REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
         check_metadata();
         CHECK_FALSE(driver->get_image_ready());
-        CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::InvalidOperation);
         // Invalid input cannot cancel this pending acquisition or replace A.
         for (double invalid :
              {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), 1e100}) {
-            CHECK(error([&] { driver->start_exposure(invalid, true); }) == alpacacore::AlpacaError::InvalidValue);
+            CHECK(error_code_of([&] { driver->start_exposure(invalid, true); }) ==
+                  alpacacore::AlpacaError::InvalidValue);
         }
         check_metadata();
         if (outcome == "abort" || outcome == "stop") {
@@ -187,13 +182,14 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
                 if (outcome == "deadline") CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
             }
             fake.release_wait_image();
-            REQUIRE(wait_for(
-                [&] { return error([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
-            CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
+            REQUIRE(wait_for([&] {
+                return error_code_of([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+            }));
+            CHECK(error_code_of([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
             driver->abort_exposure();
             // The watchdog failure shows before the late body returns; the settings unlock once it has, so the
             // fake's script may change.
-            REQUIRE(wait_for([&] { return error([&] { driver->set_start_x(0); }) == 0; }));
+            REQUIRE(wait_for([&] { return error_code_of([&] { driver->set_start_x(0); }) == 0; }));
         }
         check_metadata();
     }
@@ -201,7 +197,7 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
     fail_wait.store(true);
     driver->start_exposure(2.0, true);
     REQUIRE(wait_for(
-        [&] { return error([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
+        [&] { return error_code_of([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
     check_metadata();
     driver->abort_exposure();
     fail_wait.store(false);
@@ -630,14 +626,6 @@ TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid f
     fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
     driver->start_exposure(0.01, true);
     REQUIRE(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
-    auto error_code_of = [](const std::function<void()>& call) {
-        try {
-            call();
-            return 0;
-        } catch (const AlpacaException& e) {
-            return e.error_code();
-        }
-    };
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
 
@@ -890,14 +878,6 @@ TEST_CASE("ToupTek camera - a frame shorter than the binned ROI contract still f
     fake.delivered_dimensions = std::pair<unsigned, unsigned>{3, 2};
     driver->start_exposure(0.01, true);
     REQUIRE(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
-    auto error_code_of = [](const std::function<void()>& call) {
-        try {
-            call();
-            return 0;
-        } catch (const AlpacaException& e) {
-            return e.error_code();
-        }
-    };
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
@@ -911,24 +891,10 @@ TEST_CASE("ToupTek camera - no delivered frame fails ImageReady and ImageArray",
     driver->set_num_y(2);
     driver->start_exposure(0.01, true);
 
-    const auto image_ready_error = [&] {
-        try {
-            (void)driver->get_image_ready();
-        } catch (const AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
+    const auto image_ready_error = [&] { return error_code_of([&] { (void)driver->get_image_ready(); }); };
     REQUIRE(eventually([&] { return image_ready_error() == alpacacore::AlpacaError::DriverException; }));
 
-    const auto image_array_error = [&] {
-        try {
-            (void)driver->get_image_array();
-        } catch (const AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
+    const auto image_array_error = [&] { return error_code_of([&] { (void)driver->get_image_array(); }); };
     CHECK(image_array_error() == alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
@@ -1124,18 +1090,6 @@ std::chrono::microseconds time_of(Fn&& fn) {
     });
 }
 
-// The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing
-// an exchange may refuse it with NotConnected but must never fail it on a closed handle (DriverException).
-template <typename Fn>
-int outcome_of(Fn&& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return 0;
-}
-
 constexpr std::chrono::milliseconds kSlowDevice{300};
 constexpr std::chrono::milliseconds kNoIoBound{20};
 
@@ -1190,12 +1144,14 @@ TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and
     delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
 
     std::atomic<int> outcome{-1};
-    std::thread read([&] { outcome = outcome_of([&] { (void)thermal->get_switch_value(0); }); });
+    std::thread read([&] { outcome = worker_code_of([&] { (void)thermal->get_switch_value(0); }); });
     wait_for_entered(entered);
 
     CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
     read.join();
     fake.before_call = nullptr;
+    // A disconnect racing the read may refuse it with NotConnected, but never fails it on a closed handle
+    // (the fake raises DriverException).
     CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
     CHECK_FALSE(thermal->get_connected());
     CHECK(fake.underflow_closes == 0);
@@ -1211,7 +1167,7 @@ TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the
     delay_sdk_call(fake, "put_heat", kSlowDevice, entered);
 
     std::atomic<int> outcome{-1};
-    std::thread write([&] { outcome = outcome_of([&] { thermal->set_switch_value(0, 1.0); }); });
+    std::thread write([&] { outcome = worker_code_of([&] { thermal->set_switch_value(0, 1.0); }); });
     wait_for_entered(entered);
 
     CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));

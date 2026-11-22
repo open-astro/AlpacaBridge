@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_touptek_powerbox_sdk.h"
 #include "locked_touptek_powerbox_sdk.h"
 #include "power_port_test_dir.h"
@@ -35,17 +36,9 @@ namespace {
 
 namespace touptek = alpacacore::vendor::touptek;
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTouptekPowerboxSDK;
 using alpacacore::test::LockedTouptekPowerboxSDK;
-
-int error_code(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return -1;
-}
 
 // Every WARN logged while it lives, as (component, message).
 struct WarnCapture {
@@ -93,13 +86,13 @@ TEST_CASE("ToupTek powerbox seam - the real wrapper starts every port on before 
 TEST_CASE("FakeTouptekPowerboxSDK - set_value enforces the real wrapper's rules", "[touptek][switch][unit][fake-sdk]") {
     const auto cfg = mixed_config();
     FakeTouptekPowerboxSDK fake(cfg.ports);
-    CHECK(error_code([&] { fake.set_value(0, 0); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { fake.set_value(0, 0); }) == alpacacore::AlpacaError::NotConnected);
     fake.open();
     REQUIRE(fake.is_open());
-    CHECK(error_code([&] { fake.set_value(3, 0); }) == alpacacore::AlpacaError::NotImplemented);
-    CHECK(error_code([&] { fake.set_value(0, 2); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_code([&] { fake.set_value(1, 101); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_code([&] { fake.set_value(9, 0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { fake.set_value(3, 0); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { fake.set_value(0, 2); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { fake.set_value(1, 101); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { fake.set_value(9, 0); }) == alpacacore::AlpacaError::InvalidValue);
     fake.set_value(1, 40);
     fake.set_value(0, 0);
     CHECK(fake.get_value(1) == 40);
@@ -120,14 +113,14 @@ TEST_CASE("ToupTek StellaVita Switch Driver - connected async and read-only writ
     auto driver = touptek::create_touptek_switch(0, cfg, fake);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK(error_code([&] { driver->set_async(0, true); }) == alpacacore::AlpacaError::NotImplemented);
-    CHECK(error_code([&] { driver->set_async_value(0, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
-    CHECK(error_code([&] { driver->set_switch(3, true); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { driver->set_async(0, true); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { driver->set_async_value(0, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { driver->set_switch(3, true); }) == alpacacore::AlpacaError::NotImplemented);
     // The range check precedes the writability check (issue #2264): an out-of-range write to the read-only
     // port is InvalidValue, a valid one NotImplemented, and neither reaches the box.
     const int writes_before = fake.set_value_calls();
-    CHECK(error_code([&] { driver->set_switch_value(3, 2.0); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_code([&] { driver->set_switch_value(3, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { driver->set_switch_value(3, 2.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->set_switch_value(3, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
     CHECK(fake.set_value_calls() == writes_before);
     driver->set_connected(false);
 }
@@ -138,7 +131,7 @@ TEST_CASE("FakeTouptekPowerboxSDK - fail_open refuses the connect and counts the
     FakeTouptekPowerboxSDK fake;
     fake.fail_open = true;
     auto driver = touptek::create_touptek_switch(0, touptek::default_stellavita_config(), fake);
-    CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(fake.open_calls() == 1);
 }
@@ -191,14 +184,14 @@ TEST_CASE("ToupTek powerbox seam - connecting leaves every port on and writes no
     for (int i = 0; i < 4; ++i) CHECK(driver->get_switch(i));
     // Only the four configured ports are exposed; the Cypress hub lines are not.
     CHECK(driver->get_max_switch() == 4);
-    CHECK(error_code([&] { driver->get_switch(4); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->get_switch(4); }) == alpacacore::AlpacaError::InvalidValue);
 
     driver->set_switch(2, false);
     CHECK_FALSE(driver->get_switch(2));
     CHECK(fake.get_value(2) == 0);
     driver->set_connected(false);
     CHECK(fake.close_calls() == 1);
-    CHECK(error_code([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
 }
 
 // Falsified by: power_port_switch_driver.h set_switch_value() dropping the PWM range check (101
@@ -213,10 +206,10 @@ TEST_CASE("ToupTek powerbox seam - PWM and read-only ports map through the injec
     driver->set_switch_value(1, 35.0);
     CHECK(fake.get_value(1) == 35);
     const int writes = fake.set_value_calls();
-    CHECK(error_code([&] { driver->set_switch_value(1, 101.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->set_switch_value(1, 101.0); }) == alpacacore::AlpacaError::InvalidValue);
     // The driver refuses it before the box is touched.
     CHECK(fake.set_value_calls() == writes);
-    CHECK(error_code([&] { driver->set_switch(3, false); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code_of([&] { driver->set_switch(3, false); }) == alpacacore::AlpacaError::NotImplemented);
 }
 
 // Falsified by: power_port_switch_driver.h constructor dropping the port_count() comparison
@@ -225,7 +218,8 @@ TEST_CASE("ToupTek powerbox seam - a box whose port count differs from the confi
           "[touptek][switch][unit][fake-sdk]") {
     auto cfg = touptek::default_stellavita_config();
     FakeTouptekPowerboxSDK fake(std::vector<touptek::StellaVitaPortConfig>(cfg.ports.begin(), cfg.ports.begin() + 2));
-    CHECK(error_code([&] { touptek::create_touptek_switch(0, cfg, fake); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { touptek::create_touptek_switch(0, cfg, fake); }) ==
+          alpacacore::AlpacaError::InvalidValue);
 }
 
 // Falsified by: touptek_switch_driver.cpp stellavita_profile() editing destruction_warning (or the shared driver's
@@ -291,7 +285,7 @@ TEST_CASE("ToupTek powerbox seam - restore at server start sets the saved ports 
     CHECK(fake.get_value(0) == 0);
     CHECK(fake.get_value(1) == 35);
     CHECK(fake.get_value(2) == 1);  // nothing saved: left as it was
-    CHECK(error_code([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
 
     // A Disconnect before any Connect keeps the hold.
     driver->set_connected(false);

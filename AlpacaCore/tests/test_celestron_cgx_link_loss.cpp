@@ -331,14 +331,7 @@ struct HangupRig {
     // Runs `call` on another thread, pulls the cable while its first held reply is in flight, and returns the call's
     // error code (0 for none) and how long it took after the pull.
     std::pair<int, std::chrono::steady_clock::duration> pull_during(const std::function<void()>& call) {
-        auto task = std::async(std::launch::async, [&] {
-            try {
-                call();
-                return 0;
-            } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code();
-            }
-        });
+        auto task = std::async(std::launch::async, [&] { return alpacacore::test::error_code_of(call); });
         REQUIRE(mount->wait_for_reply_fragment(2s));
         const auto pulled = std::chrono::steady_clock::now();
         mount->sever_link();

@@ -784,14 +784,8 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     REQUIRE(alpacacore::util::is_serial_port_in_use(rig.node));
 
     rig.fake->gate_next(0x02);  // the GOTO's reply never comes: the cable is pulled first
-    auto move = std::async(std::launch::async, [&] {
-        try {
-            rig.driver->move(5000);
-            return 0;
-        } catch (const alpacacore::AlpacaException& error) {
-            return error.error_code();
-        }
-    });
+    auto move = std::async(std::launch::async,
+                           [&] { return alpacacore::test::error_code_of([&] { rig.driver->move(5000); }); });
     REQUIRE(rig.fake->wait_gate_reached(kBound));
     rig.fake->sever_link();
     REQUIRE(move.wait_for(1000ms) == std::future_status::ready);  // the exchange's own timeout is 1 s
@@ -866,14 +860,8 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during the connect fails th
     REQUIRE(rig.fake->ok());
     SECTION("the limits read") { rig.fake->gate_next(0x2C); }
     SECTION("the firmware read, whose failure the connect does without") { rig.fake->gate_next(0xFE); }
-    auto connect = std::async(std::launch::async, [&] {
-        try {
-            rig.driver->set_connected(true);
-            return 0;
-        } catch (const alpacacore::AlpacaException& error) {
-            return error.error_code();
-        }
-    });
+    auto connect = std::async(
+        std::launch::async, [&] { return alpacacore::test::error_code_of([&] { rig.driver->set_connected(true); }); });
     REQUIRE(rig.fake->wait_gate_reached(kBound));
     rig.fake->sever_link();
     REQUIRE(connect.wait_for(kBound) == std::future_status::ready);

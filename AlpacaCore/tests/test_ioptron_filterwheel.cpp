@@ -530,18 +530,6 @@ bool wait_until(Pred pred, milliseconds limit) {
     return true;
 }
 
-// The AlpacaException code fn threw, or 0. Safe on a non-test thread.
-int alpaca_code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    } catch (...) {
-        return -1;
-    }
-    return 0;
-}
-
 // The AlpacaException text fn threw, or empty.
 std::string alpaca_what_of(const std::function<void()>& fn) {
     try {
@@ -592,7 +580,7 @@ struct FaultedIefw {
         REQUIRE(driver->get_connected());
         fake.fail_wheel_position(true);
         for (int i = 0; i < 3; ++i) {
-            REQUIRE(alpaca_code_of([&] { (void)driver->get_position(); }) == kDriverException);
+            REQUIRE(alpacacore::test::error_code_of([&] { (void)driver->get_position(); }) == kDriverException);
         }
         REQUIRE(driver->get_link_fault().find("consecutive failures") != std::string::npos);
     }
@@ -631,7 +619,7 @@ TEST_CASE("iEFW Link - a cable pulled during a Position read loses the link at o
     const int polls = fake.count(":WP#");
     fake.hold_next_reply(milliseconds(300));  // the wheel sits on the :WP# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(alpaca_code_of([&] { (void)driver->get_position(); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { (void)driver->get_position(); })); });
     REQUIRE(wait_until([&] { return fake.count(":WP#") == polls + 1; }, milliseconds(2000)));
     const auto pulled = std::chrono::steady_clock::now();
     fake.unplug();
@@ -669,7 +657,7 @@ TEST_CASE("iEFW Link - a cable pulled before a move's ack loses the link at once
     // The ack is optional (a silent firmware only costs the ack wait), but a hangup there is not silence.
     fake.hold_reply_to(":WM", milliseconds(300));
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(alpaca_code_of([&] { driver->set_position(3); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_position(3); })); });
     REQUIRE(wait_until([&] { return fake.count(":WM03#") == 1; }, milliseconds(2000)));
     fake.unplug();
     caller.join();
@@ -719,7 +707,7 @@ TEST_CASE("iEFW Link - a loss after failed reads is NotConnected and later calls
 
     fake.fail_wheel_position(true);  // the cable is in, the replies do not parse: two failed reads, below the latch
     for (int i = 0; i < 2; ++i) {
-        CHECK(alpaca_code_of([&] { (void)driver->get_position(); }) ==
+        CHECK(alpacacore::test::error_code_of([&] { (void)driver->get_position(); }) ==
               static_cast<int>(alpacacore::AlpacaError::DriverException));
     }
     REQUIRE(driver->get_connected());
@@ -762,7 +750,7 @@ TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Dis
     port.replug(replugged);
     replugged.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return replugged.count(":FW1#") == 1; }, milliseconds(3000)));
     CHECK_FALSE(driver->get_connected());  // the handshake passed, the reconnect has not finished
     connecting.join();
@@ -787,7 +775,7 @@ TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Con
 
     fake.hold_next_reply(milliseconds(300));  // the first :DeviceInfo# reply is held while the cable goes
     std::atomic<int> code{0};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.connects() == 1; }, milliseconds(2000)));
     fake.unplug();
     connecting.join();  // the handshake's own retries (about 2 s), then the failure
@@ -818,7 +806,7 @@ TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails
 
     fake.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.count(":FW1#") == 1; }, milliseconds(3000)));
     fake.unplug();
     connecting.join();
@@ -846,7 +834,7 @@ TEST_CASE("iEFW Link - a silent wheel with the cable in latches a fault and stay
 
     fake.fail_wheel_position(true);
     for (int i = 0; i < 2; ++i) {
-        (void)alpaca_code_of([&] { (void)driver->get_position(); });
+        (void)alpacacore::test::error_code_of([&] { (void)driver->get_position(); });
     }
     fake.fail_wheel_position(false);
     fake.set_silent(true);
@@ -909,7 +897,7 @@ TEST_CASE("iEFW Link - a move on a wheel with a latched fault is refused and a g
     const std::string fault = wheel.driver->get_link_fault();
     CHECK(alpaca_what_of([&] { wheel.driver->set_position(1); }) ==
           "iOptron iEFW communications compromised: " + fault);
-    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
     CHECK(wheel.fake.count(":WM") == 0);
     CHECK(wheel.driver->get_connected());
 
@@ -974,8 +962,8 @@ TEST_CASE("iEFW Link - a fault just under the staleness bound does not lose the 
           "[ioptron][filterwheel][unit][fake][link-lost]") {
     FaultedIefw wheel;
     wheel.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1));
-    CHECK(alpaca_code_of([&] { (void)wheel.driver->get_position(); }) == kDriverException);
-    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { (void)wheel.driver->get_position(); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
     CHECK(wheel.driver->get_connected());
     CHECK(alpacacore::util::is_serial_port_in_use(wheel.pts));
     CHECK(wheel.driver->get_link_fault().find("consecutive failures") != std::string::npos);

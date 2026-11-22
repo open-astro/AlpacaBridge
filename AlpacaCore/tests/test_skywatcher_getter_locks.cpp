@@ -41,6 +41,7 @@
 #include "fake_task_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::require_alpaca_error;
@@ -250,20 +251,16 @@ TEST_CASE("SkyWatcher getters - a getter during a clean disconnect's close reads
     bool connected_in_close = true;
     int ra_error = 0;
     int slewing_error = 0;
-    auto error_of = [&](const std::function<void()>& read) {
-        try {
-            read();
-        } catch (const alpacacore::AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
     sw::set_disconnect_before_close_hook_for_testing(*driver, [&] {
         hook_ran = true;
         std::thread reader([&] {
-            connected_in_close = driver->get_connected();
-            ra_error = error_of([&] { (void)driver->get_right_ascension(); });
-            slewing_error = error_of([&] { (void)driver->get_slewing(); });
+            try {
+                connected_in_close = driver->get_connected();
+                ra_error = error_code_of([&] { (void)driver->get_right_ascension(); });
+                slewing_error = error_code_of([&] { (void)driver->get_slewing(); });
+            } catch (...) {  // a non-Alpaca exception must fail the case, not end the run from this thread
+                ra_error = slewing_error = -1;
+            }
         });
         reader.join();
     });

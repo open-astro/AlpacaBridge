@@ -51,6 +51,7 @@ struct WarnCapture {
     WarnCapture& operator=(const WarnCapture&) = delete;
 };
 
+using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
 
 using FakeEAFSDK = alpacacore::test::FakeZWOEAFSDK;
@@ -750,18 +751,10 @@ TEST_CASE("ZWO EAF Focuser Driver - An idle focuser does not drive the unit that
     sdk.last_move_id = -1;
     wait_past_status_ttl(clock);
     // Every check runs, so a red run shows each of Y's calls that reached X's unit.
-    const auto error_of = [](const std::function<void()>& fn) -> int {
-        try {
-            fn();
-        } catch (const alpacacore::AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
-    CHECK(error_of([&] { (void)y->get_position(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)y->get_position(); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(sdk.last_read_id == -1);
     CHECK_FALSE(y->get_connected());
-    CHECK(error_of([&] { y->move(100); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { y->move(100); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(sdk.last_move_id == -1);
     CHECK_NOTHROW(y->set_connected(false));
     CHECK(x->get_connected());
@@ -883,15 +876,6 @@ namespace {
 
 constexpr auto kPastTtl = std::chrono::milliseconds(150);
 
-int code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& e) {
-        return e.error_code();
-    }
-    return 0;
-}
-
 // An EAF on a fake task clock (decision 0005) whose status reads fail with a generic error, the unit still attached:
 // three failed reads latch the status cache's fault at the clock's current time. No real waits.
 struct FaultedEaf {
@@ -910,9 +894,9 @@ struct FaultedEaf {
     void latch() {
         clock.advance(kPastTtl);
         sdk.fail_reads = true;
-        CHECK(code_of([&] { (void)driver->get_position(); }) != 0);
-        CHECK(code_of([&] { (void)driver->get_position(); }) != 0);
-        CHECK(code_of([&] { (void)driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)driver->get_position(); }) != 0);
+        CHECK(error_code_of([&] { (void)driver->get_position(); }) != 0);
+        CHECK(error_code_of([&] { (void)driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
         REQUIRE(driver->get_link_fault().find("consecutive failures") != std::string::npos);
     }
 };
@@ -964,7 +948,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A fault just under the staleness bound does 
           "[zwo][focuser][unit][fake-sdk][link]") {
     FaultedEaf eaf;
     eaf.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1));
-    CHECK(code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(eaf.driver->get_connected());
     CHECK(eaf.sdk.close_calls == 0);
     CHECK(eaf.driver->get_link_fault().find("consecutive failures") != std::string::npos);
@@ -983,7 +967,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A good read starts the staleness clock again
 
     eaf.latch();
     eaf.clock.advance(std::chrono::seconds(2));  // past the bound from the first latch, not from the second
-    CHECK(code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(eaf.driver->get_connected());
 
     eaf.clock.advance(alpacacore::util::kLinkStalenessBound);

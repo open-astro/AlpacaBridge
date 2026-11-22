@@ -47,6 +47,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::CelestronTracking;
@@ -852,18 +853,9 @@ TEST_CASE("Celestron initiator supersede - AbortSlew during a held Park GOTO lea
     CHECK(second_initiator_with_held_body([](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }, rig, held) ==
           kSuperseded);
     // The superseded dispatch wrote no target: the getters throw ValueNotSet, not some other failure.
-    const auto code_of = [](const std::function<void()>& call) -> int {
-        try {
-            call();
-        } catch (const alpacacore::AlpacaException& ex) {
-            return ex.error_code();
-        } catch (...) {
-            return -1;
-        }
-        return 0;
-    };
-    CHECK(code_of([&] { (void)rig.driver->get_target_right_ascension(); }) == alpacacore::AlpacaError::ValueNotSet);
-    CHECK(code_of([&] { (void)rig.driver->get_target_declination(); }) == alpacacore::AlpacaError::ValueNotSet);
+    CHECK(error_code_of([&] { (void)rig.driver->get_target_right_ascension(); }) ==
+          alpacacore::AlpacaError::ValueNotSet);
+    CHECK(error_code_of([&] { (void)rig.driver->get_target_declination(); }) == alpacacore::AlpacaError::ValueNotSet);
 }
 
 // ---- The Park body's dispatch writes state around two reads (decision 0006, rule 6) ----
@@ -953,22 +945,12 @@ TEST_CASE("Celestron initiator supersede - a failed AbortSlew during a Park ends
     REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
     REQUIRE(rig.server->drop_connections());
     rig.st->silent.store(true);  // the reconnect, if the wrapper makes one, gets no answer either
-    const auto code_of = [](const std::function<void()>& call) -> int {
-        try {
-            call();
-        } catch (const alpacacore::AlpacaException& ex) {
-            return ex.error_code();
-        } catch (...) {
-            return -1;
-        }
-        return 0;
-    };
-    REQUIRE(code_of([&] { rig.driver->abort_slew(); }) == alpacacore::AlpacaError::DriverException);
+    REQUIRE(error_code_of([&] { rig.driver->abort_slew(); }) == alpacacore::AlpacaError::DriverException);
     // A park that is still recorded as in flight refuses a slew with InvalidWhileParked; on the dropped link it fails
     // on the wire instead.
-    CHECK(code_of([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); }) !=
+    CHECK(error_code_of([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); }) !=
           alpacacore::AlpacaError::InvalidWhileParked);
-    CHECK(code_of([&] { rig.driver->move_axis(0, 0.5); }) != alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(error_code_of([&] { rig.driver->move_axis(0, 0.5); }) != alpacacore::AlpacaError::InvalidWhileParked);
 }
 
 // ---- The Park body inside its J read (decision 0006, rule 6) ----
