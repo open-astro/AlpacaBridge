@@ -368,15 +368,6 @@ bool wait_until(Pred pred, milliseconds limit) {
     return true;
 }
 
-// error_code_of for a worker thread, where an escaping exception ends the whole run: -1 for a non-Alpaca one.
-int worker_code_of(const std::function<void()>& fn) {
-    try {
-        return alpacacore::test::error_code_of(fn);
-    } catch (...) {
-        return -1;
-    }
-}
-
 constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
 
 // What a lost link refuses; old_pts is the node the driver had open.
@@ -415,7 +406,7 @@ TEST_CASE("iEAF Link - a cable pulled during a status read loses the link at onc
     const int polls = fake.count(":FI#");
     fake.hold_next_reply(milliseconds(300));  // the focuser sits on the :FI# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(worker_code_of([&] { (void)driver->get_position(); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { (void)driver->get_position(); })); });
     REQUIRE(wait_until([&] { return fake.count(":FI#") == polls + 1; }, milliseconds(2000)));
     const auto pulled = std::chrono::steady_clock::now();
     fake.unplug();
@@ -451,7 +442,7 @@ TEST_CASE("iEAF Link - a cable pulled before a move's ack loses the link at once
     // The ack is optional (a silent firmware only costs the ack wait), but a hangup there is not silence.
     fake.hold_next_reply(milliseconds(300));
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(worker_code_of([&] { driver->move(1500); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->move(1500); })); });
     REQUIRE(wait_until([&] { return fake.count(":FM") == 1; }, milliseconds(2000)));
     fake.unplug();
     caller.join();
@@ -557,7 +548,7 @@ TEST_CASE("iEAF Link - a cable pulled during the connect handshake fails the Con
 
     fake.hold_next_reply(milliseconds(300));  // the first :DeviceInfo# reply is held while the cable goes
     std::atomic<int> code{0};
-    std::thread connecting([&] { code.store(worker_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.connects() == 1; }, milliseconds(2000)));
     fake.unplug();
     connecting.join();  // the handshake's own retries (about 2 s), then the failure

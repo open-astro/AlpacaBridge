@@ -296,14 +296,7 @@ TEST_CASE("ToupTek Camera Driver - a failed exposure survives AbortExposure and 
     driver->set_connected(true);
     driver->start_exposure(0.01, true);  // the fake delivers no frame: the exposure fails
 
-    const auto image_ready_error = [&] {
-        try {
-            (void)driver->get_image_ready();
-        } catch (const alpacacore::AlpacaException& e) {
-            return static_cast<int>(e.error_code());
-        }
-        return 0;
-    };
+    const auto image_ready_error = [&] { return error_code_of([&] { (void)driver->get_image_ready(); }); };
     const auto failure_kept = [&] {
         for (int i = 0; i < 400 && image_ready_error() == 0; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

@@ -530,15 +530,6 @@ bool wait_until(Pred pred, milliseconds limit) {
     return true;
 }
 
-// error_code_of for a worker thread, where an escaping exception ends the whole run: -1 for a non-Alpaca one.
-int worker_code_of(const std::function<void()>& fn) {
-    try {
-        return alpacacore::test::error_code_of(fn);
-    } catch (...) {
-        return -1;
-    }
-}
-
 // The AlpacaException text fn threw, or empty.
 std::string alpaca_what_of(const std::function<void()>& fn) {
     try {
@@ -628,7 +619,7 @@ TEST_CASE("iEFW Link - a cable pulled during a Position read loses the link at o
     const int polls = fake.count(":WP#");
     fake.hold_next_reply(milliseconds(300));  // the wheel sits on the :WP# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(worker_code_of([&] { (void)driver->get_position(); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { (void)driver->get_position(); })); });
     REQUIRE(wait_until([&] { return fake.count(":WP#") == polls + 1; }, milliseconds(2000)));
     const auto pulled = std::chrono::steady_clock::now();
     fake.unplug();
@@ -666,7 +657,7 @@ TEST_CASE("iEFW Link - a cable pulled before a move's ack loses the link at once
     // The ack is optional (a silent firmware only costs the ack wait), but a hangup there is not silence.
     fake.hold_reply_to(":WM", milliseconds(300));
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(worker_code_of([&] { driver->set_position(3); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_position(3); })); });
     REQUIRE(wait_until([&] { return fake.count(":WM03#") == 1; }, milliseconds(2000)));
     fake.unplug();
     caller.join();
@@ -759,7 +750,7 @@ TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Dis
     port.replug(replugged);
     replugged.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(worker_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return replugged.count(":FW1#") == 1; }, milliseconds(3000)));
     CHECK_FALSE(driver->get_connected());  // the handshake passed, the reconnect has not finished
     connecting.join();
@@ -784,7 +775,7 @@ TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Con
 
     fake.hold_next_reply(milliseconds(300));  // the first :DeviceInfo# reply is held while the cable goes
     std::atomic<int> code{0};
-    std::thread connecting([&] { code.store(worker_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.connects() == 1; }, milliseconds(2000)));
     fake.unplug();
     connecting.join();  // the handshake's own retries (about 2 s), then the failure
@@ -815,7 +806,7 @@ TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails
 
     fake.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(worker_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.count(":FW1#") == 1; }, milliseconds(3000)));
     fake.unplug();
     connecting.join();

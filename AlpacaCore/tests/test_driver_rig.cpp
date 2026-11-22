@@ -75,6 +75,14 @@ TEST_CASE("driver_rig - error_code_of lets a non-Alpaca exception propagate", "[
     REQUIRE_THROWS_AS(error_code_of([] { throw std::runtime_error("boom"); }), std::runtime_error);
 }
 
+// Falsified by: worker_code_of() returning 0 for a non-Alpaca exception, or dropping the Alpaca code.
+TEST_CASE("driver_rig - worker_code_of maps a non-Alpaca exception to -1", "[driver_rig]") {
+    CHECK(worker_code_of([] { throw std::runtime_error("boom"); }) == -1);
+    CHECK(worker_code_of([] { throw AlpacaException("boom", AlpacaError::NotConnected); }) ==
+          AlpacaError::NotConnected);
+    CHECK(worker_code_of([] {}) == 0);
+}
+
 // Falsified by: timed() returning zero or the start time instead of the elapsed time.
 TEST_CASE("driver_rig - timed returns the elapsed duration of the call", "[driver_rig]") {
     const auto spent = timed([] { std::this_thread::sleep_for(std::chrono::milliseconds(20)); });

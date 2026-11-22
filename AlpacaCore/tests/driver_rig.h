@@ -106,6 +106,16 @@ inline int error_code_of(const std::function<void()>& fn, std::string* message =
     return 0;
 }
 
+// error_code_of for a thread other than the test thread, where an escaping exception ends the whole run
+// instead of failing one case: a non-Alpaca exception returns -1. Never call it on the test thread.
+inline int worker_code_of(const std::function<void()>& fn) {
+    try {
+        return error_code_of(fn);
+    } catch (...) {
+        return -1;
+    }
+}
+
 // The message of the AlpacaException fn throws, after requiring expected_code.
 inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
     try {
