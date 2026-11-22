@@ -41,7 +41,6 @@ struct AsiairPlusSwitchConfig {
 // onto the kernel module's DC-port ioctl indices (4..7).
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config();
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
-                                                            AsiairPlusSwitchConfig config);
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config);
 
 } // namespace alpacacore::vendor::zwo

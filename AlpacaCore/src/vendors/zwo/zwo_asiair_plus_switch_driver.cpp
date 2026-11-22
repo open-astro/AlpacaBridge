@@ -102,8 +102,7 @@ AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
-                                                            AsiairPlusSwitchConfig config) {
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config) {
     if (config.ports.size() > 4) {
         throw AlpacaException("ASIAIR Plus exposes 4 DC ports; configuration lists more", AlpacaError::InvalidValue);
     }

@@ -119,7 +119,7 @@ private:
     mutable std::mutex mutex_;
     std::atomic<bool> open_{false};
     bool closing_ = false;         // under mutex_
-    bool lines_readable_ = false;  // under mutex_: the last open() read the lines' levels
+    bool lines_readable_ = false;  // under lifecycle_mutex_: the last open() read the lines' levels
     std::vector<std::unique_ptr<PortState>> states_;
 };
 

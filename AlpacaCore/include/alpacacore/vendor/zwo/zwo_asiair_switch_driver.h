@@ -50,6 +50,6 @@ struct AsiairSwitchConfig {
 // PWM frequency 1000 Hz.
 AsiairSwitchConfig default_asiair_pro_config();
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, AsiairSwitchConfig config);
+std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, const AsiairSwitchConfig& config);
 
 } // namespace alpacacore::vendor::zwo

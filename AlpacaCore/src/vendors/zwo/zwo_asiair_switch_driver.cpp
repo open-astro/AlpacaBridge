@@ -66,7 +66,7 @@ AsiairSwitchConfig default_asiair_pro_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, AsiairSwitchConfig config) {
+std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, const AsiairSwitchConfig& config) {
     // The GPIO chip is a libgpiod character-device node; it must be an absolute /dev/ path. Reject anything
     // else up front (empty string, relative path, a bare "gpiochip0") with a clear InvalidValue rather than
     // letting it reach gpiod_chip_open() as an opaque failure.
