@@ -475,7 +475,7 @@ local logs/source/tests only; the main operator remains the sole hardware operat
 
 Following explicit user approval to save qualification, the report was published as
 [Linux-arm64-usb.txt](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-(since replaced; that path now holds the 2026-11-11 v6.0.0-beta.2 pass).
+(since replaced; that path now holds the 2026-11-22 `feat/cgx-aux-tcp-transport` pass).
 It was a new report; the CGX-L hand-controller report remains unchanged. The raw
 382-line operator log remains private and unchanged. The publication applies
 only the approved site/elevation and

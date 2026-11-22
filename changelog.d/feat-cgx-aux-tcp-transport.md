@@ -23,3 +23,6 @@
 
 ### Fixed (tests)
 - **Four CGX USB cases no longer race the end of FindHome** (private, no issue): "Sync waits for encoder stability after tracking stops" and three siblings waited only for AtHome, which the FindHome body sets before it returns, so the next Tracking or Sync write could be refused ("Celestron CGX is already moving", about 1 run in 10 under ASan). They now wait for Slewing false too. Test change only.
+
+### Added (docs)
+- **Celestron CGX ConformU over SkyPortal WiFi, and a new USB report** (private, no issue): ConformU 4.6.0-rc.1 passes with 0 errors, 0 warnings, 0 issues and all 97 timing rows over the SkyPortal WiFi adapter in its own access-point mode (`AlpacaCore/conformu/Celestron/CGX/Linux-arm64-wifi.txt`) and over direct USB (`Linux-arm64-usb.txt`, replacing the 2026-11-11 v6.0.0-beta.2 run), both on a build of this branch on the bare northern CGX, with the site and local times redacted. SUPPORTED-DRIVERS.md lists the CGX over WiFi with a SkyPortal WiFi backend note: both adapter modes, FindHome after every reconnect, which lost replies are re-sent, and the qualification limits.
