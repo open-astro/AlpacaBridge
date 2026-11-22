@@ -13,6 +13,8 @@
 // The persisted device list on its own (issue #2481): a store over a temp
 // directory, no Router, no catalog and no devices.
 
+#include <alpacacore/util/logging.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -20,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
@@ -181,7 +184,7 @@ int main() {
         EXPECT(corrupt_copies(dir.path).size() == 1);
     }
     {
-        // case: save writes the list, a new store reads it back, and add_or_replace replaces by vendor, type and number
+        // case: save writes the list, a new store reads it back, and add_or_replace replaces by type and number
         TempDir dir;
         PersistedConfigStore store(fs::path(dir.path) / "nested");  // save creates the directory
         (void)store.load(identity);
@@ -191,8 +194,8 @@ int main() {
         store.add_or_replace(entry("celestron", "telescope", 0));
         nlohmann::json camera_again = entry("zwo", "Camera", 0);
         camera_again["gain"] = 100;
-        store.add_or_replace(camera_again);               // same vendor, type (any case) and number: replaced
-        store.add_or_replace(entry("qhy", "camera", 0));  // another vendor on the same type and number: appended
+        store.add_or_replace(camera_again);  // same type (any case) and number: replaced
+        store.add_or_replace(entry("qhy", "camera", 1));
         store.add_or_replace(nlohmann::json{{"vendor", "zwo"}, {"deviceType", "camera"}});  // no number: ignored
         EXPECT(store.snapshot().size() == 3);
         EXPECT(store.save());
@@ -204,41 +207,36 @@ int main() {
         EXPECT(snapshot.size() == 3);
         EXPECT(snapshot[0]["gain"] == 100);
         EXPECT(snapshot[0]["deviceType"] == "Camera");
-        EXPECT(snapshot[2]["vendor"] == "qhy");
+        EXPECT(snapshot[2]["vendor"] == "qhy" && snapshot[2]["deviceNumber"] == 1);
     }
     {
-        // case: the three match rules (type and number; vendor, type and number; vendor only when given)
+        // case: one match rule, device type (any case) and number; vendor is data
         const nlohmann::json e = entry("zwo", "Camera", 3);
-        EXPECT(PersistedConfigStore::matches_type_and_number(e, "camera", 3));
-        EXPECT(!PersistedConfigStore::matches_type_and_number(e, "camera", 4));
-        EXPECT(PersistedConfigStore::matches_vendor_type_and_number(e, "zwo", "CAMERA", 3));
-        EXPECT(!PersistedConfigStore::matches_vendor_type_and_number(e, "qhy", "camera", 3));
-        EXPECT(PersistedConfigStore::matches_vendor_when_given(e, "", "camera", 3));
-        EXPECT(PersistedConfigStore::matches_vendor_when_given(e, "zwo", "camera", 3));
-        EXPECT(!PersistedConfigStore::matches_vendor_when_given(e, "qhy", "camera", 3));
+        EXPECT(PersistedConfigStore::matches(e, "camera", 3));
+        EXPECT(PersistedConfigStore::matches(e, "CAMERA", 3));
+        EXPECT(!PersistedConfigStore::matches(e, "camera", 4));
+        EXPECT(!PersistedConfigStore::matches(e, "focuser", 3));
         // A wrong-typed number has no key and matches nothing (#388); a whole 3.0 is device 3.
         nlohmann::json bad = e;
         bad["deviceNumber"] = "3";
-        EXPECT(!PersistedConfigStore::matches_type_and_number(bad, "camera", 3));
+        EXPECT(!PersistedConfigStore::matches(bad, "camera", 3));
         nlohmann::json whole = e;
         whole["deviceNumber"] = 3.0;
-        EXPECT(PersistedConfigStore::matches_type_and_number(whole, "camera", 3));
+        EXPECT(PersistedConfigStore::matches(whole, "camera", 3));
     }
     {
-        // case: remove drops the vendor's entry only when a vendor is given, and every vendor's when not
+        // case: remove drops the entry at a type and number, whatever its vendor
         TempDir dir;
         PersistedConfigStore store(dir.path);
         (void)store.load(identity);
         store.add_or_replace(entry("zwo", "camera", 0));
-        store.add_or_replace(entry("qhy", "camera", 0));
         store.add_or_replace(entry("zwo", "camera", 1));
-        EXPECT(!store.remove("svbony", "camera", 0));
-        EXPECT(store.remove("zwo", "camera", 0));
-        EXPECT(store.snapshot().size() == 2);
-        EXPECT(store.remove("", "Camera", 0));
+        EXPECT(!store.remove("camera", 5));
+        EXPECT(store.remove("Camera", 0));
         EXPECT(store.snapshot().size() == 1);
-        EXPECT(!store.remove("", "", 1));
-        EXPECT(!store.remove("", "camera", -1));
+        EXPECT(!store.remove("", 1));
+        EXPECT(!store.remove("camera", -1));
+        EXPECT(store.snapshot().size() == 1);
     }
     {
         // case: an edit runs on the first match only and saves only a change
@@ -246,7 +244,7 @@ int main() {
         PersistedConfigStore store(dir.path);
         (void)store.load(identity);
         store.add_or_replace(entry("zwo", "telescope", 0));
-        store.add_or_replace(entry("celestron", "telescope", 0));
+        store.add_or_replace(entry("celestron", "telescope", 1));
         int calls = 0;
         auto unchanged = store.edit_by_type_and_number("telescope", 0, [&](nlohmann::json&) {
             ++calls;
@@ -254,7 +252,7 @@ int main() {
         });
         EXPECT(calls == 1 && !unchanged.changed && !unchanged.saved);
         EXPECT(!fs::exists(store.file()));
-        auto changed = store.edit_by_vendor_type_and_number("celestron", "telescope", 0, [](nlohmann::json& e) {
+        auto changed = store.edit_by_type_and_number("telescope", 1, [](nlohmann::json& e) {
             e["focalLength"] = 2.0;
             return true;
         });
@@ -284,7 +282,7 @@ int main() {
                     });
                     (void)store.snapshot();
                     if (round % 2 == 0) {
-                        EXPECT(store.remove("zwo", "camera", t));
+                        EXPECT(store.remove("camera", t));
                         (void)store.save();
                     }
                 }
@@ -302,6 +300,70 @@ int main() {
         EXPECT(store.save());
         const auto on_disk = read_json(store.file());
         EXPECT(on_disk.is_array() && on_disk.size() == kEntries);
+    }
+    {
+        // case: a second vendor configured at a stored type and number replaces the entry
+        TempDir dir;
+        PersistedConfigStore store(dir.path);
+        (void)store.load(identity);
+        // A configure of a second vendor at a type and number leaves one entry, and every lookup finds it.
+        store.add_or_replace(entry("zwo", "telescope", 0));
+        store.add_or_replace(entry("celestron", "telescope", 0));
+        EXPECT(store.snapshot().size() == 1);
+        EXPECT(store.snapshot()[0]["vendor"] == "celestron");
+        std::vector<std::string> seen;
+        (void)store.edit_by_type_and_number("telescope", 0, [&](nlohmann::json& e) {
+            seen.push_back(e["vendor"].get<std::string>());
+            return false;
+        });
+        EXPECT(seen == std::vector<std::string>{"celestron"});
+        EXPECT(store.remove("telescope", 0));
+        EXPECT(store.snapshot().empty());
+    }
+    {
+        // case: load keeps the first of two entries at one type and number, drops the later, warns, and saves
+        TempDir dir;
+        nlohmann::json file = nlohmann::json::array();
+        file.push_back(entry("zwo", "camera", 0));
+        file.push_back(entry("qhy", "Camera", 0));  // the same type (any case) and number
+        file.push_back(entry("qhy", "camera", 1));
+        write_text(dir.path / "registered_devices.json", file.dump());
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(warnings_mutex);
+                if (level == alpacacore::logging::LogLevel::Warn) warnings.emplace_back(message);
+            });
+        PersistedConfigStore store(dir.path);
+        const auto loaded = store.load(identity);
+        EXPECT(loaded.parsed);
+        EXPECT(warnings.size() == 1);
+        EXPECT(!warnings.empty() && warnings[0].find("qhy") != std::string::npos &&
+               warnings[0].find("zwo") != std::string::npos);
+        EXPECT(loaded.entries.size() == 2);
+        EXPECT(loaded.entries[0]["vendor"] == "zwo" && loaded.entries[1]["deviceNumber"] == 1);
+        EXPECT(loaded.live_unique_ids.size() == 2);
+        const auto snapshot = store.snapshot();
+        EXPECT(snapshot.size() == 2 && snapshot[0]["vendor"] == "zwo");
+        const auto on_disk = read_json(store.file());
+        EXPECT(on_disk.is_array() && on_disk.size() == 2 && on_disk[0]["vendor"] == "zwo");
+        // Entries with no readable key are not a pair: they stay.
+        nlohmann::json odd =
+            nlohmann::json::array({nlohmann::json{{"vendor", "zwo"}}, nlohmann::json{{"vendor", "qhy"}}});
+        TempDir odd_dir;
+        write_text(odd_dir.path / "registered_devices.json", odd.dump());
+        PersistedConfigStore odd_store(odd_dir.path);
+        EXPECT(odd_store.load(identity).entries.size() == 2);
     }
     {
         // case: a reserved uniqueId is not kept by a second call until the first releases it
@@ -335,6 +397,12 @@ int main() {
         same["uniqueId"] = kUuid;
         EXPECT(store.reserve_unique_id(same).has_value());
         EXPECT(same["uniqueId"] == kUuid);
+
+        // A configure that replaces the entry with another vendor counts its uniqueId as free.
+        nlohmann::json swapped = entry("qhy", "camera", 0);
+        swapped["uniqueId"] = kUuid;
+        EXPECT(store.reserve_unique_id(swapped).has_value());
+        EXPECT(swapped["uniqueId"] == kUuid);
 
         // A device-number ID is never kept.
         nlohmann::json slot = entry("zwo", "camera", 7);

@@ -68,15 +68,10 @@ public:
 
     const std::filesystem::path& file() const { return file_; }
 
-    // The three match rules in use today. A device type is compared lowercase.
-    // Device type and number only.
-    static bool matches_type_and_number(const nlohmann::json& entry, const std::string& device_type, int device_number);
-    // Vendor, device type and number.
-    static bool matches_vendor_type_and_number(const nlohmann::json& entry, const std::string& vendor,
-                                               const std::string& device_type, int device_number);
-    // Device type and number, and the vendor only when `vendor` is not empty.
-    static bool matches_vendor_when_given(const nlohmann::json& entry, const std::string& vendor,
-                                          const std::string& device_type, int device_number);
+    // The one identity rule of a stored device, the same as the live registry's: device
+    // type (compared lowercase) and number. The vendor is data: configuring another
+    // vendor at a stored type and number replaces the entry.
+    static bool matches(const nlohmann::json& entry, const std::string& device_type, int device_number);
 
     struct LoadResult {
         // This call read the file: false when an earlier call already did.
@@ -93,10 +88,11 @@ public:
         std::set<std::string> first_unique_ids;
     };
     using Sanitize = std::function<nlohmann::json(const nlohmann::json&)>;
-    // Once per store: reads the file, sets a corrupt one aside (#1688), keeps
-    // `sanitize(entry)` of each entry with a decision 0018 uniqueId, and saves
-    // the list back when it assigned one. `sanitize` runs under the list lock
-    // and must not call into this store.
+    // Once per store: reads the file, sets a corrupt one aside (#1688), keeps the
+    // first entry at each type and number and drops a later one with a warning
+    // (also from `entries`), keeps `sanitize(entry)` of each entry with a decision
+    // 0018 uniqueId, and saves the list back when it assigned an ID or dropped an
+    // entry. `sanitize` runs under the list lock and must not call into this store.
     LoadResult load(const Sanitize& sanitize);
 
     // Writes the list to the file atomically. True when it was written; false
@@ -106,14 +102,14 @@ public:
     // A copy of the list.
     std::vector<nlohmann::json> snapshot() const;
 
-    // Replaces the entry matching the config's vendor, type and number, or
-    // appends it. A config without all three is ignored. Does not save.
+    // Replaces the entry matching the config's type and number (whatever its
+    // vendor), or appends it. A config without all three is ignored. Does not save.
     void add_or_replace(const nlohmann::json& config);
-    // Removes every entry matching matches_vendor_when_given(). True when one
-    // was removed. Does not save.
-    bool remove(const std::string& vendor, const std::string& device_type, int device_number);
+    // Removes the entry matching the type and number. True when one was
+    // removed. Does not save.
+    bool remove(const std::string& device_type, int device_number);
 
-    // Runs `edit` on the first entry the rule matches, under the list lock;
+    // Runs `edit` on the entry matching the type and number, under the list lock;
     // `edit` returns true when it changed the entry and must not call into this
     // store. A change is saved after the lock is released.
     struct EditResult {
@@ -122,8 +118,6 @@ public:
     };
     using Edit = std::function<bool(nlohmann::json&)>;
     EditResult edit_by_type_and_number(const std::string& device_type, int device_number, const Edit& edit);
-    EditResult edit_by_vendor_type_and_number(const std::string& vendor, const std::string& device_type,
-                                              int device_number, const Edit& edit);
 
     // Holds a uniqueId reserve_unique_id() chose, and the entry-cap slot of a
     // call that adds an entry, until it is destroyed.
@@ -146,17 +140,15 @@ public:
     // removes the entry first, so its own ID is free again) unless another
     // entry holds it, or another configuredevice call chose it and has not
     // stored its entry yet; otherwise mint one, and write it to config's
-    // "uniqueId". The entry this call replaces (matches_vendor_type_and_number,
-    // as add_or_replace() matches) is not another entry. The choice is reserved
-    // until the Reservation is destroyed.
+    // "uniqueId". The entry this call replaces (the one at its type and number,
+    // whatever its vendor) is not another entry: its ID is free for the new
+    // config. The choice is reserved until the Reservation is destroyed.
     // open-astro#2292: a call that adds an entry counts against kMaxEntries with
     // the adding calls still in flight, so concurrent calls cannot pass it
     // together. std::nullopt, with config unchanged, when the cap is reached.
     std::optional<Reservation> reserve_unique_id(nlohmann::json& config);
 
 private:
-    EditResult edit_first(const std::function<bool(const nlohmann::json&)>& match, const Edit& edit);
-
     std::filesystem::path file_;
     // Serialises the file write in save(): request workers reach it
     // concurrently (#444), and two truncate-and-write passes interleave into

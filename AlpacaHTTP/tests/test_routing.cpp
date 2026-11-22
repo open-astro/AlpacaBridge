@@ -9875,6 +9875,45 @@ int main() {
     }
 
     {
+        // case: a removed vendor's driver cannot store its learned config into another vendor's entry at that number
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
+        auto other_schema = alpacahttp::test_catalog::make_schema();
+        other_schema.key.vendor = "yyy";
+        auto other_factory = alpacahttp::test_catalog::make_factory();
+        other_factory.key.vendor = "yyy";
+        router.catalog().add(other_schema);
+        router.catalog().add(other_factory);
+        EXPECT(
+            api_attempt(
+                router,
+                nlohmann::json{
+                    {"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9263}, {"count", 7}, {"ratio", 3.0}},
+                "Focuser")
+                .ok);
+        const auto store = alpacahttp::test_catalog::last_learned_at_connect;
+        EXPECT(static_cast<bool>(store));
+        const std::string uid = raw_listed_config(router, "Focuser", 9263).value("uniqueId", std::string());
+        remove_device(router, "zzz", "focuser", 9263);
+        // The web UI's edit flow: another vendor configured at the number, sending the old UniqueID (decision 0018).
+        EXPECT(api_attempt(router,
+                           nlohmann::json{{"vendor", "yyy"},
+                                          {"deviceType", "focuser"},
+                                          {"deviceNumber", 9263},
+                                          {"count", 5},
+                                          {"uniqueId", uid}},
+                           "Focuser")
+                   .ok);
+        alpacacore::catalog::DeviceConfig learned;
+        learned.set("host", std::string("learned-at-connect"));
+        store(learned);
+        const auto kept = listed_entry(router, "Focuser", 9263);
+        EXPECT(!kept.is_null() && kept.dump().find("learned-at-connect") == std::string::npos);
+        EXPECT(raw_listed_config(router, "Focuser", 9263).value("vendor", std::string()) == "yyy");
+        remove_device(router, "yyy", "focuser", 9263);
+    }
+
+    {
         // case: a bind hook's registration warning reaches the configuredevice reply and the device card
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());

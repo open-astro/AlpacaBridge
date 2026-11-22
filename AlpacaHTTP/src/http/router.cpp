@@ -1149,7 +1149,9 @@ void Router::store_learned_config(const nlohmann::json& entry, const nlohmann::j
     const auto wanted = persisted_key(entry);
     if (!wanted.has_value()) return;
     const auto merge = [&](nlohmann::json& saved) {
-        // The number now names another device.
+        // The number now names another device (a new ID, or another vendor configured there).
+        const auto now = persisted_key(saved);
+        if (!now || now->vendor != wanted->vendor) return false;
         if (!unique_id.empty() && stored_unique_id(saved) != unique_id) return false;
         for (const auto& [field, value] : learned.items()) {
             if (value.is_null()) {
@@ -1160,7 +1162,7 @@ void Router::store_learned_config(const nlohmann::json& entry, const nlohmann::j
         }
         return true;
     };
-    persisted_store_->edit_by_vendor_type_and_number(wanted->vendor, wanted->device_type, wanted->device_number, merge);
+    persisted_store_->edit_by_type_and_number(wanted->device_type, wanted->device_number, merge);
 }
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
@@ -2127,7 +2129,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         auto find_config = [&persisted_snapshot](const std::string& device_type,
                                                  int device_number) -> const nlohmann::json* {
             for (const auto& entry : persisted_snapshot) {
-                if (PersistedConfigStore::matches_type_and_number(entry, device_type, device_number)) {
+                if (PersistedConfigStore::matches(entry, device_type, device_number)) {
                     return &entry;
                 }
             }
@@ -2286,8 +2288,8 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
             int pnum = pkey ? pkey->device_number : -1;
             bool already_listed = false;
             for (const auto& cap : capabilities) {
-                if (PersistedConfigStore::matches_type_and_number(entry, alpacacore::device_type_to_string(cap.type),
-                                                                  cap.device_number)) {
+                if (PersistedConfigStore::matches(entry, alpacacore::device_type_to_string(cap.type),
+                                                  cap.device_number)) {
                     already_listed = true;
                     break;
                 }
@@ -4023,7 +4025,6 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         }
 
         std::string device_type_str = catalog_json::get_string(config, "deviceType");
-        std::string vendor = catalog_json::get_string(config, "vendor");
         int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
         if (device_type_str.empty() || device_number < 0) {
@@ -4079,7 +4080,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             was_registered = registry.unregister_device(device_type, device_number);
         }
 
-        bool was_persisted = persisted_store_->remove(vendor, device_type_str, device_number);
+        bool was_persisted = persisted_store_->remove(device_type_str, device_number);
         set_registration_warning(device_type, device_number, {});
 
         if (was_registered || was_persisted) {

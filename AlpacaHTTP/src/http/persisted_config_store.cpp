@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -82,31 +84,15 @@ std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::st
 PersistedConfigStore::PersistedConfigStore(const std::filesystem::path& directory)
     : file_(directory / "registered_devices.json") {}
 
-bool PersistedConfigStore::matches_type_and_number(const nlohmann::json& entry, const std::string& device_type,
-                                                   int device_number) {
+bool PersistedConfigStore::matches(const nlohmann::json& entry, const std::string& device_type, int device_number) {
     const auto key = persisted_key(entry);
     return key && key->device_type == to_lower_copy(device_type) && key->device_number == device_number;
-}
-
-bool PersistedConfigStore::matches_vendor_type_and_number(const nlohmann::json& entry, const std::string& vendor,
-                                                          const std::string& device_type, int device_number) {
-    const auto key = persisted_key(entry);
-    return key && key->vendor == vendor && key->device_type == to_lower_copy(device_type) &&
-           key->device_number == device_number;
-}
-
-bool PersistedConfigStore::matches_vendor_when_given(const nlohmann::json& entry, const std::string& vendor,
-                                                     const std::string& device_type, int device_number) {
-    const auto key = persisted_key(entry);
-    if (!key || key->device_type != to_lower_copy(device_type) || key->device_number != device_number) {
-        return false;
-    }
-    return vendor.empty() || key->vendor == vendor;
 }
 
 PersistedConfigStore::LoadResult PersistedConfigStore::load(const Sanitize& sanitize) {
     LoadResult result;
     bool assigned_unique_ids = false;
+    bool dropped_duplicate = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (loaded_) {
@@ -147,6 +133,29 @@ PersistedConfigStore::LoadResult PersistedConfigStore::load(const Sanitize& sani
             }
 
             entries_.clear();
+            // One entry per type and number, as the registry holds: keep the first in file order.
+            // The router registers `result.entries`, so a dropped one leaves it too.
+            {
+                std::map<std::pair<std::string, int>, std::string> seen;  // type and number -> the kept vendor
+                nlohmann::json kept = nlohmann::json::array();
+                for (auto& entry : result.entries) {
+                    const auto key = persisted_key(entry);
+                    if (key) {
+                        const auto first = seen.emplace(std::pair(key->device_type, key->device_number), key->vendor);
+                        if (!first.second) {
+                            util::log_warning("Dropping a persisted " + util::escape_for_log(key->vendor) + " " +
+                                              util::escape_for_log(key->device_type) + " " +
+                                              std::to_string(key->device_number) + ": the earlier " +
+                                              util::escape_for_log(first.first->second) +
+                                              " entry already holds that device type and number");
+                            dropped_duplicate = true;
+                            continue;
+                        }
+                    }
+                    kept.push_back(std::move(entry));
+                }
+                result.entries = std::move(kept);
+            }
             // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
             // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
             std::set<std::string> taken;
@@ -171,7 +180,9 @@ PersistedConfigStore::LoadResult PersistedConfigStore::load(const Sanitize& sani
     }
     if (assigned_unique_ids) {
         util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
-        if (!save() && !result.first_unique_ids.empty()) {
+    }
+    if (assigned_unique_ids || dropped_duplicate) {
+        if (!save() && assigned_unique_ids && !result.first_unique_ids.empty()) {
             // The next start would mint other GUIDs and prune whatever moved onto
             // these, so nothing moves until the file can keep them.
             util::log_warning("Could not store the new UniqueIDs; saved rotator offsets stay under their old IDs");
@@ -227,11 +238,10 @@ void PersistedConfigStore::add_or_replace(const nlohmann::json& config) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::string vendor = catalog_json::get_string(config, "vendor");
     const std::string device_type = to_lower_copy(catalog_json::get_string(config, "deviceType"));
     const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
     for (auto& existing : entries_) {
-        if (matches_vendor_type_and_number(existing, vendor, device_type, device_number)) {
+        if (matches(existing, device_type, device_number)) {
             existing = config;
             return;
         }
@@ -240,28 +250,27 @@ void PersistedConfigStore::add_or_replace(const nlohmann::json& config) {
     entries_.push_back(config);
 }
 
-bool PersistedConfigStore::remove(const std::string& vendor, const std::string& device_type, int device_number) {
+bool PersistedConfigStore::remove(const std::string& device_type, int device_number) {
     if (device_type.empty() || device_number < 0) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t before = entries_.size();
-    entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
-                                  [&](const nlohmann::json& entry) {
-                                      return matches_vendor_when_given(entry, vendor, device_type, device_number);
-                                  }),
-                   entries_.end());
+    entries_.erase(
+        std::remove_if(entries_.begin(), entries_.end(),
+                       [&](const nlohmann::json& entry) { return matches(entry, device_type, device_number); }),
+        entries_.end());
     return entries_.size() < before;
 }
 
-PersistedConfigStore::EditResult PersistedConfigStore::edit_first(
-    const std::function<bool(const nlohmann::json&)>& match, const Edit& edit) {
+PersistedConfigStore::EditResult PersistedConfigStore::edit_by_type_and_number(const std::string& device_type,
+                                                                               int device_number, const Edit& edit) {
     EditResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& entry : entries_) {
-            if (match(entry)) {
+            if (matches(entry, device_type, device_number)) {
                 result.changed = edit(entry);
                 break;
             }
@@ -271,23 +280,6 @@ PersistedConfigStore::EditResult PersistedConfigStore::edit_first(
         result.saved = save();
     }
     return result;
-}
-
-PersistedConfigStore::EditResult PersistedConfigStore::edit_by_type_and_number(const std::string& device_type,
-                                                                               int device_number, const Edit& edit) {
-    return edit_first(
-        [&](const nlohmann::json& entry) { return matches_type_and_number(entry, device_type, device_number); }, edit);
-}
-
-PersistedConfigStore::EditResult PersistedConfigStore::edit_by_vendor_type_and_number(const std::string& vendor,
-                                                                                      const std::string& device_type,
-                                                                                      int device_number,
-                                                                                      const Edit& edit) {
-    return edit_first(
-        [&](const nlohmann::json& entry) {
-            return matches_vendor_type_and_number(entry, vendor, device_type, device_number);
-        },
-        edit);
 }
 
 PersistedConfigStore::Reservation::Reservation(PersistedConfigStore* store, std::string unique_id, bool adds_entry)
@@ -311,8 +303,7 @@ std::optional<PersistedConfigStore::Reservation> PersistedConfigStore::reserve_u
     std::set<std::string> taken = reserved_unique_ids_;
     const auto replaced = persisted_key(config);
     for (const auto& entry : entries_) {
-        if (replaced &&
-            matches_vendor_type_and_number(entry, replaced->vendor, replaced->device_type, replaced->device_number)) {
+        if (replaced && matches(entry, replaced->device_type, replaced->device_number)) {
             adds_entry = false;
             continue;
         }
