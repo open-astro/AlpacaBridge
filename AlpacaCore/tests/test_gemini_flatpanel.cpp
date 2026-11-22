@@ -685,8 +685,10 @@ void require_lost(alpacacore::CoverCalibratorDriver& driver, const std::string& 
     require_alpaca_error([&] { (void)driver.get_cover_state(); }, kNotConnected);
     require_alpaca_error([&] { driver.calibrator_on(10); }, kNotConnected);
     require_alpaca_error([&] { driver.calibrator_off(); }, kNotConnected);
-    // The wrapper released the port: no claim is left on the dead node.
-    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
+    // The wrapper released the port: no claim is left on the dead node. Connected reads the link's lock-free lost()
+    // latch, which the read sets before the thread that met the hangup (a cover body, for one) closes the port, so
+    // wait for the release (#2402).
+    CHECK(slot_wait_until([&] { return !alpacacore::util::is_serial_port_in_use(old_pts); }, milliseconds(1000)));
 }
 
 }  // namespace

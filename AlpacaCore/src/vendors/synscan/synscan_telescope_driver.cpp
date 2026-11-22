@@ -107,6 +107,8 @@ constexpr double kLandingToleranceArcsec = 3.0;
 // the GOTO is repeated once unchanged; a second miss this large (a refused or limit-stopped GOTO, a mount that never
 // moved) fails the slew.
 constexpr double kLandingRefineLimitArcsec = 600.0;
+// How long a GOTO may report itself in progress before the wait stops the mount and fails the slew (#2412).
+constexpr auto kSlewTimeout = std::chrono::seconds(120);
 // How long a refinement GOTO forces Slewing true while the handset starts moving (the first GOTO uses 8 s).
 constexpr auto kRefineStartForce = std::chrono::seconds(2);
 // open-astro#1030: the handset computes RA from a local sidereal time it advances once a second, so after a GOTO
@@ -1645,6 +1647,9 @@ public:
                     if (precise && wait_for_slew_complete(lock, owner_generation, &ctx)) {
                         refine_goto_landing_locked(lock, ra, dec, owner_generation, &ctx);
                     }
+                } catch (const SlewFailureKept&) {
+                    // A timed-out wait stopped the mount and kept its error (#2412): Slewing and the error stand.
+                    return;
                 } catch (const std::exception& ex) {
                     if (ctx.stop_reason() == util::StopReason::Superseded) {
                         // The newer initiator owns Slewing, the force window and the error text.
@@ -2498,6 +2503,91 @@ private:
         }
     }
 
+    // The stops of stop_park_slew_wire(), then the tracking restore when every stop was answered and `restore_mode`
+    // is a tracking mode: the RA stop ended sidereal tracking. Returns the first stop failure (empty when every stop
+    // was answered); a failed restore goes to `restore_error` and never hides the stop. Runs with mutex_ released.
+    static std::string stop_and_restore_tracking_wire(int restore_mode, std::string& restore_error) {
+        std::string stop_error = stop_park_slew_wire();
+        if (stop_error.empty() && restore_mode > 0) {
+            try {
+                SynScanProtocolWrapper::instance().set_tracking_mode(restore_mode);
+            } catch (const std::exception& e) {
+                restore_error = e.what();
+            } catch (...) {
+                restore_error = "unknown exception";
+            }
+        }
+        return stop_error;
+    }
+
+    // Publishes the outcome of stop_and_restore_tracking_wire(), as AbortSlew's restore: a restore that did not land
+    // leaves Tracking false until one does; one that landed is written through, so a poll sampled during the RA stop
+    // cannot publish over it. `what` names the stop in the log. mutex_ must be held.
+    void note_tracking_restore_locked(const std::string& stop_error, const std::string& restore_error, int restore_mode,
+                                      const std::string& what) {
+        if (!restore_error.empty()) {
+            ra_stop_unconfirmed_ = true;
+            ALPACA_LOG_ERROR("SynScan", "tracking restore after " + what + " failed: " + restore_error);
+        } else if (stop_error.empty() && restore_mode > 0) {
+            set_tracking_mode_cached_locked(restore_mode);
+            ra_stop_unconfirmed_ = false;
+            invalidate_readback_top_locked();
+        }
+    }
+
+    // A slew failure whose stop and kept error are already published (fail_slew_timeout_locked()): the async body
+    // passes it on without overwriting the error or Slewing.
+    class SlewFailureKept : public AlpacaException {
+    public:
+        using AlpacaException::AlpacaException;
+    };
+
+    // A GOTO whose wait timed out (#2412): the handset still reports it in progress, so the mount is stopped in its
+    // wire turn and its tracking restored, as AbortSlew does, and the error is kept for Slewing until the next motion
+    // command or a reconnect clears it. An answered stop clears Slewing; a failed one leaves Slewing as it was and
+    // the error says the mount may still be moving. Throws SlewFailureKept with the kept text. A newer operation that
+    // took the mount (or a disconnect) owns the state: nothing is recorded, and this returns for the wait to report
+    // the supersession (a disconnect throws NotConnected). `lock` (mutex_) is held on entry and on return or throw.
+    void fail_slew_timeout_locked(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
+                                  const util::OperationContext* ctx) {
+        const std::string message = "Slew timed out after " + std::to_string(kSlewTimeout.count()) + " s";
+        const auto owns = [&] { return connected_ && !lost_ownership_locked(owner_generation, ctx); };
+        std::string stop_error;
+        std::string restore_error;
+        int restore_mode = 0;
+        if (!send_in_turn(
+                lock,
+                [&] {
+                    restore_mode = tracking_mode_cached_;  // read at the turn, as AbortSlew's restore
+                    return owns();
+                },
+                [&] { stop_error = stop_and_restore_tracking_wire(restore_mode, restore_error); })) {
+            check_connected();
+            ALPACA_LOG_WARN("SynScan", "slew timeout dropped, the slew was taken over: " + message);
+            return;
+        }
+        if (!owns()) {
+            check_connected();
+            return;
+        }
+        note_tracking_restore_locked(stop_error, restore_error, restore_mode, "slew timeout");
+        last_slew_error_ = message;
+        if (stop_error.empty()) {
+            set_slewing_locked(false);
+            last_slew_error_ += "; the mount was stopped";
+        } else {
+            last_slew_error_ += "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("SynScan",
+                             "stop after slew timeout failed: " + stop_error + "; the mount may still be moving");
+        }
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        guide_position_valid_ = false;
+        drop_poll_in_flight_locked();
+        ALPACA_LOG_WARN("SynScan", last_slew_error_);
+        throw SlewFailureKept(last_slew_error_);
+    }
+
     // AbortSlew's stop and published state, for a refused start that cancelled
     // a body in flight. A failed stop leaves Slewing as it was: the mount may
     // still be moving.
@@ -2512,27 +2602,11 @@ private:
                     return static_cast<bool>(connected_);
                 },
                 [&stop_error, &restore_error, &restore_mode] {
-                    stop_error = stop_park_slew_wire();
-                    // The RA stop ended sidereal tracking; a failed re-send is logged and never hides the stop.
-                    if (stop_error.empty() && restore_mode > 0) {
-                        try {
-                            SynScanProtocolWrapper::instance().set_tracking_mode(restore_mode);
-                        } catch (const std::exception& e) {
-                            restore_error = e.what();
-                        }
-                    }
+                    stop_error = stop_and_restore_tracking_wire(restore_mode, restore_error);
                 })) {
             return;
         }
-        if (!restore_error.empty()) {
-            ra_stop_unconfirmed_ = true;  // Tracking reads false until a restore lands
-            ALPACA_LOG_ERROR("SynScan", "tracking restore after refused slew start failed: " + restore_error);
-        } else if (stop_error.empty() && restore_mode > 0) {
-            // Written through, as AbortSlew's restore: a poll sampled during the RA stop cannot publish over it.
-            set_tracking_mode_cached_locked(restore_mode);
-            ra_stop_unconfirmed_ = false;
-            invalidate_readback_top_locked();
-        }
+        note_tracking_restore_locked(stop_error, restore_error, restore_mode, "refused slew start");
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
@@ -3628,8 +3702,7 @@ private:
     }
 
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
-                                util::OperationContext* ctx = nullptr) const {
-        const auto timeout = std::chrono::seconds(120);
+                                util::OperationContext* ctx = nullptr) {
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
@@ -3667,8 +3740,9 @@ private:
                 }
                 break;
             }
-            if (clock_.now() - start > timeout) {
-                throw AlpacaException("Slew timed out");
+            if (clock_.now() - start > kSlewTimeout) {
+                fail_slew_timeout_locked(lock, owner_generation, ctx);
+                return false;  // a newer operation took the mount meanwhile: it owns the state
             }
             sleep_unlocked(std::chrono::milliseconds(250));
         }
