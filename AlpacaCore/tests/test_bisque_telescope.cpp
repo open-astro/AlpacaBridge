@@ -1833,7 +1833,8 @@ TEST_CASE("Bisque MoveAxis - a move not renewed within 60 s is stopped, and Slew
     poll_now(*rig.driver);
     CHECK(rig.mount.move_stops.load() == 1);
     CHECK(rig.mount.move_starts.load() == 2);
-    CHECK(contains(slewing_failure(*rig.driver), "MoveAxis on axis 0 ran 60 s, the longest allowed"));
+    CHECK(contains(slewing_failure(*rig.driver),
+                   "MoveAxis on axis 0 ran 60 s, the longest allowed; the driver stopped both axes"));
     // A client causes it by not stopping its own move: INFO, not WARN (decision 0007 rule 9).
     CHECK(logs.info.load() == 1);
     CHECK(logs.warn_or_worse.load() == 0);
@@ -1878,6 +1879,21 @@ TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motio
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(slewing_failure(*rig.driver).empty());
     CHECK(rig.driver->get_slewing());
+
+    // FindHome and Park are motion commands too.
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.clock.advance(std::chrono::seconds(61));
+    poll_now(*rig.driver);
+    REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    CHECK(slewing_failure(*rig.driver).empty());
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.clock.advance(std::chrono::seconds(61));
+    poll_now(*rig.driver);
+    REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
+    REQUIRE_NOTHROW(rig.driver->park());
+    CHECK(slewing_failure(*rig.driver).empty());
 }
 
 TEST_CASE("Bisque slew - a SlewToRaDec with no reply is stopped and fails, a refused one sends no stop",
@@ -2146,4 +2162,36 @@ TEST_CASE("Bisque MoveAxis - a cap stop on one axis clears both, since DoCommand
     rig.clock.advance(std::chrono::seconds(30));
     poll_now(*rig.driver);  // axis 1's cap would have passed: no second stop
     CHECK(rig.mount.move_stops.load() == 1);
+}
+
+TEST_CASE("Bisque motion safety - a stop whose session ended meanwhile writes nothing into the new session",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    // A disconnect and a reconnect land while the stop is on the wire (decision 0016 rule 6).
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
+        rig.driver->set_connected(false);
+        rig.driver->set_connected(true);
+        pause_poll(*rig.driver);
+    });
+    rig.mount.ignore_aborts = 100;  // the stop fails, so the old session would store a failure
+
+    rig.mount.drop_slew_reply = true;
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::DriverException);
+    rig.mount.drop_slew_reply = false;
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    rig.mount.slew_polls_needed = 100000;
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    try {
+        slewed.get();
+        FAIL("Expected the slew deadline");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()) == "Slew timed out after 120 seconds");
+    }
+    CHECK(slewing_failure(*rig.driver).empty());
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
+    rig.mount.ignore_aborts = 0;
 }

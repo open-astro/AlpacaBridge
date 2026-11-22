@@ -230,6 +230,7 @@ public:
                 // A disconnect of a lost link: the transport is closed already; drop the rest of the session. A
                 // motion the lost link left running is stopped by the next connect (#2410).
                 note_relink_stop_if_moving_locked();
+                ++session_;
                 published_connected_ = false;
                 connected_ = false;
                 link_lost_ = false;
@@ -250,6 +251,7 @@ public:
             // Relink after a lost link: retire the dead session, then connect as a fresh one. Only the client's
             // Connected=true gets here; the driver never reopens on its own (decision 0009 point 4).
             note_relink_stop_if_moving_locked();
+            ++session_;
             published_connected_ = false;
             connected_ = false;
             link_lost_ = false;
@@ -300,6 +302,7 @@ public:
 
             lock.lock();
             connected_ = true;
+            ++session_;
             begin_motion_command_locked();  // a stored motion failure does not outlive its session
             target_ra_set_ = false;
             target_dec_set_ = false;
@@ -327,6 +330,7 @@ public:
             start_status_poller();
         } else {
             const bool axis_moving = manual_axis_slewing_[0] || manual_axis_slewing_[1];
+            ++session_;
             ++pulse_request_;
             pulse_generation_.bump();
             published_connected_ = false;
@@ -707,6 +711,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_link_locked();
             check_not_parked("FindHome");
+            begin_motion_command_locked();
         }
         auto& protocol = BisqueProtocolWrapper::instance();
         // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
@@ -741,6 +746,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
+                begin_motion_command_locked();
                 parking_ = true;
                 at_home_ = false;  // a park moves the mount off home (#2461)
                 guard.epoch = ++park_epoch_;
@@ -1204,6 +1210,11 @@ public:
     void set_slew_complete_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(test_hook_mutex_);
         slew_complete_hook_ = std::move(hook);
+    }
+
+    void set_stop_sent_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        stop_sent_hook_ = std::move(hook);
     }
 
 private:
@@ -1876,10 +1887,16 @@ private:
                                             const std::string& why) {
         lock.lock();
         note_slew_started_locked();  // TheSkyX may be slewing: Slewing must not read false meanwhile
+        const uint64_t session = session_;
         lock.unlock();
         const std::string stop_failure = send_verified_abort();
+        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
         lock.lock();
         const std::string unconfirmed = std::string(who) + ": TheSkyX did not confirm the slew (" + why + ")";
+        if (session != session_) {
+            // A disconnect or connect since: the state is the new session's (decision 0016 rule 6).
+            throw AlpacaException(unconfirmed, AlpacaError::DriverException);
+        }
         if (stop_failure.empty()) {
             slewing_cached_ = false;
             motion_error_ = unconfirmed + "; the driver stopped the mount";
@@ -1902,9 +1919,14 @@ private:
         if (epoch != slew_epoch_ || !connected_) {
             throw AlpacaException(kTimedOut);
         }
+        const uint64_t session = session_;
         lock.unlock();
         const std::string stop_failure = send_verified_abort();
+        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
         lock.lock();
+        if (session != session_) {
+            throw AlpacaException(kTimedOut);  // the state is the new session's (decision 0016 rule 6)
+        }
         if (stop_failure.empty()) {
             slewing_cached_ = false;
             motion_error_ = kTimedOut + "; the driver stopped the mount";
@@ -1991,7 +2013,7 @@ private:
             const std::string what =
                 "MoveAxis on " + axes + " ran " + std::to_string(seconds) + " s, the longest allowed";
             if (failure.empty()) {
-                motion_error_ = what + "; the driver stopped it";
+                motion_error_ = what + "; the driver stopped both axes";  // DoCommand(10) stops both
                 ALPACA_LOG_INFO("Bisque", motion_error_);
             } else {
                 motion_error_ = what + ", and stopping it failed: " + failure;
@@ -2006,6 +2028,17 @@ private:
         {
             std::lock_guard<std::mutex> lock(test_hook_mutex_);
             hook = slew_complete_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    void run_stop_sent_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = stop_sent_hook_;
         }
         if (hook) {
             hook();
@@ -2055,6 +2088,7 @@ private:
     std::atomic<bool> status_poll_paused_for_testing_{false};
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
+    std::function<void()> stop_sent_hook_;      // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -2077,6 +2111,7 @@ private:
     util::TaskClock::clock::time_point manual_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
                                                                    util::TaskClock::clock::time_point::max()};
     std::string motion_error_;
+    uint64_t session_ = 0;  // bumped by every connect and disconnect: a stop's late write checks it
     bool relink_abort_pending_ = false;
     bool relink_move_stop_pending_ = false;
     mutable bool pulse_guiding_ = false;
@@ -2121,6 +2156,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_slew_complete_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_stop_sent_hook_for_testing(std::move(hook));
     }
 }
 
