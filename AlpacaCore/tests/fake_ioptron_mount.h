@@ -84,6 +84,9 @@ public:
     /// "0#", so a synchronous slew's landing wait sees failed reads while its status reads still answer.
     void fail_position_reads_after_goto(int n) { fail_gep_after_goto_.store(n); }
 
+    /// Issue #2396: the next @p n position reads (":GEP#" only) get the unparseable "0#" from now on.
+    void fail_next_position_reads(int n) { gep_failing_.store(n); }
+
     /// Issue #2396: every ":GEP#" read first moves the modelled RA by @p arcsec (0.01 arcsec units underneath), so the
     /// position never settles. 0 (the default) keeps it still.
     void set_position_drift_per_read(double arcsec) { drift_units_.store(std::llround(arcsec * 100.0)); }
