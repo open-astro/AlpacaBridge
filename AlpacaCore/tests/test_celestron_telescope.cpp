@@ -2195,9 +2195,36 @@ TEST_CASE("Celestron Link - a reconnect over a lost link stops a MoveAxis first"
     REQUIRE(driver.get_connected());
     const std::string received = rig.mount->received();
     REQUIRE_FALSE(received.empty());
-    // The cancel ('M') and the rate-0 moves lead the new session, ahead of the handshake.
+    // The cancel ('M') and the rate-0 moves lead the new session, ahead of the handshake ('V' is its first read).
     CHECK((received.front() == 'M') == moving);
+    if (moving) {
+        const auto first_read = received.find('V');
+        const auto rate_zero = [&](unsigned char device) {
+            for (const unsigned char direction : {0x24, 0x25}) {
+                const std::string stop{'P', '\x02', static_cast<char>(device), static_cast<char>(direction), '\0'};
+                const auto at = received.find(stop);
+                if (at == std::string::npos || at > first_read) return false;
+            }
+            return true;
+        };
+        CHECK(rate_zero(0x10));
+        CHECK(rate_zero(0x11));
+    }
     driver.set_connected(false);
+}
+
+// #2409 review: a lost link clears neither motion flag (the relink stop reads them), so the site setters' motion check
+// must not answer first: while lost they answer NotConnected, as every member does (decision 0009 rule 3).
+TEST_CASE("Celestron Link - site writes answer NotConnected while lost with a MoveAxis running",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    require_alpaca_error([&] { driver.set_site_latitude(10.0); }, err::NotConnected);
+    require_alpaca_error([&] { driver.set_site_longitude(10.0); }, err::NotConnected);
 }
 
 TEST_CASE("Celestron Link - a write to a pulled mount loses the link at once and Disconnect clears the reason",

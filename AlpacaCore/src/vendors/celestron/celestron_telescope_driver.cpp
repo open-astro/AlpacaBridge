@@ -799,8 +799,10 @@ public:
 
     // #2409 (#2396 AB-10): a site or time write changes the handset's pointing and limit maths, so none goes out while
     // a motion of this driver runs: a GOTO, Park or FindHome the driver started (Slewing as the driver set it) or a
-    // MoveAxis. A pulse guide does not count. Takes mutex_ briefly.
+    // MoveAxis. A pulse guide does not count. NotConnected comes first: a lost link clears neither flag (the relink
+    // stop reads them), and every member answers NotConnected while lost (decision 0009 rule 3). Takes mutex_ briefly.
     void refuse_while_moving(const char* who) const {
+        check_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (slewing_cached_ || manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             throw AlpacaException(std::string(who) + " is not allowed while the mount is moving",
@@ -2710,7 +2712,8 @@ private:
             "Celestron");
         std::string relink_stop_failure;
         if (std::exchange(relink_stop_due_, false)) {
-            // Under initiator_mutex_ (the relink's), before the poll starts: nothing else is on the wire.
+            // Before the poll starts, so nothing else is on the wire: under the relink's initiator_mutex_, or, for a
+            // stop kept across a failed open or a Disconnect, with every initiator refused by check_connected().
             const std::string stop_error = stop_park_slew_wire();
             if (stop_error.empty()) {
                 ALPACA_LOG_INFO("Celestron", "Reconnect: the motion under way when the link was lost was stopped");
