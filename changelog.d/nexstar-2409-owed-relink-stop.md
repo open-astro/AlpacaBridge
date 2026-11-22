@@ -1,0 +1,2 @@
+### Fixed
+- **Celestron NexStar Telescope Driver** (AlpacaCore): after a lost link, a reconnect whose stop the mount did not answer, followed by a handshake step that failed the Connect, no longer forgets the stop. The next Connect sends it again before anything else, and only a Connect that completes clears it. A cap stop that keeps failing on a MoveAxis is logged at ERROR once, not every second. Issue #2409. Tested on the fake mount only, not on hardware.
