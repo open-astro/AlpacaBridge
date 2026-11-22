@@ -855,7 +855,7 @@ private:
     // silence while the client is actively waiting on it.
     std::atomic<int> in_flight_requests_{0};
     // Held across the default per-axis GuideRate setters' get_guide_rate() and set_guide_rate() (#2465). Outermost:
-    // taken before any driver lock those calls take, and by nothing else, so it adds no lock-order edge.
+    // taken before any driver lock those calls take, and by nothing else, so it adds no lock-order cycle.
     std::mutex guide_rate_axis_mutex_;
 };
 
