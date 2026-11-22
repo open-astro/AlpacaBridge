@@ -321,6 +321,14 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"set_num_y(-1)", [&] { c.set_num_y(-1); }});
             p.push_back({"set_start_x(-1)", [&] { c.set_start_x(-1); }});
             p.push_back({"set_start_y(-1)", [&] { c.set_start_y(-1); }});
+            // #2487: a setpoint that is not a number is invalid whatever the camera is; a cooled camera refuses it
+            // before the connection check. The values are built inside each lambda (the probes outlive this scope).
+            p.push_back({"set_set_ccd_temperature(NaN)",
+                         [&] { c.set_set_ccd_temperature(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"set_set_ccd_temperature(+inf)",
+                         [&] { c.set_set_ccd_temperature(std::numeric_limits<double>::infinity()); }});
+            p.push_back({"set_set_ccd_temperature(-inf)",
+                         [&] { c.set_set_ccd_temperature(-std::numeric_limits<double>::infinity()); }});
             break;
         }
         default:
@@ -442,6 +450,26 @@ constexpr ProbeState kExposing = ProbeState::Exposing;
 
 // clang-format off
 const std::vector<ProbeExemption> kProbeExemptions = {
+    // #2487: gphoto and the iGuider have no cooler, so SetCCDTemperature is not implemented and keeps its answer.
+    {"gphoto_camera", kOff, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kOff, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kOff, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kOn, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kOn, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kOn, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kExposing, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kExposing, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"gphoto_camera", kExposing, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOff, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOff, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOff, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOn, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOn, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kOn, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kExposing, "set_set_ccd_temperature(NaN)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kExposing, "set_set_ccd_temperature(+inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+    {"iguider_camera", kExposing, "set_set_ccd_temperature(-inf)", kPermanent, "no cooler: SetCCDTemperature is not implemented"},
+
     // Celestron NexStar: the guide rate needs the autoguider port, known only once connected.
     {"celestron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent,
      "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
