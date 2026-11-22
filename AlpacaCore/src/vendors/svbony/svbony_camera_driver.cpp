@@ -918,6 +918,7 @@ public:
     }
 
     void set_set_ccd_temperature(double temperature) override {
+        util::check_ccd_setpoint(temperature);
         const double temperature_tenths = temperature * 10.0;
         if (!std::isfinite(temperature_tenths) ||
             temperature_tenths < static_cast<double>(std::numeric_limits<long>::min()) ||

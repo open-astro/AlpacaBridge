@@ -65,6 +65,8 @@ CameraRequestTexts field_names() {
     texts.frame_above_sensor = "frame_above_sensor";
     texts.frame_start_off_sensor = "frame_start_off_sensor";
     texts.frame_beyond_sensor = "frame_beyond_sensor";
+    texts.setpoint_not_finite = "setpoint_not_finite";
+    texts.setpoint_out_of_bounds = "setpoint_out_of_bounds";
     return texts;
 }
 
@@ -273,4 +275,48 @@ TEST_CASE("Camera frame request - a frame that fits the sensor has no misfit", "
     CameraRequestTexts cleared;
     cleared.frame_beyond_sensor = nullptr;
     CHECK_FALSE(util::all_texts_set(cleared));
+}
+namespace {
+
+// SetCCDTemperature as a driver calls the stages: the static check, then the connection.
+std::string set_ccd_temperature(const Camera& camera, double setpoint, const util::CcdSetpointBounds& bounds = {}) {
+    try {
+        util::check_ccd_setpoint(setpoint, bounds, kTexts);
+        ensure_connected(camera);
+        return "ok";
+    } catch (const AlpacaException& e) {
+        return std::to_string(e.error_code()) + " " + e.what();
+    }
+}
+
+}  // namespace
+
+TEST_CASE("Camera frame request - a setpoint that is not finite is InvalidValue before the connection",
+          "[util][camera-frame-request]") {
+    const std::string not_finite = std::to_string(AlpacaError::InvalidValue) + " setpoint_not_finite";
+    for (const double bad : {kNaN, kInf, -kInf}) {
+        CHECK(set_ccd_temperature(Camera{}, bad) == not_finite);
+        CHECK(set_ccd_temperature(disconnected(), bad) == not_finite);
+    }
+    // A finite value passes the static check; a disconnected camera then answers NotConnected.
+    CHECK(set_ccd_temperature(Camera{}, -10.0) == "ok");
+    CHECK(set_ccd_temperature(disconnected(), -10.0) == std::to_string(AlpacaError::NotConnected) + " not connected");
+    // Defaults carry no bound: no number is invented for a camera whose SDK reports none.
+    CHECK(set_ccd_temperature(Camera{}, -1e6) == "ok");
+    CHECK(set_ccd_temperature(Camera{}, 1e6) == "ok");
+}
+
+TEST_CASE("Camera frame request - a setpoint outside the vendor's bounds is InvalidValue before the connection",
+          "[util][camera-frame-request]") {
+    const util::CcdSetpointBounds qhy{-273.15, 60.0};
+    const std::string out = std::to_string(AlpacaError::InvalidValue) + " setpoint_out_of_bounds";
+    CHECK(set_ccd_temperature(disconnected(), -273.15, qhy) == out);  // at the lower bound: refused
+    CHECK(set_ccd_temperature(disconnected(), -300.0, qhy) == out);
+    CHECK(set_ccd_temperature(disconnected(), 60.5, qhy) == out);
+    CHECK(set_ccd_temperature(disconnected(), 60.0, qhy) ==  // at the upper bound: accepted, then NotConnected
+          std::to_string(AlpacaError::NotConnected) + " not connected");
+    CHECK(set_ccd_temperature(Camera{}, -273.0, qhy) == "ok");
+    // Not finite stays its own text under bounds.
+    CHECK(set_ccd_temperature(disconnected(), kNaN, qhy) ==
+          std::to_string(AlpacaError::InvalidValue) + " setpoint_not_finite");
 }
