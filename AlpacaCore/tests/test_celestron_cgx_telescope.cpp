@@ -4422,9 +4422,16 @@ TEST_CASE(
         if (next == Next::Park) driver->park();
         if (next == Next::Disconnect) driver->set_connected(false);
     });
-    // Give the newer command real time to take the axes before the clock moves: five 20 ms steps end the stop's
-    // still-wait, and a body not yet superseded would send its second home first. Unbounded waits fall to the steps.
-    static_cast<void>(newer.wait_for(2s));
+    // Wait for the newer command to take the axes before the clock moves: five 20 ms steps end the stop's still-wait,
+    // and a body not yet superseded would send its second home first. A FindHome or Park sends Dec its own home only
+    // after its claim superseded the body, and a disconnect sends Dec its stop only after the body has ended. CHECK,
+    // not REQUIRE: on a miss the steps below still drive the newer command to its end.
+    CHECK(wait_until(
+        [&] {
+            return next == Next::Disconnect ? mount.count_command(0x11, 0x24) >= 1
+                                            : mount.count_command(0x11, 0x0b) >= 2;
+        },
+        20s));
     REQUIRE(step_until(clock, [&] { return newer.wait_for(0ms) == std::future_status::ready; }, 20ms));
     CHECK_NOTHROW(newer.get());
 
