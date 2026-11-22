@@ -733,17 +733,22 @@ public:
         // long as TheSkyX homes (a 60 s exchange would age the frame past the 30 s loss bound).
         protocol.find_home();
         const auto start = clock_.now();
+        std::string last_error;  // a failed poll retries; the timeout names the last failure
         while (true) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (motion_owner_.stop_reason(claim) != util::StopReason::None) return;
             }
             if (clock_.now() - start > std::chrono::seconds(60)) {
-                throw AlpacaException("FindHome timed out after 60 seconds");
+                throw AlpacaException("FindHome timed out after 60 seconds" +
+                                      (last_error.empty() ? "" : "; last IsSlewComplete error: " + last_error));
             }
             try {
                 if (protocol.is_slew_complete()) break;
+            } catch (const std::exception& e) {
+                last_error = e.what();
             } catch (...) {
+                last_error = "unknown error";
             }
             clock_.sleep_for(std::chrono::seconds(1));
             check_connected_now();
