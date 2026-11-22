@@ -85,6 +85,7 @@ struct FakeCelestronState {
     std::atomic<bool> mute{false};
     std::atomic<bool> tracking_on{true};      // what the 't' query answers: EQ-North when on, Off when not
     std::atomic<int> requests{0};
+    std::atomic<int> muted_ra_stops{0};  // rate-0 variable-rate moves on the RA motor (0x10) that arrived while muted
     std::atomic<unsigned char> model_id{24};  // CGX-L
     std::atomic<unsigned char> firmware_major{5};
     std::atomic<unsigned char> firmware_minor{35};
@@ -132,7 +133,14 @@ struct FakeCelestronState {
 alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shared_ptr<FakeCelestronState>& st) {
     return [st](const std::string& chunk) -> std::string {
         st->requests.fetch_add(1);
-        if (st->mute.load()) return "";
+        if (st->mute.load()) {
+            // MoveAxis(0, 0)'s stop: the variable-rate move (0x06) at rate 0 on the RA motor.
+            if (chunk.size() >= 6 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[2]) == 0x10 &&
+                static_cast<unsigned char>(chunk[3]) == 0x06 && chunk[4] == 0 && chunk[5] == 0) {
+                st->muted_ra_stops.fetch_add(1);
+            }
+            return "";
+        }
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'W' || chunk[0] == 'H') {
             st->record(chunk);
@@ -1597,6 +1605,8 @@ TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is logged once",
     step_virtual(clock, std::chrono::seconds(6));
     st->mute.store(false);
     CHECK(stop_errors.load() == 1);
+    // The stop was retried on later ticks, not only sent once.
+    CHECK(st->muted_ra_stops.load() >= 2);
     driver->set_connected(false);
 }
 

@@ -1598,9 +1598,10 @@ public:
     // #2409 (#2396 AB-9): a poll tick stops an axis whose MoveAxis ran kMaxMoveAxisDuration with no new MoveAxis, as
     // MoveAxis(axis, 0) stops it, and keeps the failure for Slewing until the next motion command or a reconnect. A
     // client causes it, so it is logged at INFO (decision 0007 rule 9); a stop that fails is a device failure, logged
-    // at ERROR, and is tried again on the next tick. try_lock, as the failure stops: set_connected joins the poll while
-    // it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it for the next tick. One axis per
-    // tick: a second axis overdue at the same time is stopped on the next tick, about 1 s later.
+    // at ERROR once per overdue MoveAxis, and is tried again on every tick. try_lock, as the failure stops:
+    // set_connected joins the poll while it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it
+    // for the next tick. One axis per tick: a second axis overdue at the same time is stopped on the next tick, about 1
+    // s later.
     void stop_overdue_move_axis() const {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2924,7 +2925,9 @@ private:
             site_longitude_cached_ = read_site->longitude_degrees;
             site_info_valid_ = true;
         }
-        relink_stop_due_ = false;  // this session reports a failed relink stop through Slewing
+        // Last step before connected_: any throw above keeps a failed relink stop owed for the next Connect, so no
+        // step that can throw goes after this line. This session reports a failed relink stop through Slewing.
+        relink_stop_due_ = false;
         connected_ = true;
     }
 
