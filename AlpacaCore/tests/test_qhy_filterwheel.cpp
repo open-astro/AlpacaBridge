@@ -85,10 +85,12 @@ TEST_CASE("QHY Filter Wheel Driver - Unsupported actions", "[qhy][filterwheel][u
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("QHY Filter Wheel Driver - Names and focus offsets configurable while disconnected",
@@ -200,11 +202,35 @@ TEST_CASE("QHY Filter Wheel Driver - Connects and reads its slot count", "[qhy][
     CHECK(driver->get_names().size() == 7);
     CHECK(driver->get_names()[0] == "Filter 1");
     CHECK(driver->get_focus_offsets().size() == 7);
-    CHECK(driver->get_name() == "FakeQHY600 CFW");
+    CHECK(driver->get_name() == "QHY CFW");
+    CHECK(driver->get_description() == "QHY color filter wheel on FakeQHY600");
 
     driver->set_connected(false);
     CHECK(fake.physical_closes == 1);
     CHECK(fake.underflow_closes == 0);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp teardown() not calling slots_.clear_slot_count(), so a Disconnect keeps
+// the slot count and a names list of another length is still refused.
+TEST_CASE("QHY Filter Wheel Driver - Names follow the slot count only while connected", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();  // 5 slots
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == 5);
+
+    const auto before = driver->get_names();
+    require_alpaca_error([&] { driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_names() == before);
+
+    driver->set_names({"LRGBH"});
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
 }
 
 TEST_CASE("QHY Filter Wheel Driver - A camera with no CFW port is refused", "[qhy][filterwheel][unit]") {
@@ -384,7 +410,7 @@ TEST_CASE("QHY Filter Wheel Driver - A failed move leaves Position on live reads
     const int before = driver->get_position();
 
     fake.throw_from.insert("move_cfw");
-    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     fake.throw_from.clear();
 
     for (int i = 0; i < 5; ++i) {

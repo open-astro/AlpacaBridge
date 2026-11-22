@@ -260,7 +260,8 @@ TEST_CASE("Gemini Focuser Driver - a getter after a successful connect never thr
     rig.fake().set_garbage_state_replies(true);
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    alpacacore::test::require_alpaca_error([&] { rig.driver().set_connected(true); },
+                                           alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK_FALSE(rig.driver().get_device_firmware().has_value());
     rig.fake().set_garbage_state_replies(false);

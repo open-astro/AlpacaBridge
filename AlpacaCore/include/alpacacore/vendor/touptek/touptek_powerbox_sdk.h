@@ -65,6 +65,7 @@ public:
 
     // Boolean port: 0 (off / GPIO low) or 1 (on / GPIO high).
     // PWM port: duty-cycle percent in [0, 100].
+    // Never negative: the shared power-port driver reads any value above 0 as on.
     virtual int get_value(std::size_t index) const = 0;
     virtual void set_value(std::size_t index, int value) = 0;
 

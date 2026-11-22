@@ -416,19 +416,26 @@ TEST_CASE("iOptron iGuider Camera Driver - Gain maps onto the UVC gain", "[ioptr
     CHECK(rig.fake.control(Control::Gain) == 64);
 }
 
-TEST_CASE("iOptron iGuider Camera Driver - A new exposure supersedes one in flight",
+// Issue #2259: a second StartExposure while one is in flight is InvalidOperation, as on every other camera (it used
+// to supersede the first); the exposure in flight keeps running and serves its own frame. A geometry write is refused
+// the same way. Falsified by: ioptron_iguider_camera_driver.cpp start_exposure without its
+// ensure_not_exposing_locked().
+TEST_CASE("iOptron iGuider Camera Driver - A new exposure or a geometry write is refused while one is in flight",
           "[ioptron][iguider][camera][unit]") {
     Rig rig;
     auto& c = *rig.camera;
     c.set_connected(true);
 
     rig.fake.stalled = true;
-    c.start_exposure(2.0, true);
     c.start_exposure(0.01, true);
+    require_alpaca_error([&] { c.start_exposure(2.0, true); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { c.set_num_x(640); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { c.set_bin_x(1); }, AlpacaError::InvalidOperation);
     rig.fake.stalled = false;
     REQUIRE(wait_until([&] { return c.get_image_ready(); }));
     CHECK(c.get_last_exposure_duration() == 0.01);
     CHECK(rig.fake.control(Control::ExposureAbsolute) == 1);
+    c.set_num_x(640);  // settings are writable again once the frame is in
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - A stalled stream latches a link fault and recovers",
@@ -538,8 +545,11 @@ TEST_CASE("iOptron iGuider Camera Driver - LastExposure duration survives pendin
     c.set_connected(true);  // not a new session
     CHECK(c.get_last_exposure_duration() == 1.0);
 
-    // A superseded request must never publish its duration or its old-control frames.
+    // An aborted request must never publish its duration or its old-control frames; a second StartExposure while one
+    // is in flight is refused, not a supersede (#2259).
     c.start_exposure(3.5, true);
+    require_alpaca_error([&] { c.start_exposure(0.3, true); }, AlpacaError::InvalidOperation);
+    c.abort_exposure();
     c.start_exposure(0.3, true);
     CHECK(c.get_last_exposure_duration() == 1.0);
     rig.fake.stalled = false;

@@ -88,7 +88,7 @@ public:
         state_.stop_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, "Error during Q-Focuser destruction: " + std::string(e.what()));
             }
@@ -118,16 +118,7 @@ public:
     // and releases the fd, so this reads false without a reconnect. Both
     // reads are lock-free; this stays a FAST-timing getter.
     bool get_connected() const override { return connected_.load() && link_up(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogTag, "Q-Focuser disconnect error: " + std::string(e.what()));
-        }
-    }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other, matching the sibling
@@ -238,21 +229,6 @@ public:
         state_.stop_and_join();
         protocol_.disconnect();
         reset_state();
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-    bool can_action(std::string_view) const override { return false; }
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- Focuser interface ---

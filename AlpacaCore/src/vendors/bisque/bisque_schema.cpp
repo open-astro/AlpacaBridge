@@ -32,12 +32,14 @@ namespace {
 NormalizeResult normalize_bisque(const DeviceConfig& in, Source source) {
     NormalizeResult result;
     result.config = in;
-    if (in.get(kBisqueHost).empty()) {
-        constexpr const char* kHostMissing = "Host is required for Bisque/TheSkyX connection";
+    std::string endpoint_fault = in.get(kBisqueHost).empty()
+                                     ? std::string("Host is required for Bisque/TheSkyX connection")
+                                     : network_port_fault(kBisqueTcpPort.key, result.config.get(kBisqueTcpPort));
+    if (!endpoint_fault.empty()) {
         if (source == Source::Api) {
-            result.rejection = kHostMissing;
+            result.rejection = std::move(endpoint_fault);
         } else {
-            result.warnings.emplace_back(kHostMissing);
+            result.warnings.push_back(std::move(endpoint_fault));
         }
     }
     return result;

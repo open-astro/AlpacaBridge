@@ -141,10 +141,9 @@ Today's date in `YYYY-MM-DD` (UTC is fine). Then:
    the README badge date, so this is not optional: it read 2026-09-24 on the 2026-09-27 release.
    This step is the only one that sets it: `/conformu` and `/commit` leave it alone, because a
    line every driver PR moved made open PRs conflict on it.
-6. README authored-line badge: `python3 scripts/check_docs_drift.py --badge` prints the count and a
-   paste-ready `badge:` line; replace the `[![Authored code]...` line at the top of `README.md` with
-   it. Check 25 (issue #1465) fails when the badge is more than 5% from the count; counting rules
-   live in the script.
+
+The README `Authored code` badge needs nothing: it reads the count that
+`.github/workflows/authored-lines-badge.yml` publishes on every push to `main` (issue #2079).
 
 Verify with `python3 scripts/check_docs_drift.py` before moving on.
 

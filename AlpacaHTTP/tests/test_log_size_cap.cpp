@@ -491,13 +491,13 @@ int main() {
         // Logged every day from 5 days ago to today, plus a file and its part from 7 days ago: no gap is longer than
         // the retention, so the cutoff counts back from today (#2292).
         on_one_day([](const fs::path& dir, const Day& day) {
-            const fs::path old_file = dir / ("alpacabridge-" + day.days_ago(7) + ".log");
-            const fs::path old_part = dir / ("alpacabridge-" + day.days_ago(7) + ".2.log");
+            const fs::path old_file = dated(dir, day.days_ago(7));
+            const fs::path old_part = dated(dir, day.days_ago(7), 2);
             std::ofstream(old_file) << "old\n";
             std::ofstream(old_part) << "old\n";
             std::vector<fs::path> recent;
             for (int days = 1; days <= 5; ++days) {
-                recent.push_back(dir / ("alpacabridge-" + day.days_ago(days) + ".log"));
+                recent.push_back(dated(dir, day.days_ago(days)));
                 std::ofstream(recent.back()) << "recent\n";
             }
             const fs::path file = start(dir, day, 4096);
@@ -521,9 +521,9 @@ int main() {
         // future. The cutoff counts back from the day after the newest earlier file, so only the files older than
         // the retention before it go.
         on_one_day([](const fs::path& dir, const Day& day) {
-            const fs::path older = dir / "alpacabridge-2000-01-01.log";
-            const fs::path newest = dir / "alpacabridge-2000-01-10.log";
-            const fs::path newest_part = dir / "alpacabridge-2000-01-10.2.log";
+            const fs::path older = dated(dir, "2000-01-01");
+            const fs::path newest = dated(dir, "2000-01-10");
+            const fs::path newest_part = dated(dir, "2000-01-10", 2);
             std::ofstream(older) << "older\n";
             std::ofstream(newest) << "newest\n";
             std::ofstream(newest_part) << "newest\n";
@@ -546,9 +546,9 @@ int main() {
         // The jump came yesterday: yesterday's and today's logs follow the files from 2000. Two days of newer logs
         // count as following 2000-01-10, so with a 5-day retention only the file from 2000-01-01 goes.
         on_one_day([](const fs::path& dir, const Day& day) {
-            const fs::path older = dir / "alpacabridge-2000-01-01.log";
-            const fs::path newest_before = dir / "alpacabridge-2000-01-10.log";
-            const fs::path yesterday = dir / ("alpacabridge-" + day.days_ago(1) + ".log");
+            const fs::path older = dated(dir, "2000-01-01");
+            const fs::path newest_before = dated(dir, "2000-01-10");
+            const fs::path yesterday = dated(dir, day.days_ago(1));
             std::ofstream(older) << "older\n";
             std::ofstream(newest_before) << "before the jump\n";
             std::ofstream(yesterday) << "after the jump\n";

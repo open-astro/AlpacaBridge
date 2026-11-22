@@ -11,8 +11,10 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
@@ -127,7 +129,7 @@ public:
     // camera with a heater or fan. bound_serial, when set, names the camera and wins.
     // owned_sdk, when set, is the adapter `sdk` refers to; the driver keeps it alive.
     PlayerOneSwitchDriver(int device_number, int camera_index, std::string bound_serial, PlayerOneThermalSdk& sdk,
-                          std::unique_ptr<ThermalSdkOverCameraSdk> owned_sdk = nullptr)
+                          util::TaskClock& clock, std::unique_ptr<ThermalSdkOverCameraSdk> owned_sdk = nullptr)
         : AsyncConnectable("PlayerOne"),
           owned_sdk_(std::move(owned_sdk)),
           sdk_(sdk),
@@ -136,7 +138,8 @@ public:
           bound_serial_(std::move(bound_serial)),
           camera_name_("Player One Camera"),
           connected_(false),
-          status_cache_("Player One thermal switch", kStatusTtl, 3, "PlayerOne") {}
+          // The TTL and the fault stamp read the injected clock (decision 0005), so a test ages both with advance().
+          status_cache_("Player One thermal switch", kStatusTtl, 3, "PlayerOne", clock) {}
 
     ~PlayerOneSwitchDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -155,7 +158,13 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "Player One Thermal Switch"; }
+    // Camera model + function (decision 0024), so two cameras' switches are told apart; "Player One Thermal Switch"
+    // until a connect names the camera.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_name_ == "Player One Camera") return "Player One Thermal Switch";
+        return util::branded_name("Player One", camera_name_) + " Thermal Switch";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -177,9 +186,7 @@ public:
 
     bool get_connected() const override { return connected_.load(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
@@ -255,26 +262,6 @@ public:
             std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_camera(close_id);
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("CommandBlind not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("CommandBool not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
     int get_max_switch() const override {
@@ -397,7 +384,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_switch_id_locked(id);
+        (void)element_locked(id);
         elements_[static_cast<std::size_t>(id)].name = name;
     }
 
@@ -405,8 +392,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_switch_id_locked(id);
-        return elements_[static_cast<std::size_t>(id)].description + " (" + camera_name_ + ")";
+        return element_locked(id).description + " (" + camera_name_ + ")";
     }
 
     double get_min_switch_value(int id) const override {
@@ -449,10 +435,19 @@ private:
         validate_switch_id_locked(id);
     }
 
+    // Caller holds mutex_. A disconnect between the caller's ensure_connected() and this lock has cleared the list
+    // while the disconnected bound still admits the id: NotConnected, never an index past the end.
+    const ThermalElement& element_locked(int id) const {
+        validate_switch_id_locked(id);
+        if (static_cast<std::size_t>(id) >= elements_.size()) {
+            throw AlpacaException("Switch not connected", AlpacaError::NotConnected);
+        }
+        return elements_[static_cast<std::size_t>(id)];
+    }
+
     ThermalElement element_copy(int id) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_switch_id_locked(id);
-        return elements_[static_cast<std::size_t>(id)];
+        return element_locked(id);
     }
 
     int camera_id_copy() const {
@@ -519,19 +514,21 @@ private:
 std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
                                                       const std::string& camera_serial) {
     return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, camera_serial,
-                                                   ThermalSdkOverCameraSdk::production());
+                                                   ThermalSdkOverCameraSdk::production(), util::default_task_clock());
 }
 
 std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
-                                                      const std::string& camera_serial, PlayerOneSDK& sdk) {
+                                                      const std::string& camera_serial, PlayerOneSDK& sdk,
+                                                      util::TaskClock& clock) {
     auto adapter = std::make_unique<ThermalSdkOverCameraSdk>(sdk);
     auto& thermal = *adapter;
-    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, camera_serial, thermal,
+    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, camera_serial, thermal, clock,
                                                    std::move(adapter));
 }
 
-std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index, PlayerOneThermalSdk& sdk) {
-    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, std::string(), sdk);
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index, PlayerOneThermalSdk& sdk,
+                                                      util::TaskClock& clock) {
+    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, std::string(), sdk, clock);
 }
 
 std::vector<util::ThermalCameraCandidate> list_playerone_thermal_cameras(PlayerOneSDK& sdk) {

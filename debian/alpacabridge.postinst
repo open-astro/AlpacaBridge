@@ -12,7 +12,12 @@ case "$1" in
                 alpacabridge
         fi
 
-        # Grant plugdev membership so udev rules give USB device access
+        # Grant plugdev membership so udev rules give USB device access. The
+        # installed vendor rules are GROUP="plugdev", MODE="0660" (issue #2290),
+        # so create the group on a host that lacks it.
+        if ! getent group plugdev > /dev/null 2>&1; then
+            addgroup --system plugdev || true
+        fi
         if getent group plugdev > /dev/null 2>&1; then
             usermod -aG plugdev alpacabridge || true
         fi

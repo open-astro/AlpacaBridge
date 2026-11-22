@@ -85,16 +85,19 @@ std::string printable(const std::string& raw) {
 // 9600 8N1 raw. HUPCL is left as the port has it: the wheel resets on the
 // DTR edge of the OPEN, and clearing HUPCL did not prevent that (see
 // connect()). The fd stays non-blocking (SerialLink); reads go through
-// util::tty_read() and writes through util::tty_write_all(), which waits out
-// an EAGAIN on an idle USB endpoint instead of failing (the Q-Focuser lesson).
+// util::read_until(SerialLink&, ...) and writes through SerialLink::write_all()
+// (util::tty_read() and util::tty_write_all() underneath, so an EAGAIN on an
+// idle USB endpoint is waited out instead of failing, the Q-Focuser lesson),
+// and the link judges every failure (#2262).
 void configure_tty(struct termios& tty) { util::make_raw_8n1(tty, B9600); }
 
 // Read up to `max_len` bytes: wait up to `first_byte_ms` for the first byte,
 // then keep collecting until `max_len` is reached or the line has been idle
-// for kReplyIdleMs (util::read_until, IdleGap). Sets link_dead when the port
-// is gone (a hangup, EOF, or EIO/ENXIO/ENODEV/EBADF) so the caller fails the transaction at once instead
-// of re-polling to the deadline.
-std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& link_dead) {
+// for kReplyIdleMs (util::read_until, IdleGap). The read goes through @p link,
+// whose verdict judges a failure (util::SerialLink, #2262: a hangup, EOF, or
+// EIO/ENXIO/ENODEV/EBADF); link_dead is that verdict, so the caller fails the
+// transaction at once instead of re-polling to the deadline.
+std::string read_reply(util::SerialLink& link, int first_byte_ms, std::size_t max_len, bool& link_dead) {
     // Bounded by poll() on the non-blocking fd: a retune to VMIN=1 by another
     // program cannot park this read (#1202). A hangup reads as LinkDead, never
     // as a quiet timeout. The reply is raw bytes, so nothing is skipped; the
@@ -114,8 +117,8 @@ std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& lin
     spec.first_byte_timeout = std::chrono::milliseconds(first_byte_ms);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(first_byte_ms) +
                           static_cast<std::int64_t>(max_len) * std::chrono::milliseconds(kReplyIdleMs);
-    util::ReadResult reply = util::read_until(fd, spec, deadline);
-    link_dead = reply.outcome == util::ReadOutcome::LinkDead;
+    util::ReadResult reply = util::read_until(link, spec, deadline);
+    link_dead = link.lost();
     return std::move(reply.bytes);
 }
 
@@ -124,14 +127,14 @@ std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& lin
 // nullopt when nothing arrived (the port did not reset -- a pty, or a bridge
 // that kept DTR steady). Any preceding noise is skipped; the LAST valid slot
 // character wins so a repeated byte is harmless.
-std::optional<int> wait_for_boot_byte(int fd, int timeout_ms, bool& link_dead) {
+std::optional<int> wait_for_boot_byte(util::SerialLink& link, int timeout_ms, bool& link_dead) {
     link_dead = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::optional<int> position;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        const std::string chunk = read_reply(fd, static_cast<int>(remaining), 8, link_dead);
+        const std::string chunk = read_reply(link, static_cast<int>(remaining), 8, link_dead);
         if (link_dead) return std::nullopt;
         if (chunk.empty()) break;  // deadline with nothing more
         for (char ch : chunk) {
@@ -173,17 +176,17 @@ static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3De
     const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
     bool link_dead = false;
-    const auto boot = wait_for_boot_byte(fd, boot_timeout_ms, link_dead);
+    const auto boot = wait_for_boot_byte(link, boot_timeout_ms, link_dead);
     if (link_dead) {
         return false;
     }
     auto ask = [&](const char* cmd, std::size_t max_len) -> std::string {
         tcflush(fd, TCIFLUSH);
-        if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) return {};
+        if (!link.write_all(cmd, std::char_traits<char>::length(cmd))) return {};
         // A bridge that stops taking data never empties the TX queue (#2030 on the Q-Focuser; #2038 here): a
         // bare tcdrain() would park the probe forever with the port held. Not draining is "not this device".
         if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) return {};
-        return read_reply(fd, 3000, max_len, link_dead);
+        return read_reply(link, 3000, max_len, link_dead);
     };
     const std::string vrs = ask("VRS", kFirmwareReplyLen);
     const std::string mxp = link_dead ? std::string() : ask("MXP", 1);
@@ -214,7 +217,7 @@ namespace {
 bool raw_port_looks_like_cfw3_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"10c4", "Silicon Labs", "CP210"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, cfw3_usb_tokens());
 }
 }  // namespace
 #endif
@@ -371,14 +374,14 @@ public:
                 // check below catch one that lands later.
                 tcflush(serial_fd_, TCIOFLUSH);
                 bool link_dead = false;
-                const std::string stale = read_reply(serial_fd_, kReconnectSettleMs, 64, link_dead);
+                const std::string stale = read_reply(link_, kReconnectSettleMs, 64, link_dead);
                 if (link_dead) fail_link_locked();
                 ALPACA_LOG_DEBUG(kLogTag, "QHYCFW3 port " + config_.serial_port +
                                               " held open since the last session; no reset, no boot wait" +
                                               (stale.empty() ? "" : "; drained " + printable(stale)));
             } else {
                 bool link_dead = false;
-                const auto boot = wait_for_boot_byte(serial_fd_, config_.boot_timeout_ms, link_dead);
+                const auto boot = wait_for_boot_byte(link_, config_.boot_timeout_ms, link_dead);
                 if (link_dead) fail_link_locked();
                 if (boot) {
                     ALPACA_LOG_INFO(kLogTag,
@@ -427,9 +430,16 @@ public:
         } catch (...) {
             in_connect_ = false;
             close_port_locked();
+#ifndef _WIN32
+            link_.clear_loss();  // a failed connect keeps no reason (the loss during it was not latched)
+#endif
             throw;
         }
         in_connect_ = false;
+#ifndef _WIN32
+        // A loss seen inside the handshake failed it above; a connect that got here starts with a clear verdict.
+        link_.clear_loss();
+#endif
         connected_ = true;
         ALPACA_LOG_INFO(kLogTag, "QHYCFW3 connected on " + config_.serial_port + " (" +
                                      std::to_string(info.slot_count) + " slots, firmware " +
@@ -502,7 +512,7 @@ public:
                 throw AlpacaException("QHYCFW3 move wait cancelled", AlpacaError::InvalidOperation);
             }
             bool link_dead = false;
-            const std::string reply = read_reply(serial_fd_, kMoveSliceMs, 1, link_dead);
+            const std::string reply = read_reply(link_, kMoveSliceMs, 1, link_dead);
             if (link_dead) fail_link_locked();
             if (reply.empty()) continue;
             const auto arrived = cfw3_parse_slot(reply[0]);
@@ -589,10 +599,12 @@ private:
     }
 
 #ifndef _WIN32
+    // A write the link judges lost (a hung-up tty, or EBADF on its fd: util::SerialLink, #2262) is a lost link;
+    // any other failure stays a DriverException.
     void write_locked(const char* data, std::size_t len) {
-        if (!util::tty_write_all(serial_fd_, data, len)) {
+        if (!link_.write_all(data, len)) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
+            if (link_.lost()) fail_link_locked();
             throw AlpacaException("QHYCFW3 write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
         // Bounded (#2038, the Q-Focuser's #2030 shape): the kernel queued the command and nothing clocked it out.
@@ -614,7 +626,7 @@ private:
         tcflush(serial_fd_, TCIFLUSH);
         write_locked(cmd, std::char_traits<char>::length(cmd));
         bool link_dead = false;
-        const std::string reply = read_reply(serial_fd_, timeout_ms, max_len, link_dead);
+        const std::string reply = read_reply(link_, timeout_ms, max_len, link_dead);
         if (link_dead) fail_link_locked();
         ALPACA_LOG_TRACE(kLogTag, "QHYCFW3 reply: " + printable(reply));
         return reply;
@@ -626,15 +638,23 @@ private:
 #endif
     }
 
-    // A new Connect or a Disconnect ends the outage: drop the reason, and the stamp (no #521 consumer yet).
+    // A new Connect or a Disconnect ends the outage: drop the reason, the stamp (no #521 consumer yet) and the
+    // link's own verdict (decision 0009 rule 5; the link is held across a logical disconnect).
     void clear_link_loss() {
         link_lost_.store(false);
+#ifndef _WIN32
+        link_.clear_loss();
+#endif
         std::lock_guard<std::mutex> lock(fault_mutex_);
         link_fault_.clear();
         link_lost_at_.consume();
     }
 
     mutable std::mutex mutex_;
+    // The wrapper publishes its own latch and text rather than read link_.lost() and link_.fault(): the client sees
+    // the vendor text ("QHYCFW3 link lost on <port>") and a LinkLostStamp stamped before the latch, a closed port
+    // (serial_fd_ < 0) is a loss with no errno, and a loss inside connect() is not latched. The errno verdict itself
+    // is the link's (util::SerialLink, #2262); this wrapper keeps no errno list.
     mutable std::mutex fault_mutex_;  // leaf: guards link_fault_
     std::string link_fault_;
     util::TaskClock& clock_;
@@ -663,5 +683,10 @@ std::optional<std::chrono::steady_clock::time_point> Cfw3ProtocolWrapper::consum
 }
 int Cfw3ProtocolWrapper::get_position() { return impl_->get_position(); }
 int Cfw3ProtocolWrapper::goto_slot(int slot, const std::atomic<bool>& cancel) { return impl_->goto_slot(slot, cancel); }
+
+const std::vector<std::string>& cfw3_usb_tokens() {
+    static const std::vector<std::string> tokens{"10c4", "Silicon Labs", "CP210"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::qhy

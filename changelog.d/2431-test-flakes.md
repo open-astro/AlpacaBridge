@@ -1,0 +1,7 @@
+### Fixed
+
+- **QHY: a Disconnect during a StartExposure no longer leaves a brief DriverException** (QHY camera driver, issue #2431): a Disconnect that began while a StartExposure held its reservation found no exposure to stop. The exposure then started, its body saw the disconnect and returned with no image, and ImageReady and ImageArray raised "the exposure ended without an image" until the disconnect finished. The disconnect now ends such a start before it runs, and that StartExposure throws `NotConnected`. The disconnect, the driver's shutdown and AbortExposure now record the abort before they look for a running exposure, as the other camera drivers do: a start that published its exposure between the two steps was missed, and an AbortExposure in that gap was lost. This was the intermittent "QHY camera - concurrent connect/disconnect/exposure stress" failure.
+
+### Fixed (tests)
+
+- **A SynScan pulse case waits on the event it checks** (issue #2431): "SynScan PulseGuide - a second pulse on an axis supersedes the first without a join or a stop (#2263)" now waits for the replacement pulse's end command on the handset log, because IsPulseGuiding turns false when the pulse window closes, before the woken body sends that command.

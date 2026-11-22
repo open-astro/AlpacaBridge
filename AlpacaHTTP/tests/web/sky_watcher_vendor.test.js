@@ -290,7 +290,8 @@ test('an edit that switches the Sky-Watcher connection submits the new key with 
     const elements = { 'form-message': { style: {} } };
     const handler = submitHandler({
         document: { getElementById: (id) => elements[id] ?? null }, FormData, fetch, API_BASE: '',
-        MM_PER_METER: 1000, alert: (text) => assert.fail(`alert: ${text}`),
+        MM_PER_METER: 1000, showFieldError: (field, text) => assert.fail(`field error: ${text}`),
+        clearFieldErrors: () => {},
         resetDeviceForm: () => {}, setTimeout: () => {}, loadDevices: () => {}, showTab: () => {},
     });
     await handler.call({ dataset }, { preventDefault: () => {} });

@@ -57,6 +57,9 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs once a poll tick has planned its sample (whether it reads Slewing), before its site read and sample exchanges,
+/// without any driver lock held; null clears it.
+void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs after a slewing read (the slew-complete wait, the park poll), before its result is applied, without any
 /// driver lock held; null clears it.
 void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
@@ -78,7 +81,7 @@ void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// try at the time write's own exchange (its motion check), Written after the write and before its publish, Finished
 /// as the body returns, whatever it did. Around it: ClientWriting and ClientWritten just before and after a client
 /// UTCDate write's exchange (under transition_mutex_ only), ExitChecked at each pass of set_connected()'s exit with
-/// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its state is published (under
+/// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its send gate closes (under
 /// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held),
 /// HookBusy when on_host_clock_changed() found the gate held (on the timer thread, no driver lock held).
 enum class ClockResyncStep : std::uint8_t {

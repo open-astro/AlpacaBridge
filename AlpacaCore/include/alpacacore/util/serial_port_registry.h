@@ -93,7 +93,7 @@ struct SerialRegistry {
 // run after a destroyed registry's. Leaking one map and mutex avoids the
 // static-destruction-order question entirely.
 inline SerialRegistry& serial_registry() {
-    static auto* r = new SerialRegistry();  // NOLINT(cppcoreguidelines-owning-memory)
+    static auto* r = new SerialRegistry();  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
     return *r;
 }
 }  // namespace detail

@@ -24,7 +24,8 @@ namespace alpacacore::test {
 
 /**
  * Thread-safe decorator over any GPhotoSDK -- every call forwards to the
- * inner implementation under one mutex. Mirrors LockedToupTekSDK.
+ * inner implementation under one mutex, except get_gphoto_version(), which has
+ * its own (see below). Mirrors LockedToupTekSDK.
  *
  * Exists for the concurrency stress harness (issue #489, following #241/#101):
  * FakeGPhotoSDK is deliberately NOT thread-hardened, but the stress tests
@@ -34,6 +35,13 @@ namespace alpacacore::test {
  * so production drivers never need this.
  *
  * The mutex is a leaf: the inner SDK never calls back into this interface.
+ *
+ * Since open-astro#2148 get_gphoto_version() takes its own version_mutex_,
+ * because GPhotoSDKWrapper::get_gphoto_version() reads gp_library_version()
+ * with no lock: the SDK-version hook overtakes an in-flight open_camera(), as
+ * in production. That is sound only because the fake's get_gphoto_version()
+ * reads just its gphoto_version member (the LockedQHYSDK get_sdk_version()
+ * shape, #1646).
  */
 class LockedGPhotoSDK : public vendor::gphoto::GPhotoSDK {
 public:
@@ -52,7 +60,10 @@ public:
     }
 
     std::string get_gphoto_version() override {
-        return locked([&] { return inner_.get_gphoto_version(); });
+        // open-astro#2148: its own mutex, like the real wrapper's lock-free version read, so the hook never queues
+        // behind an in-flight open_camera() (the "cheap and non-blocking" hook contract).
+        std::lock_guard<std::mutex> lock(version_mutex_);
+        return inner_.get_gphoto_version();
     }
 
     std::string get_camera_summary(int handle) override {
@@ -109,6 +120,7 @@ private:
 
     vendor::gphoto::GPhotoSDK& inner_;
     std::mutex mutex_;
+    std::mutex version_mutex_;
 };
 
 }  // namespace alpacacore::test

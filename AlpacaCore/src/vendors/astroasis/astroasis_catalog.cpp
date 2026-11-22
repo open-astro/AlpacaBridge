@@ -20,6 +20,7 @@
 // file set (only *_schema.cpp is), so the vendor header here is fine.
 
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+#include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "astroasis_fields.h"
@@ -38,6 +39,15 @@ void register_astroasis_factory(DeviceCatalog& catalog) {
         return vendor::astroasis::create_astroasis_focuser_by_index(device_number, focuser_index);
     };
     catalog.add(std::move(factory));
+
+    // The attacheddevices listing (#2312): hid_enumerate by VID:PID, which opens no device.
+    catalog.add_hid_lister(DeviceKey{"astroasis", DeviceType::Focuser}, [] {
+        std::vector<AttachedHidDevice> found;
+        for (const auto& port : vendor::astroasis::enumerate_astroasis_focusers()) {
+            found.push_back({port.hid_path, "Astroasis Oasis Focuser"});
+        }
+        return found;
+    });
 }
 
 }  // namespace alpacacore::catalog

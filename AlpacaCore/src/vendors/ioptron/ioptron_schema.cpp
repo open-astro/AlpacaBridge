@@ -60,12 +60,18 @@ NormalizeResult normalize_ioptron_telescope(const DeviceConfig& in, Source sourc
         type = "serial";
         result.config.set(kIoptronConnectionType.key, type);
     }
+    std::string endpoint_fault;
     if (type == "serial" && in.get(kIoptronPortPath).empty()) {
+        endpoint_fault = "Serial port path is required";
+    } else if (type == "network") {
+        endpoint_fault = network_port_fault(kIoptronTcpPort.key, result.config.get(kIoptronTcpPort));
+    }
+    if (!endpoint_fault.empty()) {
         if (from_api) {
-            result.rejection = "Serial port path is required";
+            result.rejection = endpoint_fault;
             return result;
         }
-        result.warnings.emplace_back("Serial port path is required");
+        result.warnings.push_back(std::move(endpoint_fault));
     }
     return result;
 }

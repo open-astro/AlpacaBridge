@@ -75,6 +75,10 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 /// held, so a case that holds the wire in one exchange can tell a second sender is queued behind it. An empty
 /// function removes it.
 void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` when a Disconnect or the destructor has decided whether to raise the wrapper interrupt, with no driver
+/// lock held, so a case can hold the teardown there and check whose exchanges it cuts (#2070). An empty function
+/// removes it.
+void set_closing_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seams of the host clock re-sync (open-astro#2419): `hook` runs as each re-sync body ends, with no driver lock
 /// held, and is told whether the body wrote the mount clock; an empty function removes it.

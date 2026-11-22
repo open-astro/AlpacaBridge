@@ -1,0 +1,23 @@
+# Reports the required `adr-authorization` check in the merge queue. On a PR
+# that context is the commit status from decision-records.yml, which needs a
+# PR head to judge, so it is never posted on a queued merge commit. A PR enters
+# the queue only after that status passes.
+#
+# This is its own workflow because a job with this name in a workflow that also
+# runs on PRs would report on the PR too and could satisfy the check there.
+name: Decision records (merge queue)
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+permissions: {}
+
+jobs:
+  adr-authorization:
+    name: adr-authorization
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Passed on the PR before it was queued
+        run: echo "adr-authorization passed on the PR head before queueing."

@@ -12,12 +12,13 @@ the matching shared file, not in a vendor file.
 
 With the device catalog (decision 0004), adding a vendor or device type is one descriptor and its tests:
 
-1. **Write one descriptor** — `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (fields), `<vendor>_schema.cpp` (schema, compiled in every build, no vendor header) and `<vendor>_catalog.cpp` (factory, compiled only under `ALPACACORE_ENABLE_<VENDOR>`), registered in `AlpacaCore/src/catalog/builtin_catalog.cpp`. `Router::register_device_from_config` has no vendor arm: it consults the catalog. The catalog sanitizes saved config from the declared fields, so declare every persisted non-secret field or it is dropped.
+1. **Write one descriptor** — `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (fields), `<vendor>_schema.cpp` (schema, compiled in every build, no vendor header) and `<vendor>_catalog.cpp` (factory, compiled only under `ALPACACORE_ENABLE_<VENDOR>`), registered in `AlpacaCore/src/catalog/builtin_catalog.cpp`. `Router::register_device_from_config` has no vendor arm: it consults the catalog. The catalog sanitizes saved config from the declared fields, so declare every persisted non-secret field or it is dropped. A USB-serial device also registers its wrapper's `<x>_usb_tokens()` with `add_usb_serial_identity()` there, and a HID device a lister with `add_hid_lister()`, so `attacheddevices` lists it (issue #2312). A network device whose adapter announces itself on the LAN registers a finder with `add_network_adapter_finder()` for its form's Find button, `GET /management/v1/networkadapters?vendor=<v>` (the Celestron CGX SkyPortal beacon): the finder blocks its worker for a bounded listen and sends nothing, the route holds no router lock and runs one search at a time (a second is refused at once with `InvalidOperation`, so clicks cannot pin the worker pool), and a found address only fills the form.
 2. **Read fields through `DeviceConfig::get()` / `find()`, never raw JSON** (#388): a JSON `null` counts as absence and a wrong type becomes an `AlpacaException` naming the field.
-3. **No vendor include in `router.cpp`** — the router includes no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` baseline 0); the factory file is the only place the driver header is included.
+3. **No vendor include in `router.cpp` or the `routes/` sources** — the router and its per-type `src/http/routes/<type>_routes.cpp` dispatch sources include no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` scans all of AlpacaHTTP, baseline 0); the factory file is the only place the driver header is included.
 4. **Web UI, what the catalog does not cover** — add the vendor's `<option>` to `#vendor` in `AlpacaHTTP/web/index.html` (the device types that offer it come from the descriptor's `available` flag), and put each vendor-specific form field inside a `data-vendor` / `data-device-type` scope `<div>` with `data-config-key="<catalog field key>"`. `AlpacaHTTP/tests/web/catalog_form_drift.test.js` fails on a form field the catalog does not declare, on a catalog field no form field names, and on a control that does not fit the field's type or role. Editing a device fills every mapped field from the saved config with no `app.js` code (`editAssignments()` in `catalog_schema.js`); a field that needs a conversion carries `data-config-fill="manual"` and its fill goes in `startEditDevice` (`catalog_edit_fill.test.js`).
 5. **Index inputs** — an SDK enumeration index input gets a **unique vendor-prefixed `name`** and `type="number"` with a `data-config-key` naming an `EnumerationIndex` field; see "Enumeration index fields" below.
 6. **Tests** — add the descriptor's tests and any routing/config tests in `AlpacaHTTP/tests/`; `ALPACACORE_ENABLE_<VENDOR>` must reach AlpacaHTTP (see the packaging rules).
+7. **Fake ConformU row** (#2078) — every `kFakeConnectableRoster` row in `AlpacaCore/tests/contract_sweep.h` has a record in `scripts/conformu_fake_runs.tsv`: `run` with its committed `Fake` report, or `pending` with the #2078 slice that runs it and the reason it does not run yet (the fake's parity gap, or the simulator it needs). A driver with no fake gets a `no-fake` record. Docs-drift check 30 fails a PR that adds a roster row without one.
 
 ### FilterWheel vendors — required web UI (slot count + filter name pickers)
 
@@ -30,8 +31,8 @@ widget is one reusable component — instantiate `createFilterwheelSlotUI({...})
 an existing vendor in `index.html`. The component keeps the slot rows and the textarea in
 sync; the form submit reads the textarea.
 
-**Single-token shorthand expansion** (shared by `parseFilterNamesInput` in `app.js` and the
-`normalize_slot_data_locked` in the ZWO/ToupTek filter-wheel drivers): a lone name with no
+**Single-token shorthand expansion** (shared by `parseFilterNamesInput` in `app.js` and
+`util::FilterWheelSlots` in `filterwheel_slots.h`, which every filter wheel driver uses): a lone name with no
 delimiters whose length equals the slot count expands to one character per slot (`LRGB` →
 `L,R,G,B`). Guard it with **"no lowercase letters"** so ordinary names like `Clear` or
 `Ha_NB` that happen to match the slot count are NOT exploded — a bot-review foot-gun. Keep

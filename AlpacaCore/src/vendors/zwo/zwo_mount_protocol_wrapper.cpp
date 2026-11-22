@@ -17,6 +17,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -191,162 +192,6 @@ std::string trim_copy(std::string value) {
     return value;
 }
 
-bool parse_hms(const std::string& value, double& hours) {
-    static const std::regex kPattern(R"(^\s*(\d{1,3})[:](\d{1,2})[:](\d{1,2})\s*$)");
-    std::smatch match;
-    if (!std::regex_match(value, match, kPattern)) {
-        return false;
-    }
-
-    const int h = std::stoi(match[1].str());
-    const int m = std::stoi(match[2].str());
-    const int s = std::stoi(match[3].str());
-    if (m > 59 || s > 59) {
-        return false;
-    }
-
-    hours = static_cast<double>(h) + static_cast<double>(m) / 60.0 + static_cast<double>(s) / 3600.0;
-    return true;
-}
-
-bool parse_angle_triplet(const std::string& value, bool require_sign, double& degrees_out) {
-    if (value.empty()) {
-        return false;
-    }
-
-    std::size_t pos = 0;
-    bool negative = false;
-    if (value[pos] == '+' || value[pos] == '-') {
-        negative = value[pos] == '-';
-        ++pos;
-    } else if (require_sign) {
-        return false;
-    }
-
-    std::vector<int> parts;
-    int current = 0;
-    bool in_number = false;
-    for (; pos < value.size(); ++pos) {
-        const unsigned char ch = static_cast<unsigned char>(value[pos]);
-        if (std::isdigit(ch)) {
-            current = (current * 10) + (ch - static_cast<unsigned char>('0'));
-            in_number = true;
-            continue;
-        }
-        if (in_number) {
-            parts.push_back(current);
-            current = 0;
-            in_number = false;
-        }
-    }
-    if (in_number) {
-        parts.push_back(current);
-    }
-
-    if (parts.size() < 3) {
-        return false;
-    }
-    if (parts[1] > 59 || parts[2] > 59) {
-        return false;
-    }
-
-    double degrees = static_cast<double>(parts[0]) +
-                     static_cast<double>(parts[1]) / 60.0 +
-                     static_cast<double>(parts[2]) / 3600.0;
-    if (negative) {
-        degrees = -degrees;
-    }
-
-    degrees_out = degrees;
-    return true;
-}
-
-std::string format_hms(double hours) {
-    if (!std::isfinite(hours)) {
-        return "00:00:00";
-    }
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-
-    int total_seconds = static_cast<int>(std::round(wrapped * 3600.0));
-    total_seconds %= (24 * 3600);
-    if (total_seconds < 0) {
-        total_seconds += 24 * 3600;
-    }
-
-    const int h = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << std::setfill('0') << std::setw(2) << h << ':'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_colon(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << ':'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_star_colon(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << '*'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_star(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << '*'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
 // Protocol uses inverted sign for UTC offsets (UTC+8 is encoded as -08:00).
 int parse_protocol_timezone_to_utc_minutes(const std::string& value) {
     static const std::regex kPattern(R"(^\s*([+-])(\d{1,2})(?::(\d{1,2}))?\s*$)");
@@ -455,7 +300,7 @@ private:
     };
     static Registry& registry() {
         // Static wrappers may release their claims at process exit.
-        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory)
+        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
         return *reg;
     }
 };
@@ -523,11 +368,10 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping " + port_path + ": " + error);
         return "";
     }
-    const int fd = link.fd();
-
-    // One query: the trimmed reply up to its '#', or nothing when it never terminates.
+    // One query: the trimmed reply up to its '#', or nothing when it never terminates. The probe's reads and writes go
+    // through its link (util::SerialLink, #2262); a probe judges only the bytes it got, as before.
     const auto query = [&](const std::string& command) -> std::optional<std::string> {
-        if (!util::tty_write_all(fd, command)) return std::nullopt;
+        if (!link.write_all(command)) return std::nullopt;
 
         // This read is reached via enumerate_zwo_mounts() called from
         // Impl::connect(Auto), which deliberately holds mutex_ across the
@@ -542,8 +386,8 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
         spec.max_len = 4096;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        const auto reply = util::read_until(fd, spec, deadline);
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): poll() bounded by the deadline
+        const auto reply = util::read_until(link, spec, deadline);
         const std::size_t hash = reply.bytes.find('#');
         if (hash == std::string::npos) return std::nullopt;
         return trim_copy(reply.bytes.substr(0, hash));
@@ -852,12 +696,21 @@ public:
         }
         reply_owed_ = false;
         link_lost_.store(false);
+#ifndef _WIN32
+        // A connect, failed or done, starts with a clear verdict; a loss in the handshake that follows latches.
+        link_.clear_loss();
+#endif
         return ok;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+#ifndef _WIN32
+        // An explicit Disconnect forgets the link's verdict (decision 0009 rule 5); try_disconnect(), the port release
+        // after a loss, keeps it.
+        link_.clear_loss();
+#endif
     }
 
     bool link_lost() const { return link_lost_.load(); }
@@ -1068,7 +921,7 @@ private:
             char buf[128];
             ssize_t count = 0;
             if (connection_type_ == ConnectionType::Serial) {
-                count = util::tty_read(fd, buf, sizeof(buf), slice_ms);
+                count = link_.read(buf, sizeof(buf), slice_ms);
             } else {
                 pollfd pfd = {fd, POLLIN, 0};
                 const int ready = ::poll(&pfd, 1, slice_ms);
@@ -1117,11 +970,12 @@ private:
                 char peek[128];
                 ssize_t got;
                 int reads = 0;
-                while (reads++ < 16 && (got = util::tty_read(serial_fd_, peek, sizeof(peek), 0)) > 0) {
+                while (reads++ < 16 && (got = link_.read(peek, sizeof(peek), 0)) > 0) {
                     if (std::memchr(peek, '#', static_cast<std::size_t>(got)) != nullptr) *saw_hash = true;
                 }
             }
             if (tcflush(serial_fd_, TCIFLUSH) != 0) {
+                link_.note_error(errno);  // an fd call the link's members do not cover
                 note_transport_error();
                 throw AlpacaException("Failed to discard ZWO mount serial input");
             }
@@ -1149,10 +1003,17 @@ private:
 #endif
     }
 
+    // Publishes a lost transport on link_lost_ after a failed exchange. Over serial the verdict is the link's
+    // (util::SerialLink, #2262: EIO, ENXIO, ENODEV and EBADF on its fd, judged by link_.read(), link_.write_all() and
+    // util::read_until(link_, ...)); this wrapper keeps no serial errno list. Over TCP the socket errnos below are a
+    // loss (decision 0009 point 2a).
     void note_transport_error() {
 #ifndef _WIN32
-        if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF || errno == ENOTSOCK ||
-            errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
+        if (connection_type_ == ConnectionType::Serial) {
+            if (link_.lost()) link_lost_.store(true);
+            return;
+        }
+        if (errno == EBADF || errno == ENOTSOCK || errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
             link_lost_.store(true);
         }
 #endif
@@ -1385,7 +1246,7 @@ private:
         }
         return true;
 #else
-        return util::tty_write_all(serial_fd_, data);
+        return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
 #endif
     }
 
@@ -1413,12 +1274,12 @@ private:
 #endif
     }
 
-    // One reply read for both transports: util::read_until on the tty or
+    // One reply read for both transports: util::read_until on the serial link or
     // util::read_until_socket on the TCP fd, poll()-bounded (no pacing sleep).
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(serial_fd_, spec, deadline);
+            return util::read_until(link_, spec, deadline);  // the link judges a LinkDead read (#2262)
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
 #else
@@ -1452,7 +1313,8 @@ private:
             if (r.outcome == util::ReadOutcome::LinkDead) {
                 errno = r.err;
                 note_transport_error();
-                link_lost_.store(true);
+                // Over serial read_until(link_, ...) judged it; over TCP a LinkDead read is a loss whatever its errno.
+                if (connection_type_ != ConnectionType::Serial) link_lost_.store(true);
             }
             if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
             return r;
@@ -1609,7 +1471,7 @@ std::string ZWOMountProtocolWrapper::get_mount_info() {
     }
     if (!is_zwo_mount_model(response)) {
         ALPACA_LOG_WARN("ZWO", "Mount reports an unlisted model '" + sanitize_for_log(response) +
-                                   "'; connecting as ZWO Mount, unvalidated");
+                                   "'; connecting as ZWO Telescope, unvalidated");
     }
     return response;
 }
@@ -1636,15 +1498,19 @@ EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial(int timeou
 
     const std::string ra_response = send_command(":GR", true, timeout_ms_override);
     throw_if_mount_error(ra_response, ":GR");
-    if (!parse_hms(ra_response, out.ra_hours)) {
+    const auto ra = util::parse_hms(ra_response);
+    if (!ra) {
         throw AlpacaException("Invalid RA response from ZWO mount", AlpacaError::DriverException);
     }
+    out.ra_hours = *ra;
 
     const std::string dec_response = send_command(":GD", true, timeout_ms_override);
     throw_if_mount_error(dec_response, ":GD");
-    if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
+    const auto dec = util::parse_angle_triplet(dec_response, true);
+    if (!dec) {
         throw AlpacaException("Invalid Dec response from ZWO mount", AlpacaError::DriverException);
     }
+    out.dec_degrees = *dec;
 
     return out;
 }
@@ -1654,15 +1520,19 @@ HorizontalCoordinates ZWOMountProtocolWrapper::get_current_horizontal() {
 
     const std::string az_response = send_command(":GZ");
     throw_if_mount_error(az_response, ":GZ");
-    if (!parse_angle_triplet(az_response, false, out.azimuth_degrees)) {
+    const auto az = util::parse_angle_triplet(az_response, false);
+    if (!az) {
         throw AlpacaException("Invalid Azimuth response from ZWO mount", AlpacaError::DriverException);
     }
+    out.azimuth_degrees = *az;
 
     const std::string alt_response = send_command(":GA");
     throw_if_mount_error(alt_response, ":GA");
-    if (!parse_angle_triplet(alt_response, true, out.altitude_degrees)) {
+    const auto alt = util::parse_angle_triplet(alt_response, true);
+    if (!alt) {
         throw AlpacaException("Invalid Altitude response from ZWO mount", AlpacaError::DriverException);
     }
+    out.altitude_degrees = *alt;
 
     return out;
 }
@@ -1672,15 +1542,19 @@ EquatorialCoordinates ZWOMountProtocolWrapper::get_target_equatorial() {
 
     const std::string ra_response = send_command(":Gr");
     throw_if_mount_error(ra_response, ":Gr");
-    if (!parse_hms(ra_response, out.ra_hours)) {
+    const auto ra = util::parse_hms(ra_response);
+    if (!ra) {
         throw AlpacaException("Invalid target RA response from ZWO mount", AlpacaError::DriverException);
     }
+    out.ra_hours = *ra;
 
     const std::string dec_response = send_command(":Gd");
     throw_if_mount_error(dec_response, ":Gd");
-    if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
+    const auto dec = util::parse_angle_triplet(dec_response, true);
+    if (!dec) {
         throw AlpacaException("Invalid target Dec response from ZWO mount", AlpacaError::DriverException);
     }
+    out.dec_degrees = *dec;
 
     return out;
 }
@@ -1690,7 +1564,7 @@ void ZWOMountProtocolWrapper::set_target_ra(double ra_hours) {
         throw AlpacaException("RA must be in [0,24) hours", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":Sr" + format_hms(ra_hours);
+    const std::string command = ":Sr" + util::format_hms(ra_hours);
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sr");
     // #2408: an empty reply did not confirm the target, so the GOTO that follows would aim at whatever the mount held.
@@ -1707,7 +1581,7 @@ void ZWOMountProtocolWrapper::set_target_dec(double dec_degrees) {
         throw AlpacaException("Dec must be in [-90,+90] degrees", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":Sd" + format_angle_colon(dec_degrees, 2);
+    const std::string command = ":Sd" + util::format_dms(dec_degrees, 2, ':');
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sd");
     // #2408: an empty reply did not confirm the target, so the GOTO that follows would aim at whatever the mount held.
@@ -1727,8 +1601,7 @@ void ZWOMountProtocolWrapper::sync_target_equatorial(double ra_hours, double dec
         throw AlpacaException("Dec must be in [-90,+90] degrees", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":SMMC" + format_hms(ra_hours) + "&" +
-                                format_angle_star_colon(dec_degrees, 2);
+    const std::string command = ":SMMC" + util::format_hms(ra_hours) + "&" + util::format_dms(dec_degrees, 2, '*');
     const std::string response = trim_copy(send_command(command, false));
     throw_if_mount_error(response, ":SMMC");
     if (response.empty() || response == "N/A") {
@@ -1995,7 +1868,7 @@ double ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
     const double scaled = guide_rate * 15.0;
     send_rate(scaled, 1);
     // open-astro#2462: return what the mount reports after the x15 send, so the caller can see a write it did not
-    // take. Only a mount that answers no readable :Ggr at all keeps the request (the connect assumes 1.00x for it).
+    // take. Only a mount that answers no readable :Ggr at all keeps the request (its connect publishes no rate, #2314).
     try {
         return get_guide_rate();
     } catch (const std::exception& e) {
@@ -2018,10 +1891,13 @@ SiteInfo ZWOMountProtocolWrapper::get_site_info() {
     const std::string lat = response.substr(0, separator);
     const std::string lon = response.substr(separator + 1);
 
-    if (!parse_angle_triplet(lat, true, info.latitude_degrees) ||
-        !parse_angle_triplet(lon, true, info.longitude_degrees)) {
+    const auto latitude = util::parse_angle_triplet(lat, true);
+    const auto longitude = util::parse_angle_triplet(lon, true);
+    if (!latitude || !longitude) {
         throw AlpacaException("Unable to parse site coordinates", AlpacaError::DriverException);
     }
+    info.latitude_degrees = *latitude;
+    info.longitude_degrees = *longitude;
 
     // ZWO wire longitude is west-positive; SiteInfo follows ASCOM's east-positive convention.
     info.longitude_degrees = -info.longitude_degrees;
@@ -2036,8 +1912,8 @@ void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
         throw AlpacaException("Longitude must be in [-180,+180]", AlpacaError::InvalidValue);
     }
 
-    const std::string lat = format_angle_star(info.latitude_degrees, 2);
-    const std::string lon = format_angle_star(-info.longitude_degrees, 3);
+    const std::string lat = util::format_dms(info.latitude_degrees, 2, '*');
+    const std::string lon = util::format_dms(-info.longitude_degrees, 3, '*');
 
     const std::string response = trim_copy(send_command(":SMGE" + lat + "&" + lon, false));
     throw_if_mount_error(response, ":SMGE");
@@ -2148,11 +2024,11 @@ double ZWOMountProtocolWrapper::get_sidereal_time_hours() {
     const std::string response = send_command(":GS");
     throw_if_mount_error(response, ":GS");
 
-    double hours = 0.0;
-    if (!parse_hms(response, hours)) {
+    const auto hours = util::parse_hms(response);
+    if (!hours) {
         throw AlpacaException("Invalid sidereal time response", AlpacaError::DriverException);
     }
-    return hours;
+    return *hours;
 }
 
 char ZWOMountProtocolWrapper::get_mount_direction() {

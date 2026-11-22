@@ -38,6 +38,39 @@ namespace alpacacore::util {
 class CaptureSession;
 
 /**
+ * A start reserved with CaptureSession::reserve() (decision 0020 rule 9). Move-only. It locks the camera
+ * settings from the driver's settings snapshot until start() publishes Exposing or refuses; destroying it
+ * without a start releases it. The session must outlive it.
+ */
+class CaptureReservation {
+public:
+    CaptureReservation() = default;
+    CaptureReservation(const CaptureReservation&) = delete;
+    CaptureReservation& operator=(const CaptureReservation&) = delete;
+    CaptureReservation(CaptureReservation&& other) noexcept
+        : session_(std::exchange(other.session_, nullptr)), id_(std::exchange(other.id_, 0)) {}
+    CaptureReservation& operator=(CaptureReservation&& other) noexcept {
+        if (this != &other) {
+            release();
+            session_ = std::exchange(other.session_, nullptr);
+            id_ = std::exchange(other.id_, 0);
+        }
+        return *this;
+    }
+    ~CaptureReservation() { release(); }
+    /// True while it still holds a reservation (not consumed by start(), released or moved from).
+    explicit operator bool() const { return id_ != 0; }
+
+private:
+    friend class CaptureSession;
+    CaptureReservation(CaptureSession* session, std::uint64_t id) : session_(session), id_(id) {}
+    inline void release() noexcept;
+
+    CaptureSession* session_ = nullptr;
+    std::uint64_t id_ = 0;
+};
+
+/**
  * Handed to a camera's exposure body; valid only inside that body. The body
  * owns the SDK calls (start, the readiness wait, the download); the session
  * owns the state, the time and the failure.
@@ -49,12 +82,20 @@ public:
 
     /// Waits `d` on the TaskClock, never past the watchdog deadline. False when the body must stop.
     inline bool wait_for(std::chrono::nanoseconds d);
+    /// Waits on the TaskClock for CaptureSession::signal() (an SDK frame event), never past the watchdog
+    /// deadline, with no poll step. True when the signal came and the body still owns the session; false when
+    /// the body must stop. A signal raised before the wait is kept, so an early event is not lost.
+    inline bool wait_for_signal();
     StopReason stop_reason() const { return ctx_.stop_reason(); }
     /// This body's session token: what begin_stop() returns while the body owns the session, so a
     /// driver can tell a stop meant for this exposure from one meant for an earlier one (#2043).
     std::uint64_t token() const { return token_; }
     /// The SDK exposure has begun: stamps LastExposureStartTime and the PercentCompleted base.
     inline void exposure_started();
+    /// Moves the watchdog deadline to at least `from_now` after the task clock's now, for a download whose length
+    /// the body learns only once the exposure has run (QHY's slow readout modes, #1736). It never shortens the
+    /// deadline. False, and nothing changed, when this body no longer owns the session.
+    inline bool extend_deadline(std::chrono::nanoseconds from_now);
     /// The frame is being downloaded: CameraState Download.
     inline void reading_out();
     /// Publishes the frame. False, and the frame dropped, when this body no
@@ -79,9 +120,10 @@ private:
  * Locks: mutex_ is a leaf. While it is held the session calls no slot method,
  * body, log call or callback. Joins serialise on join_mutex_, taken without
  * mutex_. Call start(), abort(), disconnect_and_join() and the destructor
- * without the driver mutex; the getters, fail(), set_stopping(), discard_image()
- * and open() may run under it. A body never calls start(), abort(), disconnect_and_join()
- * or open().
+ * without the driver mutex; the getters, fail(), set_stopping(), discard_image(),
+ * open(), reserve(), record_abort(), starting(), settings_locked() and
+ * ensure_settings_unlocked() may run under it. A body never calls start(),
+ * abort(), disconnect_and_join() or open().
  */
 class CaptureSession {
 public:
@@ -106,24 +148,145 @@ public:
     void start(double duration_seconds, Body body,
                std::optional<std::chrono::nanoseconds> watchdog_margin = std::nullopt) {
         std::unique_lock<std::mutex> lock(mutex_);
+        if (reserved_ != 0) {
+            throw AlpacaException(name_ + ": an exposure is already starting", AlpacaError::InvalidOperation);
+        }
+        (void)start_locked(lock, 0, duration_seconds, std::move(body), watchdog_margin);
+    }
+
+    /// Reserves a start (decision 0020 rule 9): from now until start(reservation, ...) publishes Exposing or
+    /// refuses, settings_locked() is true and a second reserve() is refused. Call under the driver mutex, while
+    /// the driver reads the settings the exposure will use. Throws NotConnected on a closed session, and
+    /// InvalidOperation while exposing or while another start holds a reservation. It does not wait for a body
+    /// that is only returning: start() does, within kStartTimeout.
+    CaptureReservation reserve() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        apply_watchdog(lock);  // an exposure past its deadline is not "in progress", as in start()
+        if (!open_) {
+            throw AlpacaException(name_ + ": the camera is not connected", AlpacaError::NotConnected);
+        }
+        if (is_exposing_locked()) {
+            throw AlpacaException(name_ + ": an exposure is already in progress", AlpacaError::InvalidOperation);
+        }
+        if (reserved_ != 0) {
+            throw AlpacaException(name_ + ": an exposure is already starting", AlpacaError::InvalidOperation);
+        }
+        reserved_ = ++last_reservation_;  // abort_pending_ is false: every path that ends a reservation clears it
+        return CaptureReservation(this, reserved_);
+    }
+
+    /// start() for a reserved start: consumes `reservation` once Exposing is published and releases it on any
+    /// refusal or throw. A reservation a disconnect_and_join() dropped is refused with NotConnected, and the body
+    /// never runs. Returns true when an AbortExposure arrived while the start was reserved (record_abort()): that
+    /// abort is applied at once, so the exposure ends Idle with no frame and the body never runs; the driver has no
+    /// SDK exposure to stop. An abort recorded for a start that is refused is cleared with the reservation.
+    [[nodiscard]] bool start(CaptureReservation&& reservation, double duration_seconds, Body body,
+                             std::optional<std::chrono::nanoseconds> watchdog_margin = std::nullopt) {
+        CaptureReservation held = std::move(reservation);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (held.session_ != this || held.id_ == 0) {
+            throw AlpacaException(name_ + ": start() needs a reservation from this session's reserve()",
+                                  AlpacaError::InvalidOperation);
+        }
+        if (held.id_ != reserved_) {
+            held.id_ = 0;  // a disconnect dropped it; nothing to release
+            throw AlpacaException(name_ + ": the camera was disconnected while the exposure was starting",
+                                  AlpacaError::NotConnected);
+        }
+        const std::uint64_t id = std::exchange(held.id_, 0);  // released below on a refusal, consumed on success
+        try {
+            return start_locked(lock, id, duration_seconds, std::move(body), watchdog_margin);
+        } catch (...) {
+            if (!lock.owns_lock()) lock.lock();
+            if (reserved_ == id) {
+                reserved_ = 0;
+                abort_pending_ = false;
+                cv_.notify_all();
+            }
+            throw;
+        }
+    }
+
+    /// An AbortExposure that finds no exposure running but a start reserved: records it, and the start that holds
+    /// the reservation reports it (start(reservation, ...) returns true). True when recorded. Under the driver
+    /// mutex or not; it never waits.
+    bool record_abort() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (reserved_ == 0 || is_exposing_locked()) {
+            return false;
+        }
+        abort_pending_ = true;
+        return true;
+    }
+
+    /// True while a start is reserved and has not yet published Exposing.
+    bool starting() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return reserved_ != 0;
+    }
+
+    /// True while the camera settings must not change: a start is reserved, an exposure is Exposing or
+    /// Downloading, or a cancelled or failed body is still returning and no frame is ready. Applies the watchdog,
+    /// as the state getters do.
+    bool settings_locked() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        apply_watchdog(lock);
+        return settings_locked_locked();
+    }
+
+    /// Throws InvalidOperation, with one text for every camera, while settings_locked() is true.
+    void ensure_settings_unlocked() const {
+        if (settings_locked()) {
+            throw AlpacaException(name_ + ": cannot change camera settings during an exposure",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+private:
+    // The shared body of both start() overloads, with mutex_ held. `reservation` is the id being consumed, 0 for
+    // an unreserved start. Returns whether an abort was recorded against that reservation.
+    bool start_locked(std::unique_lock<std::mutex>& lock, std::uint64_t reservation, double duration_seconds, Body body,
+                      std::optional<std::chrono::nanoseconds> watchdog_margin) {
         apply_watchdog(lock);
         require_startable_locked();
         if (running_ > 0 || pending_ > 0) {
             // Bounded, with mutex_ released: only a body stranded in the SDK or a
             // join in flight keeps the session busy.
-            (void)clock_.wait_for(lock, cv_, kStartTimeout, [this] {
-                return !open_ || is_exposing_locked() || (running_ == 0 && pending_ == 0);
+            (void)clock_.wait_for(lock, cv_, kStartTimeout, [this, reservation] {
+                return !open_ || is_exposing_locked() || (running_ == 0 && pending_ == 0) ||
+                       (reservation != 0 && reserved_ != reservation);
             });
             require_startable_locked();
+            if (reservation != 0 && reserved_ != reservation) {
+                throw AlpacaException(name_ + ": the camera was disconnected while the exposure was starting",
+                                      AlpacaError::NotConnected);
+            }
             if (running_ > 0 || pending_ > 0) {
                 throw AlpacaException(name_ + ": the previous exposure is still finishing; try again",
                                       AlpacaError::InvalidOperation);
             }
         }
+        bool aborted = false;
+        if (reservation != 0) {
+            reserved_ = 0;
+            aborted = std::exchange(abort_pending_, false);
+        }
+        if (aborted) {
+            // Rule 9: the abort recorded during the reservation applies the moment Exposing would be published, so
+            // the exposure is published and aborted in one step and no body runs. Running the body and leaving the
+            // abort to the driver raced it: a body that reached its download first served the aborted frame (#2337).
+            state_ = State::Idle;
+            image_.reset();
+            failure_.reset();
+            owner_ = 0;
+            cv_.notify_all();
+            return true;
+        }
         const Saved saved{state_, image_, failure_};
         const std::uint64_t token = ++last_token_;
         owner_ = token;
         stopping_ = false;
+        signalled_ = false;
         state_ = State::Exposing;
         image_.reset();
         failure_.reset();
@@ -152,6 +315,16 @@ public:
             cv_.notify_all();
             throw;
         }
+        return aborted;
+    }
+
+public:
+    /// Wakes the body's wait_for_signal(), or marks the signal for its next one. For an SDK event callback:
+    /// any thread, the driver mutex held or not (the session mutex is a leaf). start() clears it.
+    void signal() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        signalled_ = true;
+        cv_.notify_all();
     }
 
     /// Forwards to the slot's thread factory, for a test that must hold a body
@@ -171,6 +344,7 @@ public:
         image_.reset();
         owner_ = 0;
         ++pending_;
+        cv_.notify_all();  // wakes a body in wait_for_signal(), which the SDK stop does not
         lock.unlock();
         join_all();
         lock.lock();
@@ -187,6 +361,8 @@ public:
         open_ = false;
         state_ = State::Idle;
         owner_ = 0;
+        reserved_ = 0;  // a start holding it is refused with NotConnected (rule 9)
+        abort_pending_ = false;
         ++pending_;
         ++disconnecting_;
         cv_.notify_all();
@@ -344,6 +520,18 @@ private:
     };
 
     bool is_exposing_locked() const { return state_ == State::Exposing || state_ == State::Download; }
+    bool settings_locked_locked() const {
+        return reserved_ != 0 || is_exposing_locked() || ((running_ > 0 || pending_ > 0) && state_ != State::Ready);
+    }
+    friend class CaptureReservation;
+    void release_reservation(std::uint64_t id) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (reserved_ == id) {
+            reserved_ = 0;
+            abort_pending_ = false;
+            cv_.notify_all();
+        }
+    }
     bool owns_locked(std::uint64_t token) const { return owner_ == token && is_exposing_locked(); }
 
     void require_startable_locked() const {
@@ -446,6 +634,10 @@ private:
     int running_ = 0;  // bodies reserved or running
     int disconnecting_ = 0;
     bool open_ = true;
+    bool signalled_ = false;  // signal() since start(), not yet taken by wait_for_signal()
+    std::uint64_t reserved_ = 0;          // id of the held reservation (rule 9); 0 = none
+    std::uint64_t last_reservation_ = 0;  // reserve() hands out ++last_reservation_
+    bool abort_pending_ = false;          // an AbortExposure during the held reservation (record_abort())
     bool stopping_ = false;  // the driver is stopping the SDK exposure: a body failure is not kept
     bool started_ = false;
     double duration_ = 0.0;
@@ -458,6 +650,14 @@ private:
     // Declared last: destroyed first, joining every thread before the members above die.
     mutable AsyncOperation slot_;
 };
+
+inline void CaptureReservation::release() noexcept {
+    if (session_ != nullptr && id_ != 0) {
+        session_->release_reservation(id_);
+    }
+    session_ = nullptr;
+    id_ = 0;
+}
 
 inline bool CaptureControl::wait_for(std::chrono::nanoseconds d) {
     std::chrono::nanoseconds wait = d;
@@ -477,6 +677,21 @@ inline bool CaptureControl::wait_for(std::chrono::nanoseconds d) {
     return session_.owns_locked(token_) && wait == d;
 }
 
+// Every path that ends the body's ownership (abort, disconnect_and_join, the watchdog's fail_locked) clears
+// owner_ and notifies cv_ under mutex_, so the predicate needs no slot call (the session mutex stays a leaf).
+inline bool CaptureControl::wait_for_signal() {
+    std::unique_lock<std::mutex> lock(session_.mutex_);
+    session_.apply_watchdog(lock);
+    const bool woke = session_.clock_.wait_for(lock, session_.cv_, session_.deadline_ - session_.clock_.now(),
+                                               [this] { return session_.signalled_ || !session_.owns_locked(token_); });
+    session_.apply_watchdog(lock);
+    if (!woke || !session_.owns_locked(token_)) {
+        return false;
+    }
+    session_.signalled_ = false;
+    return true;
+}
+
 inline void CaptureControl::exposure_started() {
     std::lock_guard<std::mutex> lock(session_.mutex_);
     if (session_.owns_locked(token_)) {
@@ -484,6 +699,19 @@ inline void CaptureControl::exposure_started() {
         session_.start_time_ = std::chrono::system_clock::now();
         session_.base_ = session_.clock_.now();
     }
+}
+
+inline bool CaptureControl::extend_deadline(std::chrono::nanoseconds from_now) {
+    std::unique_lock<std::mutex> lock(session_.mutex_);
+    session_.apply_watchdog(lock);
+    if (!session_.owns_locked(token_)) {
+        return false;
+    }
+    const auto at_least = session_.clock_.now() + std::chrono::duration_cast<TaskClock::clock::duration>(from_now);
+    if (at_least > session_.deadline_) {
+        session_.deadline_ = at_least;
+    }
+    return true;
 }
 
 inline void CaptureControl::reading_out() {

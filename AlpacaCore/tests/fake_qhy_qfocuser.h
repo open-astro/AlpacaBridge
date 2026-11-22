@@ -39,6 +39,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -204,7 +205,7 @@ private:
         if (hold_id == 0 || hold_id == id) {
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
                 hold_id_.store(0);
-                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
             }
         }
 

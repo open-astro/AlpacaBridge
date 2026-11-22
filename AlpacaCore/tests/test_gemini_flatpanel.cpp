@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
 #include "fake_task_clock.h"
@@ -129,10 +130,6 @@ TEST_CASE("Gemini Flat Panel Driver - Unsupported actions", "[gemini][flatpanel]
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },
@@ -142,13 +139,28 @@ TEST_CASE("Gemini Flat Panel Driver - Unsupported actions", "[gemini][flatpanel]
                          alpacacore::AlpacaError::MethodNotImplemented);
 }
 
-TEST_CASE("Gemini Flat Panel Driver - No motorized cover", "[gemini][flatpanel][unit]") {
+TEST_CASE("Gemini Flat Panel Driver - No motorized cover, disconnected answers NotConnected",
+          "[gemini][flatpanel][unit]") {
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, "/dev/ttyUSB0");
 
-    // This model is light-only: OpenCover/CloseCover/HaltCover are a
-    // structurally absent capability (like SlewToAltAz on a mount without alt-
-    // az slewing), so they throw MethodNotImplemented unconditionally --
-    // never NotConnected -- even while disconnected.
+    // This model is light-only, but CoverState only reports NotPresent after a
+    // connect, so OpenCover/CloseCover/HaltCover check the connection first
+    // (issue #1919) and answer NotConnected while disconnected.
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Gemini Flat Panel Driver - No motorized cover, connected answers MethodNotImplemented",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Connected, the cover is a structurally absent capability: CoverState is
+    // NotPresent and the cover methods throw MethodNotImplemented.
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::NotPresent);
     require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);
@@ -662,18 +674,6 @@ namespace {
 
 using alpacacore::test::ReplugPort;
 
-// The AlpacaException code fn threw, or 0. Safe on a non-test thread.
-int alpaca_code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    } catch (...) {
-        return -1;
-    }
-    return 0;
-}
-
 constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
 
 // The members a lost link refuses, Lite and Rev2/Pro alike.
@@ -706,7 +706,7 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during a command loses the li
 
     panel.set_reply_delay(">L#", milliseconds(300));  // the panel sits on the >L# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::jthread caller([&] { code.store(alpaca_code_of([&] { driver->calibrator_on(40); })); });
+    std::jthread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->calibrator_on(40); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
     const auto pulled = std::chrono::steady_clock::now();
     panel.unplug();
@@ -814,7 +814,8 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during the connect state seed
 
     panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
     std::atomic<int> code{0};
-    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::jthread connecting(
+        [&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
     panel.unplug();
     connecting.join();
@@ -831,7 +832,8 @@ TEST_CASE("Gemini Flat Panel Slots - a cable pulled during the connect state see
 
     panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
     std::atomic<int> code{0};
-    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::jthread connecting(
+        [&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
     panel.unplug();
     connecting.join();
@@ -859,4 +861,73 @@ TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without 
     REQUIRE(driver->get_connected());
     CHECK(driver->get_cover_state() == CoverState::Closed);
     REQUIRE_NOTHROW(driver->set_connected(false));
+}
+
+// Issue #1757 slice 2a: the V1 Cover Lite driver has no tier-2 contract sweep host (that row creates the Pro), so the
+// sweep's "Disconnect during a connect returns at once" case is repeated here. Before, disconnect() joined the
+// connect thread and tore down before it returned (commit 3ded11bd), so it blocked for the rest of the held handshake
+// and Connecting read false on return.
+// Falsified by: gemini_flatpanel_driver.cpp GeminiFlatPanelDriver::disconnect() going back to stop_connection_thread()
+// plus set_connected(false).
+TEST_CASE("Gemini Flat Panel Driver - a Disconnect during a connect returns at once (#1757)",
+          "[gemini][flatpanel][unit][issue1757]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    // The held handshake reply ends at gate.release(), not after a fixed time: a timed hold could end in a
+    // scheduler pause before disconnect() ran (connect_hold_gate.h). The handshake read timeout is 2 s.
+    alpacacore::test::ConnectHoldGate gate;
+    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path());
+    driver->connect();
+    REQUIRE(driver->get_connecting());
+    REQUIRE(gate.wait_entered(std::chrono::seconds(10)));  // inside the held handshake, past every cancel point
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->disconnect();
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = driver->get_connecting();
+    gate.release();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #2262: EBADF on the panel's own fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 this wrapper's comment said "EBADF is not one": the write failed with
+// DriverException "Write failed", link_alive() stayed true and Connected kept reading true over a dead fd.
+TEST_CASE("Gemini flat panel protocol wrapper - EBADF on a command write is a lost link with the errno",
+          "[gemini][flatpanel][unit][link-lost][issue2262]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    const auto before = alpacacore::test::fds_open_on(panel.slave_path());
+    wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(panel.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    std::string what;
+    require_alpaca_error(
+        [&]() {
+            try {
+                (void)wrapper.get_light_on();
+            } catch (const alpacacore::AlpacaException& ex) {
+                what = ex.what();
+                throw;
+            }
+        },
+        kNotConnected);
+    CHECK(what == "Serial link lost (errno 9)");
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK(wrapper.link_fault() == "Serial link lost (errno 9)");
+    // The port was released at the loss (the fd number now names nothing of ours); the reason stays.
+    CHECK(alpacacore::test::fds_open_on(panel.slave_path()) == before);
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+    CHECK(wrapper.link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
 }

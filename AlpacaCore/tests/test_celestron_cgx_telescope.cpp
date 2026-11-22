@@ -163,7 +163,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop displaces a draini
         initiate = [](auto& driver) { driver.set_tracking_rate(1); };
     }
     SECTION("SyncToCoordinates") {
-        initiate = [](auto& driver) { driver.sync_to_coordinates(6.0, 30.0); };
+        initiate = [](auto& driver) { driver.sync_to_coordinates(6.0, 87.0); };
     }
     SECTION("SyncToTarget") {
         initiate = [](auto& driver) { driver.sync_to_target(); };
@@ -512,6 +512,52 @@ TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor connects generi
     }
 }
 
+// CGX-L motors report model 0x18xx (INDI celestronaux.cpp formatModelString: "0x18xx : 'CGXL'"; the CGX is 0x1788) and
+// share the CGX's mechanics and 2^24-count axes, so both families drive; the CGX-L is not qualified on hardware.
+TEST_CASE("Celestron CGX USB Telescope Driver - CGX-L motors (model 0x18xx) connect as the CGX and may move",
+          "[celestron][cgx][telescope]") {
+    for (const std::vector<std::uint8_t>& model : {std::vector<std::uint8_t>{0x18, 0x00}, {0x18, 0x8a}}) {
+        INFO("model " << int(model[0]) << " " << int(model[1]));
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        mount.set_motor_identity(0x10, {7, 17, 0, 25}, model);
+        mount.set_motor_identity(0x11, {7, 17, 0, 25}, model);
+        auto config = test_info();
+        config.port_path = mount.slave_path();
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(driver->get_name() == "Celestron CGX/CGX-L");
+        driver->find_home();
+        CHECK(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+        CHECK_NOTHROW(driver->set_tracking(true));
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a mixed CGX/CGX-L pair or another family still refuses motion",
+          "[celestron][cgx][telescope]") {
+    using Model = std::vector<std::uint8_t>;
+    for (const auto& [ra, dec] : std::vector<std::pair<Model, Model>>{
+             {{0x17, 0x88}, {0x18, 0x88}}, {{0x18, 0x88}, {0x17, 0x88}}, {{0x14, 0x85}, {0x14, 0x85}}}) {
+        INFO("RA " << int(ra[0]) << " " << int(ra[1]) << ", Dec " << int(dec[0]) << " " << int(dec[1]));
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_motor_identity(0x10, {7, 17, 0, 25}, ra);
+        mount.set_motor_identity(0x11, {7, 17, 0, 25}, dec);
+        auto config = test_info();
+        config.port_path = mount.slave_path();
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(driver->get_name() == "Celestron Telescope");
+        require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(mount.count_command(0x10, 0x0b) == 0);
+        driver->set_connected(false);
+    }
+}
+
 // #2204: a stop needs no axis scaling, so an unknown motor must still honour AbortSlew and Unpark.
 // Falsified by: celestron_cgx_telescope_driver.cpp start_stop_operation() calling require_known_motor_model().
 TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor still accepts AbortSlew and Unpark (#2204)",
@@ -555,7 +601,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Defaults", "[celestron][cgx][tel
     CHECK(driver->get_device_type() == alpacacore::DeviceType::Telescope);
     CHECK(driver->get_device_number() == 0);
     CHECK_FALSE(driver->get_connected());
-    CHECK(driver->get_name() == "Celestron CGX/CGX-L USB Telescope");
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "Celestron_CGX_USB_0");
@@ -1021,7 +1067,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop owns cancelled mot
         auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
-        REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         driver->set_tracking(true);
         mount.set_auto_complete_motions(false);
         driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 21.0, 24.0), 65.0);
@@ -1107,14 +1153,14 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync waits for encoder stability
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
-    REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
     mount.set_ra_stop_drift_reads(8);
     driver->set_tracking(true);
     driver->set_tracking(false);
-    CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 30.0));
+    CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 87.0));
     CHECK_FALSE(driver->get_tracking());
     CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-    CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+    CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
     driver->set_connected(false);
 }
 
@@ -1128,13 +1174,13 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync refuses unsettled encoders 
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
-    REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
     const int ra_writes = mount.count_command(0x10, 0x04);
     const int dec_writes = mount.count_command(0x11, 0x04);
     mount.set_ra_stop_drift_reads(10000);
     driver->set_tracking(true);
     driver->set_tracking(false);
-    require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); }, alpacacore::AlpacaError::DriverException);
     CHECK(mount.count_command(0x10, 0x04) == ra_writes);
     CHECK(mount.count_command(0x11, 0x04) == dec_writes);
     CHECK(std::isfinite(driver->get_right_ascension()));
@@ -1154,18 +1200,18 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
         auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
-        REQUIRE(wait_until([&] { return driver->get_at_home(); }));
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         const int ra_writes = mount.count_command(0x10, 0x04);
         const int dec_writes = mount.count_command(0x11, 0x04);
         mount.set_label_read_offsets(0x10, {4, 3, 1, 0, 0});
         mount.set_label_read_offsets(
             0x11, settles ? std::vector<std::int32_t>{-8, -7, -1, 1, 1, 0, 0} : std::vector<std::int32_t>(40, 8));
         if (settles) {
-            CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 30.0));
+            CHECK_NOTHROW(driver->sync_to_coordinates(6.0, 87.0));
             CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-            CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+            CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
         } else {
-            require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); },
+            require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); },
                                  alpacacore::AlpacaError::DriverException);
             require_alpaca_error([&] { static_cast<void>(driver->get_declination()); },
                                  alpacacore::AlpacaError::DriverException);
@@ -1179,7 +1225,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
 TEST_CASE("Celestron CGX USB Telescope Driver - Device metadata", "[celestron][cgx][telescope][unit]") {
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(3, test_info());
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_name() == "Celestron CGX/CGX-L USB Telescope");
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");
     CHECK(driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
@@ -1298,6 +1344,53 @@ TEST_CASE("Celestron CGX USB Telescope Driver - error codes and input precedence
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { static_cast<void>(driver->command_string("x")); },
                          alpacacore::AlpacaError::MethodNotImplemented);
+}
+
+// open-astro#1786: the base class's individual guide-rate setters read the pair through the connection-checking
+// getter first, so an out-of-range GuideRateRightAscension or GuideRateDeclination write on a disconnected CGX
+// answered NotConnected instead of InvalidValue.
+TEST_CASE("Celestron CGX USB Telescope Driver - individual guide-rate range errors precede NotConnected",
+          "[celestron][cgx][telescope][unit]") {
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
+    constexpr double kSidereal = 15.0411 / 3600.0;
+    for (const double bad : {kSidereal * 1.5, kSidereal * 0.05, -kSidereal, std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    // An in-range value still reaches the connection check.
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(kSidereal * 0.5); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(kSidereal * 0.5); },
+                         alpacacore::AlpacaError::NotConnected);
+}
+
+// open-astro#1786: the CGX stores one rate per axis, so writing one axis keeps the other, and a refused write keeps
+// both.
+TEST_CASE("Celestron CGX USB Telescope Driver - individual guide-rate writes keep the other axis",
+          "[celestron][cgx][telescope][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    driver->set_connected(true);
+    constexpr double kSidereal = 15.0411 / 3600.0;
+
+    driver->set_guide_rate({kSidereal * 0.25, kSidereal * 0.75});
+    driver->set_guide_rate_right_ascension(kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.75);
+    driver->set_guide_rate_declination(kSidereal * 0.9);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.9);
+
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(kSidereal * 2.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.9);
+    driver->set_connected(false);
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate, SiderealTime and pointing read one time source",
@@ -1630,15 +1723,40 @@ TEST_CASE("Celestron CGX USB Telescope Driver - home wait logs both axes at DEBU
         }
     } else {
         CHECK(logged.empty());
-        // Below DEBUG the loop reads only RA's MC_LEVEL_DONE (Dec's is short-circuited while RA is pending).
+        // Below DEBUG the loop reads only RA's MC_LEVEL_DONE (Dec's is short-circuited while RA is pending) and,
+        // for the home travel guard, both encoders once per iteration.
         CHECK(mount.count_command(0x10, 0x12) == before[0] + iterations);
         CHECK(mount.count_command(0x10, 0x13) == before[1]);
-        CHECK(mount.count_command(0x10, 0x01) == before[2]);
+        CHECK(mount.count_command(0x10, 0x01) == before[2] + iterations);
         CHECK(mount.count_command(0x11, 0x12) == before[3]);
         CHECK(mount.count_command(0x11, 0x13) == before[4]);
-        CHECK(mount.count_command(0x11, 0x01) == before[5]);
+        CHECK(mount.count_command(0x11, 0x01) == before[5] + iterations);
     }
     mount.set_auto_complete_motions(true);
+}
+
+// Issue #1868: the pier-side and rate capabilities and SlewToAltAz, read on a connected driver. The direct USB
+// backend has no Alt/Az slew, so a connected SlewToAltAz is MethodNotImplemented and sends no AUX packet.
+TEST_CASE("Celestron CGX USB Telescope Driver - connected pier-side and rate capabilities and SlewToAltAz",
+          "[celestron][cgx][telescope][unit]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK_FALSE(driver->get_can_set_pier_side());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_slew_alt_az());
+    const auto before = mount.requests();
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK((mount.requests().size() == before.size()));
+    driver->set_connected(false);
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor controllers",
@@ -1715,7 +1833,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor co
     CHECK(driver->get_tracking_rate() == 1);
     driver->pulse_guide(0, 1000);
     CHECK(driver->get_is_pulse_guiding());
-    require_alpaca_error([&] { driver->pulse_guide(1, 100); }, alpacacore::AlpacaError::InvalidOperation);
+    // A second pulse on the axis supersedes this one (#2263): the motion-owner cases pin it.
     auto frames = mount.requests();
     auto pulse = std::find_if(frames.rbegin(), frames.rend(), [](const auto& frame) { return frame.command == 0x26; });
     REQUIRE(pulse != frames.rend());
@@ -1736,12 +1854,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor co
     REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
 
     mount.set_ra_tracking_drift_per_read(100);
-    driver->sync_to_coordinates(6.0, 30.0);
+    driver->sync_to_coordinates(6.0, 87.0);
     CHECK(driver->get_tracking());
     CHECK(std::abs(driver->get_right_ascension() - 6.0) < 0.001);
-    CHECK(std::abs(driver->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(driver->get_declination() - 87.0) < 2.2e-5);
     CHECK(driver->get_target_right_ascension() == 6.0);
-    CHECK(driver->get_target_declination() == 30.0);
+    CHECK(driver->get_target_declination() == 87.0);
 
     const auto tracking_ra_commands = mount.count_command(0x10, 0x06);
     const auto tracking_dec_commands = mount.count_command(0x11, 0x06);
@@ -1984,7 +2102,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - zero duration guide validates st
     mount.set_auto_complete_motions(false);
     mount.set_hold_guide_until_completed(true);
     driver->pulse_guide(3, 2550);
-    require_alpaca_error([&] { driver->pulse_guide(2, 0); }, alpacacore::AlpacaError::InvalidOperation);
+    // A zero-duration pulse claims nothing (#2263): the RA pulse running keeps its axis and its packet.
+    CHECK_NOTHROW(driver->pulse_guide(2, 0));
     invalid_inputs();
     CHECK(mount.axis_guiding(0x10));
     CHECK(driver->get_is_pulse_guiding());
@@ -2033,10 +2152,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     second->find_home();
     REQUIRE(wait_until([&] { return first->get_at_home() && !first->get_slewing(); }));
     REQUIRE(wait_until([&] { return second->get_at_home() && !second->get_slewing(); }));
-    first->sync_to_coordinates(6.0, 30.0);
-    second->sync_to_coordinates(12.0, -30.0);
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    first->sync_to_coordinates(6.0, 87.0);
+    second->sync_to_coordinates(12.0, -87.0);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     const auto ra_rehome_label = first_mount.axis_position(0x10);
     const auto dec_rehome_label = first_mount.axis_position(0x11);
     // Sync happened at physical home, so its labels are the shifted home labels.
@@ -2055,21 +2174,21 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     CHECK_FALSE(first->get_connected());
     CHECK(second->get_connected());
     CHECK(second->get_tracking());
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
 
     first->set_connected(true);
     CHECK_FALSE(first->get_at_home());
     CHECK_FALSE(first->get_tracking());
     CHECK(std::abs(std::remainder(first->get_right_ascension() - 6.0, 24.0)) < 0.001);
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
     CHECK_NOTHROW(first->set_tracking(true));
     second->set_connected(false);
     CHECK(first->get_tracking());
-    CHECK(std::abs(first->get_declination() - 30.0) < 2.2e-5);
+    CHECK(std::abs(first->get_declination() - 87.0) < 2.2e-5);
     second->set_connected(true);
     CHECK_FALSE(second->get_tracking());
     CHECK(std::abs(std::remainder(second->get_right_ascension() - 12.0, 24.0)) < 0.001);
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     CHECK_NOTHROW(second->set_tracking(true));
     check_no_reference_writes(first_mount);
     check_no_reference_writes(second_mount);
@@ -2098,11 +2217,44 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     CHECK(std::abs(first->get_declination() - 25.0) < 2.2e-5);
     CHECK(first->get_tracking());
     CHECK(second->get_tracking());
-    CHECK(std::abs(second->get_declination() + 30.0) < 2.2e-5);
+    CHECK(std::abs(second->get_declination() + 87.0) < 2.2e-5);
     check_no_reference_writes(second_mount);
     first->set_connected(false);
     second->set_connected(false);
 }
+
+#ifndef _WIN32
+TEST_CASE("Celestron CGX USB Telescope Driver - a logical reconnect discards AUX bytes that arrived while disconnected",
+          "[celestron][cgx][telescope][integration]") {
+    // Rig 2026-11-22: after an hour logically disconnected on the held fd, the first GET_VER read a backlog of stale
+    // frames and failed its checksum. A whole stale frame, then a torn one that would merge with the next reply.
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    // Opened before the driver takes TIOCEXCL; it only counts the input waiting on the held fd.
+    struct Observer {
+        int fd;
+        ~Observer() {
+            if (fd >= 0) ::close(fd);
+        }
+    } const observer{::open(mount.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK)};
+    REQUIRE(observer.fd >= 0);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    mount.write_unsolicited({0x3b, 0x04, 0x00, 0x10, 0xf0, 0xf0, 0x0c, 0x3b, 0x04, 0x10, 0x00, 0xf0});
+    int queued = 0;
+    REQUIRE(wait_until([&] { return ::ioctl(observer.fd, FIONREAD, &queued) == 0 && queued == 12; }));
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK_NOTHROW(poll_now(*driver));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+#endif
 
 TEST_CASE("Celestron CGX USB Telescope Driver - continuity budget expires on the injected clock",
           "[celestron][cgx][telescope][continuity-clock]") {
@@ -2243,7 +2395,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
             driver->set_connected(true);
             driver->find_home();
             REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
-            driver->sync_to_coordinates(6.0, 30.0);
+            driver->sync_to_coordinates(6.0, 87.0);
             driver->set_connected(false);
             mount.set_encoder_position(axis, (mount.axis_position(axis) + delta) & 0x00ffffffU);
             driver->set_connected(true);
@@ -2254,7 +2406,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
             }
             if (std::abs(delta) <= 2) {
                 CHECK(std::isfinite(driver->get_right_ascension()));
-                CHECK(std::abs(driver->get_declination() - 30.0) < 0.0001);
+                CHECK(std::abs(driver->get_declination() - 87.0) < 0.0001);
                 CHECK_NOTHROW(driver->set_tracking(true));
             } else {
                 require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
@@ -2262,7 +2414,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
                 require_alpaca_error([&] { static_cast<void>(driver->get_declination()); },
                                      alpacacore::AlpacaError::DriverException);
                 require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
-                require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 30.0); },
+                require_alpaca_error([&] { driver->sync_to_coordinates(6.0, 87.0); },
                                      alpacacore::AlpacaError::InvalidOperation);
                 driver->find_home();
                 REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2909,7 +3061,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
 
     const auto ra_before_sync = mount.axis_position(0x10);
     const auto dec_before_sync = mount.axis_position(0x11);
-    driver->sync_to_coordinates(6.0, 30.0);
+    driver->sync_to_coordinates(ra, 31.0);
     CHECK(driver->get_tracking());
     const auto encoder_revolution = alpacacore::vendor::celestron::kCgxEncoderStepsPerRevolution;
     const auto expected_rehome_label = [encoder_revolution](std::uint32_t home, std::uint32_t before,
@@ -2980,7 +3132,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes after Sync preserve 
         REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         CHECK(std::abs(driver->get_declination() - (home_latitude > 0.0 ? 90.0 : -90.0)) < 2.2e-5);
         driver->set_tracking(true);
-        driver->sync_to_coordinates(6.0, 30.0);
+        driver->sync_to_coordinates(6.0, home_latitude > 0.0 ? 87.0 : -87.0);
         const double ra = driver->get_right_ascension();
         const double dec = driver->get_declination();
         const int side = driver->get_side_of_pier();
@@ -3010,7 +3162,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes after Sync preserve 
         CHECK(driver->get_tracking());
         CHECK_FALSE(driver->get_slewing());
         CHECK(driver->get_target_right_ascension() == 6.0);
-        CHECK(driver->get_target_declination() == 30.0);
+        CHECK(driver->get_target_declination() == (home_latitude > 0.0 ? 87.0 : -87.0));
         CHECK(mount.axis_position(0x10) == ra_label);
         CHECK(mount.axis_position(0x11) == dec_label);
         const auto requests = mount.requests();
@@ -3237,6 +3389,193 @@ TEST_CASE("Celestron CGX USB Telescope Driver - elapsed arrival uses native slow
     }
 }
 
+namespace {
+
+// Slice 5 rig finding (2026-11-21, WiFi): the motors land each MC_GOTO_SLOW within ~0.5", but the mount stands
+// untracked from the moment a correction is aimed until the arrival check reads it, and the sky moves on at the
+// sidereal rate: 140-270 ms at ~21 ms an exchange, 2-4", so every GOTO used all three corrections and one failed at
+// 3.055". The rig here: each exchange costs `latency` on every clock (the task clock, the pointing UTC and the motors),
+// a GOTO reads busy 150 ms at its target (the rig's 2-3 SLEW_DONE polls per correction), a tracking RA axis follows
+// the sky and an untracked one stands still.
+constexpr std::uint32_t kSiderealCountsPerSecond = 195;  // 2^24 counts per sidereal day of 86164.09 s: 194.7
+
+struct LatencyArrivalRig {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    std::atomic<std::int64_t> epoch_milliseconds{1800000000000};
+    alpacacore::test::FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+
+    LatencyArrivalRig(std::chrono::milliseconds latency, double latitude) {
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        auto info = test_info();
+        info.port_path = mount.slave_path();
+        info.site_latitude_degrees = latitude;
+        const auto now = [this] {
+            return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_milliseconds.load())};
+        };
+        driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+        alpacacore::test::set_cgx_connected(*driver, clock, true);
+        driver->find_home();
+        REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+        driver->set_tracking(true);
+        mount.set_auto_complete_motions(false);
+        for (const std::uint8_t axis : {0x10, 0x11}) mount.set_axis_velocity_counts_per_second(axis, 10000000);
+        mount.set_tracking_counts_per_second(0x10, kSiderealCountsPerSecond);
+        mount.set_goto_min_duration(std::chrono::milliseconds(150));
+        if (latency.count() > 0) mount.set_before_request([this, latency] { advance(latency); });
+    }
+
+    // The hook goes before the clock and the UTC it advances, which die before the mount whose thread runs it.
+    ~LatencyArrivalRig() { mount.set_before_request(nullptr); }
+
+    void advance(std::chrono::milliseconds elapsed) {
+        epoch_milliseconds.fetch_add(elapsed.count());
+        mount.advance_motion(elapsed);
+        clock.advance(elapsed);
+    }
+
+    bool slew_ended() const {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            return true;  // a failed slew ends too; the case reads the failure
+        }
+    }
+
+    // Starts a slew to `hour_angle`, lets the FAST leg take 1.2 s more (it lands ~18" behind the sky, so a correction
+    // follows), then steps the body 20 ms at a time until it ends.
+    void slew(double hour_angle, double declination) {
+        using namespace std::chrono_literals;
+        target_ra = std::fmod(driver->get_sidereal_time() - hour_angle + 48.0, 24.0);
+        target_dec = declination;
+        const int fast_before = mount.count_command(0x10, 0x02);
+        driver->slew_to_coordinates_async(target_ra, target_dec);
+        if (hour_angle < 0.0) {  // BeyondPole: the home route first
+            REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+            mount.complete_axis_home(0x10);
+            mount.complete_axis_home(0x11);
+        }
+        REQUIRE(alpacacore::test::step_cgx_motion(
+            clock, [this](std::chrono::milliseconds step) { advance(step); },
+            [&] { return mount.count_command(0x10, 0x02) > fast_before; }, 20ms));
+        REQUIRE(clock.wait_for_waiters(1, 2s));
+        advance(1200ms);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+        REQUIRE(alpacacore::test::step_cgx_motion(
+            clock, [this](std::chrono::milliseconds step) { advance(step); }, [this] { return slew_ended(); }, 20ms));
+    }
+
+    // The pointing error now, from a fresh encoder read: the served frame of the arrival check would hide how far the
+    // mount fell behind before tracking started.
+    double ra_error_arcseconds() {
+        alpacacore::vendor::celestron::poll_state_now_for_testing(*driver);
+        return std::abs(std::remainder(driver->get_right_ascension() - target_ra, 24.0)) * 15.0 * 3600.0;
+    }
+    double dec_error_arcseconds() const { return std::abs(driver->get_declination() - target_dec) * 3600.0; }
+
+    double target_ra = 0.0;
+    double target_dec = 0.0;
+};
+
+}  // namespace
+
+TEST_CASE("Celestron CGX USB Telescope Driver - GOTO arrival over 21 ms exchanges lands within 3 arcsec",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    // Both pier sides (hour angle +1 Normal, -1 BeyondPole through the home route), both hemispheres: a correction is
+    // aimed where the sky will be when it lands, so the lead must move the RA target along the tracking direction.
+    for (const double latitude : {45.0, -45.0}) {
+        for (const double hour_angle : {1.0, -1.0}) {
+            INFO("latitude=" << latitude << " hour_angle=" << hour_angle);
+            LatencyArrivalRig rig(21ms, latitude);
+            rig.slew(hour_angle, latitude > 0.0 ? 30.0 : -30.0);
+            std::string failure;
+            bool slewing = true;
+            try {
+                slewing = rig.driver->get_slewing();
+            } catch (const alpacacore::AlpacaException& error) {
+                failure = error.what();
+            }
+            CHECK(failure.empty());
+            if (!failure.empty()) continue;  // the other sides and hemispheres still run
+            CHECK_FALSE(slewing);
+            CHECK(rig.driver->get_tracking());
+            // The first correction has no measured lead and lands ~4.4" behind; the second leads by its duration.
+            CHECK(rig.mount.count_command(0x10, 0x17) <= 2);
+            rig.advance(500ms);  // tracking holds it
+            CHECK(rig.ra_error_arcseconds() <= 0.5);
+            CHECK(rig.dec_error_arcseconds() <= 3.0);
+        }
+    }
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - GOTO arrival with no exchange latency still converges",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(0ms, 45.0);
+    rig.slew(1.0, 30.0);
+    REQUIRE_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_tracking());
+    CHECK(rig.mount.count_command(0x10, 0x17) == 1);
+    CHECK(rig.ra_error_arcseconds() <= 3.0);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a refinement that fails turns tracking off before its stop",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(21ms, 45.0);
+    // Each RA read of a tracking axis jumps 300 counts (~23") back, away from where the sky goes: every check misses,
+    // and the third correction fails.
+    rig.mount.set_ra_tracking_drift_per_read((1U << 24) - 300);
+    rig.slew(1.0, 30.0);
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount.count_command(0x10, 0x17) == 3);
+    CHECK_FALSE(rig.driver->get_tracking());
+    // The last RA rate command before the failure stop is a zero rate: the mount is told to stop tracking, not left to
+    // a stop whose effect on tracking is not established.
+    const auto requests = rig.mount.requests();
+    const auto stop = std::find_if(requests.rbegin(), requests.rend(), [](const auto& request) {
+        return request.destination == 0x10 && request.command == 0x24;
+    });
+    REQUIRE(stop != requests.rend());
+    const auto rate = std::find_if(stop, requests.rend(), [](const auto& request) {
+        return request.destination == 0x10 && (request.command == 0x06 || request.command == 0x07);
+    });
+    REQUIRE(rate != requests.rend());
+    CHECK(rate->payload == std::vector<std::uint8_t>{0, 0, 0});
+    const auto ra = rig.mount.axis_position(0x10);
+    rig.mount.advance_motion(1000ms);
+    CHECK(rig.mount.axis_position(0x10) == ra);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - AbortSlew between corrections stops and restores tracking",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    LatencyArrivalRig rig(21ms, 45.0);
+    rig.mount.set_ra_tracking_drift_per_read((1U << 24) - 300);  // 300 counts back a read: it never arrives
+    rig.target_ra = std::fmod(rig.driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    rig.driver->slew_to_coordinates_async(rig.target_ra, 30.0);
+    // The tracking a landed correction starts is on only inside the arrival stage, which holds motion_start_mutex_,
+    // so AbortSlew lands between stages: here while the second correction moves, with tracking off again.
+    REQUIRE(alpacacore::test::step_cgx_motion(
+        rig.clock, [&](std::chrono::milliseconds step) { rig.advance(step); },
+        [&] { return rig.mount.count_command(0x10, 0x17) == 2; }, 20ms));
+    CHECK_FALSE(rig.driver->get_tracking());
+    rig.driver->abort_slew();
+    REQUIRE(alpacacore::test::step_cgx_motion(
+        rig.clock, [&](std::chrono::milliseconds step) { rig.advance(step); }, [&] { return rig.slew_ended(); }, 20ms));
+    REQUIRE_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.mount.count_command(0x10, 0x17) == 2);
+    CHECK(rig.mount.count_command(0x10, 0x24) > 0);
+    CHECK(rig.mount.count_command(0x11, 0x24) > 0);
+    CHECK(rig.driver->get_tracking());  // AbortSlew owes the tracking the slew turned off, as before
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - stalled GOTO times out and stops both axes",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
@@ -3392,6 +3731,734 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unresolved guide failure cannot 
     REQUIRE(wait_until([&] { return stop_done(*driver); }));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
+}
+
+// The motion owner (#2263): a command owns only the axes it moves. The cases below run on the fake clock with the state
+// poll held, so every clock waiter is a motion or guide body.
+namespace {
+
+// The code and text a call threw, or an empty text when it returned.
+struct CallResult {
+    int code = 0;
+    std::string text;
+};
+
+CallResult call_result(const std::function<void()>& call) {
+    try {
+        call();
+    } catch (const alpacacore::AlpacaException& error) {
+        return {error.error_code(), error.what()};
+    }
+    return {};
+}
+
+constexpr const char* kOverlapRefusal = "PulseGuide cannot overlap telescope motion or another guide pulse";
+
+// Connect, home (the fake completes it at once) and turn Tracking on.
+void connect_home_and_track(alpacacore::test::FakeCelestronCgxMount& mount, alpacacore::TelescopeDriver& driver) {
+    mount.set_auto_complete_motions(true);
+    driver.set_connected(true);
+    driver.find_home();
+    REQUIRE(wait_until([&] { return driver.get_at_home() && !driver.get_slewing(); }));
+    driver.set_tracking(true);
+}
+
+}  // namespace
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a slew, Park or FindHome supersedes a slew in flight (#2263)",
+          "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    // A second slew, Park or FindHome during a slew; then a Park during a FindHome, and a FindHome during a Park.
+    const int leg = GENERATE(0, 1, 2, 3, 4);
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // The first command's GOTO or home stays in flight: its body waits on the clock for the mount to report it done.
+    mount.set_auto_complete_motions(false);
+    if (leg <= 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    if (leg == 3) driver->find_home();
+    if (leg == 4) driver->park();
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const int ra_stops = mount.count_command(0x10, 0x24);
+    const int dec_stops = mount.count_command(0x11, 0x24);
+    const int ra_gotos = mount.count_command(0x10, 0x02);
+    const int dec_gotos = mount.count_command(0x11, 0x02);
+
+    mount.set_auto_complete_motions(true);
+    const double second_ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
+    const auto second = call_result([&] {
+        if (leg == 0) driver->slew_to_coordinates_async(second_ra, 30.0);
+        if (leg == 1 || leg == 3) driver->park();
+        if (leg == 2 || leg == 4) driver->find_home();
+    });
+    const bool landed = wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    });
+
+    INFO("second command: " << second.text);
+    CHECK(second.text.empty());
+    CHECK(landed);
+    // The superseded slew sent no stop: its axes belong to the new command.
+    CHECK(mount.count_command(0x10, 0x24) == ra_stops);
+    CHECK(mount.count_command(0x11, 0x24) == dec_stops);
+    if (leg == 0) {
+        CHECK(mount.count_command(0x10, 0x02) == ra_gotos + 1);
+        CHECK(mount.count_command(0x11, 0x02) == dec_gotos + 1);
+        CHECK(driver->get_tracking());
+        CHECK(driver->get_target_right_ascension() == second_ra);
+        CHECK(driver->get_target_declination() == 30.0);
+    }
+    if (leg == 1 || leg == 3) CHECK(driver->get_at_park());
+    if (leg == 2 || leg == 4) CHECK(driver->get_at_home());
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a PulseGuide on the same axis supersedes the older pulse without a join "
+    "(#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);
+    driver->pulse_guide(0, 600000);  // North: a chain of 255-centisecond Dec packets, the first one held
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const int dec_packets = mount.count_command(0x11, 0x26);
+
+    // South on the same axis. A join would wait for the held packet to end.
+    auto second = std::async(std::launch::async, [&] { driver->pulse_guide(1, 100); });
+    const auto returned = second.wait_for(2s);
+    const bool guiding_while_held = driver->get_is_pulse_guiding();
+    const bool done = wait_until([&] {
+        mount.complete_axis_guide(0x11);
+        clock.advance(20ms);
+        return second.wait_for(0ms) == std::future_status::ready && !driver->get_is_pulse_guiding();
+    });
+    const auto result = call_result([&] { second.get(); });
+
+    INFO("second pulse: " << result.text);
+    CHECK(result.text.empty());
+    CHECK((returned == std::future_status::ready));
+    CHECK(guiding_while_held);
+    REQUIRE(done);
+    // The older pulse chained nothing more on the axis it lost: one packet each.
+    CHECK(mount.count_command(0x11, 0x26) == dec_packets + 1);
+    CHECK(mount.count_command(0x10, 0x26) == 0);
+    const auto frames = mount.requests();
+    const auto last =
+        std::find_if(frames.rbegin(), frames.rend(), [](const auto& frame) { return frame.command == 0x26; });
+    REQUIRE(last != frames.rend());
+    CHECK(last->destination == 0x11);
+    CHECK((last->payload.size() == 2 && last->payload[1] == 10));
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a PulseGuide on the other axis runs beside a pulse (#2263)",
+          "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);
+    driver->pulse_guide(0, 2000);  // North: one Dec packet, held
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const auto east = call_result([&] { driver->pulse_guide(2, 100); });  // East: RA
+    const bool both_guiding = mount.axis_guiding(0x10) && mount.axis_guiding(0x11);
+
+    // The RA pulse ends; the Dec pulse still runs.
+    mount.complete_axis_guide(0x10);
+    for (int i = 0; i < 10; ++i) {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+    }
+    const bool dec_still_guiding = mount.axis_guiding(0x11) && driver->get_is_pulse_guiding();
+    const bool done = wait_until([&] {
+        mount.complete_axis_guide(0x11);
+        clock.advance(20ms);
+        return !driver->get_is_pulse_guiding();
+    });
+
+    INFO("RA pulse: " << east.text);
+    CHECK(east.text.empty());
+    CHECK(both_guiding);
+    CHECK(dec_still_guiding);
+    CHECK(done);
+    CHECK(mount.count_command(0x10, 0x26) == (east.text.empty() ? 1 : 0));
+    CHECK(mount.count_command(0x11, 0x26) == 1);
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - PulseGuide during a slew, Park or FindHome is refused and changes "
+    "nothing (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew in its settle (Tracking on), a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    if (leg == 0) {
+        driver->set_slew_settle_time(10);
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+        REQUIRE(clock.wait_for_waiters(1, 2s));  // landed, tracking restored, in the 10 s settle
+        REQUIRE(driver->get_tracking());
+    } else {
+        mount.set_auto_complete_motions(false);
+        if (leg == 1) driver->park();
+        if (leg == 2) driver->find_home();
+        REQUIRE(clock.wait_for_waiters(1, 2s));  // homing
+    }
+    const auto pulse = call_result([&] { driver->pulse_guide(0, 100); });
+    const bool still_slewing = driver->get_slewing();
+    const int ra_packets = mount.count_command(0x10, 0x26);
+    const int dec_packets = mount.count_command(0x11, 0x26);
+    const int stops = mount.count_command(0x10, 0x24) + mount.count_command(0x11, 0x24);
+
+    mount.complete_axis_home(0x10);
+    mount.complete_axis_home(0x11);
+    const bool landed = wait_until([&] {
+        clock.advance(1s);
+        return stop_done(*driver);
+    });
+
+    CHECK(pulse.code == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(pulse.text == kOverlapRefusal);
+    CHECK(still_slewing);
+    CHECK(ra_packets == 0);
+    CHECK(dec_packets == 0);
+    CHECK(stops == 0);
+    CHECK(landed);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    if (leg == 1) CHECK(driver->get_at_park());
+    if (leg == 2) CHECK(driver->get_at_home());
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a slew or FindHome that fails leaves PulseGuide accepted (#2263)",
+          "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a stalled GOTO times out, a FindHome times out, a GOTO ACK is lost
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+    mount.set_auto_complete_motions(false);
+
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    if (leg == 2) {
+        mount.drop_next_reply(0x10, 0x02, true);
+        require_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, 25.0); },
+                             alpacacore::AlpacaError::DriverException);
+    } else {
+        if (leg == 0) driver->slew_to_coordinates_async(target_ra, 25.0);
+        if (leg == 1) driver->find_home();
+        REQUIRE(clock.wait_for_waiters(1, 2s));
+        clock.advance(180s);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+        REQUIRE(wait_until([&] {
+            return call_result([&] { static_cast<void>(driver->get_slewing()); }).code ==
+                   alpacacore::AlpacaError::DriverException;
+        }));
+    }
+
+    if (leg == 0) {
+        // The reference survives a stalled GOTO's stop: Tracking on, and the pulse goes out.
+        driver->set_tracking(true);
+        mount.set_hold_guide_until_completed(true);
+        const auto pulse = call_result([&] { driver->pulse_guide(0, 100); });
+        const bool done = wait_until([&] {
+            mount.complete_axis_guide(0x11);
+            clock.advance(20ms);
+            return !driver->get_is_pulse_guiding();
+        });
+        INFO("pulse: " << pulse.text);
+        CHECK(pulse.text.empty());
+        CHECK(done);
+    } else {
+        // The reference is gone, so Tracking stays off: the refusal is Tracking's, not the motion overlap's.
+        const auto pulse = call_result([&] { driver->pulse_guide(0, 100); });
+        CHECK(pulse.code == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(pulse.text == "PulseGuide requires tracking to be enabled");
+    }
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a PulseGuide on an axis whose pulse start was not acknowledged is "
+    "refused (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);
+    mount.drop_next_reply(0x11, 0x26, true);  // the packet applies, its ACK is lost
+    require_alpaca_error([&] { driver->pulse_guide(0, 600000); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(clock.wait_for_waiters(1, 2s));  // the body watches the unacknowledged packet
+    const int dec_packets = mount.count_command(0x11, 0x26);
+    const auto again = call_result([&] { driver->pulse_guide(1, 100); });
+    const int dec_packets_after = mount.count_command(0x11, 0x26);
+    const bool done = wait_until([&] {
+        mount.complete_axis_guide(0x11);
+        clock.advance(20ms);
+        return !driver->get_is_pulse_guiding();
+    });
+
+    CHECK(again.code == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(again.text == kOverlapRefusal);
+    CHECK(dec_packets_after == dec_packets);
+    CHECK(done);
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew sent while a meridian-flip slew, FindHome or Park homes is "
+    "refused (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a flip slew, FindHome, Park
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // Each first command homes both axes, which drops the pointing reference. A negative hour angle puts the flip
+    // slew's target on the BeyondPole side, so it routes through home and rebases there.
+    mount.set_auto_complete_motions(false);
+    const double flip_ra = std::fmod(driver->get_sidereal_time() + 1.0, 24.0);
+    if (leg == 0) driver->slew_to_coordinates_async(flip_ra, 25.0);
+    if (leg == 1) driver->find_home();
+    if (leg == 2) driver->park();
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const auto frames_before = mount.requests().size();
+
+    const auto second = call_result(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    const auto frames_after = mount.requests().size();
+
+    INFO("second slew: " << second.text);
+    CHECK(second.code == alpacacore::AlpacaError::InvalidOperation);
+    if (leg == 0) {
+        // Not FindHome advice: the client only has to wait for the flip, or abort it.
+        CHECK(second.text == "Celestron CGX is homing for a meridian flip; wait for it or AbortSlew first");
+    } else {
+        CHECK(second.text == "Run FindHome before slewing the Celestron CGX");
+    }
+    CHECK(frames_after == frames_before);
+    CHECK(driver->get_slewing());
+
+    // The first command is untouched and still finishes.
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_home(0x10);
+    mount.complete_axis_home(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    if (leg == 0) {
+        CHECK(driver->get_tracking());
+        CHECK(driver->get_target_right_ascension() == flip_ra);
+    }
+    if (leg == 1) CHECK(driver->get_at_home());
+    if (leg == 2) CHECK(driver->get_at_park());
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a body whose stop finds it superseded writes no state (#2263)",
+          "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a flip slew superseded by FindHome, FindHome by Park, a slew by FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    // Declared before the driver, so they outlive its threads: the body's INFO for a throw after it was superseded,
+    // the slot's WARN for a body that rethrew instead, and the latch the body's stop blocks on.
+    std::atomic<int> superseded_infos{0};
+    std::atomic<int> stale_warns{0};
+    struct SinkRestore {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkRestore() { alpacacore::logging::set_log_sink(previous); }
+    } restore;
+    alpacacore::test::Latch latch;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (message.find("ended after a newer command took its axes") != std::string_view::npos)
+                superseded_infos.fetch_add(1);
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("stale operation failed") != std::string_view::npos)
+                stale_warns.fetch_add(1);
+        });
+
+    // The first command's home or GOTO stays in flight; its body waits on the clock between completion reads.
+    mount.set_auto_complete_motions(false);
+    if (leg == 0) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 1.0, 24.0), 25.0);
+    if (leg == 1) driver->find_home();
+    if (leg == 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+
+    // Its next RA completion read gets a malformed status and throws. The body checks it is not superseded, then
+    // its stop blocks here, before it takes the lock every claim is made under; the second command claims meanwhile.
+    alpacacore::vendor::celestron::set_stop_worker_hook_for_testing(*driver, [&] { latch.block(); });
+    mount.ack_next_with_payload(0x10, leg == 2 ? 0x13 : 0x12, {0x01});
+    clock.advance(200ms);
+    REQUIRE(latch.wait_entered());
+    const int ra_stops = mount.count_command(0x10, 0x24);
+    if (leg == 1) {
+        driver->park();
+    } else {
+        driver->find_home();
+    }
+    latch.release();
+    const bool body_ended = wait_until([&] { return superseded_infos.load() + stale_warns.load() > 0; });
+    alpacacore::vendor::celestron::set_stop_worker_hook_for_testing(*driver, {});
+
+    CHECK(body_ended);
+    CHECK(superseded_infos.load() == 1);
+    CHECK(stale_warns.load() == 0);
+    CHECK(mount.count_command(0x10, 0x24) == ra_stops);
+    // The FindHome or Park in flight dropped the reference; the superseded body did not restore it.
+    const auto slew = call_result(
+        [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    INFO("slew: " << slew.text);
+    CHECK(slew.text == "Run FindHome before slewing the Celestron CGX");
+
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_home(0x10);
+    mount.complete_axis_home(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    if (leg == 1) {
+        CHECK(driver->get_at_park());
+    } else {
+        CHECK(driver->get_at_home());
+    }
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew refused inside its guide drain leaves the running slew's stage alone "
+    "(#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1);  // a flip slew's rebase stage, a slew's arrival stage
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::Latch latch;  // before the driver: it outlives the initiator thread blocked on it
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // Slew A: a flip slew homing (a BeyondPole target), or a slew whose GOTO is in flight (a Normal target).
+    mount.set_auto_complete_motions(false);
+    const double ra_a = leg == 0 ? std::fmod(driver->get_sidereal_time() + 1.0, 24.0)
+                                 : std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    driver->slew_to_coordinates_async(ra_a, 25.0);
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    const int gotos = mount.count_command(0x10, 0x02);
+
+    // Slew B opens its motion transition and blocks in the guide drain, before any claim.
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, [&] { latch.block(); });
+    auto second = std::async(std::launch::async, [&] {
+        return call_result(
+            [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 2.0, 24.0), 30.0); });
+    });
+    REQUIRE(latch.wait_entered());
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, {});
+
+    // A's poll sees its home or GOTO done and runs its next stage meanwhile: the rebase and GOTO, or the arrival
+    // check and the tracking restore. Tracking starts before the arrival read, so that stage is done once both hold.
+    const int ra_reads = mount.count_command(0x10, 0x01);
+    if (leg == 0) {
+        mount.complete_axis_home(0x10);
+        mount.complete_axis_home(0x11);
+    } else {
+        mount.complete_axis_slew(0x10);
+        mount.complete_axis_slew(0x11);
+    }
+    const bool staged = wait_until([&] {
+        clock.advance(20ms);
+        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos
+                        : driver->get_tracking() && mount.count_command(0x10, 0x01) > ra_reads;
+    });
+
+    // B's position read then fails, so B is refused without claiming anything.
+    mount.ack_next_with_payload(0x10, 0x01, {0x00});
+    latch.release();
+    const auto refused = second.get();
+
+    INFO("slew B: " << refused.text);
+    CHECK(staged);
+    CHECK(refused.code == alpacacore::AlpacaError::DriverException);
+    // A still owns the axes and lands: Slewing goes false and Tracking is restored.
+    mount.set_auto_complete_motions(true);
+    mount.complete_axis_slew(0x10);
+    mount.complete_axis_slew(0x11);
+    CHECK(wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    }));
+    CHECK(driver->get_tracking());
+    CHECK(driver->get_target_right_ascension() == ra_a);
+}
+
+namespace {
+
+// Starts the leg's motion command: a slew (0), Park (1) or FindHome (2).
+void start_leg(alpacacore::TelescopeDriver& driver, int leg) {
+    if (leg == 0) driver.slew_to_coordinates_async(std::fmod(driver.get_sidereal_time() - 1.0 + 24.0, 24.0), 25.0);
+    if (leg == 1) driver.park();
+    if (leg == 2) driver.find_home();
+}
+
+// True when every request after the first `from` is an MC_AUX_GUIDE_ACTIVE read: nothing that moves the mount.
+bool only_guide_reads_since(const alpacacore::test::FakeCelestronCgxMount& mount, std::size_t from) {
+    const auto frames = mount.requests();
+    return std::all_of(frames.begin() + static_cast<std::ptrdiff_t>(std::min(from, frames.size())), frames.end(),
+                       [](const auto& frame) { return frame.command == 0x27; });
+}
+
+}  // namespace
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew, Park or FindHome supersedes a running pulse without a join and "
+    "waits for the mount to end its packet (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    // Before the driver: they outlive the pulse body blocked on the latch.
+    alpacacore::test::Latch latch;
+    std::atomic<bool> body_resumed{false};
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    // A Dec pulse chain whose first packet the mount holds active; its body blocks at its first guide poll, so a
+    // join of it could not return.
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);
+    alpacacore::vendor::celestron::set_pulse_poll_hook_for_testing(*driver, [&] {
+        latch.block();
+        body_resumed.store(true);
+    });
+    driver->pulse_guide(0, 600000);
+    REQUIRE(latch.wait_entered());
+    alpacacore::vendor::celestron::set_pulse_poll_hook_for_testing(*driver, {});
+    const auto frames_before = mount.requests().size();
+    const int dec_packets = mount.count_command(0x11, 0x26);
+    const int position_reads = mount.count_command(0x10, 0x01) + mount.count_command(0x11, 0x01);
+
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    // The command reads the mount's guide report, which still says active, and sleeps on the clock between reads.
+    const bool waiting = clock.wait_for_waiters(1, 2s);
+    const auto returned_while_active = second.wait_for(0ms);
+    const bool nothing_moved_while_active = only_guide_reads_since(mount, frames_before);
+
+    // The mount ends the packet; the command sends its own commands at its next read.
+    mount.complete_axis_guide(0x11);
+    mount.set_auto_complete_motions(true);
+    const bool returned = wait_until([&] {
+        clock.advance(20ms);
+        return second.wait_for(0ms) == std::future_status::ready;
+    });
+    const bool body_still_held = !body_resumed.load();
+    latch.release();
+    const auto result = second.get();
+    // The superseded body resumes, finds itself superseded and ends without sending its axis anything.
+    const bool pulse_ended = wait_until([&] { return !driver->get_is_pulse_guiding(); });
+    const bool landed = wait_until([&] {
+        clock.advance(20ms);
+        return stop_done(*driver);
+    });
+
+    INFO("second command: " << result.text);
+    CHECK(result.text.empty());
+    CHECK(waiting);
+    CHECK((returned_while_active == std::future_status::timeout));
+    CHECK(nothing_moved_while_active);
+    CHECK(returned);
+    CHECK(body_still_held);
+    CHECK(pulse_ended);
+    CHECK(landed);
+    CHECK(mount.count_command(0x11, 0x26) == dec_packets);
+    CHECK(mount.count_command(0x10, 0x26) == 0);
+    if (leg == 0) {
+        CHECK(mount.count_command(0x10, 0x02) > 0);
+        CHECK(mount.count_command(0x11, 0x02) > 0);
+        CHECK(driver->get_tracking());
+    } else {
+        // Park and FindHome read no position, so every read is the pulse's end-of-pulse read: there is none.
+        CHECK(mount.count_command(0x10, 0x01) + mount.count_command(0x11, 0x01) == position_reads);
+        CHECK(driver->get_at_home());
+        CHECK(driver->get_at_park() == (leg == 1));
+    }
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a slew, Park or FindHome fails when the mount never ends the superseded "
+    "pulse's packet (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);  // the Dec packet stays active until the case ends it
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_wait_count(1, 2s));  // the pulse body, between its guide reads
+    const auto frames_before = mount.requests().size();
+    const auto started = clock.now();
+
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    REQUIRE(clock.wait_for_wait_count(2, 2s));  // the command, between its reads of the mount's guide report
+    bool guiding_while_waiting = true;
+    bool returned_early = false;
+    while (clock.now() - started < 3000ms) {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        guiding_while_waiting = guiding_while_waiting && driver->get_is_pulse_guiding();
+        returned_early = returned_early || second.wait_for(0ms) == std::future_status::ready;
+    }
+    const bool returned = wait_until([&] {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        return second.wait_for(0ms) == std::future_status::ready;
+    });
+    const auto waited = clock.now() - started;
+    const bool nothing_moved = only_guide_reads_since(mount, frames_before);
+    mount.complete_axis_guide(0x11);
+    const auto result = returned ? second.get() : CallResult{};
+    if (!returned) {
+        static_cast<void>(wait_until([&] {
+            clock.advance(20ms);
+            return second.wait_for(0ms) == std::future_status::ready;
+        }));
+    }
+
+    INFO("second command: " << result.text);
+    CHECK(guiding_while_waiting);
+    CHECK_FALSE(returned_early);
+    REQUIRE(returned);
+    CHECK(waited >= 3050ms);
+    CHECK(waited <= 3100ms);
+    CHECK(result.code == alpacacore::AlpacaError::DriverException);
+    CHECK(result.text == "Celestron CGX still reports a Dec guide packet active after 3050 ms; nothing was sent");
+    CHECK(nothing_moved);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking());
+}
+
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - IsPulseGuiding stays true from the supersede of a pulse to the wait on the "
+    "mount (#2263)",
+    "[celestron][cgx][telescope][motion-owner]") {
+    using namespace std::chrono_literals;
+    const int leg = GENERATE(0, 1, 2);  // a slew, a Park, a FindHome
+    INFO("leg=" << leg);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    connect_home_and_track(mount, *driver);
+
+    mount.set_auto_complete_motions(false);
+    mount.set_hold_guide_until_completed(true);  // the Dec packet stays active until the case ends it
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_wait_count(1, 2s));  // the pulse body, between its guide reads
+
+    // The command stops in its handoff, after the supersede woke the pulse body and before its wait on the mount.
+    // The body returns on Superseded meanwhile, so its slot ends while the packet is still active.
+    std::atomic<bool> guiding_in_handoff{true};
+    std::atomic<bool> hook_ran{false};
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, [&] {
+        const auto until = std::chrono::steady_clock::now() + 300ms;
+        while (std::chrono::steady_clock::now() < until) {
+            if (!driver->get_is_pulse_guiding()) guiding_in_handoff = false;
+            std::this_thread::yield();
+        }
+        hook_ran = true;
+    });
+    auto second = std::async(std::launch::async, [&] { return call_result([&] { start_leg(*driver, leg); }); });
+    REQUIRE(wait_until([&] { return hook_ran.load(); }));
+    alpacacore::vendor::celestron::set_drain_hook_for_testing(*driver, {});
+    mount.complete_axis_guide(0x11);
+    REQUIRE(wait_until([&] {
+        clock.advance(20ms);
+        static_cast<void>(clock.wait_for_woken_settled(100ms));
+        return second.wait_for(0ms) == std::future_status::ready;
+    }));
+    INFO("second command: " << second.get().text);
+    CHECK(guiding_in_handoff);
 }
 
 namespace {
@@ -3582,6 +4649,79 @@ TEST_CASE("Celestron CGX USB Telescope Driver - AbortSlew during a re-home sends
 }
 
 TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a newer FindHome or Park or a disconnect during a re-home ends its homes",
+    "[celestron][cgx][telescope][home-search]") {
+    using namespace std::chrono_literals;
+    bool before_rehome = false;
+    SECTION("while the stopped axis comes to rest") { before_rehome = true; }
+    SECTION("during the second search") {}
+    enum class Next { FindHome, Park, Disconnect };
+    Next next = Next::FindHome;
+    SECTION("a newer FindHome") {}
+    SECTION("a newer Park") { next = Next::Park; }
+    SECTION("a disconnect") { next = Next::Disconnect; }
+
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    mount.set_crawling_home_searches(0x10, before_rehome ? 1 : 2);
+    // Each stop reads busy for five slew-done polls, so the body waits on the clock before its second home.
+    mount.set_stop_completion_reads(5);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    driver->find_home();
+    if (before_rehome) {
+        REQUIRE(step_until(clock, [&] { return mount.count_command(0x10, 0x24) == 1 || motion_ended(*driver); }));
+        REQUIRE(mount.count_command(0x10, 0x24) == 1);
+        REQUIRE(mount.count_command(0x10, 0x0b) == 1);
+    } else {
+        REQUIRE(step_until(clock, [&] { return mount.count_command(0x10, 0x0b) == 2 || motion_ended(*driver); }));
+        REQUIRE(mount.count_command(0x10, 0x0b) == 2);
+    }
+    const int ra_homes = mount.count_command(0x10, 0x0b);
+    const int ra_stops = mount.count_command(0x10, 0x24);
+    // Async with the clock driven: the newer command may wait for the old body's motion stage.
+    auto newer = std::async(std::launch::async, [&] {
+        if (next == Next::FindHome) driver->find_home();
+        if (next == Next::Park) driver->park();
+        if (next == Next::Disconnect) driver->set_connected(false);
+    });
+    // Wait for the newer command to take the axes before the clock moves: five 20 ms steps end the stop's still-wait,
+    // and a body not yet superseded would send its second home first. A FindHome or Park sends Dec its own home only
+    // after its claim superseded the body, and a disconnect sends Dec its stop only after the body has ended. CHECK,
+    // not REQUIRE: on a miss the steps below still drive the newer command to its end.
+    CHECK(wait_until(
+        [&] {
+            return next == Next::Disconnect ? mount.count_command(0x11, 0x24) >= 1
+                                            : mount.count_command(0x11, 0x0b) >= 2;
+        },
+        20s));
+    REQUIRE(step_until(clock, [&] { return newer.wait_for(0ms) == std::future_status::ready; }, 20ms));
+    CHECK_NOTHROW(newer.get());
+
+    if (next == Next::Disconnect) {
+        for (int second = 0; second < 200; ++second) clock.advance(1s);
+        CHECK(mount.count_command(0x10, 0x0b) == ra_homes);
+        CHECK(mount.count_command(0x11, 0x0b) == 1);
+        return;
+    }
+    REQUIRE(step_until(clock, [&] { return motion_ended(*driver); }));
+    for (int second = 0; second < 200; ++second) clock.advance(1s);
+    // The newer command sent its own home on each axis; the superseded body sent no stop and no home after it.
+    CHECK(slewing_failure(*driver).empty());
+    CHECK(mount.count_command(0x10, 0x0b) == ra_homes + 1);
+    CHECK(mount.count_command(0x11, 0x0b) == 2);
+    CHECK(mount.count_command(0x10, 0x24) == ra_stops);
+    CHECK(driver->get_at_home());
+    CHECK(driver->get_at_park() == (next == Next::Park));
+}
+
+TEST_CASE(
     "Celestron CGX USB Telescope Driver - the meridian home route re-homes once an axis whose search misses the bound",
     "[celestron][cgx][telescope][home-search]") {
     using namespace std::chrono_literals;
@@ -3638,5 +4778,210 @@ TEST_CASE("Celestron CGX USB Telescope Driver - findhomeissensorsearch is true",
     CHECK(driver->action("findhomeissensorsearch", "") ==
           "{\"sensor_search\":true,\"method\":\"home_switch_search\",\"model\":\"\"}");
     driver->set_connected(false);
+}
+
+namespace {
+
+using HomeLeg = alpacacore::test::FakeCelestronCgxMount::HomeLeg;
+// The #2213 rig capture (2026-11-12, the bare northern CGX): a missed-sensor search's fast leg moved 1,479,041 counts
+// in 10 s (3.17 deg/s) and its crawl 12,640 counts/s (0.27 deg/s).
+constexpr std::uint32_t kFastHomeRate = 147904;
+constexpr std::uint32_t kCrawlHomeRate = 12640;
+constexpr double kCountsPerDegree = 16777216.0 / 360.0;
+constexpr const char* kTravelGuardText = "Celestron CGX home travel guard";
+
+// step_until(), with the fake mount's motion advanced by the same step just before each clock step.
+bool step_motion_until(alpacacore::test::FakeTaskClock& clock, alpacacore::test::FakeCelestronCgxMount& mount,
+                       const std::function<bool()>& done) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (!clock.wait_for_waiters(1, 1ms)) continue;
+        mount.advance_motion(1s);
+        clock.advance(1s);
+        if (!clock.wait_for_woken_settled(2s)) return false;
+    }
+    return true;
+}
+
+// How far `axis` went from `start` in the + direction, one way round, in degrees.
+double degrees_forward(const alpacacore::test::FakeCelestronCgxMount& mount, std::uint8_t axis, std::uint32_t start) {
+    return static_cast<double>((mount.axis_physical_position(axis) - start) & 0x00ffffffU) / kCountsPerDegree;
+}
+
+}  // namespace
+
+// The 2026-10-28 incident (docs/failures/0016-cgx-home-travel.md): a home search that never finds its switch and
+// drives away. Under #2213 alone it was stopped at 60 s (about 190 deg) and searched again for 60 s more (about 380
+// deg).
+TEST_CASE(
+    "Celestron CGX USB Telescope Driver - a runaway home search is stopped at the re-home point, not searched again",
+    "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    const int route = GENERATE(0, 1, 2);  // FindHome, Park, the meridian home route
+    INFO("route=" << route);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const auto now = [] { return std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)}; };
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    if (route == 2) {
+        driver->find_home();
+        REQUIRE(step_until(clock, [&] { return motion_ended(*driver); }));
+        REQUIRE(driver->get_at_home());
+        driver->set_tracking(true);
+    } else {
+        mount.set_physical_position(0x10, static_cast<std::uint32_t>(82.5 * kCountsPerDegree));  // BeyondPole HA -0.5 h
+    }
+    // The RA switch is never found: every search drives away at the fast home rate.
+    for (int search = 0; search < 2; ++search) mount.script_home_search(0x10, {HomeLeg{1, kFastHomeRate, 0}});
+    const auto start = mount.axis_physical_position(0x10);
+    const int homes = mount.count_command(0x10, 0x0b);
+    const int stops = mount.count_command(0x10, 0x24);
+    const int dec_stops = mount.count_command(0x11, 0x24);
+
+    if (route == 0) driver->find_home();
+    if (route == 1) driver->park();
+    if (route == 2) driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 6.0, 24.0), 30.0);
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(mount.count_command(0x10, 0x0b) == homes + 1);  // never searched again
+    CHECK(mount.count_command(0x10, 0x24) > stops);
+    CHECK(mount.count_command(0x11, 0x24) > dec_stops);
+    const double travelled = degrees_forward(mount, 0x10, start);
+    CHECK(travelled > 180.0);  // the 60 s point at 3.17 deg/s
+    CHECK(travelled < 270.0);
+    const auto stopped_at = mount.axis_physical_position(0x10);
+    for (int second = 0; second < 30; ++second) {
+        mount.advance_motion(1s);
+        clock.advance(1s);
+    }
+    CHECK(mount.axis_physical_position(0x10) == stopped_at);
+    CHECK(slewing_failure(*driver) == failure);  // kept until the next command
+    // FindHome and Park dropped the reference; the meridian route keeps its labels (no rebase), as on a timeout.
+    if (route != 2)
+        require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a re-home's travel counts toward the same home travel bound",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    // The first search goes the wrong way fast for 25 s (79.4 deg), then crawls: 88.8 deg at the 60 s point, inside
+    // the 90 deg a re-home may start from. The re-home then runs away.
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, kFastHomeRate * 25}, HomeLeg{1, kCrawlHomeRate, 0}});
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, 0}});
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    const auto start = clock.now();
+    driver->find_home();
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(mount.count_command(0x10, 0x0b) == 2);
+    // 88.8 deg by 60 s, then 3.17 deg/s: the sum passes 270 deg 58 s into the re-home, before its own 60 s point.
+    const auto failed_after = clock.now() - start;
+    CHECK(failed_after >= 115s);
+    CHECK(failed_after < 120s);
+    const auto stopped_at = mount.axis_physical_position(0x10);
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x10) == stopped_at);
+}
+
+// The longest legitimate homes the guard must allow: RA in the #2213 capture's shape (from 51.8 deg, the wrong way
+// fast to the 115 deg reversal, a crawl back, the 60 s re-home at 74 deg and straight home: 179 deg in all), and Dec
+// straight home from the farthest start a slew allows (180 deg, Dec -90 on the Normal side).
+TEST_CASE("Celestron CGX USB Telescope Driver - the longest legitimate homes pass the travel guard",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    const bool park = GENERATE(false, true);
+    INFO("park=" << park);
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    constexpr std::int32_t kRaStart = -2414046;  // 51.8 deg from home: 3,893,087 counts short at the capture's 10 s
+    mount.set_physical_position(0x10, static_cast<std::uint32_t>(kRaStart) & 0x00ffffffU);
+    mount.script_home_search(0x10, {HomeLeg{-1, kFastHomeRate, 2958082}, HomeLeg{1, kCrawlHomeRate, 0}});
+    mount.script_home_search(0x10, {HomeLeg{0, kFastHomeRate, 0}});
+    mount.set_physical_position(0x11, 8388608);
+    mount.script_home_search(0x11, {HomeLeg{0, kFastHomeRate, 0}});
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+
+    if (park)
+        driver->park();
+    else
+        driver->find_home();
+    REQUIRE(step_motion_until(clock, mount, [&] { return motion_ended(*driver); }));
+    INFO("Slewing failure: " << slewing_failure(*driver));
+    CHECK(slewing_failure(*driver).empty());
+    CHECK(driver->get_at_home());
+    CHECK(driver->get_at_park() == park);
+    CHECK(mount.count_command(0x10, 0x0b) == 2);  // the #2213 re-home
+    CHECK(mount.count_command(0x11, 0x0b) == 1);
+    CHECK(mount.axis_physical_position(0x10) == 0U);
+    CHECK(mount.axis_physical_position(0x11) == 0U);
+}
+
+// Slice 5a (rig 2026-11-21): the state poll reads both encoders every 250 ms anyway, so during a home the travel guard
+// takes the poll's frames instead of reading the encoders again: over WiFi the double reads fell in the window where
+// the adapter lost requests in bursts. The guard still sees all the travel, from the poll's readings alone.
+TEST_CASE("Celestron CGX USB Telescope Driver - the travel guard takes the state poll's encoder reads",
+          "[celestron][cgx][telescope][home-search][travel-guard]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    mount.script_home_search(0x10, {HomeLeg{1, kFastHomeRate, 0}});  // RA never finds its switch
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10); }));
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    int polled_steps = 0;
+    while (!motion_ended(*driver)) {
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        if (!clock.wait_for_waiters(1, 1ms)) continue;
+        const int ra_reads = mount.count_command(0x10, 0x01);
+        const int dec_reads = mount.count_command(0x11, 0x01);
+        mount.advance_motion(1s);
+        poll_now(*driver);  // one poll per loop iteration, as the 250 ms poll and the 200 ms loop run on the rig
+        clock.advance(1s);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+        // The poll's read only: the guard read nothing of its own.
+        CHECK(mount.count_command(0x10, 0x01) - ra_reads == 1);
+        CHECK(mount.count_command(0x11, 0x01) - dec_reads == 1);
+        ++polled_steps;
+    }
+    const std::string failure = slewing_failure(*driver);
+    INFO("Slewing failure: " << failure);
+    CHECK(failure.find(kTravelGuardText) != std::string::npos);
+    CHECK(polled_steps >= 60);  // stopped at the 60 s point, past the 90 deg a re-home may start from
+    CHECK(mount.count_command(0x10, 0x0b) == 1);
 }
 #endif

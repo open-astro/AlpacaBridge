@@ -16,6 +16,7 @@ that is manual or still missing. These records explain the current rules in
 - [CGX USB interference from another daemon's serial probe](0013-cgx-serial-probe-interference.md)
 - [CGX USB stop acknowledgement preceding completion](0014-cgx-stop-completion.md)
 - [CGX USB Sync settling before and after label writes](0015-cgx-sync-settling.md)
+- [CGX USB home search driving an axis out of bounds](0016-cgx-home-travel.md)
 - [Resolved July 2026 audit snapshot](2026-07-11-code-audit.md) — historical evidence; line numbers and observations describe that snapshot.
 
 EQMOD-style support uses the `skywatcher` direct motor-controller driver:

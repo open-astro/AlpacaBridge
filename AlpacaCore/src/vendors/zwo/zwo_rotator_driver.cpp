@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -76,7 +77,7 @@ public:
         shutdown_connection();
         if (link_.is_open()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during CAA destruction: " + std::string(e.what()));
             }
@@ -90,7 +91,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (rotator_info_valid_ && !rotator_info_.name.empty()) {
-            return rotator_info_.name;
+            return util::branded_name("ZWO", rotator_info_.name);
         }
         return "ZWO CAA";
     }
@@ -162,15 +163,7 @@ public:
         return status_cache_.fault();
     }
 
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
@@ -253,31 +246,6 @@ public:
             return std::nullopt;
         }
         return firmware_;
-    }
-
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override {
-        return false;
-    }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     bool get_can_reverse() const override {

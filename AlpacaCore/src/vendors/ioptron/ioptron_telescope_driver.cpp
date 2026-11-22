@@ -27,6 +27,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
@@ -51,6 +52,27 @@
 #include <type_traits>
 
 namespace alpacacore::vendor::ioptron {
+
+// iOptron's limits for the telescope command gate (#2258). PulseGuide takes up to 99999 ms (the protocol's 5-digit
+// duration field); MoveAxis moves axes 0 and 1, and its discrete arrow speeds stay the driver's check after the gate.
+// The guide-rate static check is finite and greater than 0 (denorm_min is the smallest double above 0); the mount's
+// range is validate_guide_rate_value()'s check, which also runs before the connection check (#2257).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 99999;
+    limits.move_axis_axes = 2;
+    limits.guide_rate_ra_min = std::numeric_limits<double>::denorm_min();
+    limits.guide_rate_dec_min = std::numeric_limits<double>::denorm_min();
+    limits.texts.pulse_direction = "PulseGuide direction must be 0-3";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0-99999 ms";
+    limits.texts.move_axis_axis = "Axis must be 0 (Primary) or 1 (Secondary)";
+    limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
+    limits.texts.guide_rate_not_finite = "GuideRate must be a finite number greater than 0";
+    limits.texts.guide_rate_range = "GuideRate must be a finite number greater than 0";
+    limits.tracking_rate_max = 4;  // DriveRates 0-3 and 4, the custom rate
+    limits.texts.tracking_rate = "Invalid tracking rate";
+    return limits;
+}();
 
 /**
  * @brief iOptron mount telescope driver implementation.
@@ -136,6 +158,9 @@ private:
         SiteInfo get_site_info() const {
             return call([](auto& p) { return p.get_site_info(); });
         }
+        SiteInfo get_site_info(const std::string& gut_reply) const {
+            return call([&](auto& p) { return p.get_site_info(gut_reply); });
+        }
         SiteInfo get_site_location() const {
             return call([](auto& p) { return p.get_site_location(); });
         }
@@ -144,6 +169,9 @@ private:
         }
         std::chrono::system_clock::time_point get_utc_time() const {
             return call([](auto& p) { return p.get_utc_time(); });
+        }
+        std::string read_utc_reply() const {
+            return call([](auto& p) { return p.read_utc_reply(); });
         }
         void set_target_ra(double ra_hours) const {
             call([&](auto& p) { p.set_target_ra(ra_hours); });
@@ -391,15 +419,7 @@ public:
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
     // and the destructor serialize behind it for the duration. Deliberate
     // (base class "COST" note); this driver is the worst case of it.
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // The auto-detect factories need the driver's unique id inside the resolver,
     // and the id is assigned only after the driver exists. Call before the first connect.
@@ -595,18 +615,27 @@ public:
             sync_offset_ra_hours_ = 0.0;
             sync_offset_dec_degrees_ = 0.0;
             invalidate_slew_error_locked();
-            // The mount clock is sampled once, before Connected is published (the getter makes no exchange).
-            util::UtcOffset mount_time;
+            // The mount clock is sampled once, before Connected is published (the getter makes no exchange). The
+            // one :GUT# reply also gives the site's timezone and DST to the prefetch below, so the connect sends
+            // :GUT# once (#1784). The two fields are judged apart: an unusable UTC still leaves usable site fields.
+            std::optional<std::string> gut_reply;
             try {
-                const auto utc = protocol.get_utc_time();
-                mount_time.set(utc, clock_.now());
+                gut_reply = protocol.read_utc_reply();
             } catch (const std::exception& e) {
                 ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+            }
+            util::UtcOffset mount_time;
+            if (gut_reply) {
+                try {
+                    mount_time.set(iOptronProtocolWrapper::parse_utc_time(*gut_reply), clock_.now());
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+                }
             }
             utc_offset_ = mount_time;
             // The caches are primed before connected_ is published: a getter that arrives during these reads
             // answers NotConnected at once (check_connected_before_lock()) instead of waiting behind them.
-            prefetch_mount_state_locked();
+            prefetch_mount_state_locked(gut_reply ? &*gut_reply : nullptr);
             read_guide_rate_locked();
             try {
                 mount_info_ = protocol.get_mount_info();
@@ -794,14 +823,20 @@ public:
                                           return cached_alt_degrees_;
                                       });
     }
-    
+
+    // The optics and SlewSettleTime are the client's values, not the mount's: no lock, no fault refusal, but
+    // NotConnected while disconnected, connecting or lost like every other member (ASCOM contract precedence). The
+    // optics setters are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with
+    // them, connected or not.
     double get_aperture_diameter() const override {
+        check_connected_lock_free();
         return aperture_diameter_m_;
     }
 
     void set_aperture_diameter(double meters) override { aperture_diameter_m_ = meters; }
 
     double get_aperture_area() const override {
+        check_connected_lock_free();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -1009,6 +1044,7 @@ public:
     }
     
     double get_focal_length() const override {
+        check_connected_lock_free();
         return focal_length_m_;
     }
     
@@ -1033,9 +1069,8 @@ public:
     // of range is refused, never clamped. The range is 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate;
     // kEps absorbs rounding at a bound, which set_guide_rate_locked() then clamps inside it.
     static void validate_guide_rate_value(double value, bool ra_axis) {
-        if (!std::isfinite(value) || value <= 0.0) {
-            throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
-        }
+        util::check_guide_rate_arguments(
+            kCommandLimits, ra_axis ? util::GuideRateAxis::RightAscension : util::GuideRateAxis::Declination, value);
         constexpr double kEps = 1e-9;
         const double fraction = value / kSiderealRateDegPerSec;
         const double low = ra_axis ? 0.01 : 0.10;
@@ -1050,7 +1085,7 @@ public:
         validate_guide_rate_value(rate.ra, true);
         validate_guide_rate_value(rate.dec, false);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRate"});
         set_guide_rate_locked(rate);
     }
 
@@ -1063,7 +1098,8 @@ public:
     void set_one_guide_rate_axis(bool ra_axis, double value) {
         validate_guide_rate_value(value, ra_axis);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_guide_rate_state(kCommandLimits,
+                                     GateChecks{*this, ra_axis ? "GuideRateRightAscension" : "GuideRateDeclination"});
         if (!guide_rate_valid_) read_guide_rate_locked();
         // A serial hangup during the re-read lost the link: NotConnected, not "unknown". Here and not in
         // read_guide_rate_locked(), whose connect-path caller closes the port on a lost link before it throws.
@@ -1221,6 +1257,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected_lock_free();
         return slew_settle_time_seconds_;
     }
 
@@ -1231,6 +1268,7 @@ public:
                 AlpacaError::InvalidValue
             );
         }
+        check_connected_lock_free();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
     
@@ -1329,19 +1367,14 @@ public:
     }
 
     void move_axis_under_lock(int axis, double rate) {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
-                                  AlpacaError::InvalidValue);
-        }
-
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         double abs_rate = std::abs(rate);
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
+        util::check_move_axis_state(kCommandLimits, abs_rate == 0.0, GateChecks{*this, "MoveAxis"});
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         const Wire protocol = wire();
@@ -1544,7 +1577,7 @@ public:
                             double guide_fraction = kDefaultGuideRateFraction;
                             try {
                                 guide_fraction = protocol.get_guide_rates().first;
-                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the default is kept
                                 // Unreadable guide rate — fall back to the default fraction.
                             }
                             if (guide_fraction < 0.1 || guide_fraction > 1.0) {
@@ -1721,11 +1754,9 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 4) {
-            throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
-        }
+        util::check_tracking_rate_arguments(kCommandLimits, rate);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_tracking_rate_state(kCommandLimits, GateChecks{*this, "TrackingRate"});
 
         const Wire protocol = wire();
 
@@ -1970,16 +2001,9 @@ public:
     
     void pulse_guide(int direction, int duration) override {
         // Argument validation precedes the connection and park checks (ASCOM).
-        // 99999 ms is the protocol's 5-digit duration field.
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("PulseGuide direction must be 0-3", AlpacaError::InvalidValue);
-        }
-        if (duration < 0 || duration > 99999) {
-            throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_fast_locked("PulseGuide");
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", /*fast_parked=*/true});
         // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
         // status is still the GOTO's: the pulse itself makes the firmware report slewing.
         if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
@@ -2089,13 +2113,13 @@ public:
     }
     
     void slew_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
         std::uint64_t generation = 0;
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinates");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
@@ -2105,7 +2129,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
@@ -2117,7 +2141,7 @@ public:
             phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             equatorial_slew_ = true;
             generation = slew_operation_generation_;
@@ -2389,6 +2413,13 @@ private:
         }
     }
 
+    // NotConnected while disconnected or connecting and once the link is lost (decision 0009 rule 3), with no lock
+    // and no fault refusal: for the members that serve the client's own values (the optics, SlewSettleTime).
+    void check_connected_lock_free() const {
+        check_connected_before_lock();
+        throw_if_link_lost();
+    }
+
     // Signalled by a refill helper that, under the state lock alone, finds the cache it would serve was never
     // primed or was invalidated: serve_cached_or_refill() runs the body again under the operation lock. Not an
     // std::exception on purpose, so no catch on the way back mistakes it for a failed exchange.
@@ -2418,7 +2449,7 @@ private:
             if (!device_faulted_ && fresh()) {
                 try {
                     return body();
-                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch): the body reruns below
                     // Lapsed between `fresh` and the body's own check, on a read that needs the exchange: the
                     // body runs again below, under the operation lock.
                 }
@@ -2614,7 +2645,9 @@ private:
         device_fault_count_ = 0;
     }
 
-    void prefetch_mount_state_locked() {
+    // `gut_reply`: the connect's :GUT# reply, for the site's timezone and DST; null when that read failed, and
+    // the site read then sends its own :GUT# as before (#1784).
+    void prefetch_mount_state_locked(const std::string* gut_reply) {
         const Wire protocol = wire();
         auto now = clock_.now();
         try {
@@ -2644,7 +2677,7 @@ private:
             ALPACA_LOG_WARN("iOptron", "Failed to prefetch status cache: " + std::string(e.what()));
         }
         try {
-            SiteInfo site = protocol.get_site_info();
+            SiteInfo site = gut_reply ? protocol.get_site_info(*gut_reply) : protocol.get_site_info();
             site_longitude_cached_ = site.longitude_degrees;
             site_latitude_cached_ = site.latitude_degrees;
             hemisphere_north_ = site.is_northern_hemisphere;
@@ -2680,17 +2713,30 @@ private:
         }
     }
 
-    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Runs after the parked check and before the new slew
-    // supersedes a dispatch in flight, so a refusal leaves that motion alone.
-    // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
-    void check_equatorial_slew_allowed_locked(const char* label) const {
-        check_connected();
-        ensure_not_parked_locked(label);
-        if (tracking_off_for_slew_locked()) {
-            throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+    // The command gate's state checks in iOptron's words (#2258): util/telescope_command_gate.h decides the order,
+    // these answer each step with the driver's own texts and reads. check_connected() also refuses a latched fault,
+    // so the gate's fault step has nothing left to check. PulseGuide reads the parked flag from the cache
+    // (`fast_parked`); the other families may refresh it from the mount.
+    struct GateChecks {
+        const iOptronTelescopeDriver& driver;
+        const char* who = nullptr;
+        bool fast_parked = false;
+        void check_connected() const { driver.check_connected(); }
+        void check_not_parked(bool /*stop*/) const {
+            fast_parked ? driver.ensure_not_parked_fast_locked(who) : driver.ensure_not_parked_locked(who);
         }
-    }
+        void check_no_fault() const {}
+        // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+        // (open-astro#1274). Runs after the parked check and before the new slew
+        // supersedes a dispatch in flight, so a refusal leaves that motion alone.
+        // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
+        void check_tracking() const {
+            if (driver.tracking_off_for_slew_locked()) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+    };
 
     // Not get_tracking_locked(): :GLS reports slewing (2) instead of tracking,
     // so the getter reads a GOTO as off, and refusing there would refuse a

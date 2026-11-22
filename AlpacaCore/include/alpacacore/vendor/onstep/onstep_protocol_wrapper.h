@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,19 +33,24 @@ struct OnStepPortInfo {
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports();
 
+/// OnStepX numbers its releases from 10 (`:GVN#` "10.23a"); OnStep 4.x and older are below it.
+bool is_onstepx_version(const std::string& version);
+
+/// The USB descriptor tokens of a OnStep mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& onstep_usb_tokens();
+
 /**
  * @brief Connection type for the OnStep protocol wrapper.
  *
- * OnStep controllers in this project are USB-serial only — Network exists
- * purely as an internal test seam (see AlpacaCore/tests/fake_mount_server.h)
- * so the mandatory concurrency stress test can drive the driver into a
- * CONNECTED state without real hardware. It is never surfaced through
- * AlpacaHTTP's router or web UI.
+ * Serial: the USB port. Network: a TCP command channel of a Wi-Fi or Ethernet
+ * OnStepX (ESP32, or the Smart Web Server add-on), host and port typed in by
+ * the user (#2220); auto-detect never scans the network. Both follow decision
+ * 0009: a removed node, or a TCP hangup or refused connect, is a lost link at
+ * once.
  */
-enum class ConnectionType : std::uint8_t {
-    Serial,
-    Network  // Test-seam only — not exposed to users.
-};
+enum class ConnectionType : std::uint8_t { Serial, Network };
 
 struct ConnectionInfo {
     ConnectionType type = ConnectionType::Serial;
@@ -53,11 +59,14 @@ struct ConnectionInfo {
     std::string port_path;
     int baud_rate = 9600;  // OnStep default per INDI reference driver
 
-    // Network connection (test-seam only)
+    // Network connection. 9998 is a persistent channel: OnStepX closes a client
+    // of the standard channel, 9999, 2 s after accepting it, while 9996-9998
+    // extend that on every byte read (Serial_IP_Wifi.cpp, af1d26bf). A port
+    // outside 1-65535 is refused at connect.
     std::string host;
-    int tcp_port = 9999;
+    int tcp_port = 9998;
 
-    // Per-command response timeout
+    // Per-command response timeout, and the TCP connect's wait (0 or less: 5000)
     int response_timeout_ms = 5000;
 };
 
@@ -79,10 +88,21 @@ struct AltitudeLimits {
 };
 
 /**
+ * @brief The mount type letter of :GU#. OnStepX writes exactly one of E, K, A or L before the pier-side letter
+ * (Status.command.cpp); OnStep 4.x writes E, K or A (Command.ino). Unknown is a frame with no type letter (no frame
+ * yet; no supported firmware omits it, so the driver's AlignmentMode throws on it).
+ */
+enum class MountType : std::uint8_t { Unknown, GermanEquatorial, Fork, AltAz, AltAlt };
+
+/**
  * @brief Mount status decoded from the :GU# extended status string.
  *
  * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
  * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
+ * mount_type: the mount-type letter (OnStepX writes 'E' GEM, 'K' fork, 'A' alt-az, 'L' alt-alt; OnStep 4.x the
+ * same except 'L'; the uppercase letters appear nowhere else in the reply). Unknown when the reply has no type.
+ * is_gem: mount_type is GermanEquatorial (the letter is 'E'); false for the other types and when the
+ * reply has no type letter.
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -103,6 +123,27 @@ struct MountStatus {
     // when a MoveAxis is still running on the other axis.
     bool is_pulse_guide_active = false;
     int side_of_pier = -1;
+    MountType mount_type = MountType::Unknown;
+    bool is_gem = false;
+    // The tracking-rate letter OnStepX writes into :GU# (Status.command.cpp, af1d26bf): '(' lunar (1), 'O' solar
+    // (2), 'k' King (3), none sidereal (0). The letters appear ONLY while tracking compensation is off; with it on
+    // (`tracking_compensation`: 'r' refraction or 't' OnTrack model) the frame carries no rate letter, and
+    // `tracking_rate` is 0 without saying the rate is sidereal. OnStep 4.x never writes a rate letter.
+    int tracking_rate = 0;
+    bool tracking_compensation = false;
+    // The pulse-guide rate digit, the third character from the end of :GU# ('0' + pulseRateSelect, then the guide
+    // rate digit and the error digit; OnStepX Status.command.cpp, OnStep 4.x Command.ino), or -1 when that
+    // character is not a digit.
+    int pulse_guide_rate_select = -1;
+    // 'F': a park failed (OnStepX PS_PARK_FAILED, the park-sense check; OnStep 4.x ParkFailed), in place of p/I/P.
+    bool is_park_failed = false;
+    // 'w': a GOTO waits at home for the user (the meridian-flip pause-at-home setting; OnStepX goTo.isHomePaused(),
+    // OnStep 4.x waitingHome). The park and home bound does not run while it shows (#2296).
+    bool is_waiting_at_home = false;
+    // The general error code, the last character of :GU# ('0' + code, 0-15, so 10-15 are ':' to '?'; OnStepX
+    // Limits::errorCode(), OnStep 4.x generalError), or -1 when the reply does not end with the three code
+    // characters (pulse-guide rate, guide rate, error), which reads as no error. See the onstep instructions.
+    int general_error = -1;
     std::string raw_status;
 };
 
@@ -125,21 +166,87 @@ struct TimeInfo {
     double utc_offset_hours = 0.0;  // :SG#/:GG#: hours to ADD to local time for UTC, e.g. +5.0 for EST
 };
 
+/// The :F<n>T# focuser status (OnStepX Focuser.command.cpp, af1d26bf): 'M' moving or 'S' stopped, then the goto-rate
+/// digit.
+struct FocuserStatus {
+    bool moving = false;
+    int goto_rate = 0;
+};
+
+/// One OnStepX auxiliary feature slot from :GXY<n># (OnStepX Features.command.cpp, af1d26bf): its name (at most 10
+/// characters) and its purpose code (Constants.h: 1 switch, 2 analog output, 3 dew heater, 4 intervalometer, 6 hidden
+/// switch; :GXY reports a momentary switch, 5, and a cover switch, 7, as 1).
+struct AuxFeature {
+    std::string name;
+    int purpose = 0;
+};
+
+/// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
+/// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
+/// written only while the rotator is stopped.
+struct RotatorStatus {
+    bool moving = false;
+    bool derotating = false;
+    bool derotation_reversed = false;
+    int goto_rate = 0;
+};
+
 /**
- * @brief Clean C++ interface wrapping the OnStep (LX200-derived) serial
- *        protocol.
+ * @brief One link to one OnStep controller: the LX200-derived command set over
+ *        its serial port or its TCP command channel.
  *
- * This wrapper isolates the serial command protocol and transport layer from
- * the driver implementation. All platform-specific code is hidden using the
- * PIMPL pattern. See .github/instructions/onstep.instructions.md for the command reference.
+ * Every OnStep device on a controller (the telescope, a focuser, the rotator, the switch) shares one
+ * link, which acquire() hands out (#2223, the iOptron iFR precedent of decision
+ * 0017): the first device to connect opens it, later devices join it, and it
+ * closes when the last holder lets go. Every exchange holds the link's own lock
+ * for its command and reply, so wire turns never interleave; a command whose
+ * error code is read next with :GE# holds a Sequence across both. A lost link
+ * is lost for every holder (decision 0009). All platform-specific code is hidden
+ * using the PIMPL pattern. See .github/instructions/onstep.instructions.md for
+ * the command reference.
  */
 class OnStepProtocolWrapper {
 public:
-    static OnStepProtocolWrapper& instance();
+    /**
+     * @brief Join the live link to @p info's controller, or open one (#2223).
+     *
+     * The key is the serial port (its canonical path) or "host:port". A live
+     * link on the key is returned as it is: its line settings and response
+     * timeout are the first opener's. A lost one is closed and a fresh link
+     * opened in its place; its holders keep it, and its loss reason, until they
+     * let go (decision 0009 rule 5). The registry lock is held across the open,
+     * so two connects at once open the port once. Returns null, with the
+     * operator-facing reason in @p error, when the open fails.
+     */
+    static std::shared_ptr<OnStepProtocolWrapper> acquire(const ConnectionInfo& info, std::string* error = nullptr);
 
+    /// A link outside the registry, closed until connect(): what acquire() builds. Tests drive one directly.
+    OnStepProtocolWrapper();
+    ~OnStepProtocolWrapper();
+
+    /// Opens this link. False, with last_connect_error(), when it cannot; a lost link still open is closed first.
     bool connect(const ConnectionInfo& info);
+    /// Closes this link and forgets its loss reason (the loss stamps stay for consume_*()).
     void disconnect();
     bool is_connected() const;
+
+    /**
+     * @brief Holds the link's sequence lock (#2223): the exchanges of the holding thread run back to back, with no
+     *        other device's exchange between them.
+     *
+     * For a command and the :GE# that reads its error code: any later command on the channel replaces the code,
+     * a sibling device's poll included. Recursive, so the holder's own exchanges take it again. Take it with no
+     * driver state lock held (decision 0016); hold it only for the exchanges that must stay together.
+     */
+    class Sequence {
+    public:
+        Sequence() = default;
+        explicit Sequence(std::unique_lock<std::recursive_mutex> lock) : lock_(std::move(lock)) {}
+
+    private:
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+    Sequence hold_sequence();
 
     /// Operator-facing reason the last connect() returned false (e.g. the
     /// serial port is held by another connected device, #1202); empty when
@@ -147,22 +254,23 @@ public:
     std::string last_connect_error() const;
 
     /**
-     * @brief Whether the serial link is still there (decision 0009, #1241).
+     * @brief Whether the link is still there (decision 0009, #1241, #2220).
      *
-     * False once the link is lost: the configured port path no longer
-     * reaches the node opened at connect (adapter unplugged or re-enumerated),
-     * or a read or write failed with EIO, ENXIO, ENODEV or EBADF. A loss
-     * found here closes the port when no exchange holds it. No serial I/O;
-     * the network test seam is never lost this way.
+     * False once the link is lost: over serial the configured port path no
+     * longer reaches the node opened at connect (adapter unplugged or
+     * re-enumerated), or a read or write failed with EIO, ENXIO, ENODEV or
+     * EBADF; over TCP the controller closed or reset the connection (a
+     * zero-wait poll() of the socket, or a hangup on a read or write). A loss
+     * found here closes the port when no exchange holds it. No wire I/O.
      */
     bool link_alive();
 
     /**
      * @brief The clock the link-loss and last-alive stamps read (decision 0005,
-     *        #1378): the driver's injected TaskClock, set at connect, so the
-     *        driver times the #521 outage on the clock it runs on. Default:
+     *        #1378): the telescope's injected TaskClock, set when it takes the
+     *        link, so it times the #521 outage on the clock it runs on. Default:
      *        util::default_task_clock(). release_task_clock() puts the default
-     *        back if `clock` is still the one set (a driver going away). A
+     *        back if `clock` is still the one set (a telescope letting go). A
      *        change of the clock in use forgets the loss and last-alive
      *        stamps: one taken on another clock means nothing here (#1460).
      */
@@ -206,6 +314,15 @@ public:
     std::string get_version_number();
 
     /**
+     * @brief Get OnStepX's product description (its PRODUCT_DESCRIPTION build setting).
+     *
+     * Sends :GVC#. The firmware builder sets it ("the user friendly name for this device";
+     * it defaults to the host name). A firmware without the command sends nothing back (an unknown :GV
+     * command gets no reply at all), so the read waits out the response timeout.
+     */
+    std::string get_product_description();
+
+    /**
      * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
      *
      * Sends :GXEE#, which replies with one bare digit and no '#':
@@ -216,6 +333,63 @@ public:
      * check the firmware version first (#1216).
      */
     std::optional<int> get_mount_coords_mode();
+
+    /**
+     * @brief Get OnStepX's preferred pier side (:GX96#, '#'-terminated).
+     *
+     * One letter: 'E' east, 'W' west, 'B' best, 'A' auto (main only; 10.23a has E/W/B). With the meridian flips
+     * disabled the firmware answers 'E'. Returns std::nullopt for any other reply. OnStepX only (#2179).
+     */
+    std::optional<char> get_preferred_pier_side();
+
+    /**
+     * @brief Whether OnStepX does meridian flips (:GX94#, '#'-terminated).
+     *
+     * The reply is "<n>" with the flips on and "<n> N" with them off (n 0 none, 1 east, 2 west).
+     * Returns the flips-enabled flag, or std::nullopt for any other reply. OnStepX only (#2179).
+     */
+    std::optional<bool> get_pier_flips_enabled();
+
+    /**
+     * @brief Get a meridian limit in minutes past the meridian (:GXE9# east, :GXEA# west).
+     *
+     * A whole number of minutes, which may be 0 or negative. std::nullopt for any other reply. OnStepX only.
+     */
+    std::optional<int> get_meridian_limit_minutes(bool east);
+
+    /**
+     * @brief Get an RA-axis limit in whole degrees (:GXEe# minimum, :GXEw# maximum).
+     *
+     * std::nullopt for any other reply. OnStepX only.
+     */
+    std::optional<int> get_axis1_limit_degrees(bool maximum);
+
+    /**
+     * @brief Whether the mount was built with a tangent arm on axis 2 (:GXEF#, FindHome on such a mount).
+     *
+     * One bare digit, no '#': '1' or '0'. OnStep 4.x answers it with the frame suppressed (Command.ino); OnStepX gives
+     * a numeric reply (Mount.command.cpp, AXIS2_TANGENT_ARM). A firmware without the command answers the
+     * unknown-command '0'. Returns std::nullopt for any other reply, or none.
+     */
+    std::optional<bool> get_tangent_arm();
+
+    /**
+     * @brief Whether the mount was built with a sector gear on axis 1 (:GXEG#, FindHome on such a mount).
+     *
+     * One bare digit, no '#': '1' or '0', OnStepX only (Mount.command.cpp, AXIS1_SECTOR_GEAR); OnStep 4.x answers the
+     * unknown-command '0'. Returns std::nullopt for any other reply, or none.
+     */
+    std::optional<bool> get_sector_gear();
+
+    /**
+     * @brief The mount's base slew rate in degrees per second (the park and home bound, #2296).
+     *
+     * Sends :GX93# (the base slew period in microseconds per step: OnStepX usPerStepBase, Goto.command.cpp; OnStep
+     * 4.x maxRateBaseActual, Command.ino) and :GXE4# (axis 1 steps per degree: OnStepX Mount.command.cpp, OnStep 4.x
+     * Command.ino), both '#'-terminated, and returns 1e6 / (us per step x steps per degree). std::nullopt when either
+     * reply is not a number greater than 0 (a firmware without the command answers '0') or the rate is not finite.
+     */
+    std::optional<double> get_base_slew_degrees_per_second();
 
     /**
      * @brief Get current RA/Dec position.
@@ -271,6 +445,16 @@ public:
     std::string slew_to_target();
 
     /**
+     * @brief GOTO the mount's current RA/Dec on the given side of the pier (:MNe# for 'e', :MNw# for 'w').
+     *
+     * OnStepX only (10.02g and later). With the flips off it gets the unknown-command "0", read as accepted, so
+     * the caller sends it only when CanSetPierSide holds (OnStepX GEM, flips on).
+     * The reply is one digit with no '#', read like slew_to_target(): "0" accepted, otherwise the :MS# refusal
+     * digit. Neither the targets nor the preferred-side setting change.
+     */
+    std::string goto_current_position_on_side(char side);
+
+    /**
      * @brief Sync to the previously set target RA/Dec.
      *
      * Sends :CM# and returns the reply: "N/A" when the mount synced, "E1".."E9"
@@ -286,9 +470,13 @@ public:
     void abort_slew();
 
     /**
-     * @brief Start sidereal tracking.
+     * @brief Start tracking.
      *
-     * Sends :ST60.164275# — verified against real OnStep firmware
+     * With `use_enable_command` (OnStepX) sends :Te#, which starts tracking at the rate already selected
+     * (Mount.command.cpp, af1d26bf); :ST sets the rate to sidereal there, which would cancel a lunar, solar or
+     * King selection. Otherwise (OnStep 4.x) sends :ST60.164275# as below.
+     *
+     * The :ST form: sends :ST60.164275# — verified against real OnStep firmware
      * (Command.ino) and live hardware. OnStep's tracking on/off control is
      * :ST[freq]# (set tracking rate in legacy AC-mains-relative Hz), not a
      * dedicated on/off command; 60.164275 = 60.0 * 1.00273790935 solves for
@@ -296,7 +484,7 @@ public:
      * inferred from the INDI driver's tracking-compensation switches) do
      * NOT toggle tracking — confirmed empirically against hardware.
      */
-    void start_tracking();
+    void start_tracking(bool use_enable_command = false);
 
     /**
      * @brief Stop tracking.
@@ -312,9 +500,50 @@ public:
      * Sends what start_tracking()/stop_tracking() send, but reads the bare
      * '0'/'1' reply instead of draining it. Returns true when the mount
      * accepted it; on false, get_last_command_error() says why (OnStep 4.x
-     * refuses it while slewing).
+     * refuses it while slewing). `use_enable_command` sends :Te# instead of the :ST start (OnStepX, see
+     * start_tracking()); stopping is :ST0# either way.
      */
-    bool set_tracking_checked(bool on);
+    bool set_tracking_checked(bool on, bool use_enable_command = false);
+
+    /**
+     * @brief Select the tracking rate (OnStepX): :TQ# sidereal (0), :TL# lunar (1), :TS# solar (2), :TK# King (3).
+     *
+     * No reply (Mount.command.cpp, af1d26bf), sent blind. Changes neither tracking on/off nor the rate offsets.
+     */
+    void set_tracking_rate(int rate);
+
+    /**
+     * @brief The tracking rate in Hz (:GT#), 0 when the mount is not tracking (Mount.command.cpp, af1d26bf).
+     *
+     * std::nullopt for a reply that is not a number.
+     */
+    std::optional<double> get_tracking_rate_hz();
+
+    /**
+     * @brief Set a tracking-rate offset (OnStepX): :SXTR,n.n# RA, :SXTD,n.n# Dec, in arcseconds per sidereal
+     *        second.
+     *
+     * Reads the bare '0'/'1' reply; true when accepted (on false, get_last_command_error() says why). The firmware
+     * clamps silently to +/-1800, so the caller refuses a value beyond it first.
+     */
+    bool set_rate_offset_ra(double arcsec_per_sidereal_second);
+    bool set_rate_offset_dec(double arcsec_per_sidereal_second);
+
+    /**
+     * @brief Read a tracking-rate offset (:GXTR# RA, :GXTD# Dec), arcseconds per sidereal second (8 decimals).
+     *
+     * std::nullopt for a reply that is not a decimal number (an unknown command answers "0").
+     */
+    std::optional<double> get_rate_offset_ra();
+    std::optional<double> get_rate_offset_dec();
+
+    /**
+     * @brief The pulse-guide rate as a multiple of the sidereal rate (:GX90#, "%0.2f"; OnStepX
+     *        Guide.command.cpp and OnStep 4.x Command.ino).
+     *
+     * std::nullopt for a reply that is not a positive decimal number (an unknown command answers "0").
+     */
+    std::optional<double> get_pulse_guide_rate();
 
     /**
      * @brief Park the mount at its configured park position.
@@ -475,12 +704,72 @@ public:
      */
     void flush_input();
 
-private:
-    OnStepProtocolWrapper();
-    ~OnStepProtocolWrapper();
+    // ── Focuser (OnStepX, #2223). Only the addressed form :F<n>...# with n 1-6 is sent: the controller's active
+    // focuser (:FA<n>#), which the handset and the OnStepX web page use, is never changed, and the bare rate preset
+    // :F<d># is never sent. Replies from OnStepX Focuser.command.cpp at af1d26bf.
+
+    /// :F<n>T#: "M" or "S" then the goto-rate digit, '#'-terminated. std::nullopt for any other reply, which is what
+    /// a controller without focuser n answers (the unknown-command "0").
+    std::optional<FocuserStatus> focuser_status(int focuser);
+    /// :F<n>g#: the position in steps ("%ld", '#'-terminated). std::nullopt when it does not parse.
+    std::optional<long> focuser_position(int focuser);
+    /// :F<n>i# / :F<n>m#: the minimum / maximum position in steps. std::nullopt when it does not parse.
+    std::optional<long> focuser_min_position(int focuser);
+    std::optional<long> focuser_max_position(int focuser);
+    /// :F<n>u#: microns per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> focuser_microns_per_step(int focuser);
+    /// :F<n>t#: the temperature in degrees C ("%3.1f" of the firmware's sensor, which prints "nan" with no probe).
+    /// std::nullopt for anything that is not a finite number.
+    std::optional<double> focuser_temperature(int focuser);
+    /// :F<n>c#: temperature compensation on ('1') or off ('0'), a bare digit. std::nullopt for any other reply.
+    std::optional<bool> focuser_temp_comp(int focuser);
+    /// :F<n>c0# / :F<n>c1#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_focuser_temp_comp(int focuser, bool enabled);
+    /// :F<n>s<steps>#: an absolute goto in steps; a bare '1' accepted or '0' refused.
+    bool focuser_goto(int focuser, long steps);
+    /// :F<n>Q#: stop. No reply (sent blind).
+    void focuser_halt(int focuser);
+
+    // ── Rotator (OnStepX, #2221). Replies from OnStepX Rotator.command.cpp at af1d26bf. The derotator commands
+    // (:r+#, :r-#, :rP#) and the derotation reverse toggle (:rR#) are never sent.
+
+    /// :GX98#: 'R' rotate only or 'D' rotate and derotate. std::nullopt for anything else: 'N' (no rotator) or the
+    /// unknown-command "0" of a firmware without the rotator.
+    std::optional<char> rotator_capability();
+    /// :rT#: the status, '#'-terminated. std::nullopt for any other reply (the unknown-command "0").
+    std::optional<RotatorStatus> rotator_status();
+    /// :rG#: the rotator's angle in degrees ("sDDD*MM", whole arcminutes; signed, inside the travel limits).
+    /// std::nullopt when it does not parse.
+    std::optional<double> rotator_angle();
+    /// :rI# / :rM#: the travel limits in whole degrees ("%ld"). std::nullopt when they do not parse.
+    std::optional<long> rotator_min_angle();
+    std::optional<long> rotator_max_angle();
+    /// :rD#: degrees per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> rotator_degrees_per_step();
+    /// :rS<sDDD*MM:SS>#: an absolute goto to `degrees` (inside the travel limits); a bare '1' accepted or '0' refused
+    /// (get_last_command_error() says why).
+    bool rotator_goto(double degrees);
+    /// :rQ#: stop. No reply (sent blind).
+    void rotator_halt();
+
+    // ── Auxiliary features (OnStepX, #2222), slots 1-8. Replies from OnStepX Features.command.cpp at af1d26bf.
+
+    /// :GXY0#: one '0'/'1' per slot, slot 1 first ("11010000#"). std::nullopt for anything else (the
+    /// unknown-command "0" of a firmware without the features is read as one absent slot, not as nullopt).
+    std::optional<std::string> aux_feature_slots();
+    /// :GXY<n>#: "name,purpose#". std::nullopt for anything else (a slot that is off answers the bare "0").
+    std::optional<AuxFeature> aux_feature(int slot);
+    /// :GXX<n>#: the slot's value, the first field of the reply ('#'-terminated; a ',' or ';' ends it, so a dew
+    /// heater's zero, span and delta-T and any power telemetry are not read). std::nullopt when it is not a whole
+    /// number.
+    std::optional<long> aux_feature_value(int slot);
+    /// :SXX<n>,V<v>#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_aux_feature_value(int slot, long value);
+
     OnStepProtocolWrapper(const OnStepProtocolWrapper&) = delete;
     OnStepProtocolWrapper& operator=(const OnStepProtocolWrapper&) = delete;
 
+private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
@@ -491,10 +780,18 @@ enum class LinkLossHookPoint : std::uint8_t {
     AliveBeforeRecord,      ///< link_alive(): node found gone, loss not yet recorded; no lock held
     AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
     DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
+    BeforeExchange,         ///< send_command(): before this exchange takes the wire; only a caller's Sequence held
+    AfterConnectionCheck,   ///< a focuser, rotator or switch member passed its connection check; no lock held
 };
-/// Test hook: lets a test land a Disconnect or a reconnect at the points above.
+/// Test hook: lets a test land a Disconnect, a reconnect or a sibling's exchange at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+/// Runs the hook at AfterConnectionCheck: the OnStep focuser, rotator and switch call it at the end of their
+/// connection check, so a test can land a Disconnect between that check and the member's read of the connect-time
+/// state. Does nothing (and takes no lock) while no hook is set.
+void run_connection_check_hook();
+/// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.
+std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info);
 }  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

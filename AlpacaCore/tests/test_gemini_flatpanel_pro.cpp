@@ -98,10 +98,6 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Unsupported actions", "[gemini][flatpa
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },
@@ -114,11 +110,11 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Unsupported actions", "[gemini][flatpa
 TEST_CASE("Gemini Flat Panel Pro Driver - Motorized cover is a real capability, not structurally absent",
           "[gemini][flatpanel][unit]") {
     // This is the key contrast with the Cover Lite (test_gemini_flatpanel.cpp
-    // "No motorized cover" case): there, OpenCover/CloseCover/HaltCover throw
-    // MethodNotImplemented UNCONDITIONALLY, even disconnected, because the
-    // capability doesn't exist on that hardware at all. Here it does exist,
-    // so the SAME calls must throw NotConnected instead (asserted above) --
-    // never MethodNotImplemented -- while disconnected.
+    // "No motorized cover" cases): there, OpenCover/CloseCover/HaltCover throw
+    // MethodNotImplemented once connected, because the capability doesn't
+    // exist on that hardware at all. Here it does exist, so the SAME calls
+    // must never throw MethodNotImplemented; while disconnected they throw
+    // NotConnected (asserted above), as the Lite's do.
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, "/dev/ttyUSB0");
 
     try {

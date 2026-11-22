@@ -52,7 +52,6 @@ public:
     // Getters
     HttpMethod method() const { return method_; }
     const std::string& path() const { return path_; }
-    const std::string& query_string() const { return query_string_; }
     const std::unordered_map<std::string, std::string>& query_params() const { return query_params_; }
     const std::unordered_map<std::string, std::string>& headers() const { return headers_; }
     const std::string& body() const { return body_; }

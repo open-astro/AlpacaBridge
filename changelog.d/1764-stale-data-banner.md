@@ -1,0 +1,3 @@
+### Added
+
+- **Web UI: a stale-data banner when the bridge stops answering**, issue #1764. The device status poll now has a 4 s request timeout and counts a refused, timed-out, non-OK or malformed answer as a failure, where it was swallowed before. On the first failure a banner says "Connection to the bridge lost, retrying" with the age of the last good data, and each status dot keeps its last state, drawn hollow with a "Stale" label. Retries back off 5, 5, 10, then 15 s, and the next good answer clears the banner and the marker. The poll and the banner run on every tab while the page is visible; a hidden page still does not poll. The device list's loading text is now a skeleton row.

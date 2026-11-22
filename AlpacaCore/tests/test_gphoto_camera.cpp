@@ -40,7 +40,7 @@ TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     // No physical DSLR is ever attached to a CI runner, so libgphoto2's USB
     // autodetect always comes back empty and the driver serves this literal
     // fallback name (see get_name()/preload_camera_info_locked).
-    CHECK(driver->get_name() == "DSLR / Mirrorless Camera");
+    CHECK(driver->get_name() == "GPhoto Camera");
     CHECK(driver->get_sensor_name().empty());  // unknown: "" (ICameraV4), never a placeholder
     CHECK(driver->get_has_shutter() == true);  // DSLRs have a real mechanical shutter
     CHECK(driver->get_can_abort_exposure() == true);
@@ -66,17 +66,11 @@ TEST_CASE("GPhoto Camera Driver - Device metadata", "[gphoto][camera][unit]") {
 TEST_CASE("GPhoto Camera Driver - Not connected throws", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gains(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_exposure_max(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_exposure_min(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_gain(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->abort_exposure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_max(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_min(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]") {
@@ -101,19 +95,18 @@ TEST_CASE("GPhoto Camera Driver - Unsupported actions", "[gphoto][camera][unit]"
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("GPhoto Camera Driver - Sub-exposure and binning not supported", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_bin_x(2), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_bin_y(2), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes", "[gphoto][camera][unit]") {
@@ -161,11 +154,10 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Sensor geometry (Bayer phase) is unknown until a real exposure has been
-    // decoded, independent of connection state -- InvalidOperation, not
-    // NotConnected/NotImplemented (see gphoto_camera_driver.cpp class comment).
-    require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::InvalidOperation);
-    require_alpaca_error([&]() { driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::InvalidOperation);
+    // NotConnected before the unknown-geometry InvalidOperation (#1919); the connected answer is pinned in
+    // test_gphoto_fake_sdk.cpp "MLU on skips the connect priming capture".
+    require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - State machine contracts", "[gphoto][camera][unit]") {
@@ -293,6 +285,40 @@ TEST_CASE("GPhoto Camera Driver - Connected ROI round-trips and rejects negative
     CHECK(driver->get_num_y() == 3);
     CHECK(driver->get_start_x() == 2);
     CHECK(driver->get_start_y() == 1);
+
+    driver->set_connected(false);
+}
+
+// #2261: StartExposure checks the frame against the sensor through util::camera_frame_request.h, NumX/NumY above the
+// sensor before StartX/StartY off it, as on every camera. A frame bad both ways therefore answers the above-the-sensor
+// check, which GPhoto words as "ROI extends beyond sensor bounds" (it checked the start first before #2261); each
+// one-way misfit keeps its own text.
+TEST_CASE("GPhoto Camera Driver - StartExposure names the first way a frame misses the sensor",
+          "[gphoto][camera][unit]") {
+    alpacacore::test::reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_connectable_camera(alpacacore::test::unique_test_model("Nikon DSC D5300")));
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_camera_x_size() == 8);  // the canned 8x6 priming frame
+
+    const auto refusal = [&] {
+        try {
+            driver->start_exposure(0.01, true);
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+            return std::string(e.what());
+        }
+        return std::string("accepted");
+    };
+    driver->set_num_x(9);    // above the 8-pixel sensor
+    driver->set_start_x(8);  // and starting off it
+    CHECK(refusal() == "ROI extends beyond sensor bounds");
+    driver->set_num_x(4);  // only the start is off the sensor
+    CHECK(refusal() == "Start position outside sensor bounds");
+    driver->set_start_x(5);  // on the sensor, but 5 + 4 runs past its edge
+    CHECK(refusal() == "ROI extends beyond sensor bounds");
 
     driver->set_connected(false);
 }

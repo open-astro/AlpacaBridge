@@ -58,8 +58,8 @@ async function setup({ apOn, confirmAnswer, host = 'pi.local', status }) {
             activeElement: null,
         },
         location: { hostname: host },
-        confirm: (msg) => { prompts.push(msg); return confirmAnswer.value; },
-        alert: () => {},
+        // The page's own dialog (issue #1764), defined above the WiFi block in app.js.
+        confirmDialog: async (opts) => { prompts.push(opts.body); return confirmAnswer.value; },
         fetch: async (url, opts) => {
             requests.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : undefined });
             return { json: async () => ({ ErrorNumber: 0, Value: {} }) };

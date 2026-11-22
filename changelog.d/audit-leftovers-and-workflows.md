@@ -1,0 +1,12 @@
+### Added (CI)
+- **Stale issues and pull requests are marked, in a dry run first** (`.github/workflows/stale.yml`, issue #1363): a daily `actions/stale` run marks an issue after 90 days without activity and closes it 30 days later, and a pull request after 30 and 14 days; a draft pull request is marked but never closed, and `P1`, `P2`, `on hold`, `testing` and `safe-to-review` are exempt. It starts with `debug-only` on, so it only logs what it would do until a later PR turns it on. `scheduled-failure.yml` watches it, and `docs/development.md` states the policy for contributors.
+- **OpenSSF Scorecard runs weekly** (`.github/workflows/scorecard.yml`, issue #1364): every Monday, on pushes to `main` and on dispatch from `main`, its SARIF goes to code scanning next to CodeQL; results are not published (`publish_results: false`). `scheduled-failure.yml` watches it.
+- **The README Authored code badge is dynamic** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to `main` the workflow writes the count from the new `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on a `badges` branch, and the badge reads it through the shields.io endpoint. `/bump-release` no longer edits the badge.
+
+### Changed (tooling)
+- **Docs-drift check 25 no longer compares a number** (issue #2079): it passes when the README badge points at the endpoint, whatever the count on `main`, and fails on a missing badge or a static `NNNk lines` one; the endpoint JSON is checked against the shields.io schema in the self-test.
+- **Docs-drift check 27: every workflow job sets `timeout-minutes`** (issue #2059): the old lint read only the review job. A job that calls a reusable workflow is skipped.
+- **Docs-drift check 28: every NOLINT gives its reason on the same line** (issue #2059): the 85 suppressions in first-party C/C++ that had none now say why (for example the destructors' `set_connected(false)`, the Sky-Watcher receive path and the DeviceState collectors); four long Sky-Watcher `recv` lines and two others moved to `NOLINTNEXTLINE`, and the QHY handle deleter became a named lambda so its line fits.
+
+### Removed (internal)
+- **Unused threading scaffolding** (issue #2059): the `ThreadPool` stub in `AlpacaHTTP` and the empty `alpacacore::threading` header and source are deleted with their CMake entries and Cursor rule references, and the server's `main.cpp` drops its two TODO examples for APIs it does not need.

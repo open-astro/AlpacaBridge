@@ -277,7 +277,7 @@ TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never thro
     rig.fake().set_state_muted(true);
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK_FALSE(rig.driver().get_device_firmware().has_value());
     rig.fake().set_state_muted(false);

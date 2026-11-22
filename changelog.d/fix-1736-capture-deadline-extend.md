@@ -1,0 +1,3 @@
+### Added (tests)
+
+- **A capture-session body can move its watchdog deadline later**, `util::CaptureSession`, issue #1736. `CaptureControl::extend_deadline(from_now)` moves the exposure's watchdog deadline to at least that far past now, never earlier, and only while the body still owns the session (`CaptureSession - extend_deadline moves the watchdog deadline later`, `... never shortens the deadline`, `a body that no longer owns the session cannot extend the deadline`). It is what the QHY exposure needs when it moves onto the session: QHY learns the download length of its slow readout modes only after the exposure has run. No camera calls it yet.

@@ -16,6 +16,9 @@ concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Nothing by default: the job grants what it needs (#1755).
+permissions: {}
+
 jobs:
   # The job id is the check-run name the skills bind verdicts to
   # (`.name == "review"` in /pr-checker and /submit-pr); do not add a `name:`.
@@ -130,7 +133,7 @@ jobs:
           path: |
             ~/.local/share/claude
             ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          key: claude-code-cli-2.1.325-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install the Claude Code CLI on a cache miss
         if: steps.claude_cli_cache.outputs.cache-hit != 'true'
@@ -140,7 +143,7 @@ jobs:
           set -o pipefail
           # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
           for wait in 15 30 60 120 stop; do
-            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
+            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.325; then
               exit 0
             fi
             if [ "${wait}" = stop ]; then
@@ -155,9 +158,9 @@ jobs:
         run: |
           reported="$("${HOME}/.local/bin/claude" --version)" || reported="(claude did not run)"
           case "${reported}" in
-            2.1.302\ *|2.1.302) echo "Claude Code CLI ${reported}" ;;
+            2.1.325\ *|2.1.325) echo "Claude Code CLI ${reported}" ;;
             *)
-              echo "::error::Expected Claude Code CLI 2.1.302, got: ${reported}"
+              echo "::error::Expected Claude Code CLI 2.1.325, got: ${reported}"
               exit 1
               ;;
           esac
@@ -169,7 +172,7 @@ jobs:
           path: |
             ~/.local/share/claude
             ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          key: claude-code-cli-2.1.325-${{ runner.os }}-${{ runner.arch }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -282,7 +285,7 @@ jobs:
             echo "ADR_SCOPE_EOF"
           } >> "${GITHUB_OUTPUT}"
 
-      - uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d  # v1
+      - uses: anthropics/claude-code-action@f3b070c88125d33dbae5653df5f143101d4ea9dc  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is
@@ -411,8 +414,12 @@ jobs:
             with the Write tool (writes outside the workspace are denied, so
             not /tmp). Do not post it yourself; a workflow step posts the file.
             If the file is missing, the run fails.
+          # Explicit mode keeps --allowedTools a strict list. The action skips its
+          # auto-mode default today (allowed_non_write_users and
+          # path_to_claude_code_executable are set), but this does not rely on that.
           claude_args: |
             --model opus
+            --permission-mode default
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(python3 -I ${{ runner.temp }}/adr-tools/scripts/check_adr_scope.py --checklist:*)"
 
       # Every in-scope rule needs a checklist line before anything posts. The
