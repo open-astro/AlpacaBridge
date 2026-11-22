@@ -56,6 +56,7 @@ using Catch::Approx;
 
 namespace {
 
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 using std::chrono::milliseconds;
 using std::chrono::seconds;
@@ -456,15 +457,6 @@ void synchronous_slew(Rig& rig, double ra, double dec) {
     if (error) std::rethrow_exception(error);
 }
 
-int error_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& e) {
-        return e.error_code();
-    }
-    return 0;
-}
-
 }  // namespace
 
 TEST_CASE("OnStep snapshot - getters and DeviceState make no mount exchange at 100 ms per exchange",
@@ -593,8 +585,8 @@ TEST_CASE(
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.tick());  // the third latches the fault
     CHECK(rig.driver->get_connected());
-    CHECK(error_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
-    CHECK(error_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(has_entry(*rig.driver, "RightAscension"));
 
     SECTION("a good tick clears the fault") {
@@ -608,7 +600,7 @@ TEST_CASE(
         CHECK_FALSE(rig.tick());  // the tick finds the bound and ends the body
         CHECK_FALSE(rig.driver->get_connected());
         CHECK(rig.driver->get_device_state().empty());
-        CHECK(error_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
         rig.mount->mute = false;
         rig.driver->set_connected(true);  // only the client relinks
         CHECK(rig.driver->get_connected());
@@ -658,7 +650,7 @@ TEST_CASE("OnStep snapshot - the site getters throw until the site is known", "[
     rig.clock.advance(seconds(3));  // past the site retry delay: the write's own pair read fails again
     rig.driver->set_site_latitude(12.5);
     CHECK(rig.driver->get_site_latitude() == 12.5);
-    CHECK(error_of([&] { (void)rig.driver->get_site_longitude(); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)rig.driver->get_site_longitude(); }) == alpacacore::AlpacaError::InvalidOperation);
     // The poll's full tick retries the pair once the mount answers it.
     rig.mount->garble_site = false;
     rig.clock.advance(seconds(3));
@@ -1265,7 +1257,7 @@ TEST_CASE("OnStep snapshot - a connect whose status poll cannot start fails and 
     CHECK(message.find("status poll did not start") != std::string::npos);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(onstep::detail::registered_link_for_testing(rig.info) == nullptr);  // the port was closed
-    CHECK(error_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(rig.clock.waiter_count() == 0);
 
     refuse = false;  // the next Connect starts the poll
@@ -1281,10 +1273,10 @@ TEST_CASE("OnStep snapshot - a parked mount answers InvalidValue to a bad MoveAx
     rig.mount->set_status("nNPEW180#");  // parked
     rig.connect();
     REQUIRE(rig.driver->get_at_park());
-    CHECK(error_of([&] { rig.driver->move_axis(5, 0.1); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); }) ==
+    CHECK(error_code_of([&] { rig.driver->move_axis(5, 0.1); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); }) ==
           alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(error_code_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::InvalidWhileParked);
 }
 
 // #1895: a Tracking write on a connect whose :GU# read failed reads :GU# first, so the write-through lands in a
@@ -1295,7 +1287,7 @@ TEST_CASE("OnStep snapshot - a Tracking write after a connect that read no statu
     rig.mount->silent_status = true;  // the connect's :GU# times out
     rig.connect();
     rig.pause();
-    REQUIRE(error_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
+    REQUIRE(error_code_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
     rig.mount->silent_status = false;
     rig.driver->set_tracking(false);  // the mount still tracks ("NpEW180#") until the next tick reads it
     CHECK_FALSE(rig.driver->get_tracking());
@@ -1310,7 +1302,7 @@ TEST_CASE("OnStep snapshot - an Unpark after a connect that read no status is se
     rig.connect();
     rig.pause();
     rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
-    CHECK(error_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(rig.mount->count(":hR") == 0);  // nothing was sent while the status was unknown
 
     rig.mount->silent_status = false;
@@ -1327,16 +1319,16 @@ TEST_CASE("OnStep snapshot - a status the connect could not read refuses the com
     rig.connect();
     rig.pause();
     rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
-    CHECK(error_of([&] { rig.driver->pulse_guide(0, 100); }) == alpacacore::AlpacaError::DriverException);
-    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->pulse_guide(0, 100); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::DriverException);
     CHECK(rig.mount->count(":M") == 0);  // no :Mg, :RA or :Me went out
     CHECK(rig.mount->count(":RA") == 0);
     CHECK_NOTHROW(rig.driver->move_axis(0, 0.0));  // a stop is not held up by the unread status
     CHECK_NOTHROW(rig.driver->abort_slew());
 
     rig.mount->silent_status = false;  // once :GU# answers, the guard reads it
-    CHECK(error_of([&] { rig.driver->find_home(); }) == alpacacore::AlpacaError::InvalidWhileParked);
-    CHECK(error_of([&] { rig.driver->set_tracking(true); }) == alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(error_code_of([&] { rig.driver->find_home(); }) == alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(error_code_of([&] { rig.driver->set_tracking(true); }) == alpacacore::AlpacaError::InvalidWhileParked);
 }
 
 // Turning tracking off is a stop: an unread status never holds it up, as for AbortSlew and MoveAxis(axis, 0).
@@ -1360,7 +1352,7 @@ TEST_CASE("OnStep snapshot - a GOTO whose :MS# send fails leaves Slewing false a
     rig.pause();
     rig.mount->set_status("NpEW180#");  // tracking, no GOTO
     rig.mount->overlong_goto = true;
-    CHECK(error_of([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); }) ==
+    CHECK(error_code_of([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); }) ==
           alpacacore::AlpacaError::DriverException);
     REQUIRE(rig.mount->count(":MS") == 1);
     CHECK_FALSE(rig.driver->get_slewing());
@@ -1377,9 +1369,9 @@ TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send meets a hangup loses t
     rig.connect();
     rig.pause();
     rig.server.hang_up_on(":Mg");
-    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(rig.driver->get_connected());
-    CHECK(error_of([&] { (void)rig.driver->get_is_pulse_guiding(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)rig.driver->get_is_pulse_guiding(); }) == alpacacore::AlpacaError::NotConnected);
 }
 
 // ── Pier side (#2179) ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -1510,7 +1502,8 @@ TEST_CASE("OnStep AlignmentMode - answers from the :GU# mount type", "[onstep][t
     }
     SECTION("a frame with no type letter throws DriverException") {
         place(rig, 1.0, "Np180#");
-        CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)rig.driver->get_alignment_mode(); }) ==
+              alpacacore::AlpacaError::DriverException);
     }
 }
 
@@ -1754,7 +1747,7 @@ TEST_CASE("OnStep pier side - a refused flip raises and Slewing stays false", "[
         rig.mount->mn_reply = "6";  // outside limits
     }
     rig.mount->clear_log();
-    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
     const auto commands = rig.mount->commands();
     const auto flip = index_of(commands, ":MNe#");
     REQUIRE(flip < commands.size());
@@ -1778,7 +1771,7 @@ TEST_CASE("OnStep pier side - a flip that gets no reply raises", "[onstep][teles
         rig.mount->mn_reply = "";
     }
     rig.mount->clear_log();
-    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) != 0);
+    CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) != 0);
     CHECK(rig.mount->count(":MNe#") == 1);
     CHECK_FALSE(rig.driver->get_slewing());
 }
@@ -1792,7 +1785,7 @@ TEST_CASE("OnStep pier side - SideOfPier is refused while the mount reports no p
     connect_paused(rig);
     place(rig, kThirdOfAnHour, "NpEo180#");  // tracking, no GOTO, not parked, no pier side
     rig.mount->clear_log();
-    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.mount->count(":MN") == 0);
     CHECK(rig.mount->count(":SX96") == 0);
     CHECK(rig.mount->count(":MS#") == 0);
@@ -1824,29 +1817,29 @@ TEST_CASE("OnStep pier side - SideOfPier refusals send nothing", "[onstep][teles
     };
 
     SECTION("a value other than 0 or 1 is InvalidValue, also while disconnected") {
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(-1); }) == alpacacore::AlpacaError::InvalidValue);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(-1); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::NotConnected);
         connect_paused(rig);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
         nothing_sent();
     }
     SECTION("parked") {
         connect_paused(rig);
         place(rig, 0.3, kParkedStatus);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidWhileParked);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidWhileParked);
         nothing_sent();
     }
     SECTION("Tracking off") {
         connect_paused(rig);
         place(rig, 0.3, kNotTrackingStatus);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
         nothing_sent();
     }
     SECTION("a GOTO running") {
         connect_paused(rig);
         place(rig, 0.3, kGotoStatus);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
         nothing_sent();
     }
     SECTION("a side that cannot reach the position") {
@@ -1865,7 +1858,8 @@ TEST_CASE("OnStep pier side - SideOfPier refusals send nothing", "[onstep][teles
         set_pier(rig, "");  // :GX96# not answered
         connect_paused(rig);
         place(rig, 0.3, kWestStatus);
-        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+        CHECK(error_code_of([&] { rig.driver->set_side_of_pier(0); }) ==
+              alpacacore::AlpacaError::PropertyNotImplemented);
         nothing_sent();
     }
 }
@@ -2006,11 +2000,11 @@ TEST_CASE("OnStepX rates - setting the TrackingRate sends the command and reads 
     show(rig, kCompensatedStatus);
     CHECK(rig.driver->get_tracking_rate() == 3);
     // 0-3 only, before the connection check (ITelescopeV4 DriveRates).
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(-1); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(-1); }) == alpacacore::AlpacaError::InvalidValue);
     rig.driver->set_connected(false);
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::NotConnected);
 }
 
 // "When tracking is turned on, the mount must use the last selected TrackingRate": :ST60.164275# would set the rate
@@ -2054,15 +2048,16 @@ TEST_CASE("OnStep 4.x rates - Tracking on still sends :ST60.164275# and the rate
     // Sidereal is accepted and sends nothing; the others are not offered.
     rig.mount->clear_log();
     CHECK_NOTHROW(rig.driver->set_tracking_rate(0));
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->set_tracking_rate(3); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->set_tracking_rate(3); }) == alpacacore::AlpacaError::InvalidValue);
     CHECK(rig.mount->count(":T") == 0);
     // The offsets are an OnStepX feature: not offered, never asked.
     CHECK_FALSE(rig.driver->get_can_set_right_ascension_rate());
     CHECK_FALSE(rig.driver->get_can_set_declination_rate());
-    CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.1); }) ==
+    CHECK(error_code_of([&] { rig.driver->set_right_ascension_rate(0.1); }) ==
           alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(error_of([&] { rig.driver->set_declination_rate(0.1); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { rig.driver->set_declination_rate(0.1); }) ==
+          alpacacore::AlpacaError::PropertyNotImplemented);
     CHECK(rig.driver->get_right_ascension_rate() == 0.0);
     CHECK(rig.driver->get_declination_rate() == 0.0);
     CHECK(rig.mount->count(":GXT") == 0);
@@ -2111,7 +2106,7 @@ TEST_CASE("OnStepX rates - the rate offsets convert units on the wire and on the
 TEST_CASE("OnStepX rates - a rate beyond the firmware's limit is InvalidValue, before the connection check",
           "[onstep][telescope][rates]") {
     Rig rig;
-    const auto invalid = [&](auto&& call) { return error_of(call) == alpacacore::AlpacaError::InvalidValue; };
+    const auto invalid = [&](auto&& call) { return error_code_of(call) == alpacacore::AlpacaError::InvalidValue; };
     SECTION("disconnected") {
         CHECK(invalid([&] { rig.driver->set_right_ascension_rate(121.0); }));
         CHECK(invalid([&] { rig.driver->set_right_ascension_rate(-121.0); }));
@@ -2119,8 +2114,10 @@ TEST_CASE("OnStepX rates - a rate beyond the firmware's limit is InvalidValue, b
         CHECK(invalid([&] { rig.driver->set_declination_rate(-1805.0); }));
         CHECK(invalid([&] { rig.driver->set_right_ascension_rate(std::nan("")); }));
         CHECK(invalid([&] { rig.driver->set_declination_rate(std::numeric_limits<double>::infinity()); }));
-        CHECK(error_of([&] { rig.driver->set_right_ascension_rate(120.0); }) == alpacacore::AlpacaError::NotConnected);
-        CHECK(error_of([&] { rig.driver->set_declination_rate(1804.0); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { rig.driver->set_right_ascension_rate(120.0); }) ==
+              alpacacore::AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { rig.driver->set_declination_rate(1804.0); }) ==
+              alpacacore::AlpacaError::NotConnected);
     }
     SECTION("connected") {
         connect_rates(rig);
@@ -2153,8 +2150,9 @@ TEST_CASE("OnStepX rates - the offsets read zero and refuse writes while Trackin
     CHECK(rig.driver->get_right_ascension_rate() == 0.0);
     CHECK(rig.driver->get_declination_rate() == 0.0);
     rig.mount->clear_log();
-    CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.5); }) == alpacacore::AlpacaError::InvalidOperation);
-    CHECK(error_of([&] { rig.driver->set_declination_rate(0.5); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { rig.driver->set_right_ascension_rate(0.5); }) ==
+          alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { rig.driver->set_declination_rate(0.5); }) == alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.mount->count(":SXT") == 0);
     show(rig, kWestStatus);  // sidereal again: the offsets were never reset
     CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
@@ -2175,12 +2173,15 @@ TEST_CASE("OnStepX rates - the rate getters throw while the connect's :GU# never
     rig.mount->silent_status = true;
     SECTION("OnStepX") {
         connect_rates(rig);
-        REQUIRE(error_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
-        CHECK(error_of([&] { (void)rig.driver->get_tracking_rate(); }) == alpacacore::AlpacaError::DriverException);
-        CHECK(error_of([&] { (void)rig.driver->get_right_ascension_rate(); }) ==
+        REQUIRE(error_code_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)rig.driver->get_tracking_rate(); }) ==
               alpacacore::AlpacaError::DriverException);
-        CHECK(error_of([&] { (void)rig.driver->get_declination_rate(); }) == alpacacore::AlpacaError::DriverException);
-        CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.5); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension_rate(); }) ==
+              alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)rig.driver->get_declination_rate(); }) ==
+              alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { rig.driver->set_right_ascension_rate(0.5); }) ==
+              alpacacore::AlpacaError::DriverException);
         rig.mount->silent_status = false;
         show(rig, kWestStatus);
         CHECK(rig.driver->get_tracking_rate() == 0);
@@ -2357,7 +2358,7 @@ TEST_CASE("OnStep guide rate - GuideRate follows :GX90# and re-reads when the :G
     CHECK(rate.ra == exact(sidereal));
     CHECK(rate.dec == exact(sidereal));
     CHECK_FALSE(rig.driver->get_can_set_guide_rates());
-    CHECK(error_of([&] { rig.driver->set_guide_rate({sidereal, sidereal}); }) ==
+    CHECK(error_code_of([&] { rig.driver->set_guide_rate({sidereal, sidereal}); }) ==
           alpacacore::AlpacaError::PropertyNotImplemented);
 
     {
@@ -2428,7 +2429,7 @@ TEST_CASE("OnStep guide rate - GuideRate throws the latched fault", "[onstep][te
     CHECK(rig.tick());
     CHECK(rig.tick());  // the third latches the fault
     REQUIRE(rig.driver->get_connected());
-    CHECK(error_of([&] { (void)rig.driver->get_guide_rate(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_guide_rate(); }) == alpacacore::AlpacaError::DriverException);
     rig.mount->mute = false;
     CHECK(rig.tick());  // a good tick clears it
     CHECK(rig.driver->get_guide_rate().ra == exact(0.25 * 15.0410686 / 3600.0));
@@ -2443,7 +2444,7 @@ TEST_CASE("OnStep AlignmentMode - throws DriverException while the connect's :GU
     Rig rig;
     rig.mount->silent_status = true;
     connect_rates(rig);
-    CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
     rig.mount->silent_status = false;
     show(rig, kWestStatus);
     CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
@@ -2461,7 +2462,7 @@ TEST_CASE("OnStep AlignmentMode - a latched fault throws", "[onstep][telescope][
     CHECK(rig.tick());
     CHECK(rig.tick());  // the third latches the fault
     REQUIRE(rig.driver->get_connected());
-    CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
     rig.mount->mute = false;
     CHECK(rig.tick());  // a good tick clears it
     CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
@@ -2490,7 +2491,7 @@ TEST_CASE("OnStep SyncToAltAz - syncs while tracking through :Sr, :Sd and :CM#",
     CHECK(rig.driver->get_right_ascension() == Approx(rig.driver->get_target_right_ascension()).margin(1e-9));
     CHECK(rig.driver->get_declination() == Approx(rig.driver->get_target_declination()).margin(1e-9));
     // The slew's opposite rule stays with the slew.
-    CHECK(error_of([&] { rig.driver->slew_to_alt_az_async(45.0, 135.0); }) ==
+    CHECK(error_code_of([&] { rig.driver->slew_to_alt_az_async(45.0, 135.0); }) ==
           alpacacore::AlpacaError::InvalidOperation);
 }
 
@@ -2500,17 +2501,18 @@ TEST_CASE("OnStep SyncToAltAz - syncs while tracking through :Sr, :Sd and :CM#",
 // GOTO check from sync_to_mount_locked().
 TEST_CASE("OnStep SyncToAltAz - validation order matches SlewToAltAz", "[onstep][telescope][rates]") {
     Rig rig;
-    CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 361.0); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(45.0, 361.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::NotConnected);
     connect_paused(rig);
     rig.mount->clear_log();
 
     SECTION("parked") {
         show(rig, kParkedStatus);
-        CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
-        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::InvalidWhileParked);
-        CHECK(error_of([&] { rig.driver->slew_to_alt_az_async(45.0, 90.0); }) ==
+        CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) ==
+              alpacacore::AlpacaError::InvalidWhileParked);
+        CHECK(error_code_of([&] { rig.driver->slew_to_alt_az_async(45.0, 90.0); }) ==
               alpacacore::AlpacaError::InvalidWhileParked);
         CHECK(rig.mount->count(":CM#") == 0);
     }
@@ -2520,13 +2522,15 @@ TEST_CASE("OnStep SyncToAltAz - validation order matches SlewToAltAz", "[onstep]
         rig.mount->mute = false;
         REQUIRE_FALSE(rig.driver->get_link_fault().empty());
         rig.mount->clear_log();
-        CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
-        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) ==
+              alpacacore::AlpacaError::DriverException);
         CHECK(rig.mount->count(":CM#") == 0);
     }
     SECTION("a GOTO running") {
         show(rig, kGotoStatus);
-        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) ==
+              alpacacore::AlpacaError::InvalidOperation);
         CHECK(rig.mount->count(":CM#") == 0);
         CHECK(rig.mount->count(":Sr") == 0);
     }

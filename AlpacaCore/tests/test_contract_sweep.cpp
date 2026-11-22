@@ -52,6 +52,7 @@
 #include "catch2_compat.h"
 #include "connect_hold_gate.h"
 #include "contract_sweep.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 
 // Tier 2 hosts: the roster fakes, each under its vendor guard. Fakes over a pty or a loopback socket
@@ -204,19 +205,7 @@ using alpacacore::AlpacaException;
 using alpacacore::DeviceType;
 using alpacacore::test::contract::ContractEntry;
 namespace err = alpacacore::AlpacaError;
-
-// The Alpaca error code `fn` throws, or -1 if it returns normally. Anything that
-// is not an AlpacaException fails the calling case.
-int thrown_code(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    } catch (const std::exception& ex) {
-        FAIL("non-Alpaca exception escaped: " << ex.what());
-    }
-    return -1;
-}
+using alpacacore::test::error_code_of;
 
 using Probe = std::pair<std::string, std::function<void()>>;
 
@@ -667,7 +656,7 @@ const char* probe_state_name(ProbeState state) {
 // Runs one InvalidValue probe and checks the code its exemption, if any, allows.
 void check_invalid_value_probe(const std::string& id, ProbeState state, const Probe& probe) {
     const auto& [name, fn] = probe;
-    const int code = thrown_code(fn);
+    const int code = error_code_of(fn);
     const auto ex = std::find_if(kProbeExemptions.begin(), kProbeExemptions.end(), [&](const ProbeExemption& x) {
         return id == x.id && state == x.state && name == x.probe;
     });
@@ -716,7 +705,7 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
         INFO(id << " " << name << " while exposing is not run (" << ex->reason << ")");
         return;
     }
-    const int code = thrown_code(fn);
+    const int code = error_code_of(fn);
     if (ex == kExposingRefusalExemptions.end()) {
         INFO(id << " " << name << " while exposing");
         CHECK(code == err::InvalidOperation);
@@ -1073,13 +1062,13 @@ bool has_can_subject(const ContractEntry& e) {
     REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
-        CHECK(thrown_code(fn) == err::NotConnected);
+        CHECK(error_code_of(fn) == err::NotConnected);
     }
     // Not-implemented members: NotConnected first, never NotImplemented.
     for (const auto& [name, fn] : not_implemented_probes(*d, e)) {
         INFO(e.id << " " << name << " must answer NotConnected while disconnected");
-        const int code = thrown_code(fn);
-        CHECK((code == -1 || code == err::NotConnected || code == err::InvalidValue));
+        const int code = error_code_of(fn);
+        CHECK((code == 0 || code == err::NotConnected || code == err::InvalidValue));
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);
@@ -1091,7 +1080,7 @@ bool has_can_subject(const ContractEntry& e) {
         // Static: the read returns. NotConnected: it throws that code. Any other code is a defect.
         const auto expect = [&](const char* name, DisconnectedRead mode, const std::function<void()>& fn) {
             INFO(e.id << " " << name);
-            CHECK(thrown_code(fn) == (mode == DisconnectedRead::Static ? -1 : err::NotConnected));
+            CHECK(error_code_of(fn) == (mode == DisconnectedRead::Static ? 0 : err::NotConnected));
         };
         expect("get_max_switch", e.switch_max_disconnected, [&] { (void)s.get_max_switch(); });
         expect("get_can_write(id)", e.switch_caps_disconnected, [&] { (void)s.get_can_write(id); });
@@ -1146,13 +1135,13 @@ bool has_can_subject(const ContractEntry& e) {
         CHECK(d->can_action(name));
     }
     CHECK_FALSE(d->can_action("no-such-action"));
-    const int a = thrown_code([&] { (void)d->action("no-such-action", ""); });
+    const int a = error_code_of([&] { (void)d->action("no-such-action", ""); });
     CHECK(a == err::ActionNotImplemented);
     // Command*: forwarded to the device (NotConnected while disconnected) or unsupported.
     const int want = e.command_passthrough ? err::NotConnected : err::NotImplemented;
-    CHECK(thrown_code([&] { d->command_blind("x"); }) == want);
-    CHECK(thrown_code([&] { (void)d->command_bool("x"); }) == want);
-    CHECK(thrown_code([&] { (void)d->command_string("x"); }) == want);
+    CHECK(error_code_of([&] { d->command_blind("x"); }) == want);
+    CHECK(error_code_of([&] { (void)d->command_bool("x"); }) == want);
+    CHECK(error_code_of([&] { (void)d->command_string("x"); }) == want);
 }
 
 // Every error a disconnected driver raises is in the ASCOM-reserved range, and
@@ -1169,8 +1158,8 @@ bool has_can_subject(const ContractEntry& e) {
     all.push_back({"command_string", [&] { (void)d->command_string("x"); }});
     for (const auto& [name, fn] : all) {
         INFO(e.id << " " << name);
-        const int code = thrown_code(fn);
-        if (code == -1) continue;  // returned normally: the NotConnected case owns that
+        const int code = error_code_of(fn);
+        if (code == 0) continue;  // returned normally: the NotConnected case owns that
         CHECK(code != err::DriverException);
         CHECK(code != err::UnspecifiedError);
         CHECK(code >= 0x400);
@@ -1190,7 +1179,7 @@ bool has_can_subject(const ContractEntry& e) {
     auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*d);
     REQUIRE_FALSE(f.get_connected());
     std::vector<std::string> names;
-    CHECK(thrown_code([&] { names = f.get_names(); }) == -1);
+    CHECK(error_code_of([&] { names = f.get_names(); }) == 0);
     for (const auto& n : names) {
         INFO(e.id << " name '" << n << "'");
         CHECK_FALSE(n.empty());
@@ -1198,14 +1187,14 @@ bool has_can_subject(const ContractEntry& e) {
     std::vector<std::string> written = names;
     written.resize(names.empty() ? 5 : names.size());
     for (std::size_t i = 0; i < written.size(); ++i) written[i] = "Sweep " + std::to_string(i + 1);
-    CHECK(thrown_code([&] { f.set_names(written); }) == -1);
+    CHECK(error_code_of([&] { f.set_names(written); }) == 0);
     CHECK(f.get_names() == written);
     std::vector<int> offsets;
-    CHECK(thrown_code([&] { offsets = f.get_focus_offsets(); }) == -1);
+    CHECK(error_code_of([&] { offsets = f.get_focus_offsets(); }) == 0);
     std::vector<int> written_offsets = offsets;
     written_offsets.resize(offsets.empty() ? 5 : offsets.size());
     for (std::size_t i = 0; i < written_offsets.size(); ++i) written_offsets[i] = static_cast<int>(10 * (i + 1));
-    CHECK(thrown_code([&] { f.set_focus_offsets(written_offsets); }) == -1);
+    CHECK(error_code_of([&] { f.set_focus_offsets(written_offsets); }) == 0);
     CHECK(f.get_focus_offsets() == written_offsets);
 }
 
@@ -1218,10 +1207,10 @@ bool has_can_subject(const ContractEntry& e) {
     const int expected = e.type == DeviceType::Switch && e.switch_caps_disconnected ==
                                                              alpacacore::test::contract::DisconnectedRead::NotConnected
                              ? err::NotConnected
-                             : -1;
+                             : 0;
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
-        CHECK(thrown_code(fn) == expected);
+        CHECK(error_code_of(fn) == expected);
     }
     if (e.type == DeviceType::Telescope) {
         auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
@@ -1452,11 +1441,11 @@ Hosted connected_host(const Tier2Host& h) {
     REQUIRE(h.type == DeviceType::Telescope);
     Hosted hosted = connected_host(h);
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
-    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == h.target_unset_error);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
+    CHECK(error_code_of([&] { (void)t.get_target_right_ascension(); }) == h.target_unset_error);
+    CHECK(error_code_of([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_right_ascension(5.5);
     CHECK(t.get_target_right_ascension() == 5.5);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
+    CHECK(error_code_of([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_declination(20.25);
     CHECK(t.get_target_right_ascension() == 5.5);
     CHECK(t.get_target_declination() == 20.25);
@@ -1519,8 +1508,8 @@ constexpr std::chrono::milliseconds kHookBound{100};
     {
         Hosted hosted = h.connectable(false);
         REQUIRE(hosted.driver != nullptr);
-        CHECK(thrown_code([&] { (void)hosted.driver->get_device_firmware(); }) == -1);
-        CHECK(thrown_code([&] { (void)hosted.driver->get_device_sdk_version(); }) == -1);
+        CHECK(error_code_of([&] { (void)hosted.driver->get_device_firmware(); }) == 0);
+        CHECK(error_code_of([&] { (void)hosted.driver->get_device_sdk_version(); }) == 0);
     }
     Hosted hosted = h.connectable(h.can_hold_connect);
     REQUIRE(hosted.driver != nullptr);
@@ -1528,14 +1517,14 @@ constexpr std::chrono::milliseconds kHookBound{100};
     const auto t0 = Clock::now();
     int fw_code = 0;
     int sdk_code = 0;
-    fw_code = thrown_code([&] { (void)hosted.driver->get_device_firmware(); });
-    sdk_code = thrown_code([&] { (void)hosted.driver->get_device_sdk_version(); });
+    fw_code = error_code_of([&] { (void)hosted.driver->get_device_firmware(); });
+    sdk_code = error_code_of([&] { (void)hosted.driver->get_device_sdk_version(); });
     const auto took = Clock::now() - t0;
     // A hook that waited for the handshake leaves Connecting false by the time it returns.
     const bool still_connecting = hosted.driver->get_connecting();
     INFO("both hooks took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
-    CHECK(fw_code == -1);
-    CHECK(sdk_code == -1);
+    CHECK(fw_code == 0);
+    CHECK(sdk_code == 0);
     CHECK(took < kHookBound);
     if (h.can_hold_connect) {
         CHECK(still_connecting);
@@ -1571,9 +1560,9 @@ constexpr std::chrono::milliseconds kInitiatorBound{1000};
                 if (!t.get_can_move_axis(axis)) continue;
                 INFO("move_axis(" << axis << ", 0)");
                 const auto t0 = Clock::now();
-                const int code = thrown_code([&] { t.move_axis(axis, 0.0); });
+                const int code = error_code_of([&] { t.move_axis(axis, 0.0); });
                 const auto took = Clock::now() - t0;
-                CHECK(code == -1);
+                CHECK(code == 0);
                 CHECK(took < kInitiatorBound);
             }
         }
@@ -1587,10 +1576,10 @@ constexpr std::chrono::milliseconds kInitiatorBound{1000};
         return;
     }
     const auto t0 = Clock::now();
-    const int code = thrown_code([&] { t.park(); });
+    const int code = error_code_of([&] { t.park(); });
     const auto took = Clock::now() - t0;
     INFO("park() took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
-    CHECK(code == -1);
+    CHECK(code == 0);
     CHECK(took < kInitiatorBound);
 }
 
@@ -4722,25 +4711,25 @@ TEST_CASE("Contract sweep tier 2 - every Name is brand and model while connected
     const std::vector<int> offsets = f.get_focus_offsets();
     CHECK(offsets.size() == n);
 
-    CHECK(thrown_code([&] { f.set_names(std::vector<std::string>(n - 1, "X")); }) == err::InvalidValue);
-    CHECK(thrown_code([&] { f.set_focus_offsets(std::vector<int>(n + 1, 7)); }) == err::InvalidValue);
+    CHECK(error_code_of([&] { f.set_names(std::vector<std::string>(n - 1, "X")); }) == err::InvalidValue);
+    CHECK(error_code_of([&] { f.set_focus_offsets(std::vector<int>(n + 1, 7)); }) == err::InvalidValue);
     CHECK(f.get_names() == names);
     CHECK(f.get_focus_offsets() == offsets);
 
     const std::string token = std::string("ABCDEFGHIJKLMNOP").substr(0, n);
-    CHECK(thrown_code([&] { f.set_names({token}); }) == -1);
+    CHECK(error_code_of([&] { f.set_names({token}); }) == 0);
     std::vector<std::string> expanded;
     for (char c : token) expanded.emplace_back(1, c);
     CHECK(f.get_names() == expanded);
     std::string lower = token;
     for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    CHECK(thrown_code([&] { f.set_names({lower}); }) == err::InvalidValue);
+    CHECK(error_code_of([&] { f.set_names({lower}); }) == err::InvalidValue);
     CHECK(f.get_names() == expanded);
 
     std::vector<std::string> gaps(n, "N");
     gaps[0].clear();
     gaps[n - 1].clear();
-    CHECK(thrown_code([&] { f.set_names(gaps); }) == -1);
+    CHECK(error_code_of([&] { f.set_names(gaps); }) == 0);
     const std::vector<std::string> read = f.get_names();
     REQUIRE(read.size() == n);
     CHECK(read[0] == "Filter 1");
@@ -4748,15 +4737,15 @@ TEST_CASE("Contract sweep tier 2 - every Name is brand and model while connected
 
     f.set_connected(false);
     REQUIRE_FALSE(f.get_connected());
-    const int names_code = thrown_code([&] { f.set_names({"A", "B"}); });
-    const int offsets_code = thrown_code([&] { f.set_focus_offsets({1, 2, 3}); });
+    const int names_code = error_code_of([&] { f.set_names({"A", "B"}); });
+    const int offsets_code = error_code_of([&] { f.set_focus_offsets({1, 2, 3}); });
     if (std::string(h.id) == "wandererastro_filterwheel") {
         // The whole SFW lineup has 8 slots, so the count is known while disconnected (wandererastro.instructions.md).
         CHECK(names_code == err::InvalidValue);
         CHECK(offsets_code == err::InvalidValue);
     } else {
-        CHECK(names_code == -1);
-        CHECK(offsets_code == -1);
+        CHECK(names_code == 0);
+        CHECK(offsets_code == 0);
         CHECK(f.get_names() == std::vector<std::string>{"A", "B"});
         CHECK(f.get_focus_offsets() == std::vector<int>{1, 2, 3});
     }
@@ -5205,6 +5194,7 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 #ifndef _WIN32
 namespace {
 
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 namespace snap_chrono = std::chrono;
 

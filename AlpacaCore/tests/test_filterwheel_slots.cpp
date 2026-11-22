@@ -19,11 +19,13 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace {
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::util::FilterWheelSlots;
 namespace logging = alpacacore::logging;
 using Names = std::vector<std::string>;
@@ -52,16 +54,6 @@ struct WarnCapture {
     logging::LogLevel previous_level;
     std::vector<std::string> lines;
 };
-
-int error_code_of(const std::function<void()>& fn, std::string* message = nullptr) {
-    try {
-        fn();
-    } catch (const AlpacaException& e) {
-        if (message) *message = e.what();
-        return e.error_code();
-    }
-    return -1;
-}
 
 constexpr int kInvalidValue = AlpacaError::InvalidValue;
 
@@ -145,7 +137,7 @@ TEST_CASE("FilterWheelSlots - publish of zero or a negative count leaves the cou
     known.publish_slot_count(0, "Tag");
     CHECK_FALSE(known.slot_count().has_value());
     CHECK(known.names() == Names{"Filter 1", "Filter 2", "Filter 3"});
-    CHECK(error_code_of([&] { known.set_names({"A", "B"}); }) == -1);
+    CHECK(error_code_of([&] { known.set_names({"A", "B"}); }) == 0);
 }
 
 // Falsified by: filterwheel_slots.h set_names() assigning names_ before require_length().

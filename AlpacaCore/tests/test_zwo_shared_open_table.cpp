@@ -28,10 +28,12 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace {
 
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::vendor::zwo::SharedOpenTable;
 namespace AlpacaError = alpacacore::AlpacaError;
 
@@ -74,15 +76,6 @@ struct RawUnits {
         return ops;
     }
 };
-
-int error_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& e) {
-        return e.error_code();
-    }
-    return 0;
-}
 
 // A per-device call as a holder makes it: under its link, checked in the same hold as the call.
 bool call_reaches(SharedOpenTable& table, int id, std::uint64_t link) {
@@ -133,7 +126,7 @@ TEST_CASE("ZWO shared open table - A different serial behind a held id retires i
     CHECK(table.open_count(3) == 1);
 
     bool reached = false;
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
           AlpacaError::NotConnected);
     CHECK_FALSE(reached);  // refused before the call, under the same hold
 
@@ -157,7 +150,7 @@ TEST_CASE("ZWO shared open table - A lost serial read behind a held id retires i
     CHECK(units.opens == 2);
     CHECK(units.closes == 1);
     CHECK(table.open_count(3) == 1);
-    CHECK(error_of([&] { (void)call_reaches(table, 3, y.link); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)call_reaches(table, 3, y.link); }) == AlpacaError::NotConnected);
 }
 
 // Falsified by: a generic serial read failure on a held open reusing it, or retiring its link (B7b b).
@@ -169,8 +162,8 @@ TEST_CASE("ZWO shared open table - A generic serial read failure fails the open 
     const auto y = table.open(3);
 
     units.read_failures = 2;
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
-    CHECK(error_of([&] { (void)table.open_candidate(3); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)table.open_candidate(3); }) == AlpacaError::DriverException);
     CHECK(table.open_count(3) == 1);
     CHECK(units.opens == 1);
     CHECK(units.closes == 0);
@@ -187,7 +180,7 @@ TEST_CASE("ZWO shared open table - A link is never handed out twice", "[zwo][lin
     const auto second = table.open(3);
 
     CHECK(second.link != first.link);
-    CHECK(error_of([&] { (void)call_reaches(table, 3, first.link); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)call_reaches(table, 3, first.link); }) == AlpacaError::NotConnected);
     table.close(3, first.link);  // a close with the old link leaves the new open alone
     CHECK(table.open_count(3) == 1);
     CHECK(call_reaches(table, 3, second.link));
@@ -211,7 +204,7 @@ TEST_CASE("ZWO shared open table - A per-device call with no link for its id is 
     }
     CHECK_FALSE(reached);
 
-    CHECK(error_of([&] { table.with_link(4, x.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
+    CHECK(error_code_of([&] { table.with_link(4, x.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
           AlpacaError::DriverException);
     CHECK_FALSE(reached);
 
@@ -229,7 +222,7 @@ TEST_CASE("ZWO shared open table - A loss code from a call closes the handle at 
     const auto x = table.open(3);
     units.close_fails = true;  // EAFClose on a removed unit fails; the close is best effort
 
-    CHECK(error_of([&] {
+    CHECK(error_code_of([&] {
               table.with_link(3, y.link, [&] {
                   table.call(
                       3, [] { throw AlpacaException("EAFGetPosition: EAF_ERROR_REMOVED", AlpacaError::NotConnected); });
@@ -239,7 +232,7 @@ TEST_CASE("ZWO shared open table - A loss code from a call closes the handle at 
     CHECK(table.open_count(3) == 0);
 
     bool reached = false;
-    CHECK(error_of([&] { table.with_link(3, x.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
+    CHECK(error_code_of([&] { table.with_link(3, x.link, [&] { table.call(3, [&] { reached = true; }); }); }) ==
           AlpacaError::NotConnected);
     CHECK_FALSE(reached);
     table.close(3, y.link);
@@ -249,7 +242,7 @@ TEST_CASE("ZWO shared open table - A loss code from a call closes the handle at 
     units.close_fails = false;
     const auto z = table.open(3);
     CHECK(units.opens == 2);
-    CHECK(error_of([&] {
+    CHECK(error_code_of([&] {
               table.with_link(3, z.link, [&] {
                   table.call(3, [] { throw AlpacaException("EAFGetPosition: EAF_ERROR_GENERAL_ERROR"); });
               });
@@ -282,15 +275,15 @@ TEST_CASE("ZWO shared open table - with_link restores the outer link and holds n
         if (!opened_while_body_ran) return 0;  // the table lock is held: every call below would deadlock
 
         CHECK_THROWS(table.with_link(4, b.link, [] { throw std::runtime_error("body failed"); }));
-        CHECK(error_of([&] { table.call(4, [] {}); }) == AlpacaError::DriverException);
-        CHECK(error_of([&] { table.call(3, [] {}); }) == 0);
+        CHECK(error_code_of([&] { table.call(4, [] {}); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { table.call(3, [] {}); }) == 0);
         return table.call(3, [] { return 42; });
     });
     other.join();
 
     CHECK(value == 42);
     CHECK(opened_while_body_ran);
-    CHECK(error_of([&] { table.call(3, [] {}); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { table.call(3, [] {}); }) == AlpacaError::DriverException);
 }
 
 // Falsified by: a candidate open sharing a held open whose unit reported no serial (B7b a): nothing proves
@@ -325,11 +318,11 @@ TEST_CASE("ZWO shared open table - A failed open leaves no entry behind", "[zwo]
     SharedOpenTable table(units.ops());
 
     units.open_failures = 1;
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
     CHECK(table.open_count(3) == 0);
 
     units.read_losses = 1;
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)table.open(3); }) == AlpacaError::NotConnected);
     CHECK(table.open_count(3) == 0);
     CHECK(units.closes == 1);  // the handle the vanished unit left is closed
 
@@ -373,7 +366,7 @@ struct HeldDownload {
 
     HeldDownload(SharedOpenTable& table, int id, std::uint64_t link, int outcome_code = 0) {
         thread = std::thread([this, &table, id, link, outcome_code] {
-            code = error_of([&] {
+            code = error_code_of([&] {
                 table.with_link(id, link, [&] {
                     table.call_unserialised(id, [&] {
                         inside = true;
@@ -403,7 +396,7 @@ TEST_CASE("ZWO shared open table - An unserialised call holds no lock while it r
     HeldDownload download(table, 3, y.link);
     REQUIRE(wait_until([&] { return download.inside.load(); }));
 
-    CHECK(error_of([&] { table.call_unserialised(4, [] {}); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { table.call_unserialised(4, [] {}); }) == AlpacaError::DriverException);
     CHECK(call_reaches(table, 4, other.link));
     CHECK(table.open(5).link != 0);
     CHECK(download.code.load() == -1);  // still running
@@ -419,17 +412,18 @@ TEST_CASE("ZWO shared open table - A loss closes the id only after the unseriali
     REQUIRE(wait_until([&] { return download.inside.load(); }));
 
     // Another call on the same open meets the removal code while the download runs.
-    CHECK(error_of([&] {
+    CHECK(error_code_of([&] {
               table.with_link(3, y.link, [&] {
                   table.call(3, [] { throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected); });
               });
           }) == AlpacaError::NotConnected);
 
     // Retired at once for every later caller ...
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) ==
+          AlpacaError::NotConnected);
     // ... but the handle stays open under the transfer, and the id cannot be reopened until it is closed.
     CHECK(units.closes.load() == 0);
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
     CHECK(units.opens.load() == 1);
 
     download.release = true;
@@ -451,7 +445,7 @@ TEST_CASE("ZWO shared open table - The last close waits for a running unserialis
 
     table.close(3, y.link);
     CHECK(units.closes.load() == 0);
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
 
     download.release = true;
     download.thread.join();
@@ -468,16 +462,16 @@ TEST_CASE("ZWO shared open table - A link 0 caller is refused on an entry retire
     HeldDownload download(table, 3, y.link);
     REQUIRE(wait_until([&] { return download.inside.load(); }));
     // A loss code on another call retires the entry; the close waits for the download.
-    CHECK(error_of([&] {
+    CHECK(error_code_of([&] {
               table.with_link(3, y.link, [&] {
                   table.call(3, [] { throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected); });
               });
           }) == AlpacaError::NotConnected);
 
     bool ran = false;
-    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call(3, [&] { ran = true; }); }); }) ==
+    CHECK(error_code_of([&] { table.with_link(3, 0, [&] { table.call(3, [&] { ran = true; }); }); }) ==
           AlpacaError::NotConnected);
-    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call_unserialised(3, [&] { ran = true; }); }); }) ==
+    CHECK(error_code_of([&] { table.with_link(3, 0, [&] { table.call_unserialised(3, [&] { ran = true; }); }); }) ==
           AlpacaError::NotConnected);
     CHECK_FALSE(ran);
 }
@@ -495,8 +489,9 @@ TEST_CASE("ZWO shared open table - A loss code from the unserialised body retire
         CHECK(download.code.load() == AlpacaError::NotConnected);
     }
     CHECK(units.closes.load() == 1);
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
-    CHECK(error_of([&] { table.close(3, y.link); }) == 0);  // a stale close is a no-op
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.close(3, y.link); }) == 0);  // a stale close is a no-op
     CHECK(units.closes.load() == 1);
 }
 
@@ -525,7 +520,7 @@ TEST_CASE("ZWO shared open table - A close that throws still drops the entry", "
 
     const auto y = table.open(3);
     units.close_fails = true;  // the unit was pulled: the close reports it
-    CHECK(error_of([&] { table.close(3, y.link); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.close(3, y.link); }) == AlpacaError::NotConnected);
     CHECK(table.open_count(3) == 0);
     units.close_fails = false;
 
@@ -556,7 +551,7 @@ struct ListedUnits : CountingUnits {
 };
 
 int call_error(SharedOpenTable& table, int id, std::uint64_t link, int code) {
-    return error_of([&] {
+    return error_code_of([&] {
         table.with_link(id, link,
                         [&] { table.call(id, [&] { throw AlpacaException("ASI_ERROR_GENERAL_ERROR", code); }); });
     });
@@ -584,7 +579,8 @@ TEST_CASE("ZWO shared open table - A generic failure on an id no longer enumerat
     CHECK(message.find("no longer enumerated") != std::string::npos);
     CHECK(units.closes.load() == 1);
     CHECK(table.open_count(3) == 0);
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) ==
+          AlpacaError::NotConnected);
 }
 
 // Falsified by: shared_open_table.h unlisted_locked() taking an enumeration check that throws as evidence of a pull.
@@ -632,10 +628,12 @@ TEST_CASE("ZWO shared open table - A failed result on an id no longer enumerated
     CHECK(units.checks.load() == 1);  // a good result asks nothing
 
     units.present = false;
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { (void)table.call(3, [] { return false; }, failed); }); }) ==
-          AlpacaError::NotConnected);
+    CHECK(error_code_of([&] {
+              table.with_link(3, y.link, [&] { (void)table.call(3, [] { return false; }, failed); });
+          }) == AlpacaError::NotConnected);
     CHECK(units.closes.load() == 1);
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) ==
+          AlpacaError::NotConnected);
 }
 
 // Falsified by: shared_open_table.h call_unserialised() rethrowing a generic failure without asking Ops::listed.
@@ -653,5 +651,6 @@ TEST_CASE("ZWO shared open table - A generic unserialised failure on an unlisted
     }
     CHECK(units.closes.load() == 1);  // by the download's own guard, after it returned
     CHECK(table.open_count(3) == 0);
-    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) ==
+          AlpacaError::NotConnected);
 }

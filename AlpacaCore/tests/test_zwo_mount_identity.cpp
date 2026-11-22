@@ -39,6 +39,7 @@ namespace {
 using namespace std::chrono_literals;
 using namespace alpacacore;
 using namespace alpacacore::vendor::zwo;
+using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
 
 bool eventually(const std::function<bool()>& predicate) {
@@ -48,15 +49,6 @@ bool eventually(const std::function<bool()>& predicate) {
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < deadline);
     return predicate();
-}
-
-int error_code(const std::function<void()>& call) {
-    try {
-        call();
-        return 0;
-    } catch (const AlpacaException& error) {
-        return error.error_code();
-    }
 }
 
 struct ProbeGate {
@@ -305,11 +297,11 @@ TEST_CASE("ZWO blocked identity keeps operational calls offline and configuratio
     REQUIRE(rig.probe.wait());
     auto calls = std::async(std::launch::async, [&] {
         std::vector<int> errors;
-        errors.push_back(error_code([&] { (void)rig.driver->get_right_ascension(); }));
-        errors.push_back(error_code([&] { (void)rig.driver->get_tracking(); }));
-        errors.push_back(error_code([&] { rig.driver->command_blind(":Q", false); }));
-        errors.push_back(error_code([&] { rig.driver->command_bool(":RAWBOOL", false); }));
-        errors.push_back(error_code([&] { rig.driver->command_string(":RAWSTRING", false); }));
+        errors.push_back(error_code_of([&] { (void)rig.driver->get_right_ascension(); }));
+        errors.push_back(error_code_of([&] { (void)rig.driver->get_tracking(); }));
+        errors.push_back(error_code_of([&] { rig.driver->command_blind(":Q", false); }));
+        errors.push_back(error_code_of([&] { rig.driver->command_bool(":RAWBOOL", false); }));
+        errors.push_back(error_code_of([&] { rig.driver->command_string(":RAWSTRING", false); }));
         rig.driver->set_site_latitude(31.0);
         rig.driver->set_site_longitude(-101.0);
         rig.driver->set_site_elevation(42.0);
@@ -343,7 +335,7 @@ TEST_CASE("ZWO disconnect racing a delayed identity cannot leave a connected tel
     rig.make_driver(info);
     rig.hold_probe.store(true);
     auto connect = std::async(std::launch::async, [&] {
-        return error_code([&] {
+        return error_code_of([&] {
             if (async_connect)
                 rig.driver->connect();
             else
@@ -418,8 +410,8 @@ TEST_CASE("ZWO verified identity survives unavailable initial telemetry and reco
     rig.bad_dec.store(failed_read == 2);
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
-    CHECK(error_code([&] { (void)rig.driver->get_right_ascension(); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { (void)rig.driver->get_declination(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)rig.driver->get_declination(); }) == AlpacaError::DriverException);
     rig.bad_status.store(false);
     rig.bad_ra.store(false);
     rig.bad_dec.store(false);
@@ -505,7 +497,7 @@ TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation"
     rig.set_serial("FEDCBA543210#");
     for (int attempt = 0; attempt < 2; ++attempt) {
         rig.driver->set_connected(false);
-        CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
         REQUIRE_FALSE(rig.driver->get_connected());
         if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
     }
@@ -545,7 +537,7 @@ TEST_CASE("ZWO serial telemetry loss cannot rebind to a different mount at the s
     rig.bad_status.store(false);
     rig.set_serial("FEDCBA543210#");
     const auto before = rig.received().size();
-    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
     CHECK_FALSE(rig.driver->get_connected());
     const auto commands = rig.received();
     CHECK(std::vector<std::string>(commands.begin() + before, commands.end()) ==
@@ -566,7 +558,8 @@ TEST_CASE("ZWO transport loss during identity fails the fresh connection", "[zwo
     rig.make_driver(info);
     rig.hold_probe.store(!after_identity);
     rig.hold_status.store(after_identity);
-    auto connect = std::async(std::launch::async, [&] { return error_code([&] { rig.driver->set_connected(true); }); });
+    auto connect =
+        std::async(std::launch::async, [&] { return error_code_of([&] { rig.driver->set_connected(true); }); });
     ReleaseProbe release{rig.probe};
     REQUIRE(rig.probe.wait());
     // Zero wait still shuts down the socket; its blocked handler is released below.
@@ -592,7 +585,7 @@ TEST_CASE("ZWO failed identity admission does not pin a mount serial", "[zwo][te
     else
         rig.set_serial("e1#");
     rig.make_driver(rig.info());
-    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
     REQUIRE_FALSE(rig.driver->get_connected());
     owner.reset();
     rig.set_serial("FEDCBA543210#");
@@ -606,7 +599,8 @@ TEST_CASE("ZWO initialization failure after identity admission retains the seria
     REQUIRE(rig.server.ok());
     rig.make_driver(rig.info());
     rig.hold_status.store(true);
-    auto connect = std::async(std::launch::async, [&] { return error_code([&] { rig.driver->set_connected(true); }); });
+    auto connect =
+        std::async(std::launch::async, [&] { return error_code_of([&] { rig.driver->set_connected(true); }); });
     ReleaseProbe release{rig.probe};
     REQUIRE(rig.probe.wait());
     (void)rig.server.drop_connections(0ms);
@@ -620,7 +614,7 @@ TEST_CASE("ZWO initialization failure after identity admission retains the seria
     }
     rig.hold_status.store(false);
     rig.set_serial("FEDCBA543210#");
-    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
     REQUIRE_FALSE(rig.driver->get_connected());
     rig.set_serial("012345ABCDEF#");
     CHECK_NOTHROW(rig.driver->set_connected(true));
@@ -807,7 +801,7 @@ TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverifie
         auto admitted = release.get_future();
         auto old_call = std::async(std::launch::async, [&] {
             if (admitted.wait_for(5s) != std::future_status::ready) return -1;
-            return error_code([&] { protocol.send_command_blind(":Sguard"); });
+            return error_code_of([&] { protocol.send_command_blind(":Sguard"); });
         });
         protocol.disconnect();
         const bool reconnected = protocol.connect(rig.info());

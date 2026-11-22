@@ -93,6 +93,19 @@ inline void require_alpaca_error(const std::function<void()>& fn, int expected_c
     }
 }
 
+// The Alpaca error code fn throws, or 0 when it returns (ASCOM "no error"). When message is not null it receives
+// the exception's text. A non-Alpaca exception is not caught: on a test thread it fails the case. A call on a
+// worker thread, where an escaping exception ends the whole run, catches or joins first.
+inline int error_code_of(const std::function<void()>& fn, std::string* message = nullptr) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        if (message != nullptr) *message = ex.what();
+        return ex.error_code();
+    }
+    return 0;
+}
+
 // The message of the AlpacaException fn throws, after requiring expected_code.
 inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
     try {

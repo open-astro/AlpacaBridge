@@ -35,6 +35,7 @@
 
 namespace {
 
+using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::FakeQHYSDK;
@@ -647,17 +648,6 @@ TEST_CASE("QHY Camera Driver - BinX write during an exposure fails at once", "[q
     CHECK(code == alpacacore::AlpacaError::InvalidOperation);
     driver->set_connected(false);
 }
-
-namespace {
-int error_code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-        return 0;
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    }
-}
-}  // namespace
 
 TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and ImageArray", "[qhy][camera][unit]") {
     auto fake = make_fake();

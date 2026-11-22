@@ -46,6 +46,7 @@ namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
 using alpacacore::CameraState;
 using alpacacore::ImageArray;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::require_alpaca_error;
 using alpacacore::util::CaptureControl;
@@ -68,19 +69,6 @@ bool eventually(const std::function<bool()>& pred, std::chrono::milliseconds bou
         std::this_thread::yield();
     }
     return true;
-}
-
-// The error code `fn` throws, or -1 when it returns.
-int error_of(const std::function<void()>& fn, std::string* message = nullptr) {
-    try {
-        fn();
-    } catch (const AlpacaException& e) {
-        if (message != nullptr) {
-            *message = e.what();
-        }
-        return e.error_code();
-    }
-    return -1;
 }
 
 // A test-owned gate: a body blocked in wait() ignores the session's cancel.
@@ -278,9 +266,9 @@ TEST_CASE("CaptureSession - image_ready publishes the frame and commits the last
     auto sdk = h.gate();
     auto download = h.gate();
 
-    CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
-    CHECK(error_of([&] { (void)h.session->last_exposure_start_time(); }) == AlpacaError::InvalidOperation);
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->last_exposure_start_time(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
     try {
         (void)h.session->image();
         FAIL("Expected AlpacaException");
@@ -299,7 +287,7 @@ TEST_CASE("CaptureSession - image_ready publishes the frame and commits the last
         p->exited = true;
     });
     REQUIRE(eventually([&] { return p->entered.load(); }));
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
 
     sdk->open();
     CHECK(eventually([&] { return h.session->camera_state() == CameraState::Download; }));
@@ -342,7 +330,7 @@ TEST_CASE("CaptureSession - abort wakes the body, discards the frame and keeps t
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK_FALSE(h.session->busy());
     CHECK_FALSE(h.session->image_ready());
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
     CHECK_FALSE(h.session->failure().has_value());
     CHECK(h.session->last_exposure_duration() == Catch::Approx(0.5));
     CHECK(h.session->last_exposure_start_time() == first_start);
@@ -373,7 +361,7 @@ TEST_CASE("CaptureSession - a throw after set_stopping is dropped, and set_stopp
             CHECK(h.session->camera_state() == CameraState::Exposing);
             h.session->abort();
             CHECK(h.session->camera_state() == CameraState::Idle);
-            CHECK(error_of([&] { (void)h.session->image_ready(); }) == -1);
+            CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == 0);
         }
     }
 }
@@ -391,18 +379,18 @@ TEST_CASE("CaptureSession - a body that throws fails the exposure until the next
     // for the next exposure (open choice 1 in the plan).
     CHECK(h.session->camera_state() == CameraState::Idle);
     std::string message;
-    CHECK(error_of([&] { (void)h.session->image_ready(); }, &message) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }, &message) == AlpacaError::DriverException);
     CHECK(message.find("scripted SDK failure") != std::string::npos);
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::DriverException);
-    CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
 
     h.session->abort();  // not exposing: the failure stays
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
 
     auto p = std::make_shared<Probe>();
     h.session->start(1.0, polling_body(p));
     CHECK_FALSE(h.session->failure().has_value());
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == -1);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == 0);
     CHECK(h.session->camera_state() == CameraState::Exposing);
     h.session->abort();
 }
@@ -421,16 +409,16 @@ TEST_CASE("CaptureSession - the watchdog fails an exposure stuck in the SDK and 
     h.clock.advance(1ms);
     CHECK(h.session->camera_state() == CameraState::Idle);
     REQUIRE(h.session->failure().has_value());
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
     CHECK(h.session->busy());  // the body is still in the SDK
 
     sdk->open();
     REQUIRE(eventually([&] { return p->exited.load(); }));
     CHECK(p->accepted == 0);  // the late frame is not published
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::DriverException);
     CHECK(eventually([&] { return !h.session->busy(); }));
-    CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
 }
 
 TEST_CASE("CaptureSession - the watchdog ends a body that waits on the clock", "[util][capture-session]") {
@@ -452,7 +440,7 @@ TEST_CASE("CaptureSession - the watchdog ends a body that waits on the clock", "
     CHECK(p->reason == StopReason::Cancelled);
     CHECK(h.session->failure().has_value());
     CHECK(h.session->camera_state() == CameraState::Idle);
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
 }
 
 // Decision 0020 rule 4, issue #1973: the ToupTek body waits for the SDK frame event with no poll step. Falsified by:
@@ -515,7 +503,7 @@ TEST_CASE("CaptureSession - start while exposing is refused and leaves the expos
     REQUIRE(eventually([&] { return p->entered.load(); }));
 
     auto second = std::make_shared<Probe>();
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(second, 1)); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(second, 1)); }) == AlpacaError::InvalidOperation);
     CHECK_FALSE(second->entered);
     CHECK(h.session->camera_state() == CameraState::Exposing);
     CHECK_FALSE(p->exited);
@@ -561,7 +549,7 @@ TEST_CASE("CaptureSession - start refuses after kStartTimeout when the old body 
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     h.clock.advance(CaptureSession::kStartTimeout);
     REQUIRE(work.wait_for(kBound) == std::future_status::ready);
-    CHECK(error_of([&] { work.get(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { work.get(); }) == AlpacaError::InvalidOperation);
     // A refused start changes nothing.
     CHECK_FALSE(next->entered);
     REQUIRE(h.session->failure().has_value());
@@ -570,7 +558,7 @@ TEST_CASE("CaptureSession - start refuses after kStartTimeout when the old body 
 
     sdk->open();
     REQUIRE(eventually([&] { return !h.session->busy(); }));
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(next, 4)); }) == -1);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(next, 4)); }) == 0);
     CHECK(eventually([&] { return h.session->image_ready(); }));
 }
 
@@ -587,9 +575,9 @@ TEST_CASE("CaptureSession - two starts over a body still in the SDK start one bo
     auto a = std::make_shared<Probe>();
     auto b = std::make_shared<Probe>();
     auto start_a =
-        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(a)); }); });
+        std::async(std::launch::async, [&] { return error_code_of([&] { h.session->start(10.0, polling_body(a)); }); });
     auto start_b =
-        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(b)); }); });
+        std::async(std::launch::async, [&] { return error_code_of([&] { h.session->start(10.0, polling_body(b)); }); });
     const auto ready = [](std::future<int>& f) { return f.wait_for(0s) == std::future_status::ready; };
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     // Both wait on the clock, or one was refused at once: either way the
@@ -603,7 +591,7 @@ TEST_CASE("CaptureSession - two starts over a body still in the SDK start one bo
     bool busy = false;
     CHECK(h.returns_without_advance([&] {
         state = h.session->camera_state();
-        ready_error = error_of([&] { (void)h.session->image_ready(); });
+        ready_error = error_code_of([&] { (void)h.session->image_ready(); });
         busy = h.session->busy();
         (void)h.session->percent_completed();
         (void)h.session->failure();
@@ -620,8 +608,8 @@ TEST_CASE("CaptureSession - two starts over a body still in the SDK start one bo
     const int result_a = start_a.get();
     const int result_b = start_b.get();
     // Exactly one start succeeds; the other sees it exposing and is refused.
-    CHECK(((result_a == -1 && result_b == AlpacaError::InvalidOperation) ||
-           (result_b == -1 && result_a == AlpacaError::InvalidOperation)));
+    CHECK(((result_a == 0 && result_b == AlpacaError::InvalidOperation) ||
+           (result_b == 0 && result_a == AlpacaError::InvalidOperation)));
     CHECK(eventually([&] { return a->entered.load() || b->entered.load(); }));
     CHECK(a->entered.load() != b->entered.load());  // never two bodies on one camera
     CHECK(stale->accepted == 0);
@@ -647,8 +635,8 @@ TEST_CASE("CaptureSession - disconnect_and_join cancels the body and clears the 
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK_FALSE(h.session->busy());
     CHECK_FALSE(h.session->image_ready());
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
-    CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
 
     SECTION("a kept failure is cleared too") {
         h.session->open();  // the next connect
@@ -656,7 +644,7 @@ TEST_CASE("CaptureSession - disconnect_and_join cancels the body and clears the 
         REQUIRE(eventually([&] { return h.session->failure().has_value(); }));
         h.session->disconnect_and_join();
         CHECK_FALSE(h.session->failure().has_value());
-        CHECK(error_of([&] { (void)h.session->image_ready(); }) == -1);
+        CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == 0);
     }
 }
 
@@ -669,7 +657,7 @@ TEST_CASE("CaptureSession - discard_image drops a ready frame and keeps the last
 
     h.session->discard_image();
     CHECK_FALSE(h.session->image_ready());
-    CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK(h.session->last_exposure_duration() == Catch::Approx(0.5));
 }
@@ -689,7 +677,7 @@ TEST_CASE("CaptureSession - fail ends the exposure with the driver's failure and
     CHECK(h.session->camera_state() == CameraState::Idle);
     REQUIRE(h.session->failure().has_value());
     CHECK(*h.session->failure() == "scripted stop failure");
-    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
 
     h.session->fail("a later failure");  // not exposing: a no-op
     CHECK(*h.session->failure() == "scripted stop failure");
@@ -722,8 +710,8 @@ TEST_CASE("CaptureSession - a start during an abort's join waits for it and its 
     CHECK(aborting.wait_for(0s) == std::future_status::timeout);
 
     auto b = std::make_shared<Probe>();
-    auto starting =
-        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, one_wait_body(b, 11)); }); });
+    auto starting = std::async(std::launch::async,
+                               [&] { return error_code_of([&] { h.session->start(10.0, one_wait_body(b, 11)); }); });
     // An abort counts as pending until its join returns: the start waits on
     // the clock instead of starting a body that join could still cancel.
     CHECK(h.clock.wait_for_waiters(1, kBound));
@@ -734,7 +722,7 @@ TEST_CASE("CaptureSession - a start during an abort's join waits for it and its 
     REQUIRE(aborting.wait_for(kBound) == std::future_status::ready);
     aborting.get();
     REQUIRE(starting.wait_for(kBound) == std::future_status::ready);
-    CHECK(starting.get() == -1);
+    CHECK(starting.get() == 0);
     REQUIRE(eventually([&] { return b->entered.load(); }));
     CHECK(h.session->camera_state() == CameraState::Exposing);
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
@@ -758,7 +746,7 @@ TEST_CASE("CaptureSession - disconnect_and_join closes the session: start raises
 
     auto late = std::make_shared<Probe>();
     std::string message;
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }, &message) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(late, 6)); }, &message) == AlpacaError::NotConnected);
     CHECK_FALSE(message.empty());
     // A refused start publishes nothing and runs no body.
     CHECK(h.session->camera_state() == CameraState::Idle);
@@ -767,12 +755,12 @@ TEST_CASE("CaptureSession - disconnect_and_join closes the session: start raises
     CHECK_FALSE(late->entered);
     h.session->abort();                // closed and idle: a no-op
     h.session->disconnect_and_join();  // already closed: stays closed
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == AlpacaError::NotConnected);
     CHECK_FALSE(late->entered);
 
     h.session->open();
     h.session->open();  // already open: a no-op
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == -1);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == 0);
     REQUIRE(eventually([&] { return late->exited.load(); }));
     CHECK(late->accepted == 1);
     CHECK(h.session->image_ready());
@@ -815,7 +803,7 @@ TEST_CASE("CaptureSession - disconnect_and_join during an abort's join returns o
     CHECK(a->reason == StopReason::Cancelled);
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK_FALSE(h.session->busy());
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(a, 1)); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(a, 1)); }) == AlpacaError::NotConnected);
 }
 
 TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is refused and never runs after the clear",
@@ -829,8 +817,8 @@ TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is r
     REQUIRE(h.session->failure().has_value());
 
     auto next = std::make_shared<Probe>();
-    auto starting =
-        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(next)); }); });
+    auto starting = std::async(std::launch::async,
+                               [&] { return error_code_of([&] { h.session->start(10.0, polling_body(next)); }); });
     REQUIRE(h.clock.wait_for_waiters(1, kBound));  // start's bounded wait
     auto disconnecting = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
     // The close ends that wait at once, while the old body is still in the
@@ -839,7 +827,7 @@ TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is r
     CHECK(disconnecting.wait_for(0s) == std::future_status::timeout);
     // No reopen while that disconnect still joins: its clear would wipe the
     // new connection's exposure.
-    CHECK(error_of([&] { h.session->open(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { h.session->open(); }) == AlpacaError::InvalidOperation);
 
     sdk->open();  // the old body returns; the join ends
     REQUIRE(disconnecting.wait_for(kBound) == std::future_status::ready);
@@ -851,7 +839,7 @@ TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is r
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK_FALSE(h.session->busy());
     CHECK_FALSE(h.session->failure().has_value());
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(next, 2)); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(next, 2)); }) == AlpacaError::NotConnected);
 }
 
 TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][capture-session]") {
@@ -866,7 +854,7 @@ TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][ca
         CHECK(p->exited);
         CHECK(p->reason == StopReason::Cancelled);
         CHECK_FALSE(h.session->failure().has_value());
-        CHECK(error_of([&] { CHECK_FALSE(h.session->image_ready()); }) == -1);
+        CHECK(error_code_of([&] { CHECK_FALSE(h.session->image_ready()); }) == 0);
         CHECK(h.session->camera_state() == CameraState::Idle);
     }
 
@@ -879,7 +867,7 @@ TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][ca
         REQUIRE(h.session->failure().has_value());
         CHECK(*h.session->failure() == "scripted stop failure");
         std::string message;
-        CHECK(error_of([&] { (void)h.session->image_ready(); }, &message) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { (void)h.session->image_ready(); }, &message) == AlpacaError::DriverException);
         CHECK(message.find("late SDK failure") == std::string::npos);
     }
 
@@ -912,7 +900,7 @@ TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][ca
         CHECK(p->exited);
         CHECK(p->reason == StopReason::Cancelled);
         CHECK_FALSE(h.session->failure().has_value());
-        CHECK(error_of([&] { CHECK_FALSE(h.session->image_ready()); }) == -1);
+        CHECK(error_code_of([&] { CHECK_FALSE(h.session->image_ready()); }) == 0);
     }
 }
 
@@ -1002,14 +990,14 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                         std::lock_guard<std::mutex> lock(s.driver);
                         int seen = static_cast<int>(h.session->camera_state());
                         seen += h.session->busy() ? 1 : 0;
-                        seen += error_of([&] { seen += h.session->image_ready() ? 1 : 0; });
-                        seen += error_of([&] {
+                        seen += error_code_of([&] { seen += h.session->image_ready() ? 1 : 0; });
+                        seen += error_code_of([&] {
                             const auto image = h.session->image();
                             seen += image ? image->data.front() : 0;
                         });
                         seen += static_cast<int>(h.session->percent_completed());
                         seen += h.session->failure().has_value() ? 1 : 0;
-                        seen += error_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
+                        seen += error_code_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
                         seen += h.session->settings_locked() ? 1 : 0;  // rule 9: under the driver mutex
                         seen += h.session->starting() ? 1 : 0;
                         s.seen += seen;
@@ -1059,7 +1047,7 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
             }
         });
         for (int i = 0; i < 20000 && s.bodies < 300; ++i) {
-            const int code = error_of([&] {
+            const int code = error_code_of([&] {
                 if (i % 2 == 0) {
                     h.session->start(0.05, body(i % 3));
                     return;
@@ -1074,7 +1062,7 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                 }
                 (void)h.session->start(std::move(reservation), 0.05, body(i % 3));
             });
-            if (code == -1) {
+            if (code == 0) {
                 ++s.starts;
             }
         }
@@ -1129,8 +1117,9 @@ TEST_CASE("CaptureSession - a start reserved before a close or an abort never ru
 
     SECTION("disconnect_and_join") {
         auto closing = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
-        REQUIRE(eventually(
-            [&] { return error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::NotConnected; }));
+        REQUIRE(eventually([&] {
+            return error_code_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::NotConnected;
+        }));
         held->open();
         REQUIRE(closing.wait_for(kBound) == std::future_status::ready);
         closing.get();
@@ -1161,12 +1150,12 @@ TEST_CASE("CaptureSession - a refused body thread rolls the start back and the n
         h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread {
             throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
         });
-        CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     SECTION("bad_alloc") {
         // The slot reports an allocation failure as DriverException, like EAGAIN (#2084).
         h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
-        CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     CHECK_FALSE(h.session->busy());
     CHECK(h.session->image_ready());  // the earlier frame, not Exposing
@@ -1186,7 +1175,7 @@ TEST_CASE("CaptureSession - a refused body thread keeps the earlier failure", "[
     h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK(error_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::DriverException);
     REQUIRE(h.session->failure().has_value());
     CHECK(*h.session->failure() == "earlier failure");
     CHECK_FALSE(h.session->busy());
@@ -1236,11 +1225,11 @@ TEST_CASE("CaptureSession - a refused body thread does not restore state over a 
     h.session->set_spawn_for_testing([&](std::function<void()>) -> std::thread {
         closing = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
         REQUIRE(eventually([&] {
-            return error_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::NotConnected;
+            return error_code_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::NotConnected;
         }));
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     REQUIRE(closing.wait_for(kBound) == std::future_status::ready);
     closing.get();
     CHECK_FALSE(h.session->image_ready());  // the closed session stays cleared
@@ -1310,7 +1299,7 @@ TEST_CASE("CaptureSession - a refused start leaves the margin alone", "[util][ca
     REQUIRE(eventually([&] { return p->entered.load(); }));
 
     auto second = std::make_shared<Probe>();
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(second, 1), 60s); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(second, 1), 60s); }) == AlpacaError::InvalidOperation);
     CHECK_FALSE(second->entered);
     h.clock.advance(2999ms);
     CHECK(h.session->camera_state() == CameraState::Exposing);
@@ -1432,21 +1421,21 @@ TEST_CASE("CaptureSession - a reservation locks the settings until it is dropped
         CHECK(static_cast<bool>(reservation));
         CHECK(h.session->settings_locked());
         CHECK(h.session->starting());
-        CHECK(error_of([&] { h.session->ensure_settings_unlocked(); }) == AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { h.session->ensure_settings_unlocked(); }) == AlpacaError::InvalidOperation);
     }
     CHECK_FALSE(h.session->settings_locked());
     CHECK_FALSE(h.session->starting());
-    CHECK(error_of([&] { h.session->ensure_settings_unlocked(); }) == -1);
+    CHECK(error_code_of([&] { h.session->ensure_settings_unlocked(); }) == 0);
 }
 
 TEST_CASE("CaptureSession - a second reserve is refused while one is held, and while exposing",
           "[util][capture-session][reserve]") {
     Harness h;
     CaptureReservation first = h.session->reserve();
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == AlpacaError::InvalidOperation);
     // An unreserved start is refused too while a start holds the reservation.
     auto other = std::make_shared<Probe>();
-    CHECK(error_of([&] { h.session->start(1.0, instant_body(other, 1)); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { h.session->start(1.0, instant_body(other, 1)); }) == AlpacaError::InvalidOperation);
     CHECK_FALSE(other->entered);
 
     auto p = std::make_shared<Probe>();
@@ -1455,7 +1444,7 @@ TEST_CASE("CaptureSession - a second reserve is refused while one is held, and w
     REQUIRE(eventually([&] { return p->entered.load(); }));
     CHECK_FALSE(h.session->starting());
     CHECK(h.session->settings_locked());  // Exposing
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == AlpacaError::InvalidOperation);
     h.session->abort();
     CHECK_FALSE(h.session->settings_locked());
 }
@@ -1463,9 +1452,9 @@ TEST_CASE("CaptureSession - a second reserve is refused while one is held, and w
 TEST_CASE("CaptureSession - reserve on a closed session is NotConnected", "[util][capture-session][reserve]") {
     Harness h;
     h.session->disconnect_and_join();
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == AlpacaError::NotConnected);
     h.session->open();
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == -1);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == 0);
 }
 
 TEST_CASE("CaptureSession - a start with the reservation publishes Exposing and consumes it",
@@ -1479,7 +1468,7 @@ TEST_CASE("CaptureSession - a start with the reservation publishes Exposing and 
     CHECK_FALSE(h.session->starting());
     CHECK_FALSE(h.session->settings_locked());  // a ready frame unlocks; the write drops it
     // The next reservation is free at once.
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == -1);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == 0);
 }
 
 TEST_CASE("CaptureSession - a refused start releases the reservation", "[util][capture-session][reserve]") {
@@ -1495,7 +1484,7 @@ TEST_CASE("CaptureSession - a refused start releases the reservation", "[util][c
     auto next = std::make_shared<Probe>();
     int code = 0;
     auto work = std::async(std::launch::async, [&] {
-        code = error_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(next, 3)); });
+        code = error_code_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(next, 3)); });
     });
     REQUIRE(h.clock.wait_for_waiters(1, kBound));  // start()'s bounded wait
     CHECK(h.session->starting());
@@ -1551,7 +1540,7 @@ TEST_CASE("CaptureSession - an abort recorded for a refused start does not reach
         h.session->disconnect_and_join();
         h.session->open();
         auto p = std::make_shared<Probe>();
-        CHECK(error_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(p, 1)); }) ==
+        CHECK(error_code_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(p, 1)); }) ==
               AlpacaError::NotConnected);
         CHECK_FALSE(p->entered);
         next_start_is_clean(4);
@@ -1573,12 +1562,12 @@ TEST_CASE("CaptureSession - disconnect_and_join drops a held reservation and its
     CHECK_FALSE(h.session->starting());
     CHECK_FALSE(h.session->settings_locked());
     auto p = std::make_shared<Probe>();
-    CHECK(error_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(p, 2)); }) ==
+    CHECK(error_code_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(p, 2)); }) ==
           AlpacaError::NotConnected);
     CHECK_FALSE(p->entered);
     // Reopened, the dropped reservation still never starts: only a new one does.
     h.session->open();
-    CHECK(error_of([&] { (void)h.session->reserve(); }) == -1);
+    CHECK(error_code_of([&] { (void)h.session->reserve(); }) == 0);
 }
 
 TEST_CASE("CaptureSession - a disconnect while a reserved start waits refuses it with NotConnected",
@@ -1595,7 +1584,7 @@ TEST_CASE("CaptureSession - a disconnect while a reserved start waits refuses it
     auto next = std::make_shared<Probe>();
     int code = 0;
     auto work = std::async(std::launch::async, [&] {
-        code = error_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(next, 3)); });
+        code = error_code_of([&] { (void)h.session->start(std::move(reservation), 1.0, instant_body(next, 3)); });
     });
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     auto disconnect = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
@@ -1635,7 +1624,7 @@ TEST_CASE("CaptureSession - reserve applies the watchdog to an exposure past its
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     h.clock.advance(4s);  // past 1 s + the 2 s margin; no getter has run since
     CaptureReservation reservation;
-    CHECK(error_of([&] { reservation = h.session->reserve(); }) == -1);
+    CHECK(error_code_of([&] { reservation = h.session->reserve(); }) == 0);
     CHECK(static_cast<bool>(reservation));
     CHECK(h.session->failure().has_value());
 }

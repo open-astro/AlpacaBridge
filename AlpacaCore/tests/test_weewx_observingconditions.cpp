@@ -39,6 +39,7 @@ namespace {
 
 // The WeeWX JSON feed over real HTTP on loopback (the shared helper, issue #1753).
 using FakeWeeWxFeed = alpacacore::test::LoopbackHttpServer;
+using alpacacore::test::error_code_of;
 
 // The scripted HTTP client's canned feed: temperature (50 F = 10 C) and humidity, observed now.
 std::string canned_feed() {
@@ -71,15 +72,6 @@ std::unique_ptr<alpacacore::ObservingConditionsDriver> make_driver(
     config.timeout = timeout;
     config.poll_interval = poll;
     return alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
-}
-
-int alpaca_error_of(const std::function<void()>& fn) {
-    try {
-        fn();
-        return 0;
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    }
 }
 
 std::string alpaca_message_of(const std::function<void()>& fn) {
@@ -235,9 +227,9 @@ TEST_CASE("WeeWX ObservingConditions Driver - AveragePeriod is 0 for instantaneo
     REQUIRE(driver->get_connected());
 
     CHECK(driver->get_average_period() == 0.0);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(0.0); }) == 0);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(1.0); }) == alpacacore::AlpacaError::InvalidValue);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(-1.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->set_average_period(0.0); }) == 0);
+    CHECK(error_code_of([&] { driver->set_average_period(1.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->set_average_period(-1.0); }) == alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_average_period() == 0.0);
     driver->set_connected(false);
 }
@@ -269,15 +261,15 @@ TEST_CASE("WeeWX ObservingConditions Driver - TimeSinceLastUpdate is NotConnecte
     auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
     const int not_connected = alpacacore::AlpacaError::NotConnected;
 
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     REQUIRE(driver->get_time_since_last_update("Temperature") >= 0.0);
     driver->set_connected(false);
 
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
 }
 
 TEST_CASE("WeeWX ObservingConditions Driver - Unknown sensor name is InvalidValue", "[weewx]") {
@@ -288,21 +280,21 @@ TEST_CASE("WeeWX ObservingConditions Driver - Unknown sensor name is InvalidValu
     auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
 
     // Disconnected: the name is validated before anything else.
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
           alpacacore::AlpacaError::InvalidValue);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("NoSuchSensor"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("NoSuchSensor"); }) ==
           alpacacore::AlpacaError::InvalidValue);
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
           alpacacore::AlpacaError::InvalidValue);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("NoSuchSensor"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("NoSuchSensor"); }) ==
           alpacacore::AlpacaError::InvalidValue);
     // A sensor IObservingConditions defines but this station does not serve stays NotImplemented.
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("CloudCover"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("CloudCover"); }) ==
           alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("CloudCover"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("CloudCover"); }) ==
           alpacacore::AlpacaError::PropertyNotImplemented);
     CHECK(driver->get_sensor_description("Temperature") == "Outdoor temperature (WeeWX outTemp)");
     driver->set_connected(false);
@@ -324,12 +316,12 @@ TEST_CASE("WeeWX ObservingConditions Driver - every member connected over a full
     CHECK(std::abs(driver->get_sky_temperature() - 5.0) < 1e-6);
 
     const int not_impl = alpacacore::AlpacaError::PropertyNotImplemented;
-    CHECK(alpaca_error_of([&] { (void)driver->get_cloud_cover(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_rain_rate(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_wind_direction(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_wind_gust(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sky_brightness(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_star_fwhm(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_cloud_cover(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_rain_rate(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_wind_direction(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_wind_gust(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_sky_brightness(); }) == not_impl);
+    CHECK(error_code_of([&] { (void)driver->get_star_fwhm(); }) == not_impl);
 
     CHECK(driver->get_sensor_description("DewPoint") == "Dew point (WeeWX dewpoint)");
     CHECK(driver->get_sensor_description("wind speed") == "Wind speed (WeeWX wind_speed)");
@@ -337,8 +329,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - every member connected over a full
     CHECK(driver->get_sensor_description("SkyTemperature") == "Sky sensor temperature (WeeWX sqmTemp)");
     for (const char* unserved : {"CloudCover", "RainRate", "WindDirection", "WindGust", "SkyBrightness", "StarFWHM"}) {
         INFO(unserved);
-        CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description(unserved); }) == not_impl);
-        CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(unserved); }) == not_impl);
+        CHECK(error_code_of([&] { (void)driver->get_sensor_description(unserved); }) == not_impl);
+        CHECK(error_code_of([&] { (void)driver->get_time_since_last_update(unserved); }) == not_impl);
     }
     driver->set_connected(false);
 }
@@ -351,11 +343,11 @@ TEST_CASE("WeeWX ObservingConditions Driver - sensors the feed lacks are NotImpl
     REQUIRE(driver->get_connected());
 
     CHECK(driver->get_temperature() > 0.0);
-    CHECK(alpaca_error_of([&] { (void)driver->get_dew_point(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(alpaca_error_of([&] { (void)driver->get_pressure(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(alpaca_error_of([&] { (void)driver->get_wind_speed(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sky_quality(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("Pressure"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_dew_point(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { (void)driver->get_pressure(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { (void)driver->get_wind_speed(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { (void)driver->get_sky_quality(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("Pressure"); }) ==
           alpacacore::AlpacaError::PropertyNotImplemented);
 
     // A sensor that gains data later (SQM after sunset) becomes supported via Refresh.
@@ -367,7 +359,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - sensors the feed lacks are NotImpl
     // A supported sensor that then drops out of the feed has no value: ValueNotSet, never a stale number.
     feed.set_body(weewx_payload());
     driver->refresh();
-    CHECK(alpaca_error_of([&] { (void)driver->get_sky_quality(); }) == alpacacore::AlpacaError::ValueNotSet);
+    CHECK(error_code_of([&] { (void)driver->get_sky_quality(); }) == alpacacore::AlpacaError::ValueNotSet);
     driver->set_connected(false);
 }
 
@@ -375,7 +367,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - Refresh pulls a new reading", "[we
     FakeWeeWxFeed feed;
     feed.set_body(full_payload());
     auto driver = make_driver(feed);  // 1 s poll: Refresh must not wait for it
-    REQUIRE(alpaca_error_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::NotConnected);
+    REQUIRE(error_code_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::NotConnected);
     driver->set_connected(true);
     CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
 
@@ -406,11 +398,11 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses a feed that never 
     feed.set_mode(FakeWeeWxFeed::Mode::Stall);
     auto driver = make_driver(feed, std::chrono::milliseconds(300));
     const auto start = std::chrono::steady_clock::now();
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
     const auto took = std::chrono::steady_clock::now() - start;
     CHECK(took < std::chrono::seconds(3));  // bounded by the configured timeout
     CHECK(driver->get_connected() == false);
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(feed.requests() >= 1);
 }
 
@@ -421,18 +413,18 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses malformed replies"
     const int driver_exception = alpacacore::AlpacaError::DriverException;
 
     feed.set_body("<html>not json</html>");
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     feed.set_body(R"({"lcd_datasheet":{"current":)");  // truncated
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     feed.set_body(R"({"lcd_datasheet":{"other":{"outTemp":{"value":50.0}}}})");  // no current block
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     feed.set_body("");
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     feed.set_body(weewx_payload());
     feed.set_mode(Mode::ServerError);
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     feed.set_mode(Mode::DropAfterAccept);
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == driver_exception);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == driver_exception);
     CHECK(driver->get_connected() == false);
 
     // Every refusal left the driver reusable: a healthy feed connects.
@@ -455,7 +447,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses a non-HTTP feed UR
     config.url = "file://" + path.string();
     config.timeout = std::chrono::milliseconds(300);
     auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
-    CHECK(alpaca_error_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     std::filesystem::remove(path);
 }
@@ -497,7 +489,7 @@ TEST_CASE(
     poll_once(clock);
     CHECK(driver->get_connected());
     CHECK_FALSE(driver->get_link_fault().empty());
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::DriverException);
 
     // A feed that comes back before the bound restores fresh data with no reconnect.
     fake.fail_next(0);
@@ -512,7 +504,7 @@ TEST_CASE(
     latch_fault(clock);
     poll_once(clock, alpacacore::util::kLinkStalenessBound);
     CHECK_FALSE(driver->get_connected());
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::NotConnected);
 
     // Disconnect and destruction do not wait on a stalled request beyond the request itself.
     fake.fail_next(0);
@@ -661,16 +653,16 @@ TEST_CASE("WeeWX ObservingConditions Driver - three consecutive failed polls lat
     CHECK(driver->get_connected());
     const std::string fault = driver->get_link_fault();
     CHECK(fault == "scripted HTTP request failure (3 consecutive failures)");
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == driver_exception);
-    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == driver_exception);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == driver_exception);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == driver_exception);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == driver_exception);
+    CHECK(error_code_of([&] { (void)driver->get_humidity(); }) == driver_exception);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == driver_exception);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update(""); }) == driver_exception);
     CHECK(alpaca_message_of([&] { (void)driver->get_temperature(); }).find(fault) != std::string::npos);
     CHECK(alpaca_message_of([&] { (void)driver->get_time_since_last_update(""); }).find(fault) != std::string::npos);
     // The parameter checks and the sensors the station does not serve keep their own answers.
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
           alpacacore::AlpacaError::InvalidValue);
-    CHECK(alpaca_error_of([&] { (void)driver->get_pressure(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_code_of([&] { (void)driver->get_pressure(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
     CHECK(driver->get_sensor_description("Temperature") == "Outdoor temperature (WeeWX outTemp)");
     CHECK(driver->get_device_state().empty());  // every operational read refuses (the ASCOM read-all FAQ)
 
@@ -755,15 +747,15 @@ TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops Connected and it
     CHECK_FALSE(driver->get_connecting());
     const std::string fault = driver->get_link_fault();
     CHECK(fault.find("scripted HTTP request failure") != std::string::npos);
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("Temperature"); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_cloud_cover(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_humidity(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("Temperature"); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_cloud_cover(); }) == not_connected);
     CHECK(alpaca_message_of([&] { (void)driver->get_temperature(); }).find(fault) != std::string::npos);
     const int calls = fake.calls();
-    CHECK(alpaca_error_of([&] { driver->refresh(); }) == not_connected);
+    CHECK(error_code_of([&] { driver->refresh(); }) == not_connected);
     CHECK(driver->get_device_state().empty());
 
     CHECK(clock.waiter_count() == 0);  // the poll body has returned
@@ -903,7 +895,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops its cached senso
     connect_parked(*driver, clock);
     CHECK(driver->get_time_since_last_update("Temperature") >= 0.0);
     CHECK(driver->get_time_since_last_update("Humidity") == -1.0);
-    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == alpacacore::AlpacaError::ValueNotSet);
+    CHECK(error_code_of([&] { (void)driver->get_humidity(); }) == alpacacore::AlpacaError::ValueNotSet);
     driver->set_connected(false);
 }
 
@@ -917,13 +909,13 @@ TEST_CASE("WeeWX ObservingConditions Driver - malformed reply after connect keep
     for (const char* bad : {"garbage", "{\"lcd_datasheet\":{\"current\":", "{}", ""}) {
         INFO("body=" << bad);
         feed.set_body(bad);
-        CHECK(alpaca_error_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_code_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
         CHECK(driver->get_connected());
         CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
     }
     CHECK(std::abs(driver->get_humidity() - 40.0) < 1e-6);
     feed.set_mode(FakeWeeWxFeed::Mode::ServerError);
-    CHECK(alpaca_error_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(std::abs(driver->get_humidity() - 40.0) < 1e-6);
     driver->set_connected(false);
 }
@@ -935,21 +927,21 @@ TEST_CASE("WeeWX ObservingConditions Driver - Value range validation", "[weewx]"
     const int invalid = alpacacore::AlpacaError::InvalidValue;
 
     // InvalidValue precedes the connection check, so these hold while disconnected.
-    CHECK(alpaca_error_of([&] { driver->set_average_period(0.5); }) == invalid);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(-0.001); }) == invalid);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(std::nan("")); }) == invalid);
-    CHECK(alpaca_error_of([&] { driver->set_average_period(1e9); }) == invalid);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Rain"); }) == invalid);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("temperature extra"); }) == invalid);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description(""); }) == invalid);
+    CHECK(error_code_of([&] { driver->set_average_period(0.5); }) == invalid);
+    CHECK(error_code_of([&] { driver->set_average_period(-0.001); }) == invalid);
+    CHECK(error_code_of([&] { driver->set_average_period(std::nan("")); }) == invalid);
+    CHECK(error_code_of([&] { driver->set_average_period(1e9); }) == invalid);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("Rain"); }) == invalid);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("temperature extra"); }) == invalid);
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description(""); }) == invalid);
     CHECK(driver->get_average_period() == 0.0);
 
     // Name matching ignores case, spaces and punctuation, as the ASCOM names are spelled variously.
     driver->set_connected(true);
     CHECK(driver->get_time_since_last_update("WIND_SPEED") >= 0.0);
     CHECK(driver->get_time_since_last_update("Sky Quality") >= 0.0);
-    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("wind speed!"); }) == 0);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("Rain"); }) == invalid);
+    CHECK(error_code_of([&] { (void)driver->get_time_since_last_update("wind speed!"); }) == 0);
+    CHECK(error_code_of([&] { (void)driver->get_sensor_description("Rain"); }) == invalid);
     driver->set_connected(false);
 }
 
@@ -961,9 +953,9 @@ TEST_CASE("WeeWX ObservingConditions Driver - State machine contracts", "[weewx]
 
     CHECK(driver->get_connected() == false);
     CHECK(driver->get_connecting() == false);
-    CHECK(alpaca_error_of([&] { driver->refresh(); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sky_quality(); }) == not_connected);
-    CHECK(alpaca_error_of([&] { (void)driver->get_sky_temperature(); }) == not_connected);
+    CHECK(error_code_of([&] { driver->refresh(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_sky_quality(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_sky_temperature(); }) == not_connected);
     CHECK(driver->get_device_state().empty());
     driver->set_connected(false);  // idempotent while disconnected
     CHECK(driver->get_connected() == false);
@@ -977,8 +969,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - State machine contracts", "[weewx]
 
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
-    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == not_connected);
-    CHECK(alpaca_error_of([&] { driver->refresh(); }) == not_connected);
+    CHECK(error_code_of([&] { (void)driver->get_temperature(); }) == not_connected);
+    CHECK(error_code_of([&] { driver->refresh(); }) == not_connected);
     CHECK(driver->get_device_state().empty());
 
     // Reconnect works and serves data again.
@@ -1016,7 +1008,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - a null HTTP client is refused at c
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
     config.url = "http://localhost:9999/dummy";
 
-    CHECK(alpaca_error_of([&] {
+    CHECK(error_code_of([&] {
               (void)alpacacore::vendor::weewx::create_weewx_observingconditions(
                   0, config, std::shared_ptr<alpacacore::util::HttpClient>{});
           }) == alpacacore::AlpacaError::InvalidValue);

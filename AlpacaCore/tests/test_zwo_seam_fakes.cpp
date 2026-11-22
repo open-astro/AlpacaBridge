@@ -39,6 +39,7 @@ namespace {
 
 namespace zwo = alpacacore::vendor::zwo;
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeZWOCAASDK;
 using alpacacore::test::FakeZWOEAFSDK;
 using alpacacore::test::FakeZWOEFWSDK;
@@ -46,15 +47,6 @@ using alpacacore::test::LockedZWOCAASDK;
 using alpacacore::test::LockedZWOEAFSDK;
 using alpacacore::test::LockedZWOEFWSDK;
 using alpacacore::test::require_alpaca_error;
-
-int error_code(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return -1;
-}
 
 }  // namespace
 
@@ -208,7 +200,7 @@ TEST_CASE("ZWO EFW enumeration - a configured index selects the SDK slot, not li
     }
     SECTION("the missing slot never binds the survivor") {
         auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
-        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
         CHECK_FALSE(driver->get_connected());
         CHECK(sdk.open_calls == 0);
     }
@@ -241,7 +233,7 @@ TEST_CASE("ZWO EAF enumeration - a configured index selects the SDK slot, not li
     }
     SECTION("the missing slot never binds the survivor") {
         auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
-        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
         CHECK_FALSE(driver->get_connected());
         CHECK(sdk.open_calls == 0);
     }
@@ -256,7 +248,7 @@ TEST_CASE("ZWO EAF enumeration - a configured index selects the SDK slot, not li
         CHECK(sdk.last_open_id == 17);
         driver->set_connected(false);
         sdk.serial = "another-unit";
-        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::NotConnected);
         CHECK_FALSE(driver->get_connected());
         CHECK(sdk.open_calls == sdk.close_calls);
     }
@@ -288,7 +280,7 @@ TEST_CASE("ZWO CAA enumeration - a configured index selects the SDK slot, not li
     }
     SECTION("the missing slot never binds the survivor") {
         auto driver = zwo::create_zwo_caa_rotator_by_index(0, 0, sdk);
-        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
         CHECK_FALSE(driver->get_connected());
         CHECK(sdk.open_calls == 0);
     }
@@ -339,7 +331,7 @@ TEST_CASE("ZWO EFW seam - Position reads -1 while the wheel moves", "[zwo][filte
 
     driver->set_position(4);
     CHECK(driver->get_position() == -1);
-    CHECK(error_code([&] { driver->set_position(2); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { driver->set_position(2); }) == alpacacore::AlpacaError::InvalidOperation);
     CHECK(driver->get_position() == -1);
     CHECK(driver->get_position() == 4);
     CHECK(sdk.moving_refusals == 1);
@@ -365,7 +357,7 @@ TEST_CASE("ZWO EFW seam - no wheel attached refuses the connect with NotConnecte
     sdk.no_wheels = true;
     auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
 
-    CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK(sdk.open_calls == 0);
 }
@@ -377,7 +369,7 @@ TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filt
     sdk.fail_open = true;
     auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
 
-    CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(sdk.open_calls == 0);
 }
@@ -515,7 +507,7 @@ TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the dri
     LockedZWOEAFSDK sdk(fake);
     auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
 
-    CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
     fake.fail_open = false;
     driver->set_connected(true);  // would deadlock if the failed call kept the decorator mutex
     CHECK(driver->get_connected());
@@ -548,8 +540,9 @@ TEST_CASE("FakeZWOEFWSDK - refuses an out-of-range slot and honours its scripted
     const auto opened = sdk.open_wheel_link(sdk.id);
     CHECK(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(50));
 
-    CHECK(error_code([&] { sdk.with_link(sdk.id, opened.link, [&] { sdk.set_position(sdk.id, sdk.slot_count); }); }) ==
-          alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] {
+              sdk.with_link(sdk.id, opened.link, [&] { sdk.set_position(sdk.id, sdk.slot_count); });
+          }) == alpacacore::AlpacaError::InvalidValue);
     sdk.close_wheel_link(sdk.id, opened.link);
 }
 

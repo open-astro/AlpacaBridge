@@ -812,12 +812,8 @@ TEST_CASE("Celestron CGX AUX link - a removed USB device is a lost link until th
     SECTION("pulled while a reply is in flight") {
         mount.fragment_next_reply();
         auto held = std::async(std::launch::async, [&] {
-            try {
-                static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(2000)));
-                return 0;  // no error
-            } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code();
-            }
+            return alpacacore::test::error_code_of(
+                [&] { static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(2000))); });
         });
         REQUIRE(mount.wait_for_reply_fragment(std::chrono::milliseconds(500)));
         const auto started = std::chrono::steady_clock::now();

@@ -1486,14 +1486,8 @@ TEST_CASE("iOptron Telescope Driver - connect time sample does not block UTC get
     while (!entered.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
     const bool held = entered.load();
     const bool published = driver->get_connected();
-    auto reader = std::async(std::launch::async, [&] {
-        try {
-            (void)driver->get_utc_date();
-            return 0;
-        } catch (const alpacacore::AlpacaException& ex) {
-            return ex.error_code();
-        }
-    });
+    auto reader = std::async(std::launch::async,
+                             [&] { return alpacacore::test::error_code_of([&] { (void)driver->get_utc_date(); }); });
     const auto ready = reader.wait_for(std::chrono::milliseconds(100));
     auto disconnecting = std::async(std::launch::async, [&] { driver->set_connected(false); });
     release.set_value();  // Release every worker before any assertion can abort the case.

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 #include "zwo_exposure_wait.h"
@@ -33,6 +34,7 @@
 namespace {
 
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZWOSDK;
 using alpacacore::vendor::zwo::create_zwo_camera;
@@ -41,15 +43,6 @@ using std::chrono::milliseconds;
 using Direction = FakeZWOSDK::GuideDirection;
 
 constexpr auto kRendezvous = std::chrono::seconds(5);
-
-int error_code(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return -1;
-}
 
 }  // namespace
 
@@ -174,7 +167,7 @@ TEST_CASE("ZWO camera clock - a pulse from before a replug never turns off the g
     camera->pulse_guide(0, 1000);
     REQUIRE(clock.wait_for_waiters(1, kRendezvous));
     sdk.removed = true;
-    CHECK(error_code([&] { (void)camera->get_ccd_temperature(); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { (void)camera->get_ccd_temperature(); }) == AlpacaError::NotConnected);
     REQUIRE_FALSE(camera->get_connected());
 
     sdk.replug({{sdk.camera.camera_id, sdk.serial}});
@@ -266,7 +259,7 @@ TEST_CASE("ZWO camera clock - exposure retries are paced by the task clock", "[z
     REQUIRE(sdk.wait_for_call_count("start_exposure", 3, kRendezvous));  // retry 2
     // The third failure has no retry left: the exposure fails at once.
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("start_exposure") == 3);
 }
 
@@ -533,25 +526,25 @@ TEST_CASE("ZWO camera clock - an AbortExposure during a StartExposure still in f
     camera->start_exposure(0.001, true);
     REQUIRE(sdk.wait_for_download(kRendezvous));  // the first body is in its download, held
     clock.advance(std::chrono::seconds(20));      // past 0.001 s x 3 + the 15 s grace: the watchdog fails it
-    REQUIRE(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    REQUIRE(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     const int triggers = sdk.call_count("start_exposure");
 
     // The second StartExposure reserves its start and waits in session_.start() for the held body.
     std::atomic<int> start_error{-2};
-    std::thread starter([&] { start_error = error_code([&] { camera->start_exposure(0.001, true); }); });
+    std::thread starter([&] { start_error = error_code_of([&] { camera->start_exposure(0.001, true); }); });
     const bool start_waiting = clock.wait_for_waiter_thread(starter.get_id(), kRendezvous);
     int abort_error = -2;
     if (start_waiting) {
-        abort_error = error_code([&] { camera->abort_exposure(); });  // the start window: nothing is Exposing
+        abort_error = error_code_of([&] { camera->abort_exposure(); });  // the start window: nothing is Exposing
     }
     sdk.release_download();  // the first body returns; the waiting start goes on
     starter.join();
     REQUIRE(start_waiting);
-    CHECK(abort_error == -1);
-    CHECK(start_error.load() == -1);
+    CHECK(abort_error == 0);
+    CHECK(start_error.load() == 0);
     // The recorded abort ended the start as it published: Idle at once, no frame, no second trigger.
     CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(error_code([&] { CHECK_FALSE(camera->get_image_ready()); }) == -1);
+    CHECK(error_code_of([&] { CHECK_FALSE(camera->get_image_ready()); }) == 0);
     CHECK(sdk.call_count("start_exposure") == triggers);
     camera->set_connected(false);
 }
