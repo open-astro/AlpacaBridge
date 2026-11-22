@@ -102,7 +102,8 @@ Each line is a summary; the linked topic file holds the rule and its history.
 
 - `AlpacaCore` is vendor-neutral Alpaca logic and device behavior only:
   - No server: no listening socket, router or inbound request parsing. An outbound client inside a
-    vendor wrapper is that vendor's wire protocol, reached through the `util::HttpClient` seam
+    vendor wrapper is that vendor's wire protocol, reached through the `util::HttpClient` seam, and so
+    is a bounded, receive-only listen for a vendor's discovery beacon
     ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)).
   - Vendor SDKs isolated to `external/` + `src/vendors/<vendor>/` + `include/alpacacore/vendor/<vendor>/`.
 - `AlpacaHTTP` is transport/routing/config/discovery only:
