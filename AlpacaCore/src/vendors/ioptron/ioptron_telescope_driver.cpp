@@ -1910,11 +1910,17 @@ public:
             throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
                                   AlpacaError::InvalidOperation);
         }
+        const bool is_dec = (direction == 0 || direction == 1);
+        const bool is_ra = (direction == 2 || direction == 3);
+        // Issue #2503: the pulse and a jog on its axis would drive one motor at once. The jog keeps running, and a
+        // pulse on the other axis is still accepted.
+        if (is_dec ? axis_move_active_secondary_ : axis_move_active_primary_) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
+        }
 
         const Wire protocol = wire();
         int calibrated_direction = direction;
-        const bool is_dec = (direction == 0 || direction == 1);
-        const bool is_ra = (direction == 2 || direction == 3);
         if (is_dec) {
             bool invert_dec = dec_guide_inverted_;
             if (should_flip_dec_for_pier_locked()) {
