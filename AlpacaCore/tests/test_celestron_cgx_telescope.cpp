@@ -3617,4 +3617,26 @@ TEST_CASE(
     CHECK(one_stop_before_last_home_start(mount.stops_before_home_starts(0x10)));
     CHECK(mount.count_command(0x11, 0x0b) == 2);
 }
+
+// Connect refuses a CGX whose home switches do not answer, and FindHome drives each axis to its switch.
+TEST_CASE("Celestron CGX USB Telescope Driver - findhomeissensorsearch is true",
+          "[celestron][cgx][telescope][unit][findhome-sensor]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto config = test_info();
+    config.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":true,\"method\":\"home_switch_search\",\"model\":\"\"}");
+    driver->set_connected(false);
+}
 #endif

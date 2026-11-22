@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/link_health.h>
@@ -795,16 +796,29 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // From the feature inquiry at connect, no device I/O: a board that reports the home index sensor on
+            // both axes (Wave) runs AutoHome, which hunts the sensor and re-anchors the count frame. Every other
+            // board's FindHome is the count-frame goto to the power-on index, true only if powered on at home.
+            if (!get_connected())
+                throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            const bool sensor_search = has_home_indexer_;
+            return util::format_findhome_sensor_search(
+                sensor_search, sensor_search ? util::kFindHomeIndexSearch : util::kFindHomeGotoStoredHome, "");
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
