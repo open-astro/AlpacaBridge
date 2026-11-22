@@ -45,7 +45,9 @@ using alpacacore::DeviceType;
 
 namespace {
 
+using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 
 alpacacore::vendor::bisque::ConnectionInfo loopback(int port) {
     alpacacore::vendor::bisque::ConnectionInfo info;
@@ -2851,4 +2853,67 @@ TEST_CASE("Bisque motion owner - a MoveAxis on either axis lets a pulse on eithe
     CHECK(rig.driver->get_slewing());
     REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
     CHECK(rig.mount.guide_commands.load() == 1);
+}
+
+// #2503: a PulseGuide on the axis a non-zero MoveAxis drives is refused with InvalidOperation, so no DirectGuide goes
+// into the jog and the jog keeps running (the #2467 decision, as ZWO since #2506). A pulse's axis is its direction's:
+// North and South move Dec (axis 1), East and West move RA (axis 0), as MoveAxis maps its axes to directions. A pulse
+// on the other axis is not checked; a stop on the jogging axis ends the refusal.
+TEST_CASE("Bisque motion owner - PulseGuide on the axis a MoveAxis is driving is refused and sends nothing (#2503)",
+          "[bisque][telescope][motion-owner][goto-safety]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    ClockedBisque rig;
+    const int axis = GENERATE(0, 1);
+    const double rate = GENERATE(0.5, -0.5);
+    CAPTURE(axis, rate);
+    const int own = axis == 0 ? 2 : 0;    // East (and West, 3) on RA; North (and South, 1) on Dec
+    const int other = axis == 0 ? 0 : 2;  // North on Dec; East on RA
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, rate));
+    REQUIRE(rig.mount.move_starts.load() == 1);
+    for (const int direction : {own, own + 1}) {
+        CAPTURE(direction);
+        std::string message;
+        CHECK(error_code_of([&] { rig.driver->pulse_guide(direction, 100); }, &message) ==
+              AlpacaError::InvalidOperation);
+        CHECK(message == "PulseGuide is not allowed on an axis MoveAxis is moving");
+        CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    }
+    CHECK(rig.mount.guide_commands.load() == 0);
+    CHECK(rig.mount.move_stops.load() == 0);  // the jog still runs
+    CHECK(rig.driver->get_slewing());
+
+    // The other axis's pulse goes out and leaves the jog running.
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(other, 100));
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.mount.guide_commands.load() == 1);
+    CHECK(rig.mount.move_stops.load() == 0);
+    CHECK(rig.driver->get_slewing());
+
+    // A stop on the jogging axis ends the refusal.
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(own, 100));
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.mount.guide_commands.load() == 2);
+}
+
+// #2503: MoveAxis sets its axis's jog flag only once TheSkyX answers the open-loop start, and PulseGuide does not take
+// the initiator lock MoveAxis holds over that exchange. A pulse on that axis while the start is on the wire is
+// refused too, so its DirectGuide does not follow the jog onto the socket.
+TEST_CASE("Bisque motion owner - PulseGuide on an axis whose MoveAxis start is on the wire is refused (#2503)",
+          "[bisque][telescope][motion-owner][goto-safety]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    ClockedBisque rig;
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    const int own = axis == 0 ? 2 : 0;
+    std::atomic<int> code{-2};
+    rig.mount.on_move_start = [&] { code = worker_code_of([&] { rig.driver->pulse_guide(own, 100); }); };
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.5));
+    CHECK(code.load() == AlpacaError::InvalidOperation);
+    CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(rig.mount.guide_commands.load() == 0);
+    CHECK(rig.mount.move_stops.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    rig.mount.on_move_start = nullptr;
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
 }
