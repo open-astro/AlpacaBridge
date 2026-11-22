@@ -55,9 +55,8 @@ namespace alpacacore::test {
  * `guide_ms` delays its reply by that many real milliseconds. `find_home_commands` counts every FindHome; while
  * `fail_find_home` > 0 a FindHome answers a TheSkyX error (the count drops by one).
  *
- * `jog_commands` counts every open-loop start (`DoCommand(9, ...)`, a non-zero MoveAxis) and `jog_stops` every
- * open-loop stop (`DoCommand(10, ...)`), so a case can tell a jog still runs. `on_jog_command`, when set, runs on the
- * server thread before an open-loop start is answered, while MoveAxis waits for the reply; set it before the MoveAxis.
+ * `on_move_start`, when set, runs on the server thread before a DoCommand(9) (MoveAxis start) is answered, while
+ * MoveAxis waits for the reply; set it before the MoveAxis.
  *
  * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
  *
@@ -92,7 +91,7 @@ public:
     std::atomic<int> fail_slew_commands{0};
     std::function<void()> on_slew_command;
     std::function<void()> on_position_read;
-    std::function<void()> on_jog_command;
+    std::function<void()> on_move_start;
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -142,8 +141,6 @@ public:
     std::atomic<int> guide_commands{0};
     std::atomic<int> guide_ms{0};
     std::atomic<int> find_home_commands{0};
-    std::atomic<int> jog_commands{0};
-    std::atomic<int> jog_stops{0};
     std::atomic<int> fail_find_home{0};
 
     std::function<std::string(const std::string&)> responder() {
@@ -181,6 +178,7 @@ private:
         if (has(command, "DoCommand(9,")) {
             ++move_starts;
             note("MoveStart");
+            if (on_move_start) on_move_start();
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "DoCommand(10,")) {
@@ -294,15 +292,6 @@ private:
                 }
             }
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
-        }
-        if (has(command, "DoCommand(9,")) {
-            ++jog_commands;
-            if (on_jog_command) on_jog_command();
-            return "|No error. Error = 0.OK#";
-        }
-        if (has(command, "DoCommand(10,")) {
-            ++jog_stops;
-            return "|No error. Error = 0.OK#";
         }
         if (has(command, "DirectGuide")) {
             ++guide_commands;

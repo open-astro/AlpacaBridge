@@ -2869,7 +2869,7 @@ TEST_CASE("Bisque motion owner - PulseGuide on the axis a MoveAxis is driving is
     const int own = axis == 0 ? 2 : 0;    // East (and West, 3) on RA; North (and South, 1) on Dec
     const int other = axis == 0 ? 0 : 2;  // North on Dec; East on RA
     REQUIRE_NOTHROW(rig.driver->move_axis(axis, rate));
-    REQUIRE(rig.mount.jog_commands.load() == 1);
+    REQUIRE(rig.mount.move_starts.load() == 1);
     for (const int direction : {own, own + 1}) {
         CAPTURE(direction);
         std::string message;
@@ -2879,14 +2879,14 @@ TEST_CASE("Bisque motion owner - PulseGuide on the axis a MoveAxis is driving is
         CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
     }
     CHECK(rig.mount.guide_commands.load() == 0);
-    CHECK(rig.mount.jog_stops.load() == 0);  // the jog still runs
+    CHECK(rig.mount.move_stops.load() == 0);  // the jog still runs
     CHECK(rig.driver->get_slewing());
 
     // The other axis's pulse goes out and leaves the jog running.
     REQUIRE_NOTHROW(rig.driver->pulse_guide(other, 100));
     CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
     CHECK(rig.mount.guide_commands.load() == 1);
-    CHECK(rig.mount.jog_stops.load() == 0);
+    CHECK(rig.mount.move_stops.load() == 0);
     CHECK(rig.driver->get_slewing());
 
     // A stop on the jogging axis ends the refusal.
@@ -2907,13 +2907,13 @@ TEST_CASE("Bisque motion owner - PulseGuide on an axis whose MoveAxis start is o
     CAPTURE(axis);
     const int own = axis == 0 ? 2 : 0;
     std::atomic<int> code{-2};
-    rig.mount.on_jog_command = [&] { code = worker_code_of([&] { rig.driver->pulse_guide(own, 100); }); };
+    rig.mount.on_move_start = [&] { code = worker_code_of([&] { rig.driver->pulse_guide(own, 100); }); };
     REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.5));
     CHECK(code.load() == AlpacaError::InvalidOperation);
     CHECK(wait_for_pulse_guide_end(*rig.driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
     CHECK(rig.mount.guide_commands.load() == 0);
-    CHECK(rig.mount.jog_stops.load() == 0);
+    CHECK(rig.mount.move_stops.load() == 0);
     CHECK(rig.driver->get_slewing());
-    rig.mount.on_jog_command = nullptr;
+    rig.mount.on_move_start = nullptr;
     REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
 }
