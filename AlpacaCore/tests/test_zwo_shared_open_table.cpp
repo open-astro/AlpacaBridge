@@ -34,6 +34,7 @@ namespace {
 
 using alpacacore::AlpacaException;
 using alpacacore::test::error_code_of;
+using alpacacore::test::worker_code_of;
 using alpacacore::vendor::zwo::SharedOpenTable;
 namespace AlpacaError = alpacacore::AlpacaError;
 
@@ -366,7 +367,7 @@ struct HeldDownload {
 
     HeldDownload(SharedOpenTable& table, int id, std::uint64_t link, int outcome_code = 0) {
         thread = std::thread([this, &table, id, link, outcome_code] {
-            code = error_code_of([&] {
+            code = worker_code_of([&] {
                 table.with_link(id, link, [&] {
                     table.call_unserialised(id, [&] {
                         inside = true;

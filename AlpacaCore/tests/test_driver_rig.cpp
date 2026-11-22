@@ -77,6 +77,7 @@ TEST_CASE("driver_rig - error_code_of lets a non-Alpaca exception propagate", "[
 
 // Falsified by: worker_code_of() returning 0 for a non-Alpaca exception, or dropping the Alpaca code.
 TEST_CASE("driver_rig - worker_code_of maps a non-Alpaca exception to -1", "[driver_rig]") {
+    // Called on the test thread only to pin its result; a real caller is a worker thread.
     CHECK(worker_code_of([] { throw std::runtime_error("boom"); }) == -1);
     CHECK(worker_code_of([] { throw AlpacaException("boom", AlpacaError::NotConnected); }) ==
           AlpacaError::NotConnected);

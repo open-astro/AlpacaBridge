@@ -37,6 +37,7 @@ namespace {
 
 using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 
 using alpacacore::test::FakeQHYSDK;
 using alpacacore::test::LockedQHYSDK;
@@ -1781,7 +1782,7 @@ void check_cached_getters_during_mode_change(const std::string& blocked_call) {
     fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].max = 3'000'000.0;
     gate.armed = true;
     int mode_error = -1;
-    std::thread changer([&] { mode_error = error_code_of([&] { driver->set_readout_mode(1); }); });
+    std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));
 
@@ -1789,7 +1790,7 @@ void check_cached_getters_during_mode_change(const std::string& blocked_call) {
     bool matches = false;
     int read_error = -1;
     std::thread reader([&] {
-        read_error = error_code_of([&] {
+        read_error = worker_code_of([&] {
             if (property == "Name")
                 matches = driver->get_name() == name;
             else if (property == "CameraXSize")
@@ -1920,7 +1921,7 @@ TEST_CASE("QHY Camera Driver - cached getters do not wait behind configuration w
     gate.armed = true;
     int write_error = -1;
     std::thread writer([&] {
-        write_error = error_code_of([&] {
+        write_error = worker_code_of([&] {
             if (setter == "Gain")
                 driver->set_gain(42);
             else if (setter == "Offset")
@@ -1937,7 +1938,7 @@ TEST_CASE("QHY Camera Driver - cached getters do not wait behind configuration w
     bool matches = false;
     int read_error = -1;
     std::thread reader([&] {
-        read_error = error_code_of([&] {
+        read_error = worker_code_of([&] {
             matches = driver->get_name() == name && driver->get_camera_state() == alpacacore::CameraState::Idle &&
                       !driver->get_image_ready() && driver->get_exposure_max() == 3600.0;
         });
@@ -1968,13 +1969,13 @@ TEST_CASE("QHY Camera Driver - redundant connect does not wait behind configurat
     driver->set_connected(true);
     gate.armed = true;
     int write_error = -1;
-    std::thread writer([&] { write_error = error_code_of([&] { driver->set_gain(42); }); });
+    std::thread writer([&] { write_error = worker_code_of([&] { driver->set_gain(42); }); });
     JoinPumped write_joiner{clock, writer, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));
     std::atomic<bool> done{false};
     int connect_error = -1;
     std::thread connector([&] {
-        connect_error = error_code_of([&] { driver->set_connected(true); });
+        connect_error = worker_code_of([&] { driver->set_connected(true); });
         done = true;
     });
     JoinPumped connect_joiner{clock, connector, &gate};
@@ -2006,7 +2007,7 @@ TEST_CASE("QHY Camera Driver - cached control reads do not extend disconnect pas
     std::atomic<bool> read_done{false};
     int read_error = -1;
     std::thread reader([&] {
-        read_error = error_code_of([&] { read_cached_control(*driver, property); });
+        read_error = worker_code_of([&] { read_cached_control(*driver, property); });
         read_done = true;
     });
     JoinPumped read_joiner{clock, reader, &gate};
@@ -2014,7 +2015,7 @@ TEST_CASE("QHY Camera Driver - cached control reads do not extend disconnect pas
     std::atomic<bool> done{false};
     int disconnect_error = -1;
     std::thread disconnector([&] {
-        disconnect_error = error_code_of([&] { driver->set_connected(false); });
+        disconnect_error = worker_code_of([&] { driver->set_connected(false); });
         done = true;
     });
     JoinPumped disconnect_joiner{clock, disconnector, &gate};
@@ -2080,7 +2081,7 @@ TEST_CASE("QHY Camera Driver - disconnect clears state before waiting for config
     gate.armed = true;
     int write_error = -1;
     std::thread writer([&] {
-        write_error = error_code_of([&] {
+        write_error = worker_code_of([&] {
             if (setter == "Gain")
                 driver->set_gain(42);
             else if (setter == "Offset")
@@ -2098,7 +2099,7 @@ TEST_CASE("QHY Camera Driver - disconnect clears state before waiting for config
     std::atomic<bool> done{false};
     int disconnect_error = -1;
     std::thread disconnector([&] {
-        disconnect_error = error_code_of([&] { driver->set_connected(false); });
+        disconnect_error = worker_code_of([&] { driver->set_connected(false); });
         done = true;
     });
     JoinPumped disconnect_joiner{clock, disconnector, &gate};
@@ -2137,7 +2138,7 @@ TEST_CASE("QHY Camera Driver - configuration publication refuses a pending disco
     write_gate.armed = true;
     int write_error = -1;
     std::thread writer([&] {
-        write_error = error_code_of([&] {
+        write_error = worker_code_of([&] {
             if (setter == "Gain")
                 driver->set_gain(42);
             else if (setter == "Offset")
@@ -2197,14 +2198,14 @@ TEST_CASE("QHY Camera Driver - pulse guide returns while a readout mode transact
     REQUIRE(driver->get_can_pulse_guide());
     gate.armed = true;
     int mode_error = -1;
-    std::thread changer([&] { mode_error = error_code_of([&] { driver->set_readout_mode(1); }); });
+    std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));
 
     std::atomic<bool> returned{false};
     int pulse_error = -1;
     std::thread guider([&] {
-        pulse_error = error_code_of([&] { driver->pulse_guide(0, 500); });
+        pulse_error = worker_code_of([&] { driver->pulse_guide(0, 500); });
         returned = true;
     });
     JoinPumped guide_joiner{clock, guider, &gate};
@@ -2290,7 +2291,7 @@ TEST_CASE("QHY Camera Driver - mode transactions serialize exposure setup and re
     }
     gate.armed = true;
     int mode_error = -1;
-    std::thread changer([&] { mode_error = error_code_of([&] { driver->set_readout_mode(1); }); });
+    std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));
     std::atomic<bool> started{false};
@@ -2299,7 +2300,7 @@ TEST_CASE("QHY Camera Driver - mode transactions serialize exposure setup and re
     std::string competing_message;
     std::thread competitor([&] {
         started = true;
-        competing_error = error_code_of([&] {
+        competing_error = worker_code_of([&] {
             if (reconnect) {
                 driver->set_connected(false);
                 driver->set_connected(true);
@@ -2383,7 +2384,7 @@ TEST_CASE("QHY Camera Driver - configuration writes refuse a blocked download wi
     std::atomic<bool> done{false};
     int write_error = -1;
     std::thread writer([&] {
-        write_error = error_code_of([&] {
+        write_error = worker_code_of([&] {
             if (setter == "Gain")
                 driver->set_gain(42);
             else if (setter == "Offset")
@@ -2411,7 +2412,7 @@ TEST_CASE("QHY Camera Driver - configuration writes refuse a blocked download wi
     std::atomic<bool> abort_done{false};
     int abort_error = -1;
     std::thread aborter([&] {
-        abort_error = error_code_of([&] { driver->abort_exposure(); });
+        abort_error = worker_code_of([&] { driver->abort_exposure(); });
         abort_done = true;
     });
     JoinPumped abort_joiner{clock, aborter, &gate};
@@ -2601,7 +2602,7 @@ TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition 
     std::atomic<bool> done{false};
     int error = 0;
     std::thread rejecter([&] {
-        error = error_code_of([&] { driver->start_exposure(maximum + 1.0, true); });
+        error = worker_code_of([&] { driver->start_exposure(maximum + 1.0, true); });
         done = true;
     });
     JoinPumped joiner{clock, rejecter, &gate};
@@ -3022,7 +3023,7 @@ TEST_CASE("QHY Camera Driver - a Disconnect during a reserved StartExposure ends
     alpacacore::vendor::qhy::set_disconnect_stop_hook_for_testing(*driver, [&] { disconnect_parked.block(); });
 
     std::atomic<int> start_error{-1};
-    std::thread starter([&] { start_error = error_code_of([&] { driver->start_exposure(0.05, true); }); });
+    std::thread starter([&] { start_error = worker_code_of([&] { driver->start_exposure(0.05, true); }); });
     JoinPumped start_joiner{clock, starter, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));  // reserved, settings written, not yet Exposing
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
@@ -3104,7 +3105,7 @@ TEST_CASE("QHY Camera Driver - StartExposure stops a body the watchdog left in t
     std::atomic<bool> done{false};
     int code = -1;
     std::thread starter([&] {
-        code = error_code_of([&] { driver->start_exposure(0.05, true); });
+        code = worker_code_of([&] { driver->start_exposure(0.05, true); });
         done = true;
     });
     JoinPumped joiner{clock, starter, &gate};
@@ -3142,7 +3143,7 @@ TEST_CASE("QHY Camera Driver - StartExposure is refused while a cancelled body s
     std::atomic<bool> done{false};
     int code = -1;
     std::thread starter([&] {
-        code = error_code_of([&] { driver->start_exposure(0.05, true); });
+        code = worker_code_of([&] { driver->start_exposure(0.05, true); });
         done = true;
     });
     JoinPumped joiner{clock, starter, &gate};
@@ -3186,7 +3187,7 @@ TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is Inval
     std::atomic<bool> done{false};
     int code = -1;
     std::thread second([&] {
-        code = error_code_of([&] { driver->start_exposure(1.0, true); });
+        code = worker_code_of([&] { driver->start_exposure(1.0, true); });
         done = true;
     });
     JoinPumped joiner{clock, second, &gate};
@@ -3854,9 +3855,9 @@ TEST_CASE("QHY Camera Driver - a refused regulation start leaves CoolerOn false"
     const auto waits = clock.wait_count();
     std::thread caller([&] {
         if (reconnect) {
-            error = error_code_of([&] { driver->set_connected(true); });
+            error = worker_code_of([&] { driver->set_connected(true); });
         } else {
-            error = error_code_of([&] { driver->set_cooler_on(true); });
+            error = worker_code_of([&] { driver->set_cooler_on(true); });
         }
         done = true;
     });
@@ -3870,7 +3871,7 @@ TEST_CASE("QHY Camera Driver - a refused regulation start leaves CoolerOn false"
     if (concurrent) {
         REQUIRE(clock.wait_for_wait_count(waits + 1, seconds(2)));  // the first start() is waiting
         client = std::thread([&] {
-            client_error = error_code_of([&] { driver->set_cooler_on(true); });
+            client_error = worker_code_of([&] { driver->set_cooler_on(true); });
             client_done = true;
         });
         std::this_thread::sleep_for(milliseconds(200));  // let it queue on the start mutex
@@ -3911,12 +3912,12 @@ TEST_CASE("QHY Camera Driver - a pulse refused behind three queued pulses keeps 
     int error = -1;
     int second_error = -1;
     std::thread caller([&] {
-        error = error_code_of([&] { driver->pulse_guide(1, 60000); });
+        error = worker_code_of([&] { driver->pulse_guide(1, 60000); });
         ++done;
     });
     JoinPumped joiner{clock, caller, &gate};
     std::thread second([&] {
-        second_error = error_code_of([&] { driver->pulse_guide(2, 60000); });
+        second_error = worker_code_of([&] { driver->pulse_guide(2, 60000); });
         ++done;
     });
     JoinPumped second_joiner{clock, second, &gate};

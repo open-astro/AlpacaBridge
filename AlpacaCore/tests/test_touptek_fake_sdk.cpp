@@ -44,6 +44,7 @@ using alpacacore::AlpacaException;
 using alpacacore::test::error_code_of;
 using alpacacore::test::FakeToupTekSDK;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 
 namespace {
 
@@ -1143,12 +1144,14 @@ TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and
     delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
 
     std::atomic<int> outcome{-1};
-    std::thread read([&] { outcome = error_code_of([&] { (void)thermal->get_switch_value(0); }); });
+    std::thread read([&] { outcome = worker_code_of([&] { (void)thermal->get_switch_value(0); }); });
     wait_for_entered(entered);
 
     CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
     read.join();
     fake.before_call = nullptr;
+    // A disconnect racing the read may refuse it with NotConnected, but never fails it on a closed handle
+    // (the fake raises DriverException).
     CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
     CHECK_FALSE(thermal->get_connected());
     CHECK(fake.underflow_closes == 0);
@@ -1164,7 +1167,7 @@ TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the
     delay_sdk_call(fake, "put_heat", kSlowDevice, entered);
 
     std::atomic<int> outcome{-1};
-    std::thread write([&] { outcome = error_code_of([&] { thermal->set_switch_value(0, 1.0); }); });
+    std::thread write([&] { outcome = worker_code_of([&] { thermal->set_switch_value(0, 1.0); }); });
     wait_for_entered(entered);
 
     CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));

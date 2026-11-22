@@ -35,6 +35,7 @@ namespace {
 
 using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 
 } // namespace
 
@@ -1210,7 +1211,7 @@ TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still
     // The second StartExposure snapshots its settings, stops the stream and waits in session_.start().
     watch_stop = true;
     std::atomic<int> start_error{-1};
-    std::thread starter([&] { start_error = error_code_of([&] { driver->start_exposure(0.5, true); }); });
+    std::thread starter([&] { start_error = worker_code_of([&] { driver->start_exposure(0.5, true); }); });
     REQUIRE(spin_until([&] { return start_in_window.load(); }));
     // Runs while the start holds its session reservation, before session_.start() publishes Exposing.
     CHECK(error_code_of([&] { driver->abort_exposure(); }) == 0);

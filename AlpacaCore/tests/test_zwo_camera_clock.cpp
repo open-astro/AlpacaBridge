@@ -37,6 +37,7 @@ using alpacacore::AlpacaException;
 using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZWOSDK;
+using alpacacore::test::worker_code_of;
 using alpacacore::vendor::zwo::create_zwo_camera;
 namespace AlpacaError = alpacacore::AlpacaError;
 using std::chrono::milliseconds;
@@ -531,7 +532,7 @@ TEST_CASE("ZWO camera clock - an AbortExposure during a StartExposure still in f
 
     // The second StartExposure reserves its start and waits in session_.start() for the held body.
     std::atomic<int> start_error{-2};
-    std::thread starter([&] { start_error = error_code_of([&] { camera->start_exposure(0.001, true); }); });
+    std::thread starter([&] { start_error = worker_code_of([&] { camera->start_exposure(0.001, true); }); });
     const bool start_waiting = clock.wait_for_waiter_thread(starter.get_id(), kRendezvous);
     int abort_error = -2;
     if (start_waiting) {

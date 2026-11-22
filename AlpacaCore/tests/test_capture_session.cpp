@@ -49,6 +49,7 @@ using alpacacore::ImageArray;
 using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::worker_code_of;
 using alpacacore::util::CaptureControl;
 using alpacacore::util::CaptureReservation;
 using alpacacore::util::CaptureSession;
@@ -990,14 +991,14 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                         std::lock_guard<std::mutex> lock(s.driver);
                         int seen = static_cast<int>(h.session->camera_state());
                         seen += h.session->busy() ? 1 : 0;
-                        seen += error_code_of([&] { seen += h.session->image_ready() ? 1 : 0; });
-                        seen += error_code_of([&] {
+                        seen += worker_code_of([&] { seen += h.session->image_ready() ? 1 : 0; });
+                        seen += worker_code_of([&] {
                             const auto image = h.session->image();
                             seen += image ? image->data.front() : 0;
                         });
                         seen += static_cast<int>(h.session->percent_completed());
                         seen += h.session->failure().has_value() ? 1 : 0;
-                        seen += error_code_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
+                        seen += worker_code_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
                         seen += h.session->settings_locked() ? 1 : 0;  // rule 9: under the driver mutex
                         seen += h.session->starting() ? 1 : 0;
                         s.seen += seen;

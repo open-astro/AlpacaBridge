@@ -5194,7 +5194,6 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 #ifndef _WIN32
 namespace {
 
-using alpacacore::test::error_code_of;
 using alpacacore::test::FakeTaskClock;
 namespace snap_chrono = std::chrono;
 

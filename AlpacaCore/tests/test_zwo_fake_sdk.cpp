@@ -39,6 +39,7 @@ namespace {
 using alpacacore::AlpacaException;
 using alpacacore::test::error_code_of;
 using alpacacore::test::FakeZWOSDK;
+using alpacacore::test::worker_code_of;
 using alpacacore::vendor::zwo::create_zwo_camera;
 namespace AlpacaError = alpacacore::AlpacaError;
 
@@ -1241,8 +1242,8 @@ TEST_CASE("ZWO fake SDK - concurrent ImageArray reads return the one downloaded 
     alpacacore::ImageArray second;
     std::atomic<int> first_code{-1};
     std::atomic<int> second_code{-1};
-    std::thread first_reader([&] { first_code.store(error_code_of([&] { first = camera->get_image_array(); })); });
-    std::thread second_reader([&] { second_code.store(error_code_of([&] { second = camera->get_image_array(); })); });
+    std::thread first_reader([&] { first_code.store(worker_code_of([&] { first = camera->get_image_array(); })); });
+    std::thread second_reader([&] { second_code.store(worker_code_of([&] { second = camera->get_image_array(); })); });
     first_reader.join();
     second_reader.join();
 
