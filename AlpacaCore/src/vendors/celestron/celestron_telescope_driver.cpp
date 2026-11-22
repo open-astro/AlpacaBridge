@@ -1599,7 +1599,8 @@ public:
     // MoveAxis(axis, 0) stops it, and keeps the failure for Slewing until the next motion command or a reconnect. A
     // client causes it, so it is logged at INFO (decision 0007 rule 9); a stop that fails is a device failure, logged
     // at ERROR, and is tried again on the next tick. try_lock, as the failure stops: set_connected joins the poll while
-    // it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it for the next tick.
+    // it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it for the next tick. One axis per
+    // tick: a second axis overdue at the same time is stopped on the next tick, about 1 s later.
     void stop_overdue_move_axis() const {
         {
             std::lock_guard<std::mutex> lock(mutex_);
