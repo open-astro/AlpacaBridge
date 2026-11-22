@@ -763,7 +763,7 @@ TEST_CASE("Astroasis Focuser Driver - a Disconnect during a connect returns at o
 
 // Falsified by: fake_astroasis_hid.h:advance_travel() jumps position to travel_target at once (the mid-travel check
 // fails) or never clears `moving` (the arrival checks fail).
-TEST_CASE("Astroasis Focuser Driver - a Move travels to its target over time in the fake's travel mode",
+TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Move travels to its target over time",
           "[astroasis][focuser][unit]") {
     AstroasisRig rig;
     const auto& state = rig.fake().state;
@@ -771,7 +771,7 @@ TEST_CASE("Astroasis Focuser Driver - a Move travels to its target over time in 
     REQUIRE(rig.connect());
 
     rig.driver().move(5000);  // 3766 steps from 1234: 3.8 s at this rate
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // real time the fake's motor travels first
     rig.tick();
     CHECK(rig.driver().get_is_moving());
     CHECK(rig.driver().get_position() > 1234);
@@ -792,7 +792,7 @@ TEST_CASE("Astroasis Focuser Driver - a Move travels to its target over time in 
 
 // Falsified by: fake_astroasis_hid.h case 0x37 clears `moving` without first calling advance_travel() (the halt
 // leaves the position at its start).
-TEST_CASE("Astroasis Focuser Driver - a Halt stops the fake's travelling motor where it is",
+TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Halt stops the travelling motor where it is",
           "[astroasis][focuser][unit]") {
     AstroasisRig rig;
     const auto& state = rig.fake().state;
@@ -800,14 +800,14 @@ TEST_CASE("Astroasis Focuser Driver - a Halt stops the fake's travelling motor w
     REQUIRE(rig.connect());
 
     rig.driver().move(5000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // real time the motor travels before the halt
     rig.driver().halt();
     rig.tick();
     CHECK_FALSE(rig.driver().get_is_moving());
     const int stopped = rig.driver().get_position();
     CHECK(stopped > 1234);
     CHECK(stopped < 5000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // real time a running motor would travel
     rig.tick();
     CHECK(rig.driver().get_position() == stopped);
 }

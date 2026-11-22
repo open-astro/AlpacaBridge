@@ -92,6 +92,7 @@ public:
 
     // Opt-in: a GOTO travels at this many encoder counts per second instead of waiting for complete_move(). 0 (the
     // default) keeps the explicit mode.
+    // TODO: replace the stand-in rates callers pass with the measured 94155 focus-motor speed.
     void set_travel_rate(std::uint32_t counts_per_second) {
         std::lock_guard<std::mutex> lock(mutex_);
         advance_locked();

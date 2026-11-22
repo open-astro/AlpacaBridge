@@ -51,6 +51,7 @@ struct FakeHidState {
     bool move_reports_moving = true;  // the device reports "moving" after a Move (0x36)
     // Opt-in: a Move (0x36) travels to its target at this many steps per second, worked out from steady_clock when
     // the device is asked, instead of leaving `position` alone. 0 (the default) keeps the scripted behaviour.
+    // TODO: replace the stand-in rates callers set with the measured Oasis focuser speed.
     int travel_rate = 0;
     int travel_target = 0;
     std::chrono::steady_clock::time_point travel_stamp = std::chrono::steady_clock::now();

@@ -914,7 +914,7 @@ TEST_CASE("Celestron Focuser Driver - a Disconnect during a connect returns at o
 
 // Falsified by: fake_celestron_focuser.h:advance_locked() jumps raw_ to the target at once (the mid-travel position
 // check fails) or never reaches it (the arrival checks fail).
-TEST_CASE("Celestron Focuser Driver - a Move travels to its target over time in the fake's travel mode",
+TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Move travels to its target over time",
           "[celestron][focuser][unit][fake]") {
     CelestronRig rig;
     REQUIRE(rig.fake().ok());
@@ -924,7 +924,7 @@ TEST_CASE("Celestron Focuser Driver - a Move travels to its target over time in 
     const std::uint32_t start = rig.fake().raw_position();
 
     rig.driver().move(5000);  // raw 56000, 26000 counts away: 2.6 s at this rate
-    std::this_thread::sleep_for(100ms);
+    std::this_thread::sleep_for(100ms);  // real time the fake's motor travels before the mid-travel check
     CHECK(rig.fake().moving());
     CHECK(rig.fake().raw_position() > start);
     CHECK(rig.fake().raw_position() < 56000U);
@@ -941,7 +941,7 @@ TEST_CASE("Celestron Focuser Driver - a Move travels to its target over time in 
 
 // Falsified by: fake_celestron_focuser.h:respond() case 0x24 clears target_ without first calling advance_locked()
 // (the halt leaves the encoder at its start) or leaves target_ set (the motor keeps travelling).
-TEST_CASE("Celestron Focuser Driver - a Halt stops the fake's travelling motor where it is",
+TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Halt stops the travelling motor where it is",
           "[celestron][focuser][unit][fake]") {
     CelestronRig rig;
     REQUIRE(rig.fake().ok());
@@ -951,13 +951,13 @@ TEST_CASE("Celestron Focuser Driver - a Halt stops the fake's travelling motor w
     const std::uint32_t start = rig.fake().raw_position();
 
     rig.driver().move(5000);
-    std::this_thread::sleep_for(100ms);
+    std::this_thread::sleep_for(100ms);  // real time the motor travels before the halt
     rig.driver().halt();
     CHECK_FALSE(rig.fake().moving());
     const std::uint32_t stopped = rig.fake().raw_position();
     CHECK(stopped > start);
     CHECK(stopped < 56000U);
-    std::this_thread::sleep_for(50ms);
+    std::this_thread::sleep_for(50ms);  // real time a running motor would travel
     CHECK(rig.fake().raw_position() == stopped);
 }
 
