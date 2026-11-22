@@ -354,7 +354,12 @@ command channel. Nothing scans the network; the host is typed in.
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
-  `DestinationSideOfPier`'s RA and Dec.
+  `DestinationSideOfPier`'s RA and Dec. After those checks a pulse is refused with `InvalidOperation`, before
+  anything is sent, while a slew, park or home runs (#2504, `refuse_pulse_during_slew_locked()`): the slew grace, a
+  `Park` or `FindHome` still to be sent after its stops, or a frame showing a GOTO (written through at its dispatch
+  and when the mount takes a park or home), `I` or `h`. It reads the frame, not `:GU#`, so a pulse costs no extra
+  exchange; a handset GOTO, park or home refuses it too, once the poll sees it. A pulse on the axis a non-zero
+  `MoveAxis` drives is refused the same way and the jog runs on (#2503, the #2467 rule); the other axis is accepted.
 - **SideOfPier is the mount's own side, from the `:GU#` letter** (#2179). On an OnStepX German mount (`E` in
   `:GU#`) the polled frame's pier-side letter (`T` east, `W` west, `o` none) is served as it is; a fork or alt-az
   mount and OnStep 4.x, not checked on a rig, keep the hour-angle rule. OnStepX's default preferred pier side, Best, keeps the mount on
