@@ -3160,7 +3160,7 @@ private:
         // and a fault that outlived util::kLinkStalenessBound.
         const bool long_unmonitored_outage =
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
-        // open-astro#2407 (decision 2026-11-19 on #2407): a GoTo, Park, FindHome or MoveAxis this driver had
+        // open-astro#2407 (the 2026-11-19 relink ruling on #2407): a GoTo, Park, FindHome or MoveAxis this driver had
         // under way when the link dropped, or a failure stop that did not reach the board, is stopped on the way
         // back in, however short the outage: the client that asked for it no longer owns it. The #521 window
         // keeps only motion the driver cannot attribute (tracking, most likely).
