@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **Two SynScan motion cases no longer flake under load** (tests, issue #2561): "SynScan - site, time and Sync writes are refused while the mount moves" now waits for the GOTO body to return after AbortSlew, which cancels the body but does not join it, before it expects the writes to be accepted. "SynScan async - malformed Park status reply persists through Slewing" now steps the fake clock only once the Park body's own thread is waiting on it, fails if a step does not settle, and runs the status poll by hand once per second of fake time, instead of ignoring both waits. Test-only; no driver change.
