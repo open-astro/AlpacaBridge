@@ -1527,11 +1527,16 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
     // read is the control path's, not a poll's: the frame keeps the age of the last poll (the connect's).
     rig.clock().advance(std::chrono::seconds(3));
     rig.fake().st->shifted = true;
+    const auto idle = rig.clock().waiter_count();  // the paused poll body
     driver.slew_to_coordinates_async(5.0, 20.0);
     CHECK(driver.get_slewing());
+    REQUIRE(rig.clock().wait_for_waiters(idle + 1, std::chrono::seconds(5)));  // the body is parked
+    // The body polls every 250 ms: step it by that, once per advance(), and wait for it to park again (a new wait)
+    // or end before the next step, so the frame ages by the slew's length only.
     for (int i = 0; i < 200 && driver.get_slewing(); ++i) {
-        rig.clock().advance(std::chrono::seconds(1));
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const auto waits = rig.clock().wait_count();
+        rig.clock().advance(std::chrono::milliseconds(250));
+        (void)rig.clock().wait_for_wait_count(waits + 1, std::chrono::milliseconds(200));
     }
     REQUIRE_FALSE(driver.get_slewing());
     CHECK(std::abs(driver.get_right_ascension() - 3.25) > 1e-3);  // the frame the slew end measured, not the sync's
