@@ -30,6 +30,7 @@
 #include <ctime>
 #include <exception>
 #include <functional>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1529,26 +1530,17 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
     rig.fake().st->shifted = true;
     // The hook runs on the slew body's thread, so the case can wait for that thread alone: the paused poll body is a
     // waiter on the same clock and must not stand in for it.
-    std::mutex body_mutex;
-    std::optional<std::thread::id> body;
-    cel::set_slew_body_hook_for_testing(driver, [&](const cel::SlewBodyStopReason&) {
-        std::lock_guard<std::mutex> lock(body_mutex);
-        body = std::this_thread::get_id();
+    auto body_thread = std::make_shared<std::promise<std::thread::id>>();
+    auto body_future = body_thread->get_future();
+    auto named = std::make_shared<std::atomic<bool>>(false);
+    cel::set_slew_body_hook_for_testing(driver, [body_thread, named](const cel::SlewBodyStopReason&) {
+        if (!named->exchange(true)) body_thread->set_value(std::this_thread::get_id());
     });
     driver.slew_to_coordinates_async(5.0, 20.0);
     CHECK(driver.get_slewing());
     const auto bound = std::chrono::seconds(5);
-    const auto body_id = [&] {
-        for (int i = 0; i < 500; ++i) {
-            {
-                std::lock_guard<std::mutex> lock(body_mutex);
-                if (body) return *body;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return std::thread::id{};
-    }();
-    REQUIRE(body_id != std::thread::id{});
+    REQUIRE(body_future.wait_for(bound) == std::future_status::ready);
+    const auto body_id = body_future.get();
     REQUIRE(rig.clock().wait_for_waiter_thread(body_id, bound));  // the body is parked
     cel::set_slew_body_hook_for_testing(driver, nullptr);
     // The body polls every 250 ms: step it by that, once per advance(), and let every woken waiter settle before the
