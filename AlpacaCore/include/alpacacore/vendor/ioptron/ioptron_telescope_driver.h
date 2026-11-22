@@ -107,6 +107,15 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                 std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam (issue #2396): replaces the thread factory of the motion bound watchdog slot (the MoveAxis dead-man and
+/// the async GOTO bound), so a case can find its thread. A driver not from the factories is ignored.
+void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
+                                                 std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam (issue #2396): whether the motion bound watchdog has a body running. False for a driver not from the
+/// factories.
+bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver);
+
 /// Test seam: turns the zero search watchdog's 1 s status reads (until a search shows motion) off or on. Off, the
 /// watchdog waits only for the 120 s bound, so a case about client reads runs with no second reader. On by default.
 /// Set it before FindHome. A driver not from the factories is ignored.
