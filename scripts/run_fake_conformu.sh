@@ -13,6 +13,11 @@
 # the script fails when the list has no such run row (the workflow runs one row
 # per matrix job). FAKE_CONFORMU_PORT overrides the server's port (11111), so
 # two rows can run side by side on one host.
+# FAKE_CONFORMU_PROFILE is `full` (the default: `conformu conformance`, every
+# test) or `pr` (pull requests, issue #2568): a telescope row then runs
+# `conformu conformance-settings` with the full-test settings minus the extended
+# rate-offset and pulse-guide tests, its report's first line names the PR
+# profile, and check_pr_profile_run() decides the pass. Other rows ignore it.
 # Each row writes <output-dir>/<reportPath below AlpacaCore/conformu/>, whose
 # first line is "FAKE REPORT: ..." (see scripts/check_conformu_reports.py),
 # with its server.log, register.json and the raw ConformU log beside it.
@@ -28,6 +33,8 @@ out_dir="${3:?$usage}"
 run_list="${4:-scripts/conformu_fake_runs.tsv}"
 only_row="${5:-}"
 port="${FAKE_CONFORMU_PORT:-11111}"
+profile="${FAKE_CONFORMU_PROFILE:-full}"
+case "$profile" in full | pr) ;; *) echo "FAKE_CONFORMU_PROFILE must be full or pr, not $profile" >&2; exit 2 ;; esac
 base="http://127.0.0.1:${port}"
 
 mkdir -p "$out_dir"
@@ -45,6 +52,39 @@ stop_server() {
   fi
 }
 trap stop_server EXIT
+
+# The PR-profile ConformU settings for a telescope at $port: every [MandatoryInFullTest] property of ConformU
+# 4.6.0-rc.1 (Settings.cs, AlpacaConfiguration.cs) at the value its SetFullTest() would set, except the two extended
+# telescope tests, plus the Alpaca device that `conformance <url>` would set (SetAlpacaDevice). A settings version
+# ConformU does not accept resets the file to defaults; check_pr_profile_run() then finds no alerts and fails.
+write_pr_settings() {
+  python3 - "$1" "$port" <<'PY'
+import json
+import sys
+path, port = sys.argv[1], int(sys.argv[2])
+settings = {
+    "SettingsCompatibilityVersion": 1,
+    "DeviceTechnology": "Alpaca",
+    "DeviceType": "Telescope",
+    "AlpacaDevice": {
+        "ServiceType": "Http", "ServerName": "127.0.0.1", "IpAddress": "127.0.0.1", "IpPort": port,
+        "InterfaceVersion": 1, "AscomDeviceType": "Telescope", "AlpacaDeviceNumber": 0,
+    },
+    "AllowConnectedTrueAfterDisconnect": False, "DisplayMethodCalls": False, "Debug": False,
+    "TraceDiscovery": False, "TraceAlpacaCalls": False, "TestProperties": True, "TestMethods": True,
+    "TelescopeFirstUseTests": True, "TestSideOfPierRead": True, "TestSideOfPierWrite": True,
+    "TelescopeExtendedMoveAxisTests": True, "TelescopeExtendedSiteTests": True,
+    "CameraFirstUseTests": True, "CameraTestImageArrayVariant": True, "DomeOpenShutter": True,
+    "SwitchEnableSet": True, "SwitchTestOffsets": True,
+    "AlpacaConfiguration": {"ProtocolShowSuccessResponses": False},
+    # The PR profile: the two tests whose HA -9/-3/+3/+9 repeats take most of a telescope run.
+    "TelescopeExtendedRateOffsetTests": False,
+    "TelescopeExtendedPulseGuideTests": False,
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(settings, fh, indent=2)
+PY
+}
 
 # One run-list row: start the server on its fake, register device 0, run ConformU, write and check the report.
 run_row() {
@@ -89,14 +129,38 @@ run_row() {
   echo
 
   raw="$row_dir/conformu-raw.txt"
-  "$conformu_bin" conformance "$base/api/v1/${device_type}/0" -n "$raw" >"$row_dir/conformu-stdout.log" 2>&1 || status=$?
+  local pr_run=0 header="FAKE REPORT: ConformU against ${description}, not hardware. Not hardware validation."
+  if [ "$profile" = pr ] && [ "$device_type" = telescope ]; then
+    pr_run=1
+    header="$header PR profile: the extended rate-offset and pulse-guide tests are off, so this is not a full ConformU test."
+    local settings="$row_dir/conformu-pr-settings.json" results="$row_dir/conformu-results.json"
+    write_pr_settings "$settings"
+    "$conformu_bin" conformance-settings -s "$settings" -r "$results" -n "$raw" \
+      >"$row_dir/conformu-stdout.log" 2>&1 || status=$?
+  else
+    "$conformu_bin" conformance "$base/api/v1/${device_type}/0" -n "$raw" >"$row_dir/conformu-stdout.log" 2>&1 || status=$?
+  fi
   stop_server
 
   {
-    echo "FAKE REPORT: ConformU against ${description}, not hardware. Not hardware validation."
+    echo "$header"
     [ -f "$raw" ] && cat "$raw"
   } >"$report"
 
+  if [ "$pr_run" -eq 1 ]; then
+    # ConformU exits with its error + issue + configuration-alert count, and the two omitted tests are two alerts:
+    # the results file, not the exit status, decides this run.
+    python3 - "$report" "$results" <<'PY'
+import sys
+sys.path.insert(0, "scripts")
+import check_conformu_reports as c
+failures = c.check_pr_profile_run(sys.argv[1], sys.argv[2])
+for f in failures:
+    print(f, file=sys.stderr)
+sys.exit(1 if failures else 0)
+PY
+    return
+  fi
   if [ "$status" -ne 0 ]; then
     echo "ConformU exited with status $status for $vendor $device_type ($fake_header)" >&2
     return "$status"

@@ -135,7 +135,7 @@ permissions:
 jobs:
   runs:
     # The run rows of scripts/conformu_fake_runs.tsv as the matrix of the job below (issue #2078 slice 2). One job per
-    # row, in parallel: a telescope row takes about 20 minutes of ConformU on the arm64 runner and the build 42 s
+    # row, in parallel: a full telescope row takes about 20 minutes of ConformU on the arm64 runner and the build 42 s
     # (measured), so walking the rows in one job would outgrow its bound with the second row.
     name: List the fake ConformU run rows
     runs-on: ubuntu-24.04-arm
@@ -360,9 +360,14 @@ jobs:
 
       - name: Run ConformU against the row's fake
         # Fails when ConformU exits non-zero or its log lacks the clean-pass line
-        # or shows a response-time finding (the checker's own rules).
+        # or shows a response-time finding (the checker's own rules). On a pull
+        # request a telescope row runs the PR profile (issue #2568): no extended
+        # rate-offset or pulse-guide tests, passed by check_pr_profile_run(). The
+        # nightly and dispatched runs keep the full test, and only their reports
+        # are committed (check_text() refuses a PR-profile report).
         env:
           ROW_KEY: ${{ matrix.row.key }}
+          FAKE_CONFORMU_PROFILE: ${{ github.event_name == 'pull_request' && 'pr' || 'full' }}
         run: |
           scripts/run_fake_conformu.sh \
             AlpacaHTTP/build/fake_conformu_server \
