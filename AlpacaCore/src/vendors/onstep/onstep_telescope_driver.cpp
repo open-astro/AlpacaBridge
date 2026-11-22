@@ -1190,10 +1190,12 @@ public:
     }
 
     // #2406: the next motion command ends the stored failure and the AbortSlew stop check.
-    void begin_motion_command_locked() const {
+    void begin_motion_command_locked(bool keep_goto_bound = false) const {
         motion_error_.clear();
         abort_stop_rounds_ = 0;
-        goto_deadline_.reset();
+        if (!keep_goto_bound) {
+            goto_deadline_.reset();
+        }
     }
 
     // #2406 (#2396 AB-10): a site or time write changes the firmware's limit and pier maths, so none goes out while
@@ -1561,7 +1563,8 @@ public:
             refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
         }
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
-        begin_motion_command_locked();
+        // A MoveAxis is not refused while a GOTO runs, so it keeps that GOTO's bound (and its site-write refusal).
+        begin_motion_command_locked(/*keep_goto_bound=*/true);
         const Wire protocol = wire();
 
         // Direction codes: 0=North(Dec+), 1=South(Dec-), 2=East(RA+), 3=West(RA-).
@@ -2154,10 +2157,11 @@ private:
         const std::string stop_error = stop_axis_locked(axis);
         if (stop_error.empty()) {
             manual_axis_slewing_[axis] = false;
+            ALPACA_LOG_INFO("OnStep", motion_error_);  // a client can cause it: decision 0007 rule 9
         } else {
             motion_error_ += "; the stop failed: " + stop_error;
+            ALPACA_LOG_ERROR("OnStep", motion_error_);  // the stop itself failed: a device failure
         }
-        ALPACA_LOG_ERROR("OnStep", motion_error_);
         if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
             clear_manual_motion_locked();  // cancel() from its own body is allowed
         }
@@ -2777,11 +2781,8 @@ private:
         std::string reply;
         try {
             reply = protocol.slew_to_target();
-        } catch (const std::exception& ex) {
+        } catch (...) {
             slew_hold_.clear();
-            if (!is_link_lost(ex)) {
-                stop_unconfirmed_goto_locked(context);
-            }
             throw;
         }
         if (reply.empty() || reply[0] != '0') {
@@ -2891,6 +2892,7 @@ private:
 
     void wait_for_slew_complete_locked(StateLock& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
+        goto_deadline_.reset();  // landed on the wait's own :GU#, before the next poll tick sees it (#2406)
         // Decide the restore here; the status was just read (#1230).
         finish_slew_tracking_from_frame_locked();
         // The control path ends the motion: publish where the mount stopped, so the position read right after
@@ -3382,8 +3384,8 @@ private:
         abort_next_round_ = clock_.now() + kAbortStopRound;
     }
 
-    // #2406: a :MS# whose reply timed out or was empty may still have started the GOTO, so :Q# goes out (best
-    // effort, logged) before the refusal is reported.
+    // #2406: a :MS# with no digit before its reply timeout may still have started the GOTO, so :Q# goes out (best
+    // effort, logged) before the refusal is reported. (The exchange itself throws only on a lost link.)
     void stop_unconfirmed_goto_locked(const char* context) const {
         ALPACA_LOG_WARN("OnStep", std::string(context) + ": no :MS# reply; sending :Q# in case the GOTO started");
         (void)send_stops_locked(true, {}, [context](const char* what, const std::string& error) {

@@ -4160,3 +4160,25 @@ TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 is allowed while parked"
     require_alpaca_error([&] { rig.driver->move_axis(0, 1.0); }, alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(rig.driver->get_at_park());
 }
+
+TEST_CASE("OnStep Telescope Driver - a site write right after a synchronous slew lands is allowed",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*rig.driver, true);  // no tick clears the bound
+    run_synchronous_slew(
+        rig.clock, [&] { rig.driver->slew_to_coordinates(12.0, 45.0); },
+        [&] { rig.clock.advance(std::chrono::seconds(3)); });  // past the slew grace: the wait's :GU# lands it
+    CHECK_NOTHROW(rig.driver->set_site_latitude(40.0));
+}
+
+TEST_CASE("OnStep Telescope Driver - a MoveAxis during a GOTO keeps the GOTO's bound",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(12.0, 45.0));
+    rig.mount->set_status("pEW180#");  // the GOTO never ends
+    observe_slewing(*rig.driver, *rig.mount, rig.clock);
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.0));  // a stop on the other axis: a motion command
+    rig.poll_after(std::chrono::seconds(120));
+    CHECK(rig.mount->count(":Q#") == 1);
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+}
