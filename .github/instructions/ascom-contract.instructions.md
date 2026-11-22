@@ -243,7 +243,7 @@ false, and even when true trusts AtHome only after a FindHome it sent in this se
 | Driver | `sensor_search` | `method` | Why |
 | --- | --- | --- | --- |
 | iOptron | true only for the HAE29C EQ (`0036`, `zero_search_active()`) | `zero_sensor_search` / `goto_stored_home` | The HAE29C runs the `:MSH#` zero sensor search (#2420); every other model's `:MH#` slews to the stored home. |
-| Celestron NexStar | true when the RA and Dec home switch devices (AUX 0x30, 0x31) answered at connect | `home_switch_search` / `no_home_sensor` | FindHome is `MC_LEVEL_START` on both axes, which drives each to its switch (CGX, CGX-L, CGE Pro). |
+| Celestron NexStar | true only for a home-switch model (CGE Pro 13, CGX 23, CGX-L 24) whose RA and Dec home switch devices (AUX 0x30, 0x31) also answered at connect | `home_switch_search` / `no_home_sensor` | FindHome is `MC_LEVEL_START` on both axes, which drives each to its switch. The model is required too because a hand controller may answer the probe for a device that is not there (an AVX, for example). |
 | Celestron CGX USB | true | `home_switch_search` | Connect refuses a CGX whose home switches do not answer. |
 | Sky-Watcher direct | true when both axes report the home index feature (bit 0x04, the Wave) | `home_index_search` / `goto_stored_home` | AutoHome hunts the index sensors; other boards' FindHome is the count-frame goto to the power-on index. |
 | Bisque / TheSkyX | false | `external_find_home` | TheSkyX's Find Home on a Paramount is likely a homing-sensor search, but the driver cannot tell which mount TheSkyX drives and no Paramount run has verified it. |
