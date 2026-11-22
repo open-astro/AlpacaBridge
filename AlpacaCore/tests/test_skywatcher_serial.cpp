@@ -1406,8 +1406,12 @@ TEST_CASE("SkyWatcher serial - an outage past the window stops a surviving axis 
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher serial - a GOTO-mode axis that survived the outage is reported without a flag",
-          "[skywatcher][serial][relink]") {
+// open-astro#2407: a GOTO-mode axis is never tracking. Found running after a link loss it is a goto the lost
+// session started, and nobody owns it now, so the relink stops it however brief the outage. (Before #2407 it was
+// preserved and reported through Slewing.)
+TEST_CASE("SkyWatcher serial - a GOTO-mode axis that survived the outage is stopped on relink",
+          "[skywatcher][serial][relink][goto-safety]") {
+    RelinkWindowGuard window(std::chrono::hours(1));  // every outage is "brief": the window does not decide
     auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
     PortLink link(board->slave_path());
     auto driver = serial_driver(link.path.string());
@@ -1419,11 +1423,33 @@ TEST_CASE("SkyWatcher serial - a GOTO-mode axis that survived the outage is repo
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK(replugged->axis_running(sw::kAxisDec));
-    // GOTO-mode motion needs no reconstructed flag: Slewing is served from the
-    // status frame polled off the board (seeded at connect), which is why this
-    // half was already visible on hardware while the speed-mode half was not.
-    CHECK(driver->get_slewing());
+    CHECK(replugged->count_frames('K') >= 1);
+    CHECK_FALSE(replugged->axis_running(sw::kAxisDec));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// open-astro#2407: a MoveAxis this driver started is stopped on relink, however brief the outage. The client
+// that jogged the axis lost its link with it; the #521 window keeps only motion the driver cannot attribute.
+TEST_CASE("SkyWatcher serial - a MoveAxis under way when the link dropped is stopped on relink",
+          "[skywatcher][serial][relink][goto-safety]") {
+    RelinkWindowGuard window(std::chrono::hours(1));
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->move_axis(0, 1.0);
+    REQUIRE(board->axis_running(sw::kAxisRa));
+
+    auto replugged = relink_board(board, link, *driver);
+    replugged->set_axis_running(sw::kAxisRa, true, /*speed_mode=*/true);  // the jog kept turning
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(replugged->count_frames('K') >= 1);
+    CHECK_FALSE(replugged->axis_running(sw::kAxisRa));
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 

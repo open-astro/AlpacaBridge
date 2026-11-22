@@ -1,0 +1,5 @@
+### Fixed
+- **Sky-Watcher Telescope Driver** (AlpacaCore, issue #2407): motion now fails closed in four more places. A reconnect stops an axis that a GoTo, Park, FindHome or MoveAxis left running when the link dropped, however short the outage. A MoveAxis with no new MoveAxis call for 60 s is stopped and reported through Slewing. A slew still more than 600 arcsec off after its three re-gotos fails and stops instead of reporting success, and each re-goto checks the altitude limit like the first leg. AbortSlew reads the axes back and sends the stop again, up to three stops, and Slewing reports a mount that keeps moving.
+
+### Breaking changes
+- **Sky-Watcher Telescope Driver**: SiteLongitude writes are refused (InvalidOperation) while a GoTo, Park, FindHome or MoveAxis runs, because they move the target under the slew. A MoveAxis now stops after 60 s without a new MoveAxis call, and a reconnect stops a GoTo-mode axis or a driver motion that survived a short link drop, which 6.0.0-beta.4 left running. **After upgrading:** send the site before you slew, and repeat MoveAxis at least once a minute for a long jog.
