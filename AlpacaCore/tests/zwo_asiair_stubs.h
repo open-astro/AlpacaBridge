@@ -13,12 +13,13 @@
 #pragma once
 
 // The hardware side of the two ZWO ASIAIR switch drivers, for every test that drives them (issue #1862): the
-// libgpiod calls of the ASIAIR Pro (and Plus Pi CM4) wrapper and the ioctl() of the ASIAIR Plus RK3568 wrapper.
-// Neither driver has a seam: each wrapper calls the C library directly. So zwo_asiair_stubs.cpp, compiled once
-// into alpacacore_tests, defines those C symbols; the wrappers linked into the binary call them instead of the
-// shared libraries. Each stub acts only on its own chip or file and forwards everything else to the real call
-// (RTLD_NEXT), so every other test in the binary sees the real library. The definitions live in that one .cpp
-// because an extern "C" override defined in two test files is a duplicate symbol.
+// libgpiod calls of the ASIAIR Pro (and Plus Pi CM4) util::GpiodLineBackend and the ioctl() of the ASIAIR Plus
+// RK3568 PwmGpioMiscBackend. The driver cases run those real backends (the engine's own cases run on a fake
+// backend, fake_gpio_line_backend.h), so zwo_asiair_stubs.cpp, compiled once into alpacacore_tests, defines the
+// C symbols the backends call; the backends linked into the binary call them instead of the shared libraries. Each stub
+// acts only on its own chip or file and forwards everything else to the real call (RTLD_NEXT), so every other test in
+// the binary sees the real library. The definitions live in that one .cpp because an extern "C" override defined in two
+// test files is a duplicate symbol.
 //
 // The libgpiod side models a chip in memory at kStubChip: a line's level outlives its request (as on the Pi
 // kernels, persist_gpio_outputs), a request or reconfigure drives only the lines its config sets to output (an
@@ -71,6 +72,8 @@ struct IoctlStub {
     std::map<std::int32_t, std::int32_t> last_level;  // kernel index -> raw level of its last SET_LEVEL
     int off_writes = 0;                               // raw level 1 == logical OFF
     int requests = 0;                                 // every stubbed SET_MODE, ENABLE and SET_LEVEL
+    std::vector<std::int32_t> set_modes;              // kernel index of each SET_MODE, in order
+    std::vector<std::int32_t> enables;                // kernel index of each ENABLE, in order
 };
 
 IoctlStub& ioctl_stub();

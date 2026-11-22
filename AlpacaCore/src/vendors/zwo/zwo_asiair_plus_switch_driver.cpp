@@ -10,12 +10,16 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/power_port_switch_driver.h>
+#include <alpacacore/util/soft_pwm_ports.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 
 #include <cstddef>
 #include <string>
 #include <utility>
+
+#include "pwm_gpio_misc_backend.h"
 
 namespace alpacacore::vendor::zwo {
 
@@ -31,7 +35,7 @@ util::PowerPortProfile asiair_plus_profile(const AsiairPlusSwitchConfig& config)
     profile.unique_id_prefix = "ZWO_ASIAIR_PLUS_RK3568_";
     profile.log_category = kLogCategory;
     profile.not_connected_message = "ASIAIR Plus switch not connected";
-    // Logged only when close() throws. This wrapper's close() logs a failed settle instead of throwing, so only an
+    // Logged only when close() throws. The engine's close() logs a failed settle instead of throwing, so only an
     // unexpected exception (a failed thread join or allocation) reaches it.
     profile.destruction_warning = "Error during ASIAIR Plus switch destruction: ";
     profile.power_on_state = config.power_on_state;
@@ -98,11 +102,22 @@ AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
-                                                            AsiairPlusSwitchConfig config) {
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config) {
+    if (config.ports.size() > 4) {
+        throw AlpacaException("ASIAIR Plus exposes 4 DC ports; configuration lists more", AlpacaError::InvalidValue);
+    }
     auto profile = asiair_plus_profile(config);
-    return std::make_unique<util::PowerPortSwitchDriver<AsiairPlusProtocolWrapper>>(
-        device_number, std::move(profile), config.device_path, std::move(config.ports), config.pwm_frequency_hz);
+    util::PortsConfig ports;
+    ports.device_path = config.device_path;
+    ports.pwm_frequency_hz = config.pwm_frequency_hz;
+    ports.model_name = "ASIAIR Plus";
+    ports.log_category = kLogCategory;
+    // Ports 1..4 are lines 0..3: the backend maps them onto the kernel indices 4..7.
+    for (std::size_t i = 0; i < config.ports.size(); ++i) {
+        ports.ports.push_back({config.ports[i].name, static_cast<unsigned int>(i), true, config.ports[i].pwm_enabled});
+    }
+    return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<PwmGpioMiscBackend>>>(
+        device_number, std::move(profile), std::move(ports));
 }
 
 } // namespace alpacacore::vendor::zwo

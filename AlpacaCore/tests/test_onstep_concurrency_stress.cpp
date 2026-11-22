@@ -209,7 +209,7 @@ TEST_CASE("OnStep telescope - destruction races an in-flight connect", "[onstep]
 
 // The driver has no slew or pulse-guide thread (#1728): what is live at
 // destruction is a MoveAxis re-send body or a Park body waiting for the mount
-// to stop, after an accepted GOTO and a pulse guide (#1762). Each driver must
+// to stop, after a pulse guide and an accepted GOTO (#1762). Each driver must
 // connect, and its destructor must let go of the controller's shared link
 // (#2223): a link it left held would still be registered after it.
 TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Park body live)",
@@ -225,10 +225,11 @@ TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Par
         mount->moving = false;
         auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, info);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        // The pulse first: since #2504 a PulseGuide during the GOTO is refused.
+        REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
         const int gotos = mount->gotos.load();
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
         REQUIRE(mount->gotos.load() == gotos + 1);
-        REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
         const int moves = mount->moves.load();
         REQUIRE_NOTHROW(driver->move_axis(0, 1.0));  // the re-send body now waits for its 7 s tick
         REQUIRE(mount->moves.load() == moves + 1);

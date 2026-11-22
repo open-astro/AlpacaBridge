@@ -2138,8 +2138,9 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
         driver->park();
         clock.advance(std::chrono::milliseconds(5500));
         CHECK(driver->get_slewing());
-        driver->pulse_guide(3, 3000);
-        CHECK(driver->get_is_pulse_guiding());
+        // Issue #2504: refused while the motion runs, and Slewing still reports it.
+        require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
         CHECK(driver->get_slewing());
         driver->set_connected(false);
     }
@@ -2161,7 +2162,8 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
         driver->find_home();
         clock.advance(std::chrono::milliseconds(5500));
         CHECK(driver->get_slewing());
-        driver->pulse_guide(3, 3000);
+        // Issue #2504: refused while the motion runs, and Slewing still reports it.
+        require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
         CHECK(driver->get_slewing());
         driver->set_connected(false);
     }
@@ -2184,8 +2186,9 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     driver->move_axis(0, driver->get_axis_rate_range(0).first);
     driver->move_axis(0, 0.0);
     driver->move_axis(1, 0.0);
-    driver->pulse_guide(3, 3000);
-    CHECK(driver->get_is_pulse_guiding());
+    // Issue #2504: refused while the motion runs, and Slewing still reports it.
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2204,8 +2207,9 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
     driver->move_axis(0, 0.0);
-    driver->pulse_guide(3, 3000);
-    CHECK(driver->get_is_pulse_guiding());
+    // Issue #2504: refused while the motion runs, and Slewing still reports it.
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2266,8 +2270,9 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
         CHECK_FALSE(driver->get_at_home());  // still the old tracking status
         mount.set_system_status(2);
         clock.advance(std::chrono::milliseconds(5500));
-        driver->pulse_guide(3, 3000);
-        CHECK(driver->get_is_pulse_guiding());
+        // Issue #2504: refused while the motion runs, and Slewing still reports it.
+        require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
         CHECK(driver->get_slewing());
         driver->set_connected(false);
     }
@@ -2327,9 +2332,10 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
 
     mount.set_system_status(2);
     clock.advance(home_at + std::chrono::seconds(2) - clock.now());
-    driver->pulse_guide(3, 3000);
+    // Issue #2504: refused while the motion runs, and Slewing still reports it.
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
     clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
-    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -3527,9 +3533,10 @@ TEST_CASE("iOptron hold window - a Connect over a lost link inside the holds lea
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
+    // The pulse first: a PulseGuide during the GOTO is refused (issue #2504).
+    driver->pulse_guide(0, 2000);
     driver->slew_to_coordinates_async(12.0, 20.0);
     REQUIRE(wait_until([&] { return first->model().count(":MS1#") == 1; }));
-    driver->pulse_guide(0, 2000);
     first->unplug_on(on_command(":GEP#"));
     require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver->get_connected());
@@ -4164,7 +4171,8 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
     mount.set_system_status(2);
     clock.advance(std::chrono::seconds(6));
     CHECK(driver->get_slewing());
-    driver->pulse_guide(3, 2704);
+    // Issue #2504: refused while the motion runs, and Slewing still reports it.
+    require_alpaca_error([&] { driver->pulse_guide(3, 2704); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK(driver->get_slewing());
     driver->abort_slew();
     driver->set_connected(false);
@@ -4188,7 +4196,8 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     // Fresh status past the dispatch window: the mount stopped 12" off, so the trim pulse goes out.
     CHECK(driver->get_slewing());
     REQUIRE(mount.count(":ZQ") == 1);
-    driver->pulse_guide(3, 3000);
+    // Issue #2504: refused while the motion runs, and Slewing still reports it.
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
     mount.set_system_status(2);
     clock.advance(std::chrono::milliseconds(2100));  // past the trim hold, inside the client's pulse window
     CHECK(driver->get_slewing());
@@ -4745,5 +4754,134 @@ TEST_CASE("iOptron MoveAxis - a positive secondary rate raises Declination on bo
             }
             driver->set_connected(false);
         }
+    }
+}
+
+// ── Issue #2504: PulseGuide is refused while the driver's own GOTO, Park or FindHome runs ─────────────────────
+//
+// A guide pulse sent into a GOTO, a Park or a home search changes the motion the mount runs. It is refused with
+// InvalidOperation before anything is sent, inside the initiator's 5 s window and past it while the mount still
+// moves. 0036 runs the :MSH# zero search for FindHome, 0040 the :MH# go-to-zero.
+// Falsified by: ioptron_telescope_driver.cpp pulse_guide() deleting the slew, park or home refusal.
+TEST_CASE("iOptron goto-safety - PulseGuide during a GOTO, Park or FindHome is refused and sends nothing (#2504)",
+          "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
+    enum class Motion { Goto, Park, FindHome };
+    for (const char* model : {"0036", "0040"}) {
+        for (const Motion motion : {Motion::Goto, Motion::Park, Motion::FindHome}) {
+            CAPTURE(model, static_cast<int>(motion));
+            FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            pass_connect_cache(clock);
+            mount.set_system_status(2);  // the mount runs the motion for the whole case
+            if (motion == Motion::Goto) {
+                driver->slew_to_coordinates_async(13.0, 20.0);
+                REQUIRE(wait_for_goto_dispatch(mount));
+            } else if (motion == Motion::Park) {
+                driver->park();
+            } else {
+                driver->find_home();
+            }
+            const int pulses = mount.count(":Z");
+            for (const auto step : {std::chrono::seconds(0), std::chrono::seconds(6)}) {
+                CAPTURE(step.count());
+                clock.advance(step);
+                require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+                CHECK(mount.count(":Z") == pulses);
+                CHECK_FALSE(driver->get_is_pulse_guiding());
+                CHECK(driver->get_slewing());
+            }
+            driver->set_connected(false);
+        }
+    }
+}
+
+// Issue #2504: the refusal ends with the motion, even when no client polled Slewing. PulseGuide asks the mount
+// itself: a GOTO or FindHome that ended lets the pulse go out, and a Park that landed keeps InvalidWhileParked.
+// Falsified by: ioptron_telescope_driver.cpp pulse_guide() refreshing the status for a GOTO only (the FindHome and
+// Park legs fail), or not checking the parked flag again after that refresh (the Park leg fails).
+TEST_CASE("iOptron goto-safety - PulseGuide after an unpolled GOTO, Park or FindHome ended is not refused (#2504)",
+          "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
+    enum class Motion { Goto, Park, FindHome };
+    for (const char* model : {"0036", "0040"}) {
+        for (const Motion motion : {Motion::Goto, Motion::Park, Motion::FindHome}) {
+            CAPTURE(model, static_cast<int>(motion));
+            FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            pass_connect_cache(clock);
+            mount.set_system_status(2);
+            if (motion == Motion::Goto) {
+                driver->slew_to_coordinates_async(13.0, 20.0);
+                REQUIRE(wait_for_goto_dispatch(mount));
+            } else if (motion == Motion::Park) {
+                driver->park();
+            } else {
+                driver->find_home();
+                // A zero search (0036) lands only once a status 2 past its 5 s hold showed it moving.
+                clock.advance(std::chrono::seconds(6));
+                CHECK(driver->get_slewing());
+            }
+            // The motion ends while nobody polls: tracking after a GOTO, parked, at home.
+            mount.set_system_status(motion == Motion::Goto ? 1 : motion == Motion::Park ? 6 : 7);
+            clock.advance(std::chrono::seconds(6));
+            const int pulses = mount.count(":Z");
+            if (motion == Motion::Park) {
+                require_alpaca_error([&] { driver->pulse_guide(3, 3000); },
+                                     alpacacore::AlpacaError::InvalidWhileParked);
+                CHECK(mount.count(":Z") == pulses);
+            } else {
+                driver->pulse_guide(3, 3000);
+                CHECK(mount.count(":Z") == pulses + 1);
+                CHECK(driver->get_is_pulse_guiding());
+            }
+            driver->set_connected(false);
+        }
+    }
+}
+
+// ── Issue #2503: PulseGuide is refused on the axis a MoveAxis is driving ─────────────────────────────────────
+//
+// The pulse and the jog would drive the same motor at once. A pulse on the jogging axis is refused with
+// InvalidOperation, nothing is sent and the jog keeps running (no stop goes out). A pulse on the other axis is
+// accepted and leaves the jog running. ASCOM directions 0 (North) and 1 (South) move Dec (axis 1), 2 (East) and
+// 3 (West) move RA (axis 0).
+// Falsified by: ioptron_telescope_driver.cpp pulse_guide() deleting the MoveAxis refusal (every refused leg fails),
+// or reading the other axis's flag (every leg fails).
+TEST_CASE("iOptron goto-safety - PulseGuide on the jogging axis is refused and the jog keeps running (#2503)",
+          "[ioptron][telescope][unit][fake][pulseguide][moveaxis][goto-safety]") {
+    struct Leg {
+        int axis;
+        int direction;        // on the jogging axis
+        int other_direction;  // on the other axis
+    };
+    for (const Leg leg : {Leg{0, 2, 0}, Leg{0, 3, 1}, Leg{1, 0, 2}, Leg{1, 1, 3}}) {
+        CAPTURE(leg.axis, leg.direction);
+        FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        FakeTaskClock clock;
+        auto driver = hold_driver(mount, clock);
+        driver->move_axis(leg.axis, driver->get_axis_rate_range(leg.axis).first);
+        const auto stops = [&] { return mount.count(":q") + mount.count(":Q#"); };
+        const int pulses = mount.count(":Z");
+        const int stops_before = stops();
+
+        require_alpaca_error([&] { driver->pulse_guide(leg.direction, 1000); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        CHECK(mount.count(":Z") == pulses);
+        CHECK(stops() == stops_before);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+
+        driver->pulse_guide(leg.other_direction, 1000);
+        CHECK(mount.count(":Z") == pulses + 1);
+        CHECK(stops() == stops_before);
+        CHECK(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+
+        driver->move_axis(leg.axis, 0.0);
+        driver->set_connected(false);
     }
 }

@@ -22,6 +22,7 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
@@ -661,8 +662,9 @@ public:
             published_connected_ = true;  // the connect is complete (#910)
             lock.unlock();
             // The connect's body reads the host clock's trust itself, so a change seen during the connect needs
-            // no re-sync of its own (#2419).
-            resync_pending_.store(false);
+            // no re-sync of its own (#2419), and its decision is this connection's first (#2480).
+            host_clock_gate_.drop_owed();
+            host_clock_gate_.begin_connect();
             // After the locks are released: the body takes both.
             start_clock_sync();
             return;
@@ -2004,16 +2006,32 @@ public:
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", /*fast_parked=*/true});
-        // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
-        // status is still the GOTO's: the pulse itself makes the firmware report slewing.
-        if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
+        // Issue #2063: a GOTO nobody polled is still flagged here, and so is a Park or FindHome (#2504). Ask the
+        // mount before the pulse starts, while its status is still the motion's: the pulse itself makes the
+        // firmware report slewing.
+        const auto own_motion_running = [&] {
+            return (slew_in_progress_ && !goto_seen_stopped_) || driver_motion_ != DriverMotion::None;
+        };
+        if (own_motion_running() && !slew_hold_.active(clock_.now())) {
             refresh_status_cache_locked(/*force=*/true);
+            ensure_not_parked_fast_locked("PulseGuide");  // a Park that landed unpolled: the gate read the old cache
+        }
+        // Issue #2504: a pulse would change the GOTO, Park or FindHome the driver started.
+        if (own_motion_running()) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
+        }
+        const bool is_dec = (direction == 0 || direction == 1);
+        const bool is_ra = (direction == 2 || direction == 3);
+        // Issue #2503: the pulse and a jog on its axis would drive one motor at once. The jog keeps running, and a
+        // pulse on the other axis is still accepted.
+        if (is_dec ? axis_move_active_secondary_ : axis_move_active_primary_) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
         }
 
         const Wire protocol = wire();
         int calibrated_direction = direction;
-        const bool is_dec = (direction == 0 || direction == 1);
-        const bool is_ra = (direction == 2 || direction == 3);
         if (is_dec) {
             bool invert_dec = dec_guide_inverted_;
             if (should_flip_dec_for_pier_locked()) {
@@ -3758,10 +3776,8 @@ private:
         // sync_time_on_connect_ is fixed at construction; published_connected_ is lock-free.
         if (!sync_time_on_connect_ || !published_connected_.load()) return;
         try {
-            resync_pending_.store(true);
-            drain_pending_resync(event.kind == util::HostClockEvent::Kind::Stepped
-                                     ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                     : std::string("Host clock became trusted"));
+            host_clock_gate_.owe(event);
+            drain_pending_resync(util::HostClockWriteGate::describe(event));
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -3771,13 +3787,13 @@ private:
     // A change seen while disconnected is dropped. Call with no driver lock held.
     void drain_pending_resync(const std::string& why) noexcept {
         try {
-            while (resync_pending_.load()) {
+            while (host_clock_gate_.owed()) {
                 std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
                 if (!transition.owns_lock()) {
                     if (host_clock_busy_hook_) host_clock_busy_hook_();  // test seam: no driver lock held
                     return;                                              // its holder drains as it lets go
                 }
-                if (!resync_pending_.exchange(false)) return;
+                if (!host_clock_gate_.take_owed()) return;
                 start_resync_transition_locked(why);
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
@@ -3894,14 +3910,12 @@ private:
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
-        if (do_clock_sync && !util::HostClockTrust::trusted()) {
+        // A re-sync stops silently; the connect's pass asks the gate, which warns (#2480).
+        if (do_clock_sync &&
+            !(resync ? util::HostClockTrust::trusted()
+                     : host_clock_gate_.may_write(mount_utc ? format_utc(*mount_utc) : std::string("unknown")))) {
             do_clock_sync = false;
             if (resync) return;
-            ALPACA_LOG_WARN("iOptron",
-                            "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                            "leaving the mount clock (" +
-                                (mount_utc ? format_utc(*mount_utc) : std::string("unknown")) +
-                                ") alone until the host clock is set or a client writes UTCDate");
         }
         if (resync && !do_clock_sync) return;
 
@@ -4511,9 +4525,9 @@ private:
     // Test seam (issue #2419): runs before each attempt of the clock sync's UTC write, before its exchange, with no
     // driver lock held.
     std::function<void()> clock_sync_before_utc_exchange_hook_;
-    // Issue #2419: a host clock change not acted on yet: stored before on_host_clock_changed() tries
-    // transition_mutex_, drained by whoever holds that lock as it lets go.
-    std::atomic<bool> resync_pending_{false};
+    // Issue #2419: a host clock change not acted on yet (owed): stored before on_host_clock_changed() tries
+    // transition_mutex_, drained by whoever holds that lock as it lets go. Also the connect's untrusted warning.
+    util::HostClockWriteGate host_clock_gate_{"iOptron"};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
     // re-sync that superseded the connect's pass runs that pass in its place.
     bool clock_sync_connect_pass_done_ = false;

@@ -1512,6 +1512,42 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop with no slew running leaves a jo
     rig.driver->move_axis(1, 0.0);
 }
 
+// #2503 (the maintainer's decision of 2026-11-22): a PulseGuide on the axis a non-zero MoveAxis drives is refused with
+// InvalidOperation before anything goes to the wire, and the jog keeps running. A pulse on the other axis is accepted
+// and leaves the jog alone.
+TEST_CASE(
+    "Celestron motion owner - PulseGuide on the axis a MoveAxis is driving is refused and the jog runs on (#2503)",
+    "[celestron][telescope][pulseguide][motion-owner][goto-safety]") {
+    const int jog_axis = GENERATE(0, 1);
+    CAPTURE(jog_axis);
+    const int other_axis = 1 - jog_axis;
+    const int jog_direction = jog_axis == 1 ? 0 : 2;  // North moves Dec, East moves RA
+    const int other_direction = jog_axis == 1 ? 2 : 0;
+    SupersedeRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    rig.driver->move_axis(jog_axis, 0.5);
+    const int stops = zero_rate_stops(*rig.st, jog_axis);
+    const int requests = rig.st->requests.load();
+
+    std::string message;
+    CHECK(error_code_of([&] { rig.driver->pulse_guide(jog_direction, 500); }, &message) ==
+          alpacacore::AlpacaError::InvalidOperation);
+    CHECK(message == "PulseGuide is not allowed on an axis MoveAxis is moving");
+    CHECK(rig.st->requests.load() == requests);  // nothing reached the wire, not even the pier read
+    CHECK(rig.st->guide_command_count(jog_axis) == 0);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(zero_rate_stops(*rig.st, jog_axis) == stops);
+    CHECK(rig.driver->get_slewing());  // the jog still runs
+
+    CHECK_NOTHROW(rig.driver->pulse_guide(other_direction, 500));
+    CHECK(rig.st->guide_command_count(other_axis) == 1);
+    CHECK(rig.st->guide_command_count(jog_axis) == 0);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    CHECK(zero_rate_stops(*rig.st, jog_axis) == stops);
+    CHECK(rig.driver->get_slewing());  // the jog still runs
+    rig.driver->move_axis(jog_axis, 0.0);
+}
+
 // A stop that fails may leave the GOTO running on either axis: the MoveAxis reports the failure, and Slewing raises it
 // (as after a failed AbortSlew) rather than reading false.
 TEST_CASE("Celestron MoveAxis - a failed one-axis stop during an async slew never reads Slewing false (#2458)",

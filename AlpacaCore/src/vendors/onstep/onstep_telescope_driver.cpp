@@ -21,6 +21,7 @@
 #include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
@@ -1076,9 +1077,13 @@ public:
             // then seeds UTCDate from. The connect still succeeds, as for the
             // site writes above (#1754).
             // open-astro#2419: this connect decides on the host clock here, so a change seen before now needs no
-            // re-sync of its own; one seen from here to the end of this call re-syncs as it returns.
-            clock_resync_pending_.store(false);
-            if (sync_time_on_connect_ && util::HostClockTrust::trusted()) {
+            // re-sync of its own; one seen from here to the end of this call re-syncs as it returns. Untrusted, the
+            // gate logs the skip (#2480): a Pi with no RTC boots on the time of its last shutdown, and writing it put
+            // RC51's mount 6 h 48 min out (#2419). The site writes above do not depend on it, and the read below
+            // seeds UTCDate.
+            host_clock_gate_.drop_owed();
+            host_clock_gate_.begin_connect();
+            if (sync_time_on_connect_ && host_clock_gate_.may_write()) {
                 try {
                     set_utc_date_locked(std::chrono::system_clock::now());
                 } catch (const std::exception& ex) {
@@ -1086,13 +1091,6 @@ public:
                                                           "clock: ") +
                                                   ex.what());
                 }
-            } else if (sync_time_on_connect_) {
-                // A Pi with no RTC boots on the time of its last shutdown; writing it put RC51's mount 6 h 48 min
-                // out (#2419). The site writes above do not depend on it, and the read below seeds UTCDate.
-                ALPACA_LOG_WARN("OnStep",
-                                "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                                "leaving the mount clock alone until the host clock is set or a client writes "
-                                "UTCDate");
             }
             // The mount clock is read here, once, so UTCDate (and so DeviceState)
             // performs no serial exchange of its own (#1478); a written UTCDate needs none.
@@ -1962,13 +1960,21 @@ public:
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
+        refuse_pulse_during_slew_locked();        // #2504: after the parked and fault checks, before anything is sent
+        const int axis = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
+        // #2503 (the #2467 rule): a pulse on the axis a non-zero MoveAxis drives would run into the jog, so it is
+        // refused and the jog runs on. The other axis is not checked. MoveAxis sets the flag under the operation lock
+        // this call holds, so no jog lands between the check and the send.
+        if (manual_axis_slewing_[axis]) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
+        }
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here:
         // IsPulseGuiding reads the axis's hold window. Each axis has its own
         // (OnStepX times each axis on its own), so a shorter pulse on one axis
         // does not end the other's.
-        const int axis = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
         const auto now = clock_.now();
         const auto pulse = std::chrono::milliseconds(duration);
         // The other axis's pulse outlasts this one: its pulse-end body, which measures after the later end, stays.
@@ -3719,6 +3725,22 @@ private:
         }
     }
 
+    // #2504, ITelescopeV4: a guide pulse during a GOTO, a Park or a FindHome changes the motion the mount runs, so a
+    // PulseGuide is refused while one runs, before anything is sent. Both sources count. The driver's state covers what
+    // the mount's status does not show yet: its slew grace (decision 0022) and a Park or FindHome still to be sent once
+    // its stops have settled (park_home_request_). The frame covers the motion itself: a GOTO (written through at its
+    // dispatch), a park or home the mount took (written through as slewing), then 'I' parking and 'h' homing from the
+    // mount. The frame is read, not :GU#, so a guide pulse costs no extra exchange. A MoveAxis is not a slew here
+    // ('N' covers a GOTO only).
+    void refuse_pulse_during_slew_locked() const {
+        const MountStatus status = frame_status_locked();
+        if (slew_hold_.active(clock_.now()) || park_home_request_ || status.is_slewing || status.is_parking ||
+            status.is_homing) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
     // The :MS# refusal digit (OnStepX Goto.command.cpp) as the error the client sees (#1379).
     // `command`: the GOTO command that was refused (:MS#, or :MNe#/:MNw# for the SideOfPier flip; same digits).
     static AlpacaException slew_refused(const char* who, const std::string& reply, const char* command = ":MS#") {
@@ -5060,9 +5082,7 @@ public:
         if (!sync_time_on_connect_) {  // fixed at construction
             return;
         }
-        clock_resync_stepped_.store(event.kind == util::HostClockEvent::Kind::Stepped);
-        clock_resync_step_ms_.store(static_cast<std::int64_t>(event.step.count()));
-        clock_resync_pending_.store(true);  // before the try_lock: a holder that lets go after it sees the flag
+        host_clock_gate_.owe(event);  // before the try_lock: a holder that lets go after it sees the flag
         drain_pending_clock_resync();
     }
 
@@ -5072,12 +5092,12 @@ private:
     // lost. Call with no driver lock held.
     void drain_pending_clock_resync() noexcept {
         try {
-            while (clock_resync_pending_.load()) {
+            while (host_clock_gate_.owed()) {
                 std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
                 if (!transition.owns_lock()) {
                     return;  // its holder drains as it lets go
                 }
-                if (!clock_resync_pending_.exchange(false)) {
+                if (!host_clock_gate_.take_owed()) {
                     return;
                 }
                 start_clock_resync_transition_locked();
@@ -5095,9 +5115,7 @@ private:
             if (!published_connected_.load()) {
                 return;
             }
-            std::string why = clock_resync_stepped_.load()
-                                  ? "Host clock stepped by " + std::to_string(clock_resync_step_ms_.load()) + " ms"
-                                  : std::string("Host clock became trusted");
+            std::string why = host_clock_gate_.owed_why();
             const std::uint64_t decided_at = utc_write_generation_.load();
             clock_resync_.start([this, why = std::move(why), decided_at](util::OperationContext& ctx) {
                 run_clock_resync(ctx, why, decided_at);
@@ -5462,11 +5480,10 @@ private:
     util::OperationGeneration pulse_measurement_generation_;
     mutable util::AsyncOperation pulse_measurement_{"OnStep pulse-end measurement", pulse_measurement_generation_,
                                                     clock_};
-    // open-astro#2419: a host clock change on_host_clock_changed() has not acted on yet, and what it was. Cleared
-    // where a connect decides on the host clock; drained by the hook itself, or as set_connected() lets go.
-    std::atomic<bool> clock_resync_pending_{false};
-    std::atomic<bool> clock_resync_stepped_{false};
-    std::atomic<std::int64_t> clock_resync_step_ms_{0};
+    // open-astro#2419: a host clock change on_host_clock_changed() has not acted on yet (owed), and what it was.
+    // Dropped where a connect decides on the host clock; drained by the hook itself, or as set_connected() lets go.
+    // Also the connect's untrusted-clock warning (#2480).
+    util::HostClockWriteGate host_clock_gate_{"OnStep"};
     // Bumped by each client UTCDate write that landed (under the operation lock); a re-sync decided before it sends
     // nothing. Read lock-free where the re-sync is decided.
     std::atomic<std::uint64_t> utc_write_generation_{0};

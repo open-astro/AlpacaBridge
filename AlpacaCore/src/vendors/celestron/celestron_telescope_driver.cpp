@@ -22,6 +22,7 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
@@ -125,6 +126,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
 }();
 // #2263: a PulseGuide while a slew, Park or FindHome runs (util::MotionOwner's refusal text).
 constexpr const char* kPulseRefusedText = "PulseGuide is not allowed while a slew, park or home is running";
+constexpr const char* kPulseOnJogRefusedText = "PulseGuide is not allowed on an axis MoveAxis is moving";
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -1123,10 +1125,8 @@ public:
         try {
             // sync_time_on_connect_ is fixed at construction.
             if (!sync_time_on_connect_ || !util::HostClockTrust::trusted()) return;
-            const std::string why = event.kind == util::HostClockEvent::Kind::Stepped
-                                        ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                        : std::string("Host clock became trusted");
-            clock_resync_pending_.store(true);
+            const std::string why = util::HostClockWriteGate::describe(event);
+            host_clock_gate_.owe(event);
             do {
                 std::unique_lock<std::mutex> gate(clock_resync_gate_mutex_, std::try_to_lock);
                 if (!gate.owns_lock()) {
@@ -1134,8 +1134,8 @@ public:
                     return;  // the holder looks at the flag after it lets go
                 }
                 // One body covers this change and any left pending before it.
-                if (clock_resync_pending_.exchange(false)) start_clock_resync_gate_locked(why);
-            } while (clock_resync_pending_.load());
+                if (host_clock_gate_.take_owed()) start_clock_resync_gate_locked(why);
+            } while (host_clock_gate_.owed());
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -1162,7 +1162,7 @@ private:
     // Under the gate: a change on_host_clock_changed() left pending during a set_connected(). A disconnect's exit
     // finds the mount disconnected and drops it.
     void start_pending_clock_resync_gate_locked() noexcept {
-        if (!clock_resync_pending_.exchange(false)) return;
+        if (!host_clock_gate_.take_owed()) return;
         if (!util::HostClockTrust::trusted()) return;
         start_clock_resync_gate_locked("Host clock changed during a connect or disconnect");
     }
@@ -1178,7 +1178,7 @@ private:
                 if (!gate.owns_lock()) return;
                 start_pending_clock_resync_gate_locked();
                 run_clock_resync_hook(ClockResyncStep::ExitChecked);
-            } while (clock_resync_pending_.load());
+            } while (host_clock_gate_.owed());
         } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor's body (only the test hook can throw)
         }
     }
@@ -1927,7 +1927,7 @@ public:
         // Validation only. The pier read, the guide write and the start below run with mutex_ free (decision 0006).
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", nullptr, true});
+            util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", true});
             // #2263: refused while a slew, Park or FindHome runs, before the pier read; the claim below asks again.
             if (motion_owner_.slew_running()) {
                 throw AlpacaException(kPulseRefusedText, AlpacaError::InvalidOperation);
@@ -1936,6 +1936,12 @@ public:
             // 0 North and 1 South move Dec (axis 1), 2 East and 3 West move RA (axis 0). North and West are positive
             // (East slows tracking, so RA increases on the sky); a rate that rounds to 0 still moves one step.
             axis = direction <= 1 ? 1 : 0;
+            // #2503: refused on the axis a non-zero MoveAxis drives, before the pier read, so the guide write never
+            // goes into the running jog. The other axis is not checked. The initiator lock keeps every MoveAxis out
+            // until this call returns, so the jog cannot start or stop after this check.
+            if (manual_axis_slewing_[axis]) {
+                throw AlpacaException(kPulseOnJogRefusedText, AlpacaError::InvalidOperation);
+            }
             const int sign = (direction == 0 || direction == 3) ? 1 : -1;
             const double rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
             velocity = sign * static_cast<int>(std::round((rate / kSiderealDegPerSec) * 100.0));
@@ -2182,7 +2188,7 @@ public:
             // Gate BEFORE claiming: claiming the slew slot would end a park in
             // flight (clearing parking_) and let this slew clobber it.
             std::unique_lock<std::mutex> lock(mutex_);
-            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
+            util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinatesAsync"}, lock});
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -2962,11 +2968,9 @@ private:
         // confirmed by a client or a Sync Time, or seen to step). A Pi with no RTC boots on its last-shutdown time,
         // which the hand controller would then point by. The site write above does not depend on it, and the mount's
         // own clock is read below instead, as with syncTimeOnConnect off.
-        if (sync_time_on_connect_ && !util::HostClockTrust::trusted()) {
-            ALPACA_LOG_WARN("Celestron",
-                            "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                            "leaving the mount clock alone until the host clock is set or a client writes UTCDate");
-        } else if (sync_time_on_connect_) {
+        // Untrusted, the gate logs the skip (#2480).
+        host_clock_gate_.begin_connect();
+        if (sync_time_on_connect_ && host_clock_gate_.may_write()) {
             fail_if_link_released();  // set_time() on a released port would throw a plain DriverException
             time_write = prepare_time_write(std::chrono::system_clock::now());
             protocol.set_time(time_write->info);
@@ -4062,7 +4066,6 @@ private:
     struct GateChecks {
         const CelestronTelescopeDriver& driver;
         const char* who = nullptr;
-        std::unique_lock<std::mutex>* lock = nullptr;
         bool guide_port = false;
 
         void check_connected() const {
@@ -4074,7 +4077,13 @@ private:
         }
         void check_not_parked(bool /*stop*/) const { driver.check_not_parked_locked(who); }
         void check_no_fault() const { driver.throw_if_link_faulted(); }
-        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
+    // A slew's checks add Tracking, which may release the held mutex_ `lock` to ask the mount. Only this type has
+    // check_tracking() and it cannot be built without the lock, so a missing lock does not compile (#2415).
+    struct SlewGateChecks : GateChecks {
+        std::unique_lock<std::mutex>& lock;
+
+        void check_tracking() const { driver.check_tracking_for_slew(lock, who); }
     };
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
@@ -4761,7 +4770,8 @@ private:
     // start(), so a re-sync starts only in a settled connected session and none starts behind a disconnect's join.
     // Lock order: transition_mutex_, this, initiator_mutex_. No body takes it.
     std::mutex clock_resync_gate_mutex_;
-    std::atomic<bool> clock_resync_pending_{false};  // a change seen while set_connected() held the gate
+    // A change seen while set_connected() held the gate (owed), and the connect's untrusted-clock warning (#2480).
+    util::HostClockWriteGate host_clock_gate_{"Celestron"};
     // Declared last, so it is destroyed (and joins) first: its body touches the members above.
     util::OperationGeneration clock_resync_generation_;
     util::AsyncOperation clock_resync_{"Celestron clock re-sync", clock_resync_generation_, clock_};

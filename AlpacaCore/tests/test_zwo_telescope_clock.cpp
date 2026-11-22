@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <future>
 #include <list>
@@ -206,6 +207,27 @@ TEST_CASE("ZWO motion owner - MoveAxis ends a running guide pulse on its own axi
     for (int i = 0; i < 10; ++i) rig.advance(500ms);
     CHECK(rig.mount.count(":Mg") == 1);
     if (rate != 0.0) rig.driver->move_axis(axis, 0.0);
+}
+
+// #2415: ZWO's MoveAxis stop is |rate| < 1e-9, strictly under. A rate of 1e-9 starts a jog; 1e-10 and the largest
+// double under 1e-9 stop the axis. Green before and after the threshold moved into the gate limits; it pins that the
+// move doesn't change where the stop starts.
+// Falsified by: zwo_telescope_driver.cpp kCommandLimits.move_axis_stop_epsilon set to 1e-9 (1e-9 becomes a stop), or
+// left at 0.0 once move_axis() decides the stop through util::check_move_axis() (1e-10 becomes a jog).
+TEST_CASE("ZWO telescope - MoveAxis treats 1e-9 as a move and a smaller rate as a stop (#2415)",
+          "[zwo][telescope][unit][clock][moveaxis]") {
+    const double stop_rate = GENERATE(1e-10, -1e-10, std::nextafter(1e-9, 0.0));
+    CAPTURE(stop_rate);
+    Rig rig;
+    rig.connect();
+    rig.driver->move_axis(0, 1e-9);
+    CHECK(rig.mount.count(":Me") == 1);
+    CHECK(rig.mount.jogging());
+    CHECK(rig.mount.count(":Qe") == 0);
+    rig.driver->move_axis(0, stop_rate);
+    CHECK(rig.mount.count(":Qe") == 1);
+    CHECK_FALSE(rig.mount.jogging());
+    CHECK(rig.mount.count(":Me") == 1);  // the stop started no jog
 }
 
 // #2263: a command owns only the axes it moves. A MoveAxis (stop or jog) on one axis leaves a guide pulse on the other

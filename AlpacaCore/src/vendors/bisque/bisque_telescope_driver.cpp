@@ -908,6 +908,13 @@ public:
             throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
                                   AlpacaError::InvalidOperation);
         }
+        // #2503: a pulse on the axis a non-zero MoveAxis drives is refused, so no DirectGuide goes into the jog; the
+        // other axis is not checked. North and South move Dec (axis 1), East and West RA (axis 0), as in move_axis().
+        const int pulse_axis = direction < 2 ? 1 : 0;
+        if (manual_axis_slewing_[pulse_axis] || jog_pending_[pulse_axis]) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
+        }
         if (pulse_guiding_ && pulse_guide_error_.empty()) {
             throw AlpacaException("TheSkyX DirectGuide is already guiding; wait for IsPulseGuiding=false",
                                   AlpacaError::InvalidOperation);
@@ -1031,7 +1038,7 @@ public:
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates", &lock});
+        util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinates"}, lock});
         // mutex_ was released for the tracking read: a disconnect or a park may have landed meanwhile (#1838).
         check_link_locked();
         check_not_parked("SlewToCoordinates");
@@ -1059,7 +1066,7 @@ public:
         util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
-        util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync", &lock});
+        util::check_equatorial_slew_state(kCommandLimits, SlewGateChecks{{*this, "SlewToCoordinatesAsync"}, lock});
         // See slew_to_coordinates().
         check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
@@ -1168,6 +1175,16 @@ public:
         util::check_move_axis_arguments(kCommandLimits, axis, rate);
         const bool stop = std::abs(rate) < 1e-9;
 
+        // #2503: a jog's start is pending from its gate to every exit, a throw included. Its flag is set only once
+        // TheSkyX answers, and PulseGuide does not take initiator_mutex_, so the pulse refusal reads both.
+        struct JogPendingGuard {
+            BisqueTelescopeDriver& self;
+            int axis;
+            ~JogPendingGuard() {
+                std::lock_guard<std::mutex> lock(self.mutex_);
+                self.jog_pending_[axis] = false;
+            }
+        };
         // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
@@ -1181,8 +1198,10 @@ public:
                 motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
             } else {
                 static_cast<void>(motion_owner_.claim(util::MotionCommand::MoveAxis, axis));
+                jog_pending_[axis] = true;
             }
         }
+        const JogPendingGuard pending{*this, axis};  // a stop set nothing: MoveAxis calls run one at a time
 
         auto& protocol = BisqueProtocolWrapper::instance();
 
@@ -1373,17 +1392,21 @@ private:
     }
 
     // The command gate's state checks in Bisque's words (#2258): util/telescope_command_gate.h decides the order,
-    // these answer each step with the driver's own texts and reads. `lock` is the held mutex_ a slew's Tracking check
-    // releases for its TheSkyX read; the other families never call that check.
+    // these answer each step with the driver's own texts and reads.
     struct GateChecks {
         BisqueTelescopeDriver& driver;
         const char* who = nullptr;
-        std::unique_lock<std::mutex>* lock = nullptr;
 
         void check_connected() const { driver.check_connected(); }
         void check_not_parked(bool /*stop*/) const { driver.check_not_parked(who); }
         void check_no_fault() const { driver.check_no_fault_locked(); }
-        void check_tracking() const { driver.check_tracking_for_slew(*lock, who); }
+    };
+    // A slew's checks add Tracking, which releases the held mutex_ `lock` for its TheSkyX read. Only this type has
+    // check_tracking() and it cannot be built without the lock, so a missing lock does not compile (#2415).
+    struct SlewGateChecks : GateChecks {
+        std::unique_lock<std::mutex>& lock;
+
+        void check_tracking() const { driver.check_tracking_for_slew(lock, who); }
     };
 
     void check_link_now() const {
@@ -2200,8 +2223,9 @@ private:
     // Under mutex_ (#2263). A slew, Park or FindHome claims both axes, a MoveAxis its own; AbortSlew, Unpark and a
     // disconnect cancel both, MoveAxis(axis, 0) its own. A Park or FindHome that is no longer None is retired: it
     // writes neither parked_, parking_ nor at_home_ (open-astro#2062). The driver never asks slew_running() and never
-    // calls finished(): TheSkyX runs the slews, parks and homes, and the PulseGuide refusal reads slewing_cached_ and
-    // homes_in_flight_. Pulses are not claimed: one DirectGuide holds the socket and nothing can end it early.
+    // calls finished(): TheSkyX runs the slews, parks and homes, and the PulseGuide refusal reads slewing_cached_,
+    // homes_in_flight_ and, on the pulse's axis, manual_axis_slewing_ and jog_pending_ (#2503). Pulses are not
+    // claimed: one DirectGuide holds the socket and nothing can end it early.
     util::MotionOwner motion_owner_;
     bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
@@ -2212,6 +2236,7 @@ private:
     util::MotionClaim slew_claim_;
     util::HoldWindow slew_hold_;  // under mutex_; Slewing's 8 s hold after a slew command (decision 0022)
     mutable bool manual_axis_slewing_[2] = {false, false};
+    bool jog_pending_[2] = {false, false};  // under mutex_; a non-zero MoveAxis between its gate and its exit (#2503)
     // #2410, under mutex_: when an async slew or a MoveAxis is stopped (enforce_motion_bounds()), the failure
     // Slewing raises until the next motion command or a connect, and the stop a lost link leaves for the next
     // connect. The relink records survive a disconnect and a connect that fails.
