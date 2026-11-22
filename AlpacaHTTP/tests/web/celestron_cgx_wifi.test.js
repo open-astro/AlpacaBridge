@@ -72,7 +72,7 @@ test('one adapter fills the address at once', () => {
     const model = skyPortalAdapterOptions([AFFC]);
     assert.equal(model.fill, '1.2.3.4');
     assert.deepEqual(model.options, []);
-    assert.equal(model.status, 'Found 1.2.3.4 (Celestron-AFFC, Telit WE310G4); its address is filled in.');
+    assert.equal(model.status, 'Found 1.2.3.4 (adapter Celestron-AFFC, Telit WE310G4); its address is filled in.');
 });
 
 test('two adapters are listed for the operator to pick, and none is chosen for them', () => {
@@ -80,8 +80,8 @@ test('two adapters are listed for the operator to pick, and none is chosen for t
     assert.equal(model.fill, '');
     assert.deepEqual(model.options.map(o => [o.value, o.label, o.disabled]), [
         ['', 'Choose the adapter (2 answered)', true],
-        ['1.2.3.4', '1.2.3.4 (Celestron-AFFC, Telit WE310G4)', false],
-        ['127.0.0.5', '127.0.0.5 (Celestron-BBBB)', false],
+        ['1.2.3.4', '1.2.3.4 (adapter Celestron-AFFC, Telit WE310G4)', false],
+        ['127.0.0.5', '127.0.0.5 (adapter Celestron-BBBB)', false],
     ]);
     assert.equal(model.status, '2 adapters answered; pick the one on this mount.');
 });
@@ -90,11 +90,23 @@ test('no adapter and a failed search say what to do and fill nothing', () => {
     const none = skyPortalAdapterOptions([]);
     assert.equal(none.fill, '');
     assert.deepEqual(none.options, []);
-    assert.match(none.status, /^No SkyPortal adapter answered in 5 s\. Join this board to the adapter's WiFi network/);
+    assert.match(none.status, /^No SkyPortal adapter answered in 5 s\. /);
     const failed = skyPortalAdapterOptions(null, 'Celestron SkyPortal beacon: cannot bind UDP port 55555');
     assert.equal(failed.fill, '');
     assert.equal(failed.status, 'Search failed: Celestron SkyPortal beacon: cannot bind UDP port 55555');
     assert.equal(skyPortalAdapterOptions(null).status, 'Search failed: no answer');
+});
+
+test('a station-mode adapter is named as the adapter, not as the network it joined', () => {
+    // The beacon's Ssid is the adapter's own access point name even while it is a station on another network
+    // (rig 2026-11-22: on this board's hotspot it still said Celestron-AFFC).
+    const model = skyPortalAdapterOptions([{ Host: '10.0.0.20', Ssid: 'Celestron-AFFC', Module: 'Telit WE310G4' }]);
+    assert.equal(model.status, 'Found 10.0.0.20 (adapter Celestron-AFFC, Telit WE310G4); its address is filled in.');
+    // With none found, joining the adapter's own network is not the only way: the same network as this board works.
+    const none = skyPortalAdapterOptions([]).status;
+    assert.match(none, /adapter's own WiFi \(Celestron-XXXX\)/);
+    assert.match(none, /same network as this board/);
+    assert.match(none, /hotspot/);
 });
 
 test('an adapter with only a module is labelled by it', () => {
