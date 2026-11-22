@@ -1,0 +1,118 @@
+FAKE REPORT: ConformU against FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal), not hardware. Not hardware validation.
+10:43:30.470 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Tue 27 October 2026 03:08:39          
+10:43:30.470                                              
+10:43:30.471 Operating system is Debian GNU/Linux 13 (trixie), Processor is Intel/AMD 64bit, Application is 64bit.          
+10:43:30.471                                              
+10:43:30.471 Alpaca device:  (127.0.0.1:11111 CoverCalibrator/0)          
+10:43:30.471                                              
+10:43:30.471 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11111, Alpaca device number: 0
+10:43:30.479 CreateDevice                        INFO     Alpaca device created OK
+10:43:30.479 CreateDevice                        INFO     Successfully created driver
+10:43:31.525 CreateDevice                        OK       Found a valid interface version: 2
+10:43:31.525 CreateDevice                        OK       Driver instance created successfully
+10:43:31.525                                              
+10:43:31.525 Pre-connect checks                           
+10:43:31.525                                              
+10:43:31.525 Connect to device                            
+10:43:31.697 Connected                           OK       Connected to device successfully using Connected = True
+10:43:32.251 Connected                           OK       Disconnected from device successfully using Connected = False
+10:43:32.755 Connect                             OK       Connected to device successfully using Connect()
+10:43:32.755                                              
+10:43:32.756 Common Driver Methods                        
+10:43:32.756 InterfaceVersion                    OK       2
+10:43:32.756 Connected                           OK       True
+10:43:32.758 Description                         OK       Gemini Motorized Flat Panel V3 (Pro) Driver
+10:43:32.759 DriverInfo                          OK       AlpacaCore Gemini Flat Panel Pro Driver
+10:43:32.759 DriverVersion                       OK       5.0.2
+10:43:32.760 Name                                OK       Gemini Motorized Flat Panel V3
+10:43:32.760                                              
+10:43:32.761 SupportedActions                    OK       Driver returned an empty action list
+10:43:32.761 Action                              INFO     Conform cannot test the Action method
+10:43:32.761                                              
+10:43:32.764 DeviceState                         OK       Received 6 operational state properties.
+10:43:32.764 DeviceState                         OK         Brightness = 0
+10:43:32.764 DeviceState                         OK         CalibratorState = Off
+10:43:32.764 DeviceState                         OK         CoverState = Closed
+10:43:32.764 DeviceState                         OK         CalibratorChanging = False
+10:43:32.764 DeviceState                         OK         CoverMoving = False
+10:43:32.764 DeviceState                         OK         TimeStamp = 11/22/2026 9:43:32 PM
+10:43:32.766 DeviceState                         OK       Found all expected operational properties
+10:43:32.766                                              
+10:43:32.766 Properties                                   
+10:43:32.767 CalibratorState                     OK       Off
+10:43:32.768 CoverState                          OK       Closed
+10:43:32.775 MaxBrightness                       OK       255
+10:43:32.776 Brightness                          OK       0
+10:43:32.777 CalibratorChanging                  OK       False
+10:43:32.778 CoverMoving                         OK       False
+10:43:32.778                                              
+10:43:32.778 Methods                                      
+10:43:42.781 OpenCover                           OK       OpenCover was successful. The asynchronous open took 10.0 seconds
+10:43:52.785 CloseCover                          OK       CloseCover was successful. The asynchronous close took 10.0 seconds
+10:43:52.785 HaltCover                           OK       HaltCover completed successfully when called while the cover is stationary
+10:43:57.790 HaltCover                           OK       Cover is no longer moving after issuing the HaltCover command
+10:43:57.797 CalibratorOn                        OK       CalibratorOn with brightness -1 threw an InvalidValueException as expected
+10:44:02.801 CalibratorOn                        OK       CalibratorOn with brightness 0 was successful. The asynchronous operation took 5.0 seconds
+10:44:02.802 CalibratorOn                        OK       Synchronous operation: CalibratorState was 'Ready' when the method completed: the call took 0.0 seconds
+10:44:02.802 CalibratorOn                        OK       The CalibratorChanging property returned false when CalibratorState returned CalibratorStatus.Ready.
+10:44:02.802 CalibratorOn                        OK       The Brightness property does return the value that was set
+10:44:02.803 CalibratorOn                        OK       Synchronous operation: CalibratorState was 'Ready' when the method completed: the call took 0.0 seconds
+10:44:02.804 CalibratorOn                        OK       The CalibratorChanging property returned false when CalibratorState returned CalibratorStatus.Ready.
+10:44:02.804 CalibratorOn                        OK       The Brightness property does return the value that was set
+10:44:02.805 CalibratorOn                        OK       Synchronous operation: CalibratorState was 'Ready' when the method completed: the call took 0.0 seconds
+10:44:02.805 CalibratorOn                        OK       The CalibratorChanging property returned false when CalibratorState returned CalibratorStatus.Ready.
+10:44:02.805 CalibratorOn                        OK       The Brightness property does return the value that was set
+10:44:02.806 CalibratorOn                        OK       Synchronous operation: CalibratorState was 'Ready' when the method completed: the call took 0.0 seconds
+10:44:02.807 CalibratorOn                        OK       The CalibratorChanging property returned false when CalibratorState returned CalibratorStatus.Ready.
+10:44:02.807 CalibratorOn                        OK       The Brightness property does return the value that was set
+10:44:02.807 CalibratorOn                        OK       CalibratorOn with brightness 256 threw an InvalidValueException as expected
+10:44:02.808 CalibratorOff                       OK       Synchronous operation: CalibratorState was 'Ready' when the method completed: the call took 0.0 seconds
+10:44:02.808 CalibratorOff                       OK       The CalibratorChanging property returned false when CalibratorState returned CalibratorStatus.Ready.
+10:44:02.808                                              
+10:44:02.808 Post-run Checks                              
+10:44:02.809 PostRunCheck                        INFO     Closing the cover...
+10:44:12.811 PostRunCheck                        INFO     Cover closed.
+10:44:12.811 PostRunCheck                        INFO     Turning off the calibrator...
+10:44:12.812 PostRunCheck                        INFO     Calibrator off.
+10:44:12.812                                              
+10:44:12.812 Disconnect from device                       
+10:44:12.814 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+10:44:12.814                                              
+10:44:12.814 Conformance test has finished                
+10:44:12.814                                              
+10:44:12.814 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+10:44:12.814                                     
+10:44:12.814 Timing Summary                               See Help for further information.
+10:44:12.814 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+10:44:12.814 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+10:44:12.814 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+10:44:12.814 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+10:44:12.814                                              
+10:44:12.814 Connect                                      At 10:43:32.252 Connect              0.001 seconds. ✓ (STANDARD)
+10:44:12.814 InterfaceVersion                             At 10:43:32.756 InterfaceVersion     0.000 seconds. ✓ (FAST)
+10:44:12.814 Connected                                    At 10:43:32.756 Connected            0.001 seconds. ✓ (FAST)
+10:44:12.814 Description                                  At 10:43:32.758 Description          0.002 seconds. ✓ (FAST)
+10:44:12.814 DriverInfo                                   At 10:43:32.759 DriverInfo           0.001 seconds. ✓ (FAST)
+10:44:12.814 DriverVersion                                At 10:43:32.759 DriverVersion        0.000 seconds. ✓ (FAST)
+10:44:12.814 Name                                         At 10:43:32.760 Name                 0.000 seconds. ✓ (FAST)
+10:44:12.814 SupportedActions                             At 10:43:32.761 SupportedActions     0.001 seconds. ✓ (FAST)
+10:44:12.814 DeviceState                                  At 10:43:32.764 DeviceState          0.002 seconds. ✓ (FAST)
+10:44:12.814 CalibratorState                              At 10:43:32.767 CalibratorState      0.001 seconds. ✓ (FAST)
+10:44:12.814 CoverState                                   At 10:43:32.768 CoverState           0.001 seconds. ✓ (FAST)
+10:44:12.814 MaxBrightness                                At 10:43:32.769 MaxBrightness        0.000 seconds. ✓ (FAST)
+10:44:12.814 Brightness                                   At 10:43:32.776 Brightness           0.000 seconds. ✓ (FAST)
+10:44:12.814 CalibratorChanging                           At 10:43:32.777 CalibratorChanging   0.001 seconds. ✓ (FAST)
+10:44:12.814 CoverMoving                                  At 10:43:32.778 CoverMoving          0.000 seconds. ✓ (FAST)
+10:44:12.814 OpenCover                                    At 10:43:32.779 OpenCover            0.001 seconds. ✓ (STANDARD)
+10:44:12.814 CloseCover                                   At 10:43:42.782 CloseCover           0.001 seconds. ✓ (STANDARD)
+10:44:12.814 HaltCover                                    At 10:43:52.785 HaltCover            0.000 seconds. ✓ (STANDARD)
+10:44:12.814 HaltCover                                    At 10:43:57.789 HaltCover            0.000 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOn                                 At 10:43:57.798 CalibratorOn         0.001 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOn                                 At 10:44:02.801 CalibratorOn         0.001 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOn                                 At 10:44:02.803 CalibratorOn         0.000 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOn                                 At 10:44:02.804 CalibratorOn         0.000 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOn                                 At 10:44:02.806 CalibratorOn         0.000 seconds. ✓ (STANDARD)
+10:44:12.814 CalibratorOff                                At 10:44:02.808 CalibratorOff        0.000 seconds. ✓ (STANDARD)
+10:44:12.814 Disconnect                                   At 10:44:12.813 Disconnect           0.000 seconds. ✓ (STANDARD)
+10:44:12.814                                              
+10:44:12.814 Congratulations, all members returned within their target response times!!          

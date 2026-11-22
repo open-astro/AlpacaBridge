@@ -8,7 +8,8 @@
 # and the run script are generic: scripts/run_fake_conformu.sh walks every
 # `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
 # serial motor board since slice 2, five focusers since slice 3, three filter
-# wheels since slice 4, two cameras since slice 5; a row runs
+# wheels since slice 4, two cameras since slice 5, three rotators and the Gemini
+# Pro flat panel since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -46,6 +47,8 @@ on:
       - "AlpacaCore/include/alpacacore/vendor/qhy/**"
       - "AlpacaCore/src/vendors/playerone/**"
       - "AlpacaCore/include/alpacacore/vendor/playerone/**"
+      - "AlpacaCore/src/vendors/gemini/**"
+      - "AlpacaCore/include/alpacacore/vendor/gemini/**"
       - "AlpacaCore/src/vendors/gphoto/**"
       - "AlpacaCore/include/alpacacore/vendor/gphoto/**"
       - "scripts/build_bundled_gphoto.sh"
@@ -66,6 +69,10 @@ on:
       - "AlpacaCore/tests/fake_qhy_cfw3.h"
       - "AlpacaCore/tests/fake_playerone_pw_sdk.h"
       - "AlpacaCore/tests/conformu_camera_factories.h"
+      - "AlpacaCore/tests/conformu_rotator_factories.h"
+      - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
+      - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
+      - "AlpacaCore/tests/fake_gemini_flatpanel.h"
       - "AlpacaCore/tests/fake_iguider_v4l2.h"
       - "AlpacaCore/tests/locked_iguider_v4l2.h"
       - "AlpacaCore/tests/fake_gphoto_sdk.h"
@@ -82,6 +89,8 @@ on:
       - "AlpacaCore/include/alpacacore/focuser_driver.h"
       - "AlpacaCore/include/alpacacore/filterwheel_driver.h"
       - "AlpacaCore/include/alpacacore/camera_driver.h"
+      - "AlpacaCore/include/alpacacore/rotator_driver.h"
+      - "AlpacaCore/include/alpacacore/covercalibrator_driver.h"
       - "AlpacaCore/include/alpacacore/alpaca_defs.h"
       - "AlpacaCore/include/alpacacore/alpaca_errors.h"
       - "AlpacaCore/include/alpacacore/alpacadriver.h"
@@ -168,7 +177,7 @@ jobs:
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
-                         "iguider": "iOptron", "gphoto": "GPhoto"}
+                         "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.

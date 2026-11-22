@@ -45,8 +45,10 @@
 #include <vector>
 
 #include "conformu_camera_factories.h"
+#include "conformu_covercalibrator_factories.h"
 #include "conformu_filterwheel_factories.h"
 #include "conformu_focuser_factories.h"
+#include "conformu_rotator_factories.h"
 #ifdef FAKE_CONFORMU_SKYWATCHER
 #include "conformu_skywatcher_factory.h"
 #endif
@@ -177,6 +179,29 @@ const std::vector<ConformuHost> kHosts = {
      "wandererastro-fake", "WandererAstro SFW (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
      "FakeSerialStreamer (a streamed SFW status frame over a pseudo-terminal)",
      [] { return !cu::wandererastro_sfw().slave_path().empty(); }, driver_of(cu::make_wandererastro_filterwheel)},
+#endif
+#ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "rotator", "fake_zwo_caa_sdk.h", alpacacore::DeviceType::Rotator, "zwo-fake",
+     "ZWO CAA (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOCAASDK (simulated CAA SDK, in process)",
+     [] { return true; }, driver_of(cu::make_zwo_rotator)},
+#endif
+#ifdef FAKE_CONFORMU_ONSTEP
+    {"onstep", "rotator", "fake_mount_server.h", alpacacore::DeviceType::Rotator, "onstep-fake",
+     "OnStepX rotator (fake controller, test only)", "ALPACACORE_ENABLE_ONSTEP",
+     "the OnStepX controller model of onstep_controller_model.h (rotator, over loopback TCP)",
+     [] { return cu::onstep_controller_host().server.ok(); }, driver_of(cu::make_onstep_rotator)},
+#endif
+#ifdef FAKE_CONFORMU_IOPTRON
+    {"ifr", "rotator", "fake_ioptron_ifr.h", alpacacore::DeviceType::Rotator, "ifr-fake",
+     "iOptron iFR rotator (fake, test only)", "ALPACACORE_ENABLE_IOPTRON",
+     "FakeIoptronIfr (simulated iFR over a pseudo-terminal)", [] { return !cu::ioptron_ifr().slave_path().empty(); },
+     driver_of(cu::make_ifr_rotator)},
+#endif
+#ifdef FAKE_CONFORMU_GEMINI
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h", alpacacore::DeviceType::CoverCalibrator, "gemini-fake",
+     "Gemini Flat Panel Pro (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal)",
+     [] { return !cu::gemini_flatpanel().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_pro)},
 #endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
