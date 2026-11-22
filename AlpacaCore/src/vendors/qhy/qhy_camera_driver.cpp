@@ -861,12 +861,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_exposure_range_valid_locked();
-        const auto& range = exposure_range_;
-        if (!range.available) {
-            return 0.000001; // 1 µs default
-        }
-        double min_s = range.min / 1'000'000.0;
-        return min_s > 0.0 ? min_s : 0.000001;
+        return exposure_min_us_locked() / 1'000'000.0;
     }
 
     double get_exposure_resolution() const override {
@@ -1456,10 +1451,12 @@ public:
         // Serialize even the cancellation bypass with mode changes. Workers and
         // cached getters never hold this lock, so a blocked download stays cancellable.
         std::lock_guard<std::mutex> io_lock(io_mutex_);
+        double minimum_us = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             validate_exposure_locked(duration);
+            minimum_us = exposure_min_us_locked();
         }
 
         // Reap the previous worker FIRST, before any other SDK call in this
@@ -1534,8 +1531,9 @@ public:
             }
         }
 
-        // Apply exposure time (microseconds)
-        double exposure_us = duration * 1'000'000.0;
+        // Apply exposure time (microseconds). A duration below ExposureMin (0, a bias frame, included) runs at the
+        // minimum (#2259), never at 0 us.
+        const double exposure_us = std::max(duration * 1'000'000.0, minimum_us);
         sdk_.set_param(id, control::EXPOSURE, exposure_us);
 
         // Close mechanical shutter for dark/bias frames if the camera supports it
@@ -1843,7 +1841,16 @@ public:
 
             ALPACA_LOG_DEBUG("QHY", "exposure worker: calling get_single_frame...");
             uint32_t w = 0, h = 0, bpp = 0, channels = 0;
-            bool ok = sdk.get_single_frame(id, local_buf.data(), w, h, bpp, channels);
+            bool ok = false;
+            // Caught like every other SDK call in this worker (#2292): the wrapper throws NotConnected once the
+            // handle is closed, and an exception out of this raw std::thread body is std::terminate.
+            std::string frame_error;
+            try {
+                ok = sdk.get_single_frame(id, local_buf.data(), w, h, bpp, channels);
+            } catch (const std::exception& e) {
+                frame_error = e.what();
+                ALPACA_LOG_WARN("QHY", "get_single_frame failed: " + frame_error);
+            }
             ALPACA_LOG_DEBUG("QHY",
                              "exposure worker: get_single_frame returned ok=" + std::string(ok ? "true" : "false"));
 
@@ -1935,7 +1942,8 @@ public:
                 }
             } else {
                 exposure_status_ = QHYExposureStatus::Failed;
-                exposure_failure_ = "The camera failed to deliver the frame";
+                exposure_failure_ =
+                    frame_error.empty() ? "The camera failed to deliver the frame" : std::move(frame_error);
                 image_ready_     = false;
             }
             exposure_deadline_valid_ = false;
@@ -2242,6 +2250,16 @@ private:
                 "set ReadoutMode again or reconnect",
                 AlpacaError::DriverException);
         }
+    }
+
+    // ExposureMin in microseconds, and the floor StartExposure writes (#2259): the SDK range minimum, or 1 us when
+    // the range is unavailable or reports 0 or less, so a 0 s bias frame never writes 0 us.
+    double exposure_min_us_locked() const {
+        constexpr double kDefaultMinimumUs = 1.0;
+        if (!exposure_range_.available || !(exposure_range_.min > 0.0)) {
+            return kDefaultMinimumUs;
+        }
+        return exposure_range_.min;
     }
 
     QHYControlRange read_exposure_range(const std::string& id) {

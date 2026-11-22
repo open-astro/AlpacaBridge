@@ -113,6 +113,13 @@ public:
 
     // --- Query commands ---
 
+    /**
+     * @brief Cap the per-exchange reply timeout (seconds) for later exchanges; 0 restores
+     * GeminiConfig::serial_timeout_s. The driver bounds its connect-time first poll with it (issue #2064).
+     * Lock-free, safe from any thread.
+     */
+    void set_exchange_timeout_s(int seconds) noexcept;
+
     /** @brief Get current position. Command :00# → P<pos># */
     int get_position();
 
