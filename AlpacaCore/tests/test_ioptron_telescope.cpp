@@ -4452,3 +4452,32 @@ TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
 }
+
+TEST_CASE("iOptron motion bound - an async Alt/Az GOTO still slewing at 300 s is stopped with no client polling",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(0);  // Tracking off: an Alt/Az slew is refused while it is on (#1377)
+    FakeTaskClock clock;
+    auto driver = io::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()), -33.856784, 151.215297,
+                                                         std::nullopt, /*sync_time_on_connect=*/false, clock);
+    io::set_zero_search_poll_for_testing(*driver, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_alt_az_async(45.0, 90.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_system_status(2);  // the mount never reports the GOTO done
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(299));
+    CHECK(mount.count(":Q#") == 0);
+
+    clock.advance(std::chrono::seconds(2));
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(contains(slewing_failure(*driver), "The slew did not end within 300 s"));
+    CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
