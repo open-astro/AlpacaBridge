@@ -402,6 +402,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (slew_.running() || slewing_by_driver_state_locked()) {
                 relink_stop_pending_ = true;
+                relink_tracking_mode_ = tracking_mode_valid_ ? tracking_mode_cached_ : 0;
             }
         }
         if (!connected || relink) {
@@ -2169,6 +2170,10 @@ private:
             protocol.cancel_goto();
             protocol.move_axis_fixed_rate(0, 0);
             protocol.move_axis_fixed_rate(1, 0);
+            // The RA stop also stops sidereal tracking: the mode the client had asked for goes back, as AbortSlew's.
+            if (relink_tracking_mode_ > 0) {
+                protocol.set_tracking_mode(relink_tracking_mode_);
+            }
         } catch (const std::exception& ex) {
             protocol.disconnect();
             throw AlpacaException(
@@ -4474,6 +4479,8 @@ private:
     // Disconnect over the lost link, before the teardown clears the motion flags, and kept until the stops are sent
     // as the first commands after the next Connect's echo test. Under transition_mutex_.
     bool relink_stop_pending_ = false;
+    // The tracking mode the relink stop restores after its RA stop, as AbortSlew does (taken with the record).
+    int relink_tracking_mode_ = 0;
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
     // get_device_firmware() poll never blocks on the coarse connect lock.

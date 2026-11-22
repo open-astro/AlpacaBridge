@@ -1496,7 +1496,13 @@ TEST_CASE("SynScan Link - a MoveAxis running when the cable is pulled is stopped
     rig.replug();
     driver.set_connected(true);
     REQUIRE(driver.get_connected());
-    CHECK(relink_stops_first(rig.handset->received()));
+    const std::string received = rig.handset->received();
+    CHECK(relink_stops_first(received));
+    // The RA stop also stops tracking: the mode cached at the record (1) goes back before the handshake's `V`.
+    const auto stop = received.find('M');
+    const auto restore = received.find(std::string("T\x01", 2), stop == std::string::npos ? 0 : stop);
+    CHECK(restore != std::string::npos);
+    CHECK(restore < received.find('V'));
 }
 
 TEST_CASE("SynScan Link - a bound stop the link loss refused is sent by the next Connect",
