@@ -1581,6 +1581,7 @@ public:
                                                            std::to_string(kMaxSlewRefines) + " (" +
                                                            std::to_string(duration_ms) +
                                                            " ms, final-approach firmware quirk)");
+                            // The wire call, not pulse_guide(): the #2504 refusal must not block the GOTO's own trim.
                             send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
                                                        [&] { protocol.pulse_guide(direction, duration_ms); });
                             goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
@@ -3605,6 +3606,7 @@ private:
                 return;
             }
             const int sample_duration = std::clamp(duration_ms, 500, 2000);
+            // The wire call, not pulse_guide(): the #2503/#2504 refusals must not block the driver's own sample.
             protocol.pulse_guide(0, sample_duration);
             clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
             Position end = protocol.get_position();
