@@ -219,6 +219,13 @@ public:
         reply_faults_.push_back({axis, command, true, std::move(payload)});
     }
 
+    // Raw bytes the mount puts on the wire unasked (stale bus traffic, a torn frame). Call it only while the link is
+    // idle: it is not ordered with the worker's replies.
+    void write_unsolicited(const std::vector<std::uint8_t>& bytes) {
+        static_cast<void>(
+            pty_write_bounded(pty_.master_fd(), reinterpret_cast<const char*>(bytes.data()), bytes.size(), stop_));
+    }
+
     void sever_link() {
         stop_worker();
         pty_.sever();

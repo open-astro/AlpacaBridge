@@ -2177,6 +2177,39 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     second->set_connected(false);
 }
 
+#ifndef _WIN32
+TEST_CASE("Celestron CGX USB Telescope Driver - a logical reconnect discards AUX bytes that arrived while disconnected",
+          "[celestron][cgx][telescope][integration]") {
+    // Rig 2026-11-22: after an hour logically disconnected on the held fd, the first GET_VER read a backlog of stale
+    // frames and failed its checksum. A whole stale frame, then a torn one that would merge with the next reply.
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    // Opened before the driver takes TIOCEXCL; it only counts the input waiting on the held fd.
+    struct Observer {
+        int fd;
+        ~Observer() {
+            if (fd >= 0) ::close(fd);
+        }
+    } const observer{::open(mount.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK)};
+    REQUIRE(observer.fd >= 0);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    mount.write_unsolicited({0x3b, 0x04, 0x00, 0x10, 0xf0, 0xf0, 0x0c, 0x3b, 0x04, 0x10, 0x00, 0xf0});
+    int queued = 0;
+    REQUIRE(wait_until([&] { return ::ioctl(observer.fd, FIONREAD, &queued) == 0 && queued == 12; }));
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK_NOTHROW(poll_now(*driver));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+#endif
+
 TEST_CASE("Celestron CGX USB Telescope Driver - continuity budget expires on the injected clock",
           "[celestron][cgx][telescope][continuity-clock]") {
     using namespace std::chrono_literals;
