@@ -1587,6 +1587,23 @@ TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][t
     CHECK(rig.warns.load() == 1);  // at 60 s it tried the axis's stop (the dropped link refused it)
 }
 
+// A stop the handset answered is known to have landed: only its tracking restore failed. The axis is not put back
+// under the bound (no Slewing true, no "ran 60 s" error later for a move the client already stopped).
+TEST_CASE("SynScan MoveAxis - a stop whose tracking restore failed is not bounded",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    REQUIRE_NOTHROW(rig.driver->set_tracking(true));
+    rig.start_move(0);
+    rig.st->reject_tracking.store(true);  // the `T` restore after the stop times out on a live link
+    CHECK_THROWS_AS(rig.driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    rig.st->reject_tracking.store(false);
+    CHECK(rig.stops(kRaMotor) == kStopCommands);  // the client's stop went out and was answered
+    rig.advance(std::chrono::seconds(61));
+    CHECK(rig.stops(kRaMotor) == kStopCommands);  // the bound sent no stop of its own
+    CHECK(rig.infos.load() == 0);
+    CHECK(rig.warns.load() == 0);
+}
+
 // The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis, so it stays watched.
 TEST_CASE("SynScan MoveAxis - a stop that threw leaves the axis bounded", "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;

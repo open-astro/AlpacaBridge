@@ -1938,6 +1938,7 @@ public:
         // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked). The mode is read at the turn, as
         // AbortSlew's: a Tracking write queued ahead has sent its `T` by then.
         int restore_mode = 0;
+        bool rate_sent = false;  // the rate command returned: its outcome is known, whatever the restore does
         try {
             if (!send_in_turn(
                     lock,
@@ -1947,6 +1948,7 @@ public:
                     },
                     [&] {
                         protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
+                        rate_sent = true;
                         if (restore_mode > 0) {
                             protocol.set_tracking_mode(restore_mode);
                         }
@@ -1960,7 +1962,9 @@ public:
             if (restore_mode > 0) {
                 ra_stop_unconfirmed_ = true;
             }
-            bound_unknown_rate_outcome_locked(lock, axis, owner_generation);
+            if (!rate_sent) {
+                bound_unknown_rate_outcome_locked(lock, axis, owner_generation);
+            }
             throw;
         }
         if (restore_mode > 0) {
@@ -2465,28 +2469,6 @@ private:
     // connection, and a GOTO or Park that joined it would leave every read frozen at the slew-end frame, the
     // link-fault latch and the site retry stopped, and the landing hunt waiting for a tick that never comes. Only the
     // lifecycle paths (disconnect, relink, the destructor) stop it, through polled_.stop_and_join().
-    // #2412: a rate command that threw may still have reached the handset (the write went out and only the reply
-    // failed), so the axis may be moving: a start that took effect, or a stop that did not. Fail closed: the axis keeps
-    // reading as moving and is watched by the MoveAxis bound, which stops it once its 60 s run out. Only for this
-    // move (no newer command owns the axis) and a link still up: over a lost link the flag is the relink stop's
-    // record. A bound that cannot start adds its own failure to nothing: the caller's exception is the one thrown.
-    // `lock` (mutex_) held on entry and on return.
-    void bound_unknown_rate_outcome_locked(std::unique_lock<std::mutex>& lock, int axis, uint64_t owner_generation) {
-        if (motion_generation_ != owner_generation || !connected_.load() || link_lost()) {
-            return;
-        }
-        manual_axis_slewing_[axis] = true;
-        manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
-        manual_axis_capped_[axis] = false;
-        ++manual_axis_move_id_[axis];
-        if (!motion_bound_active_) {
-            try {
-                start_motion_bound(lock, axis);
-            } catch (...) {  // NOLINT(bugprone-empty-catch): start_motion_bound() already stopped the axis or tried
-            }
-        }
-    }
-
     // #2412 (#2396 AB-9). `lock` (mutex_) held on entry; released for the start() (which must run with no driver
     // mutex) and held again on return or throw. A start the slot refuses fails closed: the axis just started is
     // stopped and MoveAxis throws.
@@ -2541,6 +2523,28 @@ private:
                 "MoveAxis could not start its time limit (" + why + ")" +
                     (stop_error.empty() ? "; the axis was stopped" : "; stopping the axis failed: " + stop_error),
                 AlpacaError::DriverException);
+        }
+    }
+
+    // #2412: a rate command that threw may still have reached the handset (the write went out and only the reply
+    // failed), so the axis may be moving: a start that took effect, or a stop that did not. Fail closed: the axis keeps
+    // reading as moving and is watched by the MoveAxis bound, which stops it once its 60 s run out. Only for this
+    // move (no newer command owns the axis) and a link still up: over a lost link the flag is the relink stop's
+    // record. A bound that cannot start adds its own failure to nothing: the caller's exception is the one thrown.
+    // `lock` (mutex_) held on entry and on return.
+    void bound_unknown_rate_outcome_locked(std::unique_lock<std::mutex>& lock, int axis, uint64_t owner_generation) {
+        if (motion_generation_ != owner_generation || !connected_.load() || link_lost()) {
+            return;
+        }
+        manual_axis_slewing_[axis] = true;
+        manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
+        manual_axis_capped_[axis] = false;
+        ++manual_axis_move_id_[axis];
+        if (!motion_bound_active_) {
+            try {
+                start_motion_bound(lock, axis);
+            } catch (...) {  // NOLINT(bugprone-empty-catch): start_motion_bound() already stopped the axis or tried
+            }
         }
     }
 
