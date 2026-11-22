@@ -170,8 +170,12 @@ public:
     std::atomic<int> slew_status_polls{0};
 
     /// Log of the commands whose first byte is one of kLoggedPrefixes, in wire order. `command_mutex` guards it.
-    static constexpr const char* kLoggedPrefixes = "PTMrRets";
+    static constexpr const char* kLoggedPrefixes = "PTMrRetsWH";
     std::mutex command_mutex;
+    /// Runs on the handler thread before each command is answered (a test lands a command mid-exchange with it).
+    /// Guarded by before_reply_mutex; the hook runs without it.
+    std::mutex before_reply_mutex;
+    std::function<void(const std::string&)> before_reply;
     std::vector<std::string> commands;
 
     int command_count(char prefix) {
@@ -258,6 +262,14 @@ private:
 
     std::string answer(const std::string& chunk) {
         requests.fetch_add(1);
+        {
+            std::function<void(const std::string&)> hook;
+            {
+                std::lock_guard<std::mutex> lock(before_reply_mutex);
+                hook = before_reply;
+            }
+            if (hook) hook(chunk);
+        }
         if (silent.load() || chunk.empty()) return "";
         record(chunk);
         switch (chunk[0]) {

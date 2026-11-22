@@ -189,6 +189,7 @@ constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
 // alongside open-astro#547's client-silence interval -- the two read as
 // one policy (see that header for the full rationale) rather than two
 // unrelated numbers.
+using alpacacore::util::kMaxMoveAxisDuration;
 using alpacacore::util::kRelinkMotionPreserveWindow;
 // A goto the controller reports stopped can still be finishing its approach:
 // EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
@@ -557,9 +558,19 @@ public:
         // below goes through Wire, with mutex_ free; io_mutex_ is held from the first state write to the end.
         std::lock_guard<std::mutex> transition(transition_mutex_);
         bool relink = false;
+        // open-astro#2407: what ran before cancel_async_tasks(). A cancelled slew body clears goto_in_progress_ and
+        // the Park/FindHome flags on its way out, so the disconnect branch's failed-stop catch reads this sample.
+        bool driver_motion_before_cancel = false;
+        if (!connected) {
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            driver_motion_before_cancel = connected_ && driver_motion_active_locked();
+        }
         if (connected) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             relink = connected_ && link_lost_locked();
+            if (relink) {
+                note_motion_at_link_loss_locked();  // before cancel_async_tasks() clears the flags
+            }
         }
         if (!connected || relink) {
             // Join background task threads BEFORE taking the locks (they take them).
@@ -574,6 +585,7 @@ public:
             // reconnected session and resume against the new link: drop the
             // lock and join it first, as the probe path does.
             relink = true;
+            note_motion_at_link_loss_locked();
             lock.unlock();
             cancel_async_tasks();
             lock.lock();
@@ -587,6 +599,7 @@ public:
             // Settle the dead session first, then run the gates as for any
             // disconnected device.
             ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
+            note_motion_at_link_loss_locked();
             session_open_.store(false);
             snapshot_.reset();
             connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
@@ -767,8 +780,14 @@ public:
             try {
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the poll reports
-                // Best effort; status polling still reports the true state.
+                relink_stop_pending_ = false;  // both stops acked: nothing this driver ran is owed a stop
+            } catch (...) {
+                // Best effort. A driver motion this stop did not reach is stopped by the next connect
+                // (open-astro#2407).
+                if (driver_motion_before_cancel) {
+                    relink_stop_pending_ = true;
+                }
+                note_motion_at_link_loss_locked();
             }
             session_open_.store(false);
             // Decision 0016, item 4: connected_ goes false under mutex_ BEFORE the close, which runs through
@@ -1421,6 +1440,7 @@ public:
         util::validate_longitude(longitude);
         // Io mode: a command in flight reads the longitude between its exchanges and must see one value.
         StateLock lock(lock_gate_);
+        refuse_time_base_write_while_moving_locked("SiteLongitude");
         std::lock_guard<std::mutex> clock_lock(client_clock_mutex_);
         client_clock_.site_longitude = longitude;
         client_clock_.site_longitude_set = true;
@@ -2775,8 +2795,10 @@ public:
                 const Wire protocol = wire();
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the poll reports
-                // Best effort; status polling still reports the true state.
+            } catch (...) {
+                // Best effort; status polling still reports the true state, and the next connect owes the
+                // stop (open-astro#2407), as for every other failed stop of a driver motion.
+                relink_stop_pending_ = true;
             }
             set_slewing_cached_false_locked();
             slew_hold_.clear();
@@ -2875,6 +2897,10 @@ public:
                 start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
+                // open-astro#2407: the dead-man. This call owns the axis until kMaxMoveAxisDuration passes.
+                move_axis_cap_owner_[axis] = stop_generation_[axis].current();
+                move_axis_cap_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
+                move_axis_cap_armed_[axis] = true;
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
                 // initiator: issue the stop and return inside the STANDARD
@@ -3115,7 +3141,10 @@ public:
             need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
             restarted = tracking_;
         }
+        // The stop check ends once any newer motion command or stop reaches an axis (open-astro#2407).
+        const util::MotionClaim abort_watch = motion_owner_.observe(util::MotionOwner::kBothAxes);
         lock.unlock();
+        start_abort_verify(abort_watch);
         // As in set_tracking(): the restore's RA stop-wait releases mutex_
         // while tracking_ reads false, and a limit guard polling in that window
         // exits, so start it (and the duty worker) again for the restored
@@ -3231,10 +3260,13 @@ private:
 
     // open-astro#521: a Sky-Watcher axis keeps running until something tells it
     // to stop, so motion outlives the link that started it. On the way back in,
-    // decide from the LENGTH of the outage rather than by a flat rule: a USB
-    // re-enumeration or a briefly disturbed connector is a glitch and the slew
-    // the client asked for is still wanted, while a long gap means nobody has
-    // been in control of a moving mount.
+    // motion this driver started (a GoTo, Park, FindHome or MoveAxis under way
+    // at the loss, an unconfirmed stop, any GOTO-mode axis after a loss) is
+    // stopped whatever the outage length (open-astro#2407): its client lost the
+    // link with it. Only motion the driver cannot attribute (a speed-mode axis,
+    // most likely tracking) is decided from the LENGTH of the outage: a USB
+    // re-enumeration or a briefly disturbed connector is a glitch, while a long
+    // gap means nobody has been in control of a moving mount.
     //
     // Confirmed on an EQM-35 Pro (2026-09-17): with RA turning at 0.5 deg/s the
     // cable was pulled and replaced, ":f1" then read "=111" (speed mode,
@@ -3260,6 +3292,12 @@ private:
         // and a fault that outlived util::kLinkStalenessBound.
         const bool long_unmonitored_outage =
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
+        // open-astro#2407 (the 2026-11-19 relink ruling on #2407): a GoTo, Park, FindHome or MoveAxis this driver had
+        // under way when the link dropped, or a failure stop that did not reach the board, is stopped on the way
+        // back in, however short the outage: the client that asked for it no longer owns it. The #521 window
+        // keeps only motion the driver cannot attribute (tracking, most likely).
+        const bool driver_motion_owed_stop = relink_stop_pending_;
+        relink_stop_pending_ = false;
 
         // ONE budget for the whole stop-and-confirm phase, not one per axis.
         // Both axes can take the stopping branch, and this all runs inside
@@ -3293,7 +3331,10 @@ private:
                 gap = "no recorded link loss";
             }
 
-            if (!long_unmonitored_outage) {
+            // A GOTO-mode axis is never tracking: found running after a link loss, it is a goto the lost session
+            // started, and nobody now owns it (open-astro#2407).
+            const bool goto_after_loss = lost_at.has_value() && !status.speed_mode;
+            if (!long_unmonitored_outage && !driver_motion_owed_stop && !goto_after_loss) {
                 // Preserve the motion and leave every session flag clear.
                 //
                 // manual_axis_slewing_ means "a MoveAxis THIS driver issued
@@ -3329,7 +3370,8 @@ private:
                 // kPositionCacheTtl, so the position stays honest; only the
                 // between-poll interpolation is flat.
                 //
-                // GOTO-mode motion needs no flag either: the status poll
+                // GOTO-mode motion reaches this branch only on a first connect (no link-loss stamp), and
+                // needs no flag either: the status poll
                 // publishes the board's running/goto flags and the Slewing
                 // getter serves them (served_hardware_slewing_locked()).
                 std::string message = "Link restored after ";
@@ -3345,7 +3387,9 @@ private:
                 message += gap;
                 message += " with ";
                 message += where;
-                message += " still running and nobody in control; stopping it";
+                message += (driver_motion_owed_stop || goto_after_loss)
+                               ? " still running after a driver GoTo or MoveAxis lost its link; stopping it"
+                               : " still running and nobody in control; stopping it";
                 ALPACA_LOG_WARN("SkyWatcher", message);
                 stop_surviving_axis_locked(channel, stop_confirm_deadline);
             }
@@ -3370,6 +3414,7 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Failed to stop surviving motion on axis " + std::to_string(channel) + ": " + e.what());
+            relink_stop_pending_ = true;  // still owed (open-astro#2407)
             return;
         }
         while (clock_.now() < deadline) {
@@ -4268,6 +4313,7 @@ private:
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return false;
             }
+            enforce_move_axis_cap_locked();  // open-astro#2407
             ra_cpr = axis_params_[0].counts_per_revolution;
             dec_cpr = axis_params_[1].counts_per_revolution;
         }
@@ -5368,6 +5414,8 @@ private:
     static constexpr double kTrackingResumeSeconds = 0.7;
     // Landing deadband per axis (~8 arcsec; ConformU checks RA to 10 arcsec).
     static constexpr double kLandingDeadbandDeg = 8.0 / 3600.0;
+    // A landing this far off after the re-gotos is a failed slew (open-astro#2407; the iOptron #2396 AB-7 bound).
+    static constexpr double kFarMissArcsec = 600.0;
 
     // First goto aimed at the ARRIVAL-time sky position: estimate the slew
     // duration from the distance and advance the LST used for the axis
@@ -5460,8 +5508,23 @@ private:
                 break;
             }
             if (iter >= 3) {
-                break;  // three re-gotos did not converge: keep the old bound
+                // Three re-gotos did not converge. A residual near the deadband keeps the old bound; one past
+                // kFarMissArcsec is a failed slew, not a landing (open-astro#2407, #2396 AB-7): the throw reaches
+                // the slew's failure path, which stops both axes before Slewing raises it.
+                const double axis_deg_per_second = kHoursToDegrees * kLstHoursPerSecond;
+                // On the sky: an RA-axis angle shrinks by cos(dec), so a good landing near the pole is not a miss.
+                const double ra_miss_arcsec = std::abs(landing_lead_seconds_locked(ra, dec)) * axis_deg_per_second *
+                                              3600.0 * std::cos(dec * std::numbers::pi / 180.0);
+                const double dec_miss_arcsec = std::abs(dec_target - cached_dec_axis_deg_) * 3600.0;
+                const double miss_arcsec = std::max(ra_miss_arcsec, dec_miss_arcsec);
+                if (miss_arcsec > kFarMissArcsec) {
+                    throw AlpacaException("Slew did not converge: " + std::to_string(std::lround(miss_arcsec)) +
+                                          " arcsec from the target after three re-gotos");
+                }
+                break;
             }
+            // A re-goto is a goto: the altitude floor that refused the first leg applies to it too (#2407).
+            check_target_altitude_locked(ra, dec, "Slew re-goto");
             slewing_cached_ = true;
             dispatch_predicted_goto_locked(lock, ra, dec);
             if (!wait_for_slew_complete(lock, expected)) {
@@ -6363,8 +6426,131 @@ private:
             protocol.instant_stop(kAxisDec);
             cmd_axis_rate_deg_s_[0] = 0.0;
             cmd_axis_rate_deg_s_[1] = 0.0;
-        } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, already stopped
-            // Best effort; the axes were already stopped by the aborter.
+        } catch (...) {
+            // Best effort; the aborter already stopped the axes, or the next connect does (open-astro#2407).
+            relink_stop_pending_ = true;
+        }
+    }
+
+    // open-astro#2407 (#2396 AB-9): the MoveAxis dead-man, run by every status poll (kStatusPollPeriod), so it
+    // adds no clock waiter of its own. A newer MoveAxis call on the axis (stop_generation_ moves on), or anything
+    // that ends the jog (manual_axis_slewing_ false), disarms that axis's cap; an expired one stops the axis.
+    // Caller holds the operation lock and mutex_.
+    void enforce_move_axis_cap_locked() {
+        const auto now = clock_.now();
+        for (int axis = 0; axis < 2; ++axis) {
+            if (!move_axis_cap_armed_[axis]) {
+                continue;
+            }
+            if (!manual_axis_slewing_[axis] || stop_generation_[axis].current() != move_axis_cap_owner_[axis]) {
+                move_axis_cap_armed_[axis] = false;
+                continue;
+            }
+            if (now >= move_axis_cap_deadline_[axis]) {
+                stop_capped_move_axis_locked(axis, "MoveAxis ran for " + std::to_string(kMaxMoveAxisDuration.count()) +
+                                                       " s with no new MoveAxis call");
+            }
+        }
+    }
+
+    // Stops a capped jog and leaves the axis at rest: no tracking restore (the client that owned the jog is
+    // gone, so the drive stays off), and the next Slewing read raises why. A stop that fails is owed to the
+    // next connect (relink_stop_pending_). Caller holds mutex_.
+    void stop_capped_move_axis_locked(int axis, const std::string& why) {
+        const int channel = axis == 0 ? kAxisRa : kAxisDec;
+        move_axis_cap_armed_[axis] = false;
+        stop_generation_[axis].bump();  // supersedes a stop body still polling this axis
+        std::string stop_error;
+        try {
+            wire().instant_stop(channel);
+        } catch (const std::exception& e) {
+            stop_error = e.what();
+            relink_stop_pending_ = true;
+        }
+        advance_model_anchor_locked();
+        cmd_axis_rate_deg_s_[axis] = 0.0;
+        motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, channel - 1));
+        manual_axis_slewing_[axis] = false;
+        if (channel == kAxisRa) {
+            tracking_ = false;  // the RA drive is stopped with the jog
+        }
+        invalidate_position_cache_locked(false);
+        last_slew_error_ =
+            "Axis " + std::to_string(axis) + " stopped: " + why +
+            (stop_error.empty() ? std::string{}
+                                : "; the stop failed (" + stop_error + "), the mount may still be moving");
+        // INFO (decision 0007 rule 9): any client jog of 60 s reaches it, and Slewing reports it.
+        ALPACA_LOG_INFO("SkyWatcher", last_slew_error_);
+    }
+
+    // open-astro#2407 (#2396 AB-4): an accepted ":L" is not an axis at rest. After AbortSlew the body reads both
+    // axes every kAbortVerifyPoll; an axis that should be at rest and still runs gets ":L" again, at most
+    // kAbortStopRounds stops in all within kAbortVerifyBudget. A failed status read is not "stopped". Not
+    // verified by then, the next Slewing read raises it. Any newer motion command or stop on an axis
+    // (motion_owner_.observe(), #2263), a disconnect or a newer AbortSlew ends the body. The axes that should be at
+    // rest: RA unless AbortSlew restored tracking, Dec unless that restore restarted a DeclinationRate offset.
+    static constexpr auto kAbortVerifyPoll = std::chrono::milliseconds(250);
+    static constexpr auto kAbortVerifyBudget = std::chrono::seconds(3);
+    static constexpr int kAbortStopRounds = 3;
+
+    void start_abort_verify(const util::MotionClaim& abort_generation) {
+        try {
+            abort_verify_.start(
+                [this, abort_generation](util::OperationContext& ctx) { run_abort_verify(ctx, abort_generation); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("SkyWatcher", std::string("AbortSlew stop check did not start: ") + e.what());
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            relink_stop_pending_ = true;  // unverified: the next connect still owes a stop
+        }
+    }
+
+    void run_abort_verify(util::OperationContext& ctx, const util::MotionClaim& abort_generation) {
+        const Wire protocol = wire();
+        const auto deadline = clock_.now() + kAbortVerifyBudget;
+        int stops_sent = 1;
+        for (;;) {
+            if (!ctx.wait_for(kAbortVerifyPoll)) {
+                return;
+            }
+            bool read_ok = true;
+            bool ra_running = false;
+            bool dec_running = false;
+            try {
+                ra_running = protocol.inquire_status(kAxisRa).running;
+                dec_running = protocol.inquire_status(kAxisDec).running;
+            } catch (...) {
+                read_ok = false;  // not verified; the next poll reads again
+            }
+            StateLock lock(lock_gate_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None ||
+                motion_owner_.stop_reason(abort_generation) != util::StopReason::None) {
+                return;
+            }
+            const bool ra_at_rest = !tracking_;
+            const bool dec_at_rest = !(tracking_ && dec_rate_arcsec_per_sec_ != 0.0);
+            const bool moving = (ra_at_rest && ra_running) || (dec_at_rest && dec_running);
+            if (read_ok && !moving) {
+                return;  // verified
+            }
+            if (stops_sent >= kAbortStopRounds || clock_.now() >= deadline) {
+                last_slew_error_ =
+                    read_ok ? "AbortSlew: the mount still reports motion after " + std::to_string(stops_sent) + " stops"
+                            : "AbortSlew: the stop could not be confirmed (status reads failed)";
+                relink_stop_pending_ = true;
+                ALPACA_LOG_ERROR("SkyWatcher", last_slew_error_);
+                return;
+            }
+            ++stops_sent;
+            for (const int channel : {kAxisRa, kAxisDec}) {
+                if (channel == kAxisRa ? !ra_at_rest : !dec_at_rest) {
+                    continue;
+                }
+                try {
+                    wire().instant_stop(channel);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("SkyWatcher", std::string("AbortSlew: repeated stop failed: ") + e.what());
+                }
+            }
         }
     }
 
@@ -6372,6 +6558,7 @@ private:
         // First: the limit guard stops motion through move_axis(), which
         // spawns a stop task, so it must be gone before those are joined.
         limit_guard_.cancel_all_and_join();
+        abort_verify_.cancel_all_and_join();
         // The status poll (decision 0010) only reads, but its exchanges must
         // be done before a disconnect closes the transport.
         status_poll_.cancel_all_and_join();
@@ -6560,7 +6747,39 @@ private:
         };
         stop(kAxisRa, 0);
         stop(kAxisDec, 1);
+        if (!errors.empty()) {
+            // open-astro#2407: the axes may still run, and the next connect stops them first.
+            relink_stop_pending_ = true;
+        }
         return errors;
+    }
+
+    // open-astro#2407: SiteLongitude sets the sidereal time a GoTo aims by, its re-gotos re-aim by and the limit
+    // guard measures by. Changed mid-motion it moves the target under a slew in flight, so it is refused until the
+    // GoTo, Park, FindHome or MoveAxis ends. Pulses and tracking do not block it. UTCDate is not refused: decision
+    // 0001 rule 2 accepts every write on an undisciplined host.
+    void refuse_time_base_write_while_moving_locked(const char* what) const {
+        if (connected_ && driver_motion_active_locked()) {
+            throw AlpacaException(std::string(what) +
+                                      " cannot change while the mount slews or a MoveAxis runs: it sets the sidereal "
+                                      "time the slew aims by",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // A GoTo, Park, FindHome or MoveAxis this driver issued is under way (open-astro#2407). Pulses and tracking
+    // are not: a tracking axis is left running across a relink, as before.
+    bool driver_motion_active_locked() const {
+        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[0] ||
+               manual_axis_slewing_[1];
+    }
+
+    // Called where a link loss or a failed disconnect stop ends a session: a driver motion still under way
+    // is owed a stop on the next connect (adopt_surviving_motion_locked()), however short the outage.
+    void note_motion_at_link_loss_locked() {
+        if (driver_motion_active_locked()) {
+            relink_stop_pending_ = true;
+        }
     }
 
     void fail_async_phase_locked(util::OperationContext& ctx, bool& phase_flag, std::uint64_t error_epoch,
@@ -7015,6 +7234,10 @@ private:
 
     mutable bool parking_ = false;
     mutable bool homing_ = false;
+    // open-astro#2407: a driver motion was under way when the link dropped (or a failure stop did not reach the
+    // board), so the next connect stops any axis it finds running. Survives reset_runtime_state_locked() on
+    // purpose; adopt_surviving_motion_locked() consumes it.
+    bool relink_stop_pending_ = false;
     // True from goto dispatch until the landing refinement finishes: Slewing
     // must not flicker false mid-refinement (the timed 3 s window this
     // replaced expired during a slow refine iteration, ConformU proceeded, and the
@@ -7116,6 +7339,14 @@ private:
     util::OperationGeneration stop_generation_[2];
     util::AsyncOperation stop_ops_[2] = {{"SkyWatcher MoveAxis stop (RA)", stop_generation_[0], clock_},
                                          {"SkyWatcher MoveAxis stop (Dec)", stop_generation_[1], clock_}};
+    // open-astro#2407: the MoveAxis dead-man (enforce_move_axis_cap_locked(), run by the status poll). Under
+    // mutex_.
+    std::chrono::steady_clock::time_point move_axis_cap_deadline_[2]{};
+    std::uint64_t move_axis_cap_owner_[2] = {0, 0};
+    bool move_axis_cap_armed_[2] = {false, false};
+    // open-astro#2407: the AbortSlew stop check (run_abort_verify()).
+    util::OperationGeneration abort_verify_generation_;
+    util::AsyncOperation abort_verify_{"SkyWatcher AbortSlew stop check", abort_verify_generation_, clock_};
     // The sub-floor duty-cycle worker (both axes, 50 ms tick). A generation of
     // its own: starting or replacing it must not supersede a slew, pulse or
     // stop body, and their preemption of the axes is judged per axis inside

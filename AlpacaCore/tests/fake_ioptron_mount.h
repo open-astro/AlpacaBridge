@@ -85,6 +85,9 @@ public:
     /// "0#", so a synchronous slew's landing wait sees failed reads while its status reads still answer.
     void fail_position_reads_after_goto(int n) { fail_gep_after_goto_.store(n); }
 
+    /// Issue #2396: the next @p n position reads (":GEP#" only) get the unparseable "0#" from now on.
+    void fail_next_position_reads(int n) { gep_failing_.store(n); }
+
     /// Issue #2396: every ":GEP#" read first moves the modelled RA by @p arcsec (0.01 arcsec units underneath), so the
     /// position never settles. 0 (the default) keeps it still.
     void set_position_drift_per_read(double arcsec) { drift_units_.store(std::llround(arcsec * 100.0)); }
@@ -167,6 +170,12 @@ public:
         // 0.01 arcsec units: longitude signed, latitude stored as latitude + 90 degrees.
         longitude_units_.store(std::llround(longitude_degrees * 3600.0 * 100.0));
         latitude_field_.store(std::llround((latitude_degrees + 90.0) * 3600.0 * 100.0));
+    }
+
+    /// Answer ":GEP#" with @p reply in place of the modelled position; "" restores the model.
+    void set_position_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        position_reply_ = std::move(reply);
     }
 
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
@@ -292,6 +301,10 @@ private:
             return "0030#";  // meridian treatment: stop, 30 degrees past
         }
         if (cmd == ":GEP#") {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!position_reply_.empty()) return position_reply_;
+            }
             const long long ra = ra_units_.fetch_add(drift_units_.load()) + drift_units_.load();
             const long long dec = dec_units_.load();
             return signed_eight(dec) + nine(ra) + std::to_string(pier_side_.load()) + "1#";
@@ -389,6 +402,7 @@ private:
     std::atomic<long long> latitude_field_{0};
     std::string model_code_;
     double landing_error_arcsec_;
+    std::string position_reply_;  // under mutex_
     std::atomic<int> hold_ms_{0};
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
