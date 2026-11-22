@@ -85,6 +85,9 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), or 2 (solar)";
     return limits;
 }();
+// The hand-written epsilon stays just under 1e-9, so 1e-9 is a move and anything smaller a stop (#2415).
+static_assert(kCommandLimits.move_axis_stop_epsilon < 1e-9 && kCommandLimits.move_axis_stop_epsilon > 0.9999e-9,
+              "the ZWO MoveAxis stop epsilon is the largest double under 1e-9");
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
 constexpr double kMaxSiteElevationMeters = 10000.0;
