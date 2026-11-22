@@ -7819,8 +7819,8 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9813);
     }
 
-    // open-astro#2479: Sync Time goes through HostClock, so the fake hooks drive it.
     {
+        // case: Sync Time goes through HostClock, so the fake hooks set the clock, write the RTC and latch trust (#2479)
         using alpacacore::util::HostClock;
         using alpacacore::util::HostClockTrust;
         HostClockTrustRestore untrusted(false);
