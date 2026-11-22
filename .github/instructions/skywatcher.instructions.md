@@ -375,7 +375,12 @@ datagrams before each send so replies cannot get off-by-one.
   and `slew_running()` keep their meaning; the scope calls `finished()` on every exit, a throw included,
   under the lock hold that clears the Slewing flags, and a refused slot start calls it in
   `start_slew_body()`. A PulseGuide while `slew_running()` is refused with `InvalidOperation` (a Park
-  keeps its earlier `InvalidWhileParked` refusal). A moving MoveAxis supersedes its own axis's pulse
+  keeps its earlier `InvalidWhileParked` refusal), and so is one while the driver's own goto or FindHome flags
+  are up (`own_slew_in_flight_locked()`), because a jog between `start_goto()`'s or `find_home()`'s unlock and
+  the body's first dispatch takes an axis from the slew claim (#2503). A PulseGuide on the axis a non-zero
+  MoveAxis drives, from its claim (`jog_pending_`, over its dispatch stop-wait) until its stop is sent, is
+  refused with `InvalidOperation` before anything is sent, and the jog runs on; the other axis is not checked
+  (#2503, the maintainer decision of 2026-11-22, as #2467 for SynScan and #2506 for ZWO). A moving MoveAxis supersedes its own axis's pulse
   (`supersede_pulse_locked()`: takes the pulse's state and sequence, `cancel()`s the slot, no join); the
   pulse body checks its sequence under `mutex_` before every exchange and sends that axis nothing more.
   A goto, Park or FindHome supersedes both pulses the same way inside `claim_slew_slot_locked()` (#2416),

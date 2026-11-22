@@ -1813,14 +1813,24 @@ public:
             check_writable_locked();
             check_not_parked_locked("PulseGuide");
             require_site_locked();  // the guide signs read the hemisphere
+            const auto now = clock_.now();
             // #2263: one rule on every mount. A slew, Park or FindHome owns both axes until it ends; a pulse
-            // then is refused and changes nothing. Its dispatch claims the axis in the body, as before.
-            if (motion_owner_.slew_running()) {
+            // then is refused and changes nothing. Its dispatch claims the axis in the body, as before. A jog
+            // between a goto's or FindHome's start and its body takes an axis from the slew claim, so the
+            // driver's own record of that operation refuses too (#2503).
+            if (motion_owner_.slew_running() || own_slew_in_flight_locked(now)) {
                 throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
                                       AlpacaError::InvalidOperation);
             }
-
-            const auto now = clock_.now();
+            // #2503 (maintainer decision of 2026-11-22): refused on the axis a non-zero MoveAxis drives, from its
+            // claim (jog_pending_, over its dispatch stop-wait) until its stop is sent; nothing is sent and the
+            // jog runs on. The other axis is not checked.
+            const int pulse_index = (direction == 0 || direction == 1) ? kAxisDec - 1 : kAxisRa - 1;
+            if (jog_pending_[pulse_index] != 0 ||
+                (manual_axis_slewing_[pulse_index] && cmd_axis_rate_deg_s_[pulse_index] != 0.0)) {
+                throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                      AlpacaError::InvalidOperation);
+            }
 
             // Reads are live (dead-reckoned) during pulses — no frozen-target
             // accumulation, and pulses never rewrite the slew Target
@@ -2894,6 +2904,9 @@ public:
                 if (from_rest) {
                     seed_limit_guard_baseline_locked();
                 }
+                // #2503: a PulseGuide on this axis is refused from the claim below, over the stop-wait that
+                // releases the locks, until the flag is set; the count drops under mutex_ on every exit.
+                const JogPending pending(lock, jog_pending_[axis]);
                 start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
@@ -7027,6 +7040,38 @@ private:
         pulse_ops_[axis].cancel();
     }
 
+    // #2503: the driver's own goto or FindHome is still running, read from its flags rather than its claim. A jog
+    // between start_goto()'s or find_home()'s unlock and the body's first dispatch takes an axis from the slew claim
+    // (a one-axis claim on its own thread), so slew_running() reads false there while the body is still to
+    // dispatch both axes. Each term makes Slewing read true, so a client that reads Slewing false is never refused.
+    // A Park is refused earlier, by check_not_parked_locked(). Under mutex_.
+    bool own_slew_in_flight_locked(util::HoldWindow::mono now) const {
+        return goto_in_progress_ || restoring_tracking_ || homing_ || slew_hold_.active(now);
+    }
+
+    // #2503: counts a non-zero MoveAxis on its axis (jog_pending_) from before its claim until its flag is set or
+    // it throws. Its dispatch stop-wait releases the locks, and a PulseGuide there must be refused too. The count
+    // drops under mutex_: the destructor takes the lock back when the stop-wait left it released.
+    class JogPending {
+    public:
+        JogPending(StateLock& lock, int& count) : lock_(lock), count_(count) { ++count_; }
+        JogPending(const JogPending&) = delete;
+        JogPending& operator=(const JogPending&) = delete;
+        ~JogPending() {
+            try {
+                if (!lock_.owns_lock()) {
+                    lock_.lock();
+                }
+            } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor; the count drops regardless
+            }
+            --count_;
+        }
+
+    private:
+        StateLock& lock_;
+        int& count_;
+    };
+
     // Both-axes wrapper for the stop paths that stop BOTH axes afterwards:
     // AbortSlew, and sync_to_coordinates(), which stops both for its ":E"
     // writes (disconnect joins in cancel_async_tasks()). A goto, Park or
@@ -7210,6 +7255,9 @@ private:
     mutable std::chrono::steady_clock::time_point last_slewing_poll_ = clock_.now();
     mutable util::HoldWindow slew_hold_;
     mutable bool manual_axis_slewing_[2] = {false, false};
+    // #2503: the non-zero MoveAxis calls per axis (0 RA, 1 Dec) between their claim and their flag (JogPending).
+    // Under mutex_.
+    std::array<int, 2> jog_pending_{};
 
     int slew_settle_time_seconds_ = 0;
     GuideRate guide_rate_{};
