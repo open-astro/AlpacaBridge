@@ -169,13 +169,14 @@ struct UntrustedConnect {
         REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(eventually([&] { return passes.load() == 1; }));
+        refuse_motion_bound_watchdog();
     }
     void set_host(std::chrono::system_clock::time_point utc) {
         host_s.store(std::chrono::duration_cast<std::chrono::seconds>(utc.time_since_epoch()).count());
     }
-    // The MoveAxis dead-man (#2396 AB-9) waits on the same task clock, so wait_for_waiters(1) below would count it in
-    // place of the re-sync body. A case about a MoveAxis refuses that slot; the router's client-silence watchdog is
-    // the bound left (logged).
+    // The motion bound watchdog (#2396 AB-8, AB-9: the MoveAxis dead-man and the async GOTO bound) waits on the same
+    // task clock, so wait_for_waiters(1) would count it in place of the re-sync body. connect() refuses that slot for
+    // every rig case (a refused start is logged and leaves the router's client-silence watchdog as the bound).
     void refuse_motion_bound_watchdog() {
         ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
             throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
@@ -609,7 +610,6 @@ TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis 
     IoptronLog log;
     UntrustedConnect rig;
     rig.connect();
-    rig.refuse_motion_bound_watchdog();
     rig.driver->move_axis(0, rig.driver->get_axis_rate_range(0).first);
 
     rig.set_host(kRealHost);
@@ -859,7 +859,6 @@ TEST_CASE("iOptron host clock re-sync - a MoveAxis held past the motion bound en
     UntrustedConnect rig;
     rig.connect();
     const auto sla = rig.mount.count(":SLA");
-    rig.refuse_motion_bound_watchdog();
     rig.driver->move_axis(0, rig.driver->get_axis_rate_range(0).first);
 
     rig.set_host(kRealHost);
