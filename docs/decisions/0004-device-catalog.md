@@ -23,8 +23,8 @@ The rules a change is checked against. Each names where it applies and what chec
 1. Each (vendor, device) declares its config fields once, in a descriptor pair in the vendor directory, and the schema half includes no vendor header. Scope: `AlpacaCore/src/vendors/*/*_schema.cpp`, `AlpacaCore/src/vendors/*/*_catalog.cpp`. Checked by: `scripts/check_layering.py`.
 2. AlpacaHTTP includes no vendor header and builds no driver outside the catalog. Scope: `AlpacaHTTP/src/**`, `AlpacaHTTP/include/**`. Checked by: `scripts/check_layering.py` (`MAX_ALPACAHTTP_VENDOR_INCLUDES` is 0).
 3. AlpacaCore holds no JSON type; AlpacaHTTP bridges JSON to the typed config in one place. Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review ([decision 0013](0013-designs-to-avoid.md), section 4).
-4. A config from the API is rejected on validation failure; a persisted config is normalized with a warning and stays registered. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
-5. Sanitize keeps every declared non-secret field and drops every `Secret` field. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
+4. A config from the API is rejected on validation failure; a persisted config is normalized with a warning and stays registered. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`, `AlpacaHTTP/src/http/persisted_config_store.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
+5. Sanitize keeps every declared non-secret field and drops every `Secret` field. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`, `AlpacaHTTP/src/http/persisted_config_store.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
 
 ## Alternatives rejected
 

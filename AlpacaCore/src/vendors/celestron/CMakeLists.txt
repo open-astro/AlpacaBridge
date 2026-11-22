@@ -7,6 +7,7 @@ if(ALPACACORE_ENABLE_CELESTRON)
     message(STATUS "Building Celestron NexStar and CGX/CGX-L mount driver support")
 
     set(CELESTRON_SOURCES
+        celestron_aux_beacon.cpp
         celestron_cgx_geometry.cpp
         celestron_cgx_protocol.cpp
         celestron_cgx_protocol_wrapper.cpp

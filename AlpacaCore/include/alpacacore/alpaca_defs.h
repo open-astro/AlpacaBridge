@@ -71,6 +71,15 @@ struct DeviceState {
 };
 
 /**
+ * @brief The longest PulseGuide Duration, in ms, a driver accepts when its hardware sets no limit of its own.
+ *
+ * Issue #2292: 60 s, the ZWO AM telescope's old clamp (the three mounts' refusal texts spell it out). A
+ * longer Duration is InvalidValue, never clamped. A driver whose protocol caps a pulse (iOptron, Celestron NexStar and
+ * CGX, OnStep, Bisque) keeps its own bound.
+ */
+inline constexpr int kDefaultMaxPulseGuideMs = 60000;
+
+/**
  * @brief Get device type name as string.
  */
 const char* device_type_to_string(DeviceType type);

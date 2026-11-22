@@ -23,11 +23,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <variant>
@@ -38,17 +40,21 @@
 
 namespace alpacacore::test {
 
-// The message of the AlpacaException fn throws, after requiring expected_code.
-inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-        return ex.what();
+// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
+// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
+// from the host at connect holds one, so it does not depend on the runner's NTP state.
+struct HostClockTrustGuard {
+    explicit HostClockTrustGuard(bool synchronized) {
+        util::HostClockTrust::reset_for_testing();
+        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
     }
-    FAIL("Expected AlpacaException");
-    return {};
-}
+    ~HostClockTrustGuard() {
+        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+        util::HostClockTrust::reset_for_testing();
+    }
+    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
+    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
+};
 
 // A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
 struct Latch {
@@ -76,22 +82,6 @@ struct Latch {
     }
 };
 
-// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
-// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
-// from the host at connect holds one, so it does not depend on the runner's NTP state.
-struct HostClockTrustGuard {
-    explicit HostClockTrustGuard(bool synchronized) {
-        util::HostClockTrust::reset_for_testing();
-        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
-    }
-    ~HostClockTrustGuard() {
-        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
-        util::HostClockTrust::reset_for_testing();
-    }
-    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
-    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
-};
-
 // Fails the test case unless fn throws an AlpacaException with expected_code.
 // A bare CHECK_THROWS_AS(..., AlpacaException) passes for any code.
 inline void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
@@ -101,6 +91,41 @@ inline void require_alpaca_error(const std::function<void()>& fn, int expected_c
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
     }
+}
+
+// The Alpaca error code fn throws, or 0 when it returns (ASCOM "no error"). When message is not null it receives
+// the exception's text. A non-Alpaca exception is not caught: on a test thread it fails the case. A call on a
+// worker thread, where an escaping exception ends the whole run, is worker_code_of (or sits in a catch-all).
+inline int error_code_of(const std::function<void()>& fn, std::string* message = nullptr) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        if (message != nullptr) *message = ex.what();
+        return ex.error_code();
+    }
+    return 0;
+}
+
+// error_code_of for a thread other than the test thread, where an escaping exception ends the whole run
+// instead of failing one case: a non-Alpaca exception returns -1. Never call it on the test thread.
+inline int worker_code_of(const std::function<void()>& fn) {
+    try {
+        return error_code_of(fn);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// The message of the AlpacaException fn throws, after requiring expected_code.
+inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+        return ex.what();
+    }
+    FAIL("Expected AlpacaException");
+    return {};
 }
 
 // True once a Park has ended: the mount is parked, or a read reports the failure.
@@ -144,12 +169,17 @@ struct RigTiming {
 // A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
 // first). A thin wrapper over connect_and_park(), tick() and require_alpaca_error(): it adds no rendezvous logic.
 // The factory builds the driver without connecting it, so a case can set up the fake before connect().
+// pause() and poll_now() forward to the driver's own poll seams, which a rig of a driver that has them passes in; a
+// call to one the rig was not given fails the test case.
 template <typename Fake, typename Driver>
 class PolledRig {
 public:
     using Factory = std::function<std::unique_ptr<Driver>(Fake&, FakeTaskClock&)>;
+    using PauseSeam = std::function<void(Driver&, bool)>;
+    using PollNowSeam = std::function<void(Driver&)>;
 
-    PolledRig(RigTiming timing, Factory make) : timing_(timing), driver_(make(fake_, clock_)) {}
+    PolledRig(RigTiming timing, Factory make, PauseSeam pause = {}, PollNowSeam poll_now = {})
+        : timing_(timing), pause_(std::move(pause)), poll_now_(std::move(poll_now)), driver_(make(fake_, clock_)) {}
 
     PolledRig(const PolledRig&) = delete;
     PolledRig& operator=(const PolledRig&) = delete;
@@ -168,6 +198,17 @@ public:
         for (int i = 0; i < n; ++i) alpacacore::test::tick(clock_, timing_.period, timing_.bound);
     }
 
+    // The pause seam: a paused poll skips its cycles but keeps waiting on the clock.
+    void pause(bool on) {
+        if (!pause_) FAIL("PolledRig: no pause seam");
+        pause_(*driver_, on);
+    }
+    // The poll-now seam: one poll cycle on the calling thread.
+    void poll_now() {
+        if (!poll_now_) FAIL("PolledRig: no poll_now seam");
+        poll_now_(*driver_);
+    }
+
     void expect_error(int code, const std::function<void()>& fn) { require_alpaca_error(fn, code); }
 
     Fake& fake() { return fake_; }
@@ -176,6 +217,8 @@ public:
 
 private:
     RigTiming timing_;
+    PauseSeam pause_;
+    PollNowSeam poll_now_;
     FakeTaskClock clock_;
     Fake fake_;
     std::unique_ptr<Driver> driver_;

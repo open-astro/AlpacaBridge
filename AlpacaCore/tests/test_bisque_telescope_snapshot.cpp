@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -142,7 +143,7 @@ TEST_CASE("Bisque UTCDate - unavailable mode clears time across polls and reconn
     CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(978307200456)));
     rig.driver->set_connected(false);
     rig.mount.reject_connection = true;
-    CHECK_THROWS_AS(rig.driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
     rig.mount.reject_connection = false;
     rig.mount.use_computer_clock = false;
@@ -619,7 +620,7 @@ TEST_CASE("Bisque snapshot - a getter is not blocked by the position measurement
     CHECK(rig.driver->get_right_ascension() == 5.75);
 }
 
-// Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the snapshot_.write on the success branch.
+// Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the polled_.write on the success branch.
 TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live read through to the frame",
           "[bisque][telescope][snapshot]") {
     Rig rig;
@@ -667,20 +668,100 @@ std::thread run_while_parked(alpacacore::test::FakeBisqueMount& mount, Body body
     return worker;
 }
 
-// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across protocol.find_home().
+// A FindHome polls on the task clock, so a case that waits for it moves the clock on until it returns. The clock moves
+// only while the home's thread sleeps on it, one poll per step, so a slow runner cannot push it past the 60 s deadline.
+static void advance_until_done(Rig& rig, const std::atomic<bool>& done, std::thread::id home_thread) {
+    const auto deadline = std::chrono::steady_clock::now() + seconds(10);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        if (rig.clock.wait_for_waiter_thread(home_thread, milliseconds(10))) {
+            rig.clock.advance(seconds(1));
+            static_cast<void>(rig.clock.wait_for_woken_settled(milliseconds(100)));
+        }
+    }
+}
+
+// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across protocol.is_slew_complete().
 TEST_CASE("Bisque snapshot - Name, Connected and RightAscension answer while FindHome runs in TheSkyX",
           "[bisque][telescope][snapshot]") {
     Rig rig(5000);
     REQUIRE(rig.poll());
     rig.mount.find_home_ms = 1500;
-    auto worker = run_while_parked(rig.mount, [&] { rig.driver->find_home(); });
+    rig.mount.slew_complete_ms = 1000;  // the home's first IsSlewComplete poll is slow
+    const int queries_before = rig.mount.slew_complete_queries.load();
+    std::atomic<bool> done{false};
+    std::thread worker([&] {
+        rig.driver->find_home();
+        done = true;
+    });
+    const auto poll_deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.slew_complete_queries.load() == queries_before &&
+           std::chrono::steady_clock::now() < poll_deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
     const auto budget = milliseconds(500);
     CHECK(timed([&] { (void)rig.driver->get_name(); }) < budget);
     CHECK(timed([&] { (void)rig.driver->get_connected(); }) < budget);
     CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < budget);
+    rig.mount.find_home_ms = 0;  // TheSkyX arrives home: the next IsSlewComplete reports it
+    rig.mount.slew_complete_ms = 0;
+    advance_until_done(rig, done, worker.get_id());
     worker.join();
     // The control path read the mount after FindHome: a read right after sees it.
     CHECK(rig.driver->get_at_home());
+}
+
+// Falsified by: bisque_protocol_wrapper.cpp, find_home: send the in-script loop
+// "FindHome(); while(!IsSlewComplete) Sleep(1000);" with a 60 s timeout, as before #2494 (the fake holds the reply).
+TEST_CASE("Bisque snapshot - a FindHome past the link-loss bound does not read as a lost link",
+          "[bisque][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.find_home_ms = 1000000;  // homing until the case says so
+    std::atomic<bool> done{false};
+    auto worker = run_while_parked(rig.mount, [&] {
+        try {
+            rig.driver->find_home();
+        } catch (const std::exception&) {  // a lost link fails the checks below
+        }
+        done = true;
+    });
+    // The task clock runs 31 s while TheSkyX homes; each tick still gets the wire between the home's short polls. A
+    // FindHome that holds the wire never sleeps on the task clock, and no tick can run: the clock runs on alone.
+    bool wire_held = false;
+    for (int second = 0; second < 31; ++second) {
+        const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+        while (!wire_held && rig.clock.waiter_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+        wire_held = wire_held || rig.clock.waiter_count() == 0;
+        rig.clock.advance(seconds(1));
+        if (!wire_held) REQUIRE(rig.poll());
+    }
+    CHECK_FALSE(wire_held);
+    CHECK_NOTHROW((void)rig.driver->get_right_ascension());
+    CHECK(rig.driver->get_connected());
+    rig.mount.find_home_ms = 0;
+    advance_until_done(rig, done, worker.get_id());
+    worker.join();
+    CHECK(rig.driver->get_at_home());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, kPulseGuideMaxMs: raise it to 30000 (and this case's pulse to 30000).
+TEST_CASE("Bisque snapshot - the longest PulseGuide ends inside the link-loss bound", "[bisque][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.guide_ms = 1500;
+    constexpr int kLongestPulseMs = 25000;
+    const int before = rig.mount.guide_commands.load();
+    rig.driver->pulse_guide(2, kLongestPulseMs);
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.guide_commands.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    // No tick publishes while the guide holds the wire; the frame ages by the pulse and the response margin.
+    rig.clock.advance(milliseconds(kLongestPulseMs + 1000));
+    CHECK_NOTHROW((void)rig.driver->get_right_ascension());
+    CHECK(rig.driver->get_connected());
 }
 
 // Falsified by: bisque_telescope_driver.cpp, sync_to_coordinates: call publish_measurement_locked() with mutex_ held.
@@ -754,7 +835,7 @@ TEST_CASE("Bisque snapshot - AbortSlew during the SlewToCoordinatesAsync exchang
 }
 
 // Falsified by: bisque_telescope_driver.cpp, wait_for_slew_complete: clear slewing_cached_ without the
-// `epoch == slew_epoch_` check.
+// `owns_slewing_locked(claim)` check.
 TEST_CASE("Bisque snapshot - a SlewToCoordinates that completes does not clear the Slewing of a retarget",
           "[bisque][telescope][snapshot]") {
     Rig rig;
@@ -913,4 +994,104 @@ TEST_CASE("Bisque snapshot - Connected and Slewing answer while the Unpark comma
 TEST_CASE("Bisque snapshot - Connected and Slewing answer while the SetPark command is slow",
           "[bisque][telescope][snapshot]") {
     getters_answer_during_exchange(1, [](alpacacore::TelescopeDriver& d) { d.set_park(); });
+}
+
+namespace {
+
+// Holds the position read of one status tick in the fake, lets `write` land while it is held, then releases it. The
+// tick's token was taken before the read, so `write` (a state change made under mutex_ before it reaches the wire)
+// is newer than it. `landed` says when the write has taken effect.
+void tick_overtaken_by_write(Rig& rig, const std::function<void()>& write, const std::function<bool()>& landed) {
+    std::atomic<bool> in_read{false};
+    std::atomic<bool> release{false};
+    rig.mount.on_position_read = [&] {
+        in_read = true;
+        while (!release.load()) std::this_thread::sleep_for(milliseconds(1));
+    };
+    auto tick = std::async(std::launch::async, [&] { return rig.poll(); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (!in_read.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
+    REQUIRE(in_read.load());
+    std::thread writer(write);
+    while (!landed() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
+    release = true;
+    CHECK(tick.get());
+    writer.join();
+    rig.mount.on_position_read = nullptr;
+}
+
+}  // namespace
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): take the token with polled_.begin_poll() after the position
+// read instead of before the completion read (the write is then older than the token and the frame publishes).
+TEST_CASE("Bisque snapshot - a write between the tick's token and its publish drops the frame and the slew outcome",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.land_on_target = true;
+    rig.mount.slew_polls_needed = 0;
+    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.clock.advance(seconds(9));  // past the 8 s force window: the tick asks IsSlewComplete
+    REQUIRE(rig.driver->get_slewing());
+
+    // AbortSlew clears Slewing and drops the tick in flight under mutex_ before its command waits for the wire.
+    tick_overtaken_by_write(rig, [&] { rig.driver->abort_slew(); }, [&] { return !rig.driver->get_slewing(); });
+
+    // The tick measured the landed position and the completed slew, and neither is visible: the frame was dropped.
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_right_ascension() == 5.5);
+    CHECK(rig.driver->get_declination() == 20.0);
+
+    REQUIRE(rig.poll());  // the next tick publishes
+    CHECK(rig.driver->get_right_ascension() == 5.0);
+    CHECK(rig.driver->get_declination() == 10.0);
+}
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): drop the `slewing_cached_ = false` on a completed slew.
+TEST_CASE("Bisque snapshot - a tick's slew outcome and its frame arrive together",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.land_on_target = true;
+    rig.mount.slew_polls_needed = 0;
+    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.clock.advance(seconds(9));
+    REQUIRE(rig.poll());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_right_ascension() == 5.0);
+
+    // A failed completion read is kept with its frame too: Slewing stays true and says why until a reply clears it.
+    rig.mount.land_on_target = false;
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.fail_slew_polls = 1;
+    rig.driver->slew_to_coordinates_async(6.0, 11.0);
+    rig.clock.advance(seconds(9));
+    REQUIRE(rig.poll());
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    REQUIRE(rig.poll());
+    CHECK(rig.driver->get_slewing());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): hold mutex_ from the token to the publish, across the exchanges.
+TEST_CASE("Bisque snapshot - getters answer from the frame within the budget while a tick holds 200 ms replies",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 200;
+    const int before = rig.mount.transactions.load();
+    auto tick = std::async(std::launch::async, [&] { return rig.poll(); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    REQUIRE(rig.mount.transactions.load() > before);
+    CHECK(tick.wait_for(milliseconds(0)) == std::future_status::timeout);  // the tick is on the wire
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_declination(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_tracking(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_slewing(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_device_state(); }) < kGetterBudget);
+    CHECK(tick.get());
 }

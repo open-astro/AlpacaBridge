@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 #include "locked_zwo_sdk.h"
@@ -36,7 +37,9 @@
 namespace {
 
 using alpacacore::AlpacaException;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeZWOSDK;
+using alpacacore::test::worker_code_of;
 using alpacacore::vendor::zwo::create_zwo_camera;
 namespace AlpacaError = alpacacore::AlpacaError;
 
@@ -53,15 +56,6 @@ std::vector<std::uint8_t> make_raw16_frame(int width, int height) {
         bytes[static_cast<std::size_t>(i) * 2 + 1] = static_cast<std::uint8_t>(value >> 8);
     }
     return bytes;
-}
-
-int error_code(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const AlpacaException& ex) {
-        return ex.error_code();
-    }
-    return -1;
 }
 
 }  // namespace
@@ -194,7 +188,7 @@ TEST_CASE("ZWO USB Limit applies explicit values and rejects unsupported setting
             CHECK(sdk.call_count("set_bandwidth") == 0);
         }
     } else {
-        CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
         CHECK_FALSE(camera->get_connected());
         CHECK(sdk.open_count() == 0);
         CHECK(sdk.call_count("set_bandwidth") == 0);
@@ -256,7 +250,7 @@ TEST_CASE("ZWO USB Limit readback mismatches warn only for the implicit default"
         if (explicit_setting) binding.usb_bandwidth = 40;
         auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
         if (explicit_setting) {
-            CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+            CHECK(error_code_of([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
             CHECK_FALSE(camera->get_connected());
             CHECK(sdk.open_count() == 0);
             CHECK(sdk.call_count("open_camera") == sdk.call_count("close_camera"));
@@ -281,8 +275,8 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     sdk.exposure_clock = &alpacacore::util::default_task_clock();
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     const auto expect_unset = [&](int code) {
-        CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) == code);
-        CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) == code);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); }) == code);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) == code);
     };
     expect_unset(AlpacaError::NotConnected);
     connect_camera(*camera);
@@ -295,7 +289,7 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     sdk.set_exposure_status_error("first acquisition failed");
     camera->start_exposure(0.01, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     expect_unset(AlpacaError::InvalidOperation);
 
     sdk.auto_complete_exposure = true;
@@ -312,7 +306,7 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     };
     camera->set_connected(true);  // redundant connection is not a new session
     expect_a();
-    CHECK(error_code([&] { camera->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { camera->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
     expect_a();
     sdk.auto_complete_exposure = false;
     camera->start_exposure(0.02, true);
@@ -321,11 +315,11 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     camera->abort_exposure();
     expect_a();
     CHECK_FALSE(camera->get_image_ready());
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
     sdk.set_exposure_status_error("later acquisition failed");
     camera->start_exposure(0.03, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     expect_a();
     sdk.auto_complete_exposure = true;
     camera->start_exposure(0.04, true);
@@ -339,8 +333,8 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     sdk.download_error = "late transfer failure";
     camera->start_exposure(0.05, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     CHECK(camera->get_last_exposure_duration() == 0.04);
     CHECK(camera->get_last_exposure_start_time() == start_b);
     camera->set_connected(false);
@@ -382,7 +376,7 @@ TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][
     REQUIRE(sdk.wait_for_call_count("start_exposure", 3, std::chrono::seconds(5)));  // the retry
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
     CHECK(camera->get_last_exposure_start_time() == start_a);
     clock.advance(std::chrono::milliseconds(500));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
@@ -452,7 +446,7 @@ TEST_CASE("ZWO fake SDK - a retry that would run past the client's exposure wait
     CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
     const std::string message = kept_failure(*camera);
     CHECK(message.find("a retry would run past the client's exposure wait") != std::string::npos);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
 
     // The next StartExposure clears the kept failure and starts a fresh budget.
     sdk.auto_complete_exposure = true;
@@ -628,7 +622,7 @@ TEST_CASE("ZWO fake SDK - a camera that keeps delivering early frames fails the 
     CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
     const std::string message = kept_failure(*rig.camera);
     CHECK(message.find("began before the exposure started after SDK retries") != std::string::npos);
-    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
 
     // The next StartExposure clears the kept failure, and an on-time frame is served.
     rig.camera->start_exposure(0.5, true);
@@ -653,7 +647,7 @@ TEST_CASE("ZWO fake SDK - an early frame with no time left for a retake fails th
     const std::string message = kept_failure(*rig.camera);
     CHECK(message.find("began before the exposure started; a retry would run past the client's exposure wait") !=
           std::string::npos);
-    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(rig.camera->get_image_array()); }) == AlpacaError::DriverException);
 }
 
 TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "[zwo][camera][unit][last-exposure]") {
@@ -674,15 +668,15 @@ TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "
                                     FakeZWOSDK::ExposureStatus::Failed});
         camera->start_exposure(0.02, true);
         REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
         if (prior_success) {
             CHECK(camera->get_last_exposure_duration() == 0.01);
             CHECK(camera->get_last_exposure_start_time() == prior_start);
         } else {
-            CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+            CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
                   AlpacaError::InvalidOperation);
-            CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+            CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
                   AlpacaError::InvalidOperation);
         }
     }
@@ -699,8 +693,8 @@ TEST_CASE("ZWO fake SDK - LastExposure is committed with the frame after the dow
     sdk.hold_download();
     camera->start_exposure(0.01, true);
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
-    const int held_duration = error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); });
-    const int held_start = error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); });
+    const int held_duration = error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); });
+    const int held_start = error_code_of([&] { static_cast<void>(camera->get_last_exposure_start_time()); });
     sdk.release_download();
     REQUIRE(download_started);
     CHECK(held_duration == AlpacaError::InvalidOperation);
@@ -713,7 +707,7 @@ TEST_CASE("ZWO fake SDK - LastExposure is committed with the frame after the dow
     sdk.download_error = "transfer failed after acquisition";
     camera->start_exposure(0.02, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     CHECK(camera->get_last_exposure_duration() == 0.01);
     CHECK(camera->get_last_exposure_start_time() == good_start);
 }
@@ -734,16 +728,16 @@ TEST_CASE("ZWO fake SDK - retry trigger failure stays failed without publishing"
     REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
     const int starts = sdk.call_count("start_exposure");
     CHECK(starts == 2);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("get_data_after_exposure") == 0);
     clock.advance(std::chrono::seconds(1));
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
     static_cast<void>(camera->get_camera_state());
     CHECK(sdk.call_count("start_exposure") == starts);
-    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
           AlpacaError::InvalidOperation);
-    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
           AlpacaError::InvalidOperation);
     sdk.auto_complete_exposure = true;
     camera->start_exposure(0.02, true);
@@ -775,7 +769,7 @@ TEST_CASE("ZWO fake SDK - a cancelled body never re-triggers the exposure",
     CHECK(clock.waiter_count() == 0);
     CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK_FALSE(camera->get_image_ready());  // an abort keeps no failure
-    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
           AlpacaError::InvalidOperation);
 }
 
@@ -789,7 +783,7 @@ TEST_CASE("ZWO fake SDK - lazy download preserves padded ROI pixels", "[zwo][cam
     camera->set_start_x(9);  // the padded eight-pixel ROI shifts left and crops one column
     camera->set_start_y(5);  // the effective ROI shifts upward and crops one source row
     sdk.frame_bytes = make_raw16_frame(8, 4);
-    CHECK(error_code([&] { camera->start_exposure(std::numeric_limits<double>::quiet_NaN(), true); }) ==
+    CHECK(error_code_of([&] { camera->start_exposure(std::numeric_limits<double>::quiet_NaN(), true); }) ==
           AlpacaError::InvalidValue);
     camera->start_exposure(0.001, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
@@ -814,7 +808,7 @@ TEST_CASE("ZWO fake SDK - lazy download preserves padded ROI pixels", "[zwo][cam
     CHECK(sdk.call_count("get_data_after_exposure") == 1);
     camera->set_num_x(8);  // a geometry write drops the Ready frame (issue #1981)
     CHECK_FALSE(camera->get_image_ready());
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
 }
 
 TEST_CASE("ZWO fake SDK - full-frame binned dimensions survive ROI alignment", "[zwo][camera][unit]") {
@@ -868,11 +862,11 @@ TEST_CASE("ZWO fake SDK - an SDK error at the exposure start surfaces through Im
         } else {
             sdk.fail_exposure_start = true;
         }
-        CHECK(error_code([&] { camera->start_exposure(0.002, true); }) == -1);
+        CHECK(error_code_of([&] { camera->start_exposure(0.002, true); }) == 0);
         REQUIRE(alpacacore::test::wait_exposure_end(*camera));
         CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
         CHECK(camera->get_last_exposure_duration() == 0.001);
         CHECK(camera->get_last_exposure_start_time() == start);
     }
@@ -884,7 +878,7 @@ TEST_CASE("ZWO fake SDK - post-open connect failure closes the handle and can re
     sdk.camera.supported_formats.clear();
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
 
-    CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
     CHECK_FALSE(camera->get_connected());
     CHECK(sdk.open_count() == 0);
     CHECK(sdk.call_count("close_camera") == 1);
@@ -939,7 +933,7 @@ TEST_CASE("ZWO fake SDK - geometry changes preserve last-exposure metadata", "[z
     camera->stop_exposure();
     check_history();
     CHECK_FALSE(camera->get_image_ready());
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
 }
 
 TEST_CASE("ZWO fake SDK - ImageArray while exposing is asked too early", "[zwo][camera][unit]") {
@@ -978,7 +972,7 @@ TEST_CASE("ZWO fake SDK - overlapping start is rejected without replacing the ac
 
     CHECK_FALSE(camera->get_image_ready());
     const int starts = sdk.call_count("start_exposure");
-    CHECK(error_code([&] { camera->start_exposure(0.002, true); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { camera->start_exposure(0.002, true); }) == AlpacaError::InvalidOperation);
     CHECK(sdk.call_count("start_exposure") == starts);
     CHECK_FALSE(camera->get_image_ready());
 
@@ -993,7 +987,7 @@ TEST_CASE("ZWO fake SDK - overlapping start is rejected without replacing the ac
     sdk.hold_download();
     camera->start_exposure(0.003, true);
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
-    const int code_in_download = error_code([&] { camera->start_exposure(0.004, true); });
+    const int code_in_download = error_code_of([&] { camera->start_exposure(0.004, true); });
     sdk.release_download();
     REQUIRE(download_started);
     CHECK(code_in_download == AlpacaError::InvalidOperation);
@@ -1027,25 +1021,25 @@ TEST_CASE("ZWO fake SDK - ImageReady is false from StartExposure until the new f
         gate_cv.notify_all();
         gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return release_start; });  // bounded: no hang if red
     };
-    const int start_code = error_code([&] { camera->start_exposure(0.002, true); });
+    const int start_code = error_code_of([&] { camera->start_exposure(0.002, true); });
     bool trigger_held = false;
     {
         std::unique_lock lock(gate_mutex);
         trigger_held = gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return start_entered; });
     }
     const bool returned_before_trigger = !release_start;
-    const int ready_code = error_code([&] { CHECK_FALSE(camera->get_image_ready()); });
-    const int array_code = error_code([&] { static_cast<void>(camera->get_image_array()); });
+    const int ready_code = error_code_of([&] { CHECK_FALSE(camera->get_image_ready()); });
+    const int array_code = error_code_of([&] { static_cast<void>(camera->get_image_array()); });
     {
         std::lock_guard lock(gate_mutex);
         release_start = true;
     }
     gate_cv.notify_all();
 
-    CHECK(start_code == -1);
+    CHECK(start_code == 0);
     CHECK(trigger_held);
     CHECK(returned_before_trigger);
-    CHECK(ready_code == -1);
+    CHECK(ready_code == 0);
     CHECK(array_code == AlpacaError::InvalidOperation);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(camera->get_image_ready());
@@ -1091,13 +1085,13 @@ TEST_CASE("ZWO fake SDK - lazy download failure stays visible and later exposure
     camera->start_exposure(0.001, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
 
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("get_data_after_exposure") == 1);
 
     camera->abort_exposure();  // idle: the kept failure stays until the next start (issue #1981)
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
 
     sdk.download_error.clear();
     sdk.frame_bytes = make_raw16_frame(16, 8);
@@ -1121,16 +1115,16 @@ TEST_CASE("ZWO fake SDK - status read failure and exhausted retries stay visible
     sdk.set_exposure_status_error("scripted status-read failure");
     camera->start_exposure(0.001, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
 
     sdk.set_exposure_status_error("");
     sdk.script_exposure_status(
         {FakeZWOSDK::ExposureStatus::Failed, FakeZWOSDK::ExposureStatus::Failed, FakeZWOSDK::ExposureStatus::Failed});
     camera->start_exposure(0.001, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));  // the second retry waits 250 ms of real time
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("start_exposure") == 4);
 
     camera->start_exposure(0.001, true);
@@ -1155,8 +1149,8 @@ TEST_CASE("ZWO fake SDK - reconnect clears status, ROI and transfer failures", "
         }
         camera->start_exposure(0.001, true);
         REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
 
         camera->set_connected(false);
         sdk.set_exposure_status_error("");
@@ -1164,7 +1158,7 @@ TEST_CASE("ZWO fake SDK - reconnect clears status, ROI and transfer failures", "
         sdk.download_error.clear();
         camera->set_connected(true);
         CHECK_FALSE(camera->get_image_ready());
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
 
         camera->start_exposure(0.001, true);
         REQUIRE(alpacacore::test::wait_exposure_end(*camera));
@@ -1219,14 +1213,14 @@ TEST_CASE("ZWO fake SDK - a download failure is kept: ImageReady raises and is n
     bool ever_ready = false;
     int code = 0;
     const bool raised = alpacacore::test::zwo_eventually([&] {
-        code = error_code([&] { ever_ready = camera->get_image_ready() || ever_ready; });
-        return code != -1;
+        code = error_code_of([&] { ever_ready = camera->get_image_ready() || ever_ready; });
+        return code != 0;
     });
     CHECK(raised);
     CHECK_FALSE(ever_ready);
     CHECK(code == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("get_data_after_exposure") == 1);
 }
 
@@ -1248,13 +1242,13 @@ TEST_CASE("ZWO fake SDK - concurrent ImageArray reads return the one downloaded 
     alpacacore::ImageArray second;
     std::atomic<int> first_code{-1};
     std::atomic<int> second_code{-1};
-    std::thread first_reader([&] { first_code.store(error_code([&] { first = camera->get_image_array(); })); });
-    std::thread second_reader([&] { second_code.store(error_code([&] { second = camera->get_image_array(); })); });
+    std::thread first_reader([&] { first_code.store(worker_code_of([&] { first = camera->get_image_array(); })); });
+    std::thread second_reader([&] { second_code.store(worker_code_of([&] { second = camera->get_image_array(); })); });
     first_reader.join();
     second_reader.join();
 
-    CHECK(first_code.load() == -1);
-    CHECK(second_code.load() == -1);
+    CHECK(first_code.load() == 0);
+    CHECK(second_code.load() == 0);
     CHECK(sdk.call_count("get_data_after_exposure") == 1);
     CHECK(sdk.call_count("get_roi_format") == roi_reads);
     CHECK(first.data == second.data);
@@ -1273,8 +1267,8 @@ TEST_CASE("ZWO fake SDK - mismatched ROI metadata cannot publish ready", "[zwo][
         sdk.roi_readback_override = roi;
         camera->start_exposure(0.001, true);
         REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
         CHECK(sdk.call_count("get_data_after_exposure") == 0);
     }
 
@@ -1282,8 +1276,8 @@ TEST_CASE("ZWO fake SDK - mismatched ROI metadata cannot publish ready", "[zwo][
     sdk.start_readback_override = FakeZWOSDK::StartPosition{1, 0};
     camera->start_exposure(0.001, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
     CHECK(sdk.call_count("get_data_after_exposure") == 0);
 
     sdk.start_readback_override.reset();
@@ -1303,7 +1297,7 @@ TEST_CASE("ZWO fake SDK - abort rejects an in-flight lazy download", "[zwo][came
     camera->start_exposure(0.001, true);
 
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
-    const int abort_code = error_code([&] { camera->abort_exposure(); });
+    const int abort_code = error_code_of([&] { camera->abort_exposure(); });
     const int stop_calls = sdk.call_count("stop_exposure");
     sdk.release_download();
 
@@ -1330,12 +1324,12 @@ TEST_CASE("ZWO fake SDK - stop leaves an in-flight lazy download alone", "[zwo][
     camera->start_exposure(0.001, true);
 
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
-    const int stop_code = error_code([&] { camera->stop_exposure(); });
+    const int stop_code = error_code_of([&] { camera->stop_exposure(); });
     const int stop_calls = sdk.call_count("stop_exposure");
     sdk.release_download();
 
     CHECK(download_started);
-    CHECK(stop_code == -1);
+    CHECK(stop_code == 0);
     CHECK(stop_calls == 0);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(camera->get_image_ready());
@@ -1385,7 +1379,7 @@ TEST_CASE("ZWO fake SDK - disconnect waits for the lazy download before close", 
     CHECK(close_waited);
     CHECK(cached_getter_unblocked);
     CHECK(cached_bin.load() == 1);
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::NotConnected);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::NotConnected);
     CHECK_FALSE(sdk.closed_during_download());
     CHECK(sdk.open_count() == 0);
 }
@@ -1528,7 +1522,7 @@ TEST_CASE("ZWO fake SDK - an open of a held id whose serial changed closes it an
     CHECK(sdk.call_count("init_camera") == 2);
     CHECK(sdk.open_count() == 1);
     // The first holder's link is retired: its call is refused.
-    CHECK(error_code([&] { sdk.with_link(id, first.link, [&] { (void)sdk.get_roi_format(id); }); }) ==
+    CHECK(error_code_of([&] { sdk.with_link(id, first.link, [&] { (void)sdk.get_roi_format(id); }); }) ==
           AlpacaError::NotConnected);
 }
 
@@ -1541,7 +1535,7 @@ TEST_CASE("ZWO fake SDK - a close that throws still lets the next open initialis
     const int id = sdk.camera.camera_id;
     const auto first = sdk.open_camera_link(id);
     sdk.fail_close = true;
-    CHECK(error_code([&] { sdk.close_camera_link(id, first.link); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { sdk.close_camera_link(id, first.link); }) == AlpacaError::DriverException);
     sdk.fail_close = false;
 
     const auto again = sdk.open_camera_link(id);
@@ -1664,7 +1658,7 @@ TEST_CASE("ZWO fake SDK - a failed exposure keeps its message until the next Sta
             message = ex.what();
         }
         CHECK(message.find("camera exposure failed after SDK retries") != std::string::npos);
-        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
         CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
     };
     expect_failure();
@@ -1693,7 +1687,7 @@ TEST_CASE("ZWO fake SDK - AbortExposure during the download is refused and the f
     camera->start_exposure(0.001, true);
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
     const auto state = camera->get_camera_state();
-    const int abort_code = error_code([&] { camera->abort_exposure(); });
+    const int abort_code = error_code_of([&] { camera->abort_exposure(); });
     const int stop_calls = sdk.call_count("stop_exposure");
     sdk.release_download();
 
@@ -1716,12 +1710,12 @@ TEST_CASE("ZWO fake SDK - StopExposure during the download is ignored", "[zwo][c
     sdk.hold_download();
     camera->start_exposure(0.001, true);
     const bool download_started = sdk.wait_for_download(std::chrono::seconds(2));
-    const int stop_code = error_code([&] { camera->stop_exposure(); });
+    const int stop_code = error_code_of([&] { camera->stop_exposure(); });
     const int stop_calls = sdk.call_count("stop_exposure");
     sdk.release_download();
 
     REQUIRE(download_started);
-    CHECK(stop_code == -1);
+    CHECK(stop_code == 0);
     CHECK(stop_calls == 0);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(camera->get_image_ready());
@@ -1752,8 +1746,8 @@ TEST_CASE("ZWO fake SDK - a reconnect after a link loss clears the kept failure 
     REQUIRE(camera->get_connected());
     CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK_FALSE(camera->get_image_ready());  // no kept failure
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
-    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
           AlpacaError::InvalidOperation);
     camera->set_connected(false);
 }
@@ -1768,19 +1762,19 @@ TEST_CASE("ZWO fake SDK - a geometry write is refused while exposing and drops a
     connect_camera(*camera);
     camera->start_exposure(0.001, true);
     REQUIRE(sdk.wait_for_call_count("get_exposure_status", 1, std::chrono::seconds(2)));  // triggered, now polling
-    CHECK(error_code([&] { camera->set_bin_x(2); }) == AlpacaError::InvalidOperation);
-    CHECK(error_code([&] { camera->set_num_x(7); }) == AlpacaError::InvalidOperation);
-    CHECK(error_code([&] { camera->set_start_x(1); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { camera->set_bin_x(2); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { camera->set_num_x(7); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { camera->set_start_x(1); }) == AlpacaError::InvalidOperation);
     CHECK(camera->get_bin_x() == 1);
 
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     REQUIRE(camera->get_image_ready());
     const auto start = camera->get_last_exposure_start_time();
-    CHECK(error_code([&] { camera->set_num_x(7); }) == -1);
+    CHECK(error_code_of([&] { camera->set_num_x(7); }) == 0);
     CHECK(camera->get_num_x() == 7);
     CHECK_FALSE(camera->get_image_ready());
-    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(error_code_of([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
     CHECK(camera->get_last_exposure_duration() == 0.001);
     CHECK(camera->get_last_exposure_start_time() == start);
 }
@@ -1800,7 +1794,7 @@ TEST_CASE("ZWO Camera Driver - StartExposure below ExposureMin runs at the minim
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     connect_camera(*camera);
     CHECK(camera->get_exposure_min() == static_cast<double>(sdk.exposure_min_us) / 1'000'000.0);
-    CHECK(error_code([&] { camera->start_exposure(duration, true); }) == -1);
+    CHECK(error_code_of([&] { camera->start_exposure(duration, true); }) == 0);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     REQUIRE(camera->get_image_ready());
     CHECK(sdk.control_value(FakeZWOSDK::ControlType::Exposure) == sdk.exposure_min_us);

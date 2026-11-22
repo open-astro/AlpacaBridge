@@ -143,7 +143,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     rig.mount.set_encoder_position(0x11, 0x810000);
     const auto lst = rig.driver->get_sidereal_time();
     const int sync_ra = rig.reads(0x10), sync_dec = rig.reads(0x11);
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     for (int wait = 1; wait <= 5; ++wait) {
         const bool waiting = rig.clock.wait_for_wait_count(wait, 2s);
         rig.clock.advance(20ms);
@@ -156,7 +156,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     // The synced labels are served before any poll.
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
     CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
-    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(87.0).margin(1e-3));
     rig.coordinates();
     rig.driver->set_tracking(true);
     rig.coordinates();
@@ -189,9 +189,9 @@ TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[
         cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), old_dec_label, lst, cgx::CgxHemisphere::North)
             .pointing_side;
     const auto new_dec_label =
-        cgx::cgx_sky_position_to_encoders(lst, 85.0, lst, cgx::CgxHemisphere::North, side).second;
+        cgx::cgx_sky_position_to_encoders(lst, 87.0, lst, cgx::CgxHemisphere::North, side).second;
     rig.mount.set_label_read_offsets(0x11, {0, cgx::signed_cgx_encoder_delta(old_dec_label, new_dec_label)});
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     // Waits 1-3 are the settle before the writes; wait 4 is the first verify sleep, after both label writes.
     for (int wait = 1; wait <= 3; ++wait) {
         CHECK(rig.clock.wait_for_wait_count(wait, 2s));
@@ -211,7 +211,7 @@ TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[
     CHECK(during_dec == Catch::Approx(before_dec).margin(1e-6));
     // Sync publishes the verified pair.
     CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
-    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(87.0).margin(1e-3));
 }
 
 TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label writes", "[celestron][cgx][telemetry]") {
@@ -220,7 +220,7 @@ TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label wr
     rig.poll_now();
     const double lst = rig.driver->get_sidereal_time();
     rig.mount.set_label_read_offsets(0x11, std::vector<std::int32_t>(40, 100));  // the Dec label never reads back
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     for (int wait = 1; wait <= 40 && sync.wait_for(0s) != std::future_status::ready; ++wait) {
         if (rig.clock.wait_for_wait_count(wait, 2s)) rig.clock.advance(20ms);
     }
@@ -381,15 +381,21 @@ TEST_CASE("CGX a pending stop refuses the frame until the stop completes", "[cel
     CHECK(rig.reads(0x11) == dec);
     rig.clock.advance(20ms);
     const bool second_wait = rig.clock.wait_for_wait_count(2, 2s);
-    rig.clock.advance(20ms);
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    // The AbortSlew stop then reads the encoders until two reads 500 ms apart agree (#2411): step it to the end.
+    for (int step = 0; step < 100 && rig.driver->get_slewing(); ++step) {
+        rig.clock.advance(20ms);
+        REQUIRE(rig.clock.wait_for_woken_settled(2s));
+    }
     CHECK(first_wait);
     CHECK(second_wait);
     REQUIRE_FALSE(rig.driver->get_slewing());
+    // The getters read no axis: only the stop did.
+    const int stopped_ra = rig.reads(0x10), stopped_dec = rig.reads(0x11);
+    CHECK(stopped_ra > ra);
+    CHECK(stopped_dec > dec);
     CHECK_NOTHROW(rig.coordinates());
-    CHECK(rig.reads(0x10) == ra);
-    CHECK(rig.reads(0x11) == dec);
+    CHECK(rig.reads(0x10) == stopped_ra);
+    CHECK(rig.reads(0x11) == stopped_dec);
 }
 
 TEST_CASE("CGX a known fault refuses the frame and a recovered link still needs FindHome",

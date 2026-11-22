@@ -1,0 +1,5 @@
+### Fixed
+- **Remote Alpaca ObservingConditions: a refused command answers NotConnected and leaves a newer link alone** (Remote Alpaca driver, issue #2456): a Refresh or AveragePeriod write that met a refused connection decided its answer in the caller, after its body had ended. A Disconnect and a Connect could run in that gap, so the caller's late loss dropped the new link, or, when the Connect finished between the loss and the check, the refusal escaped as a bare DriverException (the nightly stress case "refused-connection losses race connects, disconnects and reads" on 11-20 and 11-21). The body now takes the loss and picks NotConnected itself, inside the command slot every Connect joins first. New test seam `set_command_done_hook_for_testing()`.
+
+### Added (tests)
+- **Remote Alpaca refused-command race** (issue #2456): "Remote Alpaca ObservingConditions Driver - a refused Refresh racing a reconnect keeps the new link" runs a Disconnect and a Connect between a refused Refresh body and its caller's answer.

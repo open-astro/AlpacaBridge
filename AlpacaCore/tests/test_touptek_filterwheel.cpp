@@ -98,10 +98,6 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Unsupported actions", "[touptek][fi
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },
@@ -136,7 +132,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Set position validation path", "[to
 
     // ASCOM precedence (per driver-lifecycle.instructions.md): range validation precedes the connection
     // check. A negative position is unconditionally invalid, so it is InvalidValue
-    // even while disconnected. The upper bound depends on slot_count_ (unknown
+    // even while disconnected. The upper bound depends on the slot count (unknown
     // until connect), so an in-range-but-unverifiable index reports NotConnected;
     // ConformU covers the connected out-of-range InvalidValue path on hardware.
     require_alpaca_error([&]() { driver->set_position(-1); }, alpacacore::AlpacaError::InvalidValue);
@@ -357,7 +353,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a sl
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(wheel.driver->get_names().size() == 5);
-    CHECK(wheel.driver->get_name() == "FakeAFW");
+    CHECK(wheel.driver->get_name() == "ToupTek FakeAFW");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
     slow->store(false);
@@ -374,7 +370,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a failed set_position invalidates t
     REQUIRE(wheel.reads() == 1);
 
     wheel.fake.throw_from.insert("set_filter_wheel_position");
-    CHECK_THROWS_AS(wheel.driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { wheel.driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     wheel.fake.throw_from.erase("set_filter_wheel_position");
     CHECK(wheel.driver->get_position() == 0);
     CHECK(wheel.reads() == 2);
@@ -407,4 +403,25 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a he
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     connect.get();
     driver->set_connected(false);
+}
+
+// Falsified by: touptek_filterwheel_driver.cpp set_connected(false) not calling slots_.clear_slot_count(), so a
+// Disconnect keeps the slot count and a names list of another length is still refused.
+TEST_CASE("ToupTek AFW Filter Wheel Driver - Names follow the slot count only while connected",
+          "[touptek][filterwheel][unit]") {
+    ConnectedAfw wheel;  // 5 slots
+    REQUIRE(wheel.driver->get_names().size() == 5);
+
+    const auto before = wheel.driver->get_names();
+    require_alpaca_error([&] { wheel.driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(wheel.driver->get_names() == before);
+
+    wheel.driver->set_names({"LRGBH"});
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+
+    wheel.driver->set_connected(false);
+    REQUIRE_NOTHROW(wheel.driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(wheel.driver->set_focus_offsets({1, 2, 3}));
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(wheel.driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
 }

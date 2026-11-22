@@ -8,7 +8,7 @@ if(ALPACACORE_ENABLE_QHY)
     if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         message(FATAL_ERROR "Unsupported architecture for QHY SDK: ${CMAKE_SYSTEM_PROCESSOR}. AlpacaBridge is arm64-only.")
     endif()
-    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_linux_arm64_26.07.28")
+    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_linux_arm64")
 
     set(QHY_SDK_INCLUDE  "${QHY_SDK_ROOT}/usr/local/include")
     set(QHY_SDK_LIB_DIR  "${QHY_SDK_ROOT}/usr/local/lib")

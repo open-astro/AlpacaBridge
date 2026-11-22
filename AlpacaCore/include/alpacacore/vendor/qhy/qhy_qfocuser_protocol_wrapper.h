@@ -92,6 +92,11 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text);
  */
 std::vector<QFocuserPortInfo> enumerate_qfocuser_ports();
 
+/// The USB descriptor tokens of a Q-Focuser adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& qfocuser_usb_tokens();
+
 /**
  * @brief The scan's probe of one port: the {"cmd_id":1} handshake under a probe
  * claim (#1202). True, with @p info filled, only for a reply with idx 1 and a
@@ -125,9 +130,13 @@ public:
 
     /**
      * @brief False once a transaction has seen the port die (POLLHUP, EOF,
-     * EIO/ENXIO/ENODEV/EBADF) since the last connect(). The wrapper releases
-     * the fd at that moment; every later command throws NotConnected until a
-     * new connect(). Lock-free, safe from a FAST-timing getter (issue #527).
+     * EIO/ENXIO/ENODEV/EBADF: the util::SerialLink verdict, #2262) since the
+     * last connect(). The wrapper releases the fd at that moment; every later
+     * command throws NotConnected until a new connect(). Any disconnect() clears
+     * it too (decision 0009 rule 5), the driver's own on-lost release included,
+     * so the driver keeps Connected false through its PolledState, not through
+     * this flag. Lock-free, safe from a FAST-timing getter
+     * (issue #527).
      */
     bool link_alive() const noexcept;
 

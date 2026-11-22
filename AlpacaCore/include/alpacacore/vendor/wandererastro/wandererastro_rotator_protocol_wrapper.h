@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/serial_by_id_scan.h>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -25,6 +27,9 @@ inline constexpr int kRotatorMiniStepsPerDegree = 1142;
 
 /// Minimum firmware (YYYYMMDD) the Mini protocol implemented here requires.
 inline constexpr int kRotatorMiniMinFirmware = 20240226;
+
+/// Newest firmware (YYYYMMDD) INDI knows of; older firmware still works and only draws a warning.
+inline constexpr int kRotatorMiniLatestFirmware = 20261025;
 
 /**
  * @brief Connection configuration for the WandererRotator Mini.
@@ -70,6 +75,10 @@ struct RotatorState {
     // classic cause is missing DC power). mechanical_angle then stays at the
     // move start. Cleared by the next move, Halt, Sync or reconnect.
     bool completion_missing = false;
+    // The firmware refused the last move (NP or LIMIT reply): the text IsMoving
+    // throws, empty when none. mechanical_angle stays at the move start. Cleared
+    // like completion_missing.
+    std::string move_fault;
 };
 
 /**
@@ -84,8 +93,27 @@ struct RotatorState {
  */
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports();
 
+/// The USB descriptor tokens of a Wanderer rotator adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& wanderer_rotator_usb_tokens();
+
 /// Test seam: probes exactly these paths instead of scanning the host.
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths);
+
+namespace detail {
+/**
+ * @brief Why the raw /dev/ttyUSBn pass of enumerate_wanderer_rotator_ports()
+ *        skips a node whose USB descriptor read gave @p descriptor, or
+ *        std::nullopt to probe it (issue #2212).
+ *
+ * "USB descriptor unreadable" when sysfs gave none, else "not a CH340/CH341
+ * device (vendor <id>, product "<product>")" for an adapter of another
+ * class. The scan logs the reason at DEBUG, so a log shows whether a node
+ * existed and why it was not probed.
+ */
+std::optional<std::string> raw_rotator_skip_reason(const std::optional<util::UsbTtyDescriptor>& descriptor);
+}  // namespace detail
 
 /**
  * @brief Protocol wrapper for the WandererRotator Mini (V1/V2).
@@ -123,6 +151,22 @@ public:
     /** @brief Check if connected. */
     bool is_connected() const;
 
+    /**
+     * @brief False once the link is lost (decision 0009, issue #1989).
+     *
+     * EIO, ENXIO or ENODEV on a command write, or on a read of the move
+     * monitor, loses the link at once: the wrapper resets its cached state
+     * and firmware date, keeps the reason and releases the port. There is no
+     * silence latch and no staleness bound (request/response, silent between
+     * moves), so an idle pull is found by the next command. Lock-free.
+     * Cleared by the next connect() or disconnect().
+     */
+    bool link_alive() const;
+
+    /// The loss reason ("Serial link lost (errno N)") after a loss, empty on a
+    /// healthy link; kept until the next connect() or disconnect().
+    std::string link_fault() const;
+
     /** @brief Get the most recent rotator state (never blocks on serial I/O). */
     RotatorState get_state() const;
 
@@ -147,7 +191,7 @@ public:
     /** @brief Halt an in-flight move. Command "Stop". No-op when idle. */
     void halt();
 
-    /// Clear the completion_missing fault (the driver's Sync does this).
+    /// Clear the completion_missing and move_fault faults (the driver's Sync does this).
     void clear_completion_missing();
 
     /** @brief Set hardware direction reversal. Commands "1700001"/"1700000". */

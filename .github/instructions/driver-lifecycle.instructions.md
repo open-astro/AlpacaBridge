@@ -39,8 +39,10 @@ vendor-agnostic; do them in the driver from the start.
   `connection_thread_` / `connecting_` in a driver.** The driver obligations
   (each one line, all contractual — see the header comment): destructor calls
   `shutdown_connection()` FIRST; `connect()`/`disconnect()` forward to
-  `start_connection_task(true/false)`; `get_connecting()` returns
-  `connection_task_active()`; `set_connected` gates with
+  `start_connection_task(true/false)` and `get_connecting()` returns
+  `connection_task_active()`, all three written as `ALPACA_ASYNC_CONNECT_FORWARDERS()`
+  in a public section, never by hand (issue #1757; `scripts/check_connect_error_hook.py`
+  fails a driver without it); `set_connected` gates with
   `record_disconnect_if_connect_in_flight(...)` / `consume_pending_disconnect()`
   after taking the driver mutex, before the idempotency early-return. A driver
   with an extra sync-connect window the base can't see (e.g. the AFW's
@@ -53,7 +55,7 @@ vendor-agnostic; do them in the driver from the start.
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
   (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
-  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown, telemetry poll (#1918) and host clock re-sync (#2419), the OnStep, Celestron NexStar and SynScan host clock re-syncs (#2419), the ZWO camera's pulse-guide turn-off (#1667), and the Gemini focuser and flat panel run their operation bodies (async slew,
+  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown, telemetry poll (#1918) and host clock re-sync (#2419), the OnStep, Celestron NexStar and SynScan host clock re-syncs (#2419), the ZWO camera's pulse-guide turn-off (#1667), the QHY camera's temperature, telemetry, cooler-off and pulse-guide bodies (#1736), and the Gemini focuser and flat panel run their operation bodies (async slew,
   park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -68,14 +70,14 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020),
-  the QHY cooler-off and temperature workers and the GPIO
-  soft-PWM workers; the list is a sample, not a roster.
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO, SVBONY, ToupTek and QHY are;
+  decision 0020) and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
     freed memory (UB). Make it a joinable member thread with a cancel flag +
-    `std::condition_variable`, and cancel + join it in the destructor. The one
-    sanctioned exception is the bounded detach-on-timeout worker below. The 2026-07
+    `std::condition_variable`, and cancel + join it in the destructor. No driver detaches a
+    thread any more (the QHY camera's exposure worker was the last, removed by #1736); add
+    no new one. The 2026-07
     full-codebase audit found this rule held on every connect/disconnect *lifecycle*
     path but violated on a dozen *operational* paths; apply it to every thread a driver
     spawns, not just the connection machinery.
@@ -158,7 +160,7 @@ vendor-agnostic; do them in the driver from the start.
   camera moves its operational calls to the rule above only after a measurement shows a getter stall. The exposure body (a
   `CaptureSession` body, or a worker not yet converted) keeps
   a bare snapshot — it must not hold any lock across a blocking image wait
-  (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`), and its close is
+  (`SVBGetVideoData`, `POAGetImageData`), and its close is
   stop-and-joined first. Same exemption for a call that blocks for its whole
   duration on the device (SVBONY `SVBPulseGuide`). A helper returning a
   **reference** into a locked container (`control_caps_`) is the same trap one
@@ -176,8 +178,8 @@ vendor-agnostic; do them in the driver from the start.
   handle, and `Close` never balances. Don't leave post-open SDK calls
   (`put_trigger_mode`, `get_serial_number`, …) outside the cleanup try.
 - **A blocking SDK call with no timeout of its own can hang disconnect forever
-  — bound the wait, detach on timeout, and reference-count the handle** (QHY
-  ConformU session, 2026-07). Some vendor SDK calls (QHY `ControlQHYCCDTemp`,
+  — bound the wait, never the join, and reference-count the handle** (QHY
+  ConformU session, 2026-07; issue #1736). Some vendor SDK calls (QHY `ControlQHYCCDTemp`,
   a PID loop documented at ~10s but occasionally much longer; `SetQHYCCDParam`
   on some control IDs) have no cancellation and no SDK-side timeout. If a
   background worker (temp-control thread, cooler-off task) is stuck inside one
@@ -185,25 +187,36 @@ vendor-agnostic; do them in the driver from the start.
   and ConformU gives the bare `Disconnect()` method a ~5s budget (a ConformU
   timeout, not an ASCOM requirement; other clients set their own), so "just
   wait longer" is not an option. Fix
-  shape: (1) give the worker's own "is it still running" flag as a
-  `shared_ptr<std::atomic<bool>>` (same pattern as a detached timer's flag,
-  Threads & shutdown above); (2) bound the join with a short deadline (2s —
-  comfortably under ConformU's ~5s budget) and `.detach()` instead of
-  `.join()` on timeout; (3) make that detach *safe* by reference-counting the
-  SDK handle itself (`shared_ptr<qhyccd_handle>` with a
-  `CloseQHYCCD`-on-last-reference deleter in the wrapper, not a raw pointer)
-  so a concurrent `close_camera()` can never invalidate a handle the detached
-  worker is still using — the physical close is deferred until every in-flight
-  call actually finishes, instead of racing it. Same shape applies to any
-  vendor SDK with a long, uncancellable, no-timeout call.
+  shape (QHY camera): (1) run the body in a `util::AsyncOperation` slot;
+  disconnect `cancel()`s it and waits at most 2 s on the task clock for
+  `running()` to clear (comfortably under ConformU's ~5s budget), then goes on
+  with the body still cancelled, never joined or detached; (2) the body checks
+  its stop reason under the state lock before touching driver state, so a late
+  return changes nothing; (3) the destructor's `cancel_all_and_join()` waits for
+  it with no bound, the accepted cost of an SDK that never returns; (4)
+  reference-count the SDK handle (`shared_ptr<qhyccd_handle>` with a
+  `CloseQHYCCD`-on-last-reference deleter in the wrapper) so the disconnect's
+  `close_camera()` defers the physical close until every in-flight call
+  finishes. Same shape applies to any vendor SDK with a long, uncancellable,
+  no-timeout call. The QHY exposure body is the exception (#1736): it runs in a
+  `util::CaptureSession`, and a disconnect calls `cancel_exposure()` first, then
+  `disconnect_and_join()`, which joins with no bound. When the cancel does not
+  interrupt `GetQHYCCDSingleFrame`, the disconnect waits for that one call, as
+  ZWO's waits for `ASIGetDataAfterExp` (decision 0020, the QHY row).
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
   an exposure-in-progress state, checked **under the same lock that publishes it**.
   GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
-  under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
-  sets `exposure_starting_` under `mutex_` until `session_.start()` (which runs without the lock)
-  publishes Exposing, and the setters' `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
+  under the same lock. A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
+  under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
+  lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
+  or a failed body still returning), and an AbortExposure that finds only a reservation calls
+  `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
+  exposure starts
+  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260): ZWO, SVBONY,
+  Player One and ToupTek do (ZWO for its geometry setters only); Player One adds its own SDK term. Checking the
+  state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).
@@ -359,12 +372,15 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   an empty list without `TimeStamp` through the base class's per-id try/catch when no
   operational values remain (the ASCOM read-all FAQ).
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
-  first frame clears the latch without a reconnect (a re-plugged hub on the same node).
+  first frame clears the latch without a reconnect (a hub that answers again; on a driver that
+  adopted decision 0009, the Gemini PDH, a re-plugged adapter is a hangup and a lost link instead).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
   `sever_link()` (master closed: writes fail with EIO, reads return 0 at once) — `tests/fake_serial_streamer.h` for any
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
-  and the next frame restores service.
+  and the next frame restores service. On a driver that adopted decision 0009 (the Gemini PDH and the
+  WandererAstro streaming drivers) only `set_muted(true)` faults; `sever_link()` is a lost link instead
+  (`Connected` false at once; the exception below).
 - **Exception: a removed device node is a lost connection, not a fault (issue #445,
   Sky-Watcher direct driver).** A quiet link can come back on the same fd; a node that is gone
   cannot (the fd's link count is 0, writes fail `EIO`, and the held fd keeps the kernel from
@@ -375,11 +391,18 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
   `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
   even before the node lookup reflects it: a tty returns those only when its device is gone or
-  the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
+  the fd is unusable. Silence with the node still present keeps the rules above. On a serial link
+  `util::SerialLink` owns that verdict (#2262): its `read()`, `write_all()` and `read_until(SerialLink&, ...)` classify
+  every failure with `util::is_serial_loss_errno()`, set a lock-free `lost()` once and keep the text that set it
+  (`fault()`, "Serial link lost (errno N)") across the wrapper's port-release `close()` until a new link is moved in or
+  the wrapper calls `clear_loss()` on Disconnect; the wrapper still closes the port under its own I/O lock. Every
+  serial wrapper reads its errno verdict from the link since #2262 (OnStep was the last); a wrapper that also loses its
+  link with no errno (a removed node, a stale fault) keeps its own published latch and reason on top of it. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
+  lock-free latch the getter reads (the link's `lost()` since #2262); since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
-  (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
+  (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`), and over its TCP network link
+  since #2220, where a hangup of the connection is the evidence (`OnStep network -` cases in the same file). The ZWO EAF follows it since #1500 for its
   SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
   at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)); since #1666 a status fault standing past
   `util::kLinkStalenessBound` is a lost link too; the ZWO EFW filter wheel and CAA rotator have the same shape since #1668. The ZWO camera drops `Connected` at once the same way since #1667
@@ -387,13 +410,22 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   exposure retry stops at the first one), and on a generic failure from a camera the SDK no longer enumerates (a bare
   cable pull, which ASI SDK 1.41 answers with no removal code), with no staleness bound; its dew heater switch drops
   `Connected` on its next call. The QHY integrated filter wheel drops it on `QHYCCD_ERROR_DEVICELOSE` from its own call since #1985
-  ([QHY](qhy.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
+  ([QHY](qhy.instructions.md)), and the SVBONY camera on `SVB_ERROR_CAMERA_REMOVED` or `SVB_ERROR_CAMERA_CLOSED` from a
+  device call since #1986, its exposure body included (`SVB_ERROR_INVALID_ID` is not evidence; unverified on hardware,
+  [SVBONY](svbony.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
   wrapper's `close_camera()`), releases its reference exactly once, at the loss or the Disconnect, whichever comes first:
   a second release drops the other owner's reference. The Astroasis focuser follows it since #1756
   (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
-  state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The #237 drivers still treat a
-  removed node as a fault; that has not been changed. Tests: `sever_link()` on
-  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
+  state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The Gemini PDH follows it since
+  #1987 (`GeminiPdhProtocolWrapper::link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a poll or
+  command write, and a #237 fault standing past `util::kLinkStalenessBound` on the task clock; the reader, the one thread
+  that reads the fd, releases the port; the `[link-lost]` cases in `test_gemini_pdh_switch.cpp`). The WandererAstro cover, SFW
+  wheel and box follow it since #1988 (`link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a
+  write is a lost link at once, and a stream fault standing past `util::kLinkStalenessBound` is one too,
+  `StreamLinkHealth::fault_stale()`; the reader clears the cache, stops and releases the port, and a writer that meets
+  the loss leaves the close to it), and the WandererRotator since #1989 (a hangup on a command write or a move monitor
+  read; no latch, request/response). Tests: `sever_link()` on
+  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`; `fake_serial_streamer.h`, `[wandererastro][link-lost]`.
 
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 

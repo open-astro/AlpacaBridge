@@ -81,10 +81,16 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
+#include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -174,6 +180,10 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
+    // Switch only (with_static_switch_range): the MaxSwitchValue of switch_writable_id from static configuration, or
+    // -1 when the range is read from the device. When set, the sweep probes SetSwitchValue just outside 0..max while
+    // disconnected and requires InvalidValue (value checks precede the connection check).
+    double switch_static_max_value = -1.0;
 };
 
 // Platform 7 interface versions per device type.
@@ -196,8 +206,8 @@ inline int platform7_interface_version(DeviceType t) {
 }
 
 inline const char* invalid_probe_reason_for(DeviceType t) {
+    // A camera has static probes since #2259 (duration, bin, NumX/NumY and StartX/StartY).
     switch (t) {
-        case DeviceType::Camera:
         case DeviceType::Focuser:  // every focuser clamps a Move to 0..MaxStep (with_clamping_focuser says so)
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
@@ -235,12 +245,24 @@ inline ContractEntry with_clamping_focuser(ContractEntry e, const char* why) {
     return e;
 }
 
+// The ZWO EAF, ToupTek AAF and iOptron iEAF list the SetZero action (read from each driver's
+// get_supported_actions(); assumption: not checked against a hardware run).
+inline ContractEntry with_set_zero_action(ContractEntry e) {
+    e.actions = {"SetZero"};
+    return e;
+}
+
 inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_switch, DisconnectedRead can_write_async,
                                       int writable_id, const char* source) {
     e.switch_max_disconnected = max_switch;
     e.switch_caps_disconnected = can_write_async;
     e.switch_writable_id = writable_id;
     e.switch_caps_source = source;
+    return e;
+}
+
+inline ContractEntry with_static_switch_range(ContractEntry e, double max_value) {
+    e.switch_static_max_value = max_value;
     return e;
 }
 
@@ -287,13 +309,13 @@ inline ContractEntry contract_entry_zwo_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_focuser() {
-    return with_clamping_focuser(
+    return with_set_zero_action(with_clamping_focuser(
         make_entry(
             "zwo_focuser", "zwo", "focuser", DeviceType::Focuser,
             [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_eaf_focuser_by_index(n, 0); },
             kSrcAgents),
         "zwo_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range (ConformU requires clamping, "
-        "#2028)");
+        "#2028)"));
 }
 inline ContractEntry contract_entry_zwo_rotator() {
     return make_entry(
@@ -317,28 +339,32 @@ inline ContractEntry contract_entry_zwo_switch() {
 // Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
 // ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
 inline ContractEntry contract_entry_zwo_switch_asiair() {
-    return with_switch_caps(make_entry(
-                                "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::zwo::create_zwo_asiair_switch(
-                                        n, vendor::zwo::default_asiair_pro_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "ZWOAsiairSwitchDriver: MaxSwitch is the configured port count; CanWrite is "
-                            "true and CanAsync false, both after validate_id only");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::zwo::create_zwo_asiair_switch(n,
+                                                                              vendor::zwo::default_asiair_pro_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver<AsiairProtocolWrapper>: MaxSwitch is the configured "
+                         "port count; CanWrite is true and CanAsync false, both after validate_id only"),
+        1.0);
 }
 inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
-    return with_switch_caps(make_entry(
-                                "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::zwo::create_zwo_asiair_plus_switch(
-                                        n, vendor::zwo::default_asiair_plus_rk3568_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "ZWOAsiairPlusSwitchDriver: MaxSwitch is the configured port count; "
-                            "CanWrite is true and CanAsync false, both after validate_id only");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::zwo::create_zwo_asiair_plus_switch(
+                                     n, vendor::zwo::default_asiair_plus_rk3568_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver<AsiairPlusProtocolWrapper>: MaxSwitch is the configured "
+                         "port count; CanWrite is true and CanAsync false, both after validate_id only"),
+        1.0);
 }
 #endif
 
@@ -389,14 +415,15 @@ inline ContractEntry contract_entry_ioptron_telescope() {
         kSrcAgentsAxis));
 }
 inline ContractEntry contract_entry_ioptron_focuser() {
-    return with_clamping_focuser(make_entry(
-                                     "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
-                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                         return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0");
-                                     },
-                                     kSrcAgents),
-                                 "ioptron_ieaf_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
-                                 "range (ConformU requires clamping, #2028)");
+    return with_set_zero_action(
+        with_clamping_focuser(make_entry(
+                                  "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
+                                  [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                      return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0");
+                                  },
+                                  kSrcAgents),
+                              "ioptron_ieaf_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
+                              "range (ConformU requires clamping, #2028)"));
 }
 inline ContractEntry contract_entry_ioptron_filterwheel() {
     return make_entry(
@@ -433,16 +460,18 @@ inline ContractEntry contract_entry_iguider_camera() {
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
 inline ContractEntry contract_entry_ioptron_switch() {
-    return with_switch_caps(make_entry(
-                                "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::ioptron::create_ioptron_switch(
-                                        n, vendor::ioptron::default_imate_powerbox_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 1,
-                            "IoptronSwitchDriver and default_imate_powerbox_config(): static port table; id 0 "
-                            "(DC3 always on) is read-only, id 1 (DC1) is writable");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::ioptron::create_ioptron_switch(
+                                     n, vendor::ioptron::default_imate_powerbox_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 1,
+                         "util::PowerPortSwitchDriver<IoptronPowerboxWrapper> and default_imate_powerbox_config(): "
+                         "static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable"),
+        1.0);
 }
 #endif
 
@@ -527,6 +556,51 @@ inline ContractEntry contract_entry_onstep_telescope() {
         },
         kSrcAgentsAxis));
 }
+// The OnStepX focuser on the controller's shared link (#2223).
+inline ContractEntry contract_entry_onstep_focuser() {
+    return with_clamping_focuser(make_entry(
+                                     "onstep_focuser", "onstep", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         vendor::onstep::ConnectionInfo conn;
+                                         conn.type = vendor::onstep::ConnectionType::Network;
+                                         conn.host = "127.0.0.1";
+                                         conn.tcp_port = 9;
+                                         return vendor::onstep::create_onstep_focuser(n, conn, 1);
+                                     },
+                                     kSrcAgents),
+                                 "onstep_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                                 "(ConformU requires clamping, #2028)");
+}
+// The OnStepX rotator on the controller's shared link (#2221).
+inline ContractEntry contract_entry_onstep_rotator() {
+    return make_entry(
+        "onstep_rotator", "onstep", "rotator", DeviceType::Rotator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::onstep::ConnectionInfo conn;
+            conn.type = vendor::onstep::ConnectionType::Network;
+            conn.host = "127.0.0.1";
+            conn.tcp_port = 9;
+            return vendor::onstep::create_onstep_rotator(n, conn);
+        },
+        kSrcAgents);
+}
+// The OnStepX auxiliary features as a Switch on the controller's shared link (#2222). The slots are read at connect,
+// so MaxSwitch and the per-id capabilities are NotConnected while disconnected.
+inline ContractEntry contract_entry_onstep_switch() {
+    return with_switch_caps(make_entry(
+                                "onstep_switch", "onstep", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    vendor::onstep::ConnectionInfo conn;
+                                    conn.type = vendor::onstep::ConnectionType::Network;
+                                    conn.host = "127.0.0.1";
+                                    conn.tcp_port = 9;
+                                    return vendor::onstep::create_onstep_switch(n, conn);
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::NotConnected, DisconnectedRead::NotConnected, 0,
+                            "onstep_switch_driver.cpp slot_at(): the static 0-7 id check, then NotConnected (the "
+                            "slots are read at connect, OnStepX Features.command.cpp :GXY0#)");
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -547,6 +621,23 @@ inline ContractEntry contract_entry_celestron_cgx_telescope() {
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             vendor::celestron::CelestronCgxConnectionInfo info;
             info.port_path = "/dev/null";
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
+// The same CGX driver over the SkyPortal WiFi adapter (AUX over TCP): a numeric host selects the transport. The
+// sweep's calls run disconnected and open no socket.
+inline ContractEntry contract_entry_celestron_cgx_tcp_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx_tcp", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.host = "127.0.0.1";
+            info.tcp_port = 1;  // closed: a connect is refused at once
             info.site_latitude_degrees = 0.0;
             info.site_longitude_degrees = 0.0;
             return vendor::celestron::create_celestron_cgx_telescope(n, info);
@@ -591,6 +682,21 @@ inline ContractEntry contract_entry_weewx_observingconditions() {
             vendor::weewx::WeeWxHttpConfig config;
             config.url = "http://localhost:9999/dummy";
             return vendor::weewx::create_weewx_observingconditions(n, config);
+        },
+        kSrcAgents);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+// A proxied device (decision 0023): no tier-1 probe reaches the upstream, so the placeholder upstream is never called.
+inline ContractEntry contract_entry_remotealpaca_observingconditions() {
+    return make_entry(
+        "remotealpaca_observingconditions", "remotealpaca", "observingconditions", DeviceType::ObservingConditions,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteObservingConditionsConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_observingconditions(n, config);
         },
         kSrcAgents);
 }
@@ -688,14 +794,15 @@ inline ContractEntry contract_entry_touptek_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_touptek_focuser() {
-    return with_clamping_focuser(make_entry(
-                                     "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
-                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                         return vendor::touptek::create_touptek_focuser_by_index(n, 0);
-                                     },
-                                     kSrcAgents),
-                                 "touptek_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
-                                 "(ConformU requires clamping, #2028)");
+    return with_set_zero_action(
+        with_clamping_focuser(make_entry(
+                                  "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
+                                  [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                      return vendor::touptek::create_touptek_focuser_by_index(n, 0);
+                                  },
+                                  kSrcAgents),
+                              "touptek_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                              "(ConformU requires clamping, #2028)"));
 }
 #endif
 
@@ -715,16 +822,18 @@ inline ContractEntry contract_entry_touptek_switch_thermal() {
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 inline ContractEntry contract_entry_touptek_switch() {
-    return with_switch_caps(make_entry(
-                                "touptek_switch", "touptek", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::touptek::create_touptek_switch(
-                                        n, vendor::touptek::default_stellavita_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "TouptekSwitchDriver and default_stellavita_config(): static port table, "
-                            "all four ports writable");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "touptek_switch", "touptek", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::touptek::create_touptek_switch(
+                                     n, vendor::touptek::default_stellavita_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver and default_stellavita_config(): static port table, "
+                         "all four ports writable"),
+        1.0);
 }
 #endif
 
@@ -834,12 +943,13 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS_ONSTEP(X) X(onstep_telescope)
+#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser) X(onstep_rotator) X(onstep_switch)
 #else
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_focuser)
+#define CS_CELESTRON(X) \
+    X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_cgx_tcp_telescope) X(celestron_focuser)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -852,6 +962,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_WEEWX(X) X(weewx_observingconditions)
 #else
 #define CS_WEEWX(X)
+#endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions)
+#else
+#define CS_REMOTEALPACA(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 // The formatter does not reach a fixed point on this continuation list.
@@ -917,6 +1032,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_CELESTRON(X) \
     CS_BISQUE(X) \
     CS_WEEWX(X) \
+    CS_REMOTEALPACA(X) \
     CS_GEMINI(X) \
     CS_SVBONY(X) \
     CS_GPHOTO(X) \
@@ -970,10 +1086,14 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
-    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},        // direct USB backend
+    {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
     {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
+    {"onstep", "focuser", "fake_mount_server.h"},  // the focuser on the controller's shared link (#2223)
+    {"onstep", "rotator", "fake_mount_server.h"},  // the rotator on the controller's shared link (#2221)
+    {"onstep", "switch", "fake_mount_server.h"},   // the auxiliary features on the controller's shared link (#2222)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
@@ -982,6 +1102,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"ioptron", "switch", "fake_ioptron_gpio.h"},
     {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
+    {"remotealpaca", "observingconditions", "fake_http_client.h"},  // a scripted upstream (alpaca_upstream_script.h)
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1023,11 +1144,16 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
     {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
     {"onstep_telescope", "onstep", "AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp"},
+    {"onstep_focuser", "onstep", "AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp"},
+    {"onstep_rotator", "onstep", "AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp"},
+    {"onstep_switch", "onstep", "AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp"},
     {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
     {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
     {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
     {"celestron_focuser", "celestron", "AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp"},
     {"celestron_cgx_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp"},
+    {"remotealpaca_observingconditions", "remotealpaca",
+     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

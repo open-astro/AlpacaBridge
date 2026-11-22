@@ -26,9 +26,11 @@ set(TEST_SOURCES
     test_driver_rig.cpp
     test_async_connectable.cpp
     test_device_catalog.cpp
+    test_attached_devices.cpp
     test_catalog_builtins.cpp
     test_device_registry.cpp
     test_device_state.cpp
+    test_alpacadriver_defaults.cpp
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
@@ -38,20 +40,28 @@ set(TEST_SOURCES
     test_atomic_file.cpp
     test_device_location_store.cpp
     test_power_port_state_store.cpp
+    test_power_port_switch_driver.cpp
     test_rotator_sync_offset_store.cpp
     test_unique_id.cpp
     test_polled_state.cpp
     test_link_epoch.cpp
+    test_stream_link_health.cpp
     # SDK-free ZWO open bookkeeping (issue #1500): runs on every host.
     test_zwo_shared_open_table.cpp
     test_state_snapshot.cpp
     test_task_clock.cpp
     test_ttl_status_cache.cpp
+    test_filterwheel_slots.cpp
     test_utc_offset.cpp
     test_hold_window.cpp
     test_pointing_math.cpp
+    test_telescope_command_gate.cpp
+    test_camera_frame_request.cpp
+    test_sexagesimal.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
+    test_motion_owner.cpp
+    test_motion_guards.cpp
     test_lock_gate.cpp
     test_capture_session.cpp
     test_connection_resolver.cpp
@@ -59,6 +69,7 @@ set(TEST_SOURCES
     test_serial_link.cpp
     test_serial_read.cpp
     test_mount_read_until_hangup.cpp
+    test_nexstar_frame.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_telescope_driver_watchdog.cpp
@@ -82,6 +93,9 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)
+    # The libgpiod and ioctl() stubs both ASIAIR test files use; they define C symbols, so one TU only (#1862).
+    list(APPEND TEST_SOURCES zwo_asiair_stubs.cpp)
+    list(APPEND TEST_SOURCES test_zwo_asiair_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
     list(APPEND TEST_SOURCES test_zwo_fake_mount.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope_clock.cpp)
@@ -216,9 +230,26 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_getter_locks.cpp)
     # Getters and DeviceState served from the polled snapshot (issue #1783).
     list(APPEND TEST_SOURCES test_onstep_telescope_snapshot.cpp)
+    # The OnStepX focuser and the controller's shared link, with its [stress] case (issue #2223).
+    list(APPEND TEST_SOURCES test_onstep_focuser.cpp)
+    # The OnStepX rotator on the same shared link, with its [stress] cases (issue #2221).
+    list(APPEND TEST_SOURCES test_onstep_rotator.cpp)
+    # The OnStepX auxiliary features as a Switch on the same link, with its [stress] cases (issue #2222).
+    list(APPEND TEST_SOURCES test_onstep_switch.cpp)
+endif()
+if(TARGET alpacacore_http_client)
+    # The util::HttpClient libcurl implementation against a loopback server, and its
+    # test-only locked decorator (decision 0023, issue #1753).
+    list(APPEND TEST_SOURCES test_http_client.cpp)
+endif()
+if(TARGET alpacacore_remotealpaca)
+    # The upstream Alpaca client against the loopback fake Alpaca server, the proxied ObservingConditions over the
+    # scripted HTTP client and its [stress] registration (issue #1753).
+    list(APPEND TEST_SOURCES test_remotealpaca_client.cpp test_remotealpaca_observingconditions.cpp
+         test_remotealpaca_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
+    # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
@@ -269,6 +300,9 @@ if(TARGET alpacacore_celestron)
          test_celestron_cgx_geometry.cpp test_celestron_cgx_telescope.cpp
          test_celestron_cgx_telemetry.cpp
          test_celestron_cgx_link_loss.cpp
+         test_celestron_cgx_tcp_transport.cpp
+         test_celestron_cgx_tcp_driver.cpp
+         test_celestron_cgx_goto_safety.cpp
          test_celestron_cgx_getter_wait.cpp
          test_celestron_cgx_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_clock_trust.cpp)
@@ -283,6 +317,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_focuser.cpp test_celestron_focuser_concurrency_stress.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
+    # SkyPortal WiFi adapter beacon, for the CGX form's Find adapter button.
+    list(APPEND TEST_SOURCES test_celestron_aux_beacon.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
@@ -301,6 +337,9 @@ if(TARGET alpacacore_touptek)
     # it always builds with the ToupTek target.
     list(APPEND TEST_SOURCES test_touptek_thermal_switch.cpp)
     list(APPEND TEST_SOURCES test_touptek_fake_sdk.cpp)
+    # The shared ToupcamFamilySDK<Api> wrapper (ToupTek and Altair) over a fake
+    # Api traits struct, below the seam the other tests fake (issue #2088).
+    list(APPEND TEST_SOURCES test_toupcam_family_sdk.cpp)
     # Concurrency stress over the fake SDK seam (issue #101); run under the
     # sanitizers-tsan CI job to turn latent data races into hard failures.
     list(APPEND TEST_SOURCES test_touptek_concurrency_stress.cpp)
@@ -357,6 +396,13 @@ endif()
 if(TARGET alpacacore_onstep)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_onstep)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ONSTEP)
+endif()
+if(TARGET alpacacore_http_client)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_http_client)
+endif()
+if(TARGET alpacacore_remotealpaca)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_remotealpaca)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_REMOTEALPACA)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)

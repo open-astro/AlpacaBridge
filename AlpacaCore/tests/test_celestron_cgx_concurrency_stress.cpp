@@ -15,14 +15,23 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <thread>
+
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
+#include "fake_celestron_aux_tcp_adapter.h"
 #include "fake_celestron_cgx_mount.h"
+#include "getter_stall_probe.h"
 
 namespace {
 
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(
-    const std::shared_ptr<alpacacore::test::FakeCelestronCgxMount>& mount) {
+    const std::shared_ptr<alpacacore::test::FakeCelestronCgxMount>& mount,
+    alpacacore::vendor::celestron::CgxSystemNow system_now = {}) {
     mount->set_motor_identity(0x10, {7, 17, 0, 25}, {0x17, 0x88});
     mount->set_motor_identity(0x11, {7, 17, 0, 25}, {0x17, 0x88});
     mount->set_cgx_switches_present(false);
@@ -30,7 +39,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(
     info.port_path = mount->slave_path();
     info.site_latitude_degrees = 45.0;
     info.site_longitude_degrees = -75.0;
-    return alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    return alpacacore::vendor::celestron::create_celestron_cgx_telescope(
+        0, info, alpacacore::util::default_task_clock(), std::move(system_now));
 }
 
 void operate(alpacacore::test::StressCallGuard& guard, alpacacore::AlpacaDriver& base) {
@@ -52,7 +62,7 @@ void operate(alpacacore::test::StressCallGuard& guard, alpacacore::AlpacaDriver&
     guard([&] { scope.abort_slew(); });
     guard([&] { scope.park(); });
     guard([&] { scope.unpark(); });
-    guard([&] { scope.sync_to_coordinates(6.0, 30.0); });
+    guard([&] { scope.sync_to_coordinates(6.0, 87.0); });
     guard([&] { scope.set_tracking(true); });
     guard([&] { scope.set_tracking(false); });
 }
@@ -103,7 +113,7 @@ TEST_CASE("Celestron CGX USB telescope - getters read the polled frame through c
         served([&] { static_cast<void>(scope.get_azimuth()); });
         served([&] { static_cast<void>(scope.get_side_of_pier()); });
         served([&] { static_cast<void>(scope.get_device_state()); });
-        motion([&] { scope.sync_to_coordinates(6.0, 30.0); });
+        motion([&] { scope.sync_to_coordinates(6.0, 87.0); });
         motion([&] { scope.abort_slew(); });
     });
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -114,6 +124,97 @@ TEST_CASE("Celestron CGX USB telescope - getters read the polled frame through c
     INFO(served.report());
     CHECK(served.unexpected_count() == 0);
     CHECK(served.total_calls() > 0);
+}
+
+// #2035: every control-path write to the state frame drops the poll in flight and keeps measured_at (decision 0010
+// rules 2 and 3), so a writer in a tight loop would starve the poll and age the frame into a false link loss. The
+// pointing clock runs 5000x fast, so every arrival misses by a few arcseconds and the refinement loop runs in full (a
+// read per correction, kMaxSlewCorrections + 1 per slew) for 4 s on the real poll. The fake ends a slew in about 2 ms,
+// so a 100 ms pause after each one keeps the cadence at ten slews a second: far faster than a real CGX slew (seconds),
+// but not the near-continuous writing that the fake alone would give, which can drop several polls in a row on a slow
+// host. The served frame's age, from DeviceState's TimeStamp, must stay within a few poll periods and the link must
+// not be lost. Check 26 in scripts/check_docs_drift.py pins the writers themselves.
+TEST_CASE("Celestron CGX USB telescope - the state frame stays fresh through the arrival-refinement loop",
+          "[celestron][telescope][stress]") {
+    using namespace std::chrono_literals;
+    auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    REQUIRE(mount->ok());
+    mount->set_auto_complete_motions(true);
+    const auto start = std::chrono::system_clock::now();
+    auto driver = make_driver(mount, [start] { return start + (std::chrono::system_clock::now() - start) * 5000; });
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->find_home();
+    for (int i = 0; i < 500 && (driver->get_slewing() || !driver->get_at_home()); ++i)
+        std::this_thread::sleep_for(10ms);
+    REQUIRE(driver->get_at_home());
+
+    // A refinement that runs out of corrections ends the slew with DriverException and may leave tracking off.
+    alpacacore::test::StressCallGuard slews{alpacacore::AlpacaError::DriverException,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    std::atomic<bool> done{false};
+    auto max_age = std::chrono::system_clock::duration::zero();
+    std::thread worker([&] {
+        while (!done.load()) {
+            slews([&] { driver->set_tracking(true); });
+            slews(
+                [&] { driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 23.0, 24.0), 30.0); });
+            for (int i = 0; i < 500; ++i) {
+                bool slewing = false;
+                slews([&] { slewing = driver->get_slewing(); });
+                if (!slewing) break;
+                std::this_thread::sleep_for(2ms);
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+    });
+    {
+        const alpacacore::test::ReleaseAndJoin stop{done, worker};  // stops the slews on every exit, a failure too
+        for (const auto end = std::chrono::steady_clock::now() + 4s; std::chrono::steady_clock::now() < end;) {
+            const auto stamp = alpacacore::test::time_stamp_of(*driver);
+            REQUIRE_FALSE(stamp.empty());  // empty only once disconnected: the link was lost
+            max_age = std::max(max_age, std::chrono::system_clock::now() - alpacacore::test::parse_timestamp(stamp));
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+
+    const int corrections = mount->count_command(0x10, 0x17) + mount->count_command(0x11, 0x17);
+    INFO("max frame age " << std::chrono::duration_cast<std::chrono::milliseconds>(max_age).count() << " ms, "
+                          << corrections << " corrections");
+    CHECK(corrections > 0);  // the refinement loop ran
+    CHECK(max_age < 2s);     // the poll period is 250 ms; util::kLinkStalenessBound is 30 s
+    CHECK(driver->get_connected());
+    CHECK_FALSE(alpacacore::vendor::celestron::consume_link_lost_at_for_testing(*driver).has_value());
+    INFO(slews.report());
+    CHECK(slews.unexpected_count() == 0);
+    CHECK(slews.total_calls() > 0);
+    driver->set_connected(false);
+}
+
+// The same driver over the SkyPortal WiFi adapter (AUX over TCP): every Connect opens a new socket and takes the mount
+// over with a verified stop, every Disconnect closes it, and the adapter serves one client at a time. The fake adapter
+// answers at once; its motor model completes a GOTO and a home search at once too.
+TEST_CASE("Celestron CGX WiFi telescope - connection and motion lifecycle stress", "[celestron][telescope][stress]") {
+    alpacacore::test::FakeCelestronAuxTcpAdapter adapter;
+    REQUIRE(adapter.ok());
+    alpacacore::vendor::celestron::CelestronCgxConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = adapter.port();
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+
+    // DriverException: a Disconnect that lands during an exchange can cut it short (the socket closes).
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::InvalidWhileParked,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](alpacacore::AlpacaDriver& d) { operate(guard, d); });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Celestron CGX USB telescope - destruction races an in-flight connect", "[celestron][telescope][stress]") {

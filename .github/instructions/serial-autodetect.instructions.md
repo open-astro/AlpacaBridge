@@ -34,6 +34,13 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- **The link owns the lost-link verdict** (#2262, [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)
+  point 2a): a migrated wrapper reads and writes through `SerialLink::read()`, `SerialLink::write_all()` and
+  `util::read_until(SerialLink&, ...)`, which classify a failure with `util::is_serial_loss_errno()` (`EIO`, `ENXIO`,
+  `ENODEV`, `EBADF`; an `EBADF` logs one error line, since an unusable fd is our bug) and latch `lost()`. The wrapper
+  reads `lost()` for `link_alive()` and `fault()` for `link_fault()`, keeps its own `close()` under its I/O lock, and
+  calls `clear_loss()` on Disconnect and after a connect's handshake (a hangup its retries absorbed is not a loss).
+  No wrapper keeps its own latch, fault mutex or errno list once migrated.
 - **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written loop
   around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a length,
   an idle gap or the first of a terminator and an idle gap, drops CR/LF, caps the length, keeps one `steady_clock`
@@ -53,7 +60,11 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   the socket's `SO_RCVTIMEO`, 200 ms, over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
   is a timeout. The Celestron, iOptron, SynScan and OnStep wrappers set `ReadSpec::late_byte_grace` to their read slice and
   `read_until()` does the wait (#1686). The ZWO mount still reads the late byte itself, because it reads in slices to
-  see `closing_`. For the Celestron and SynScan binary payloads, a `Length`
+  see `closing_`. `ReadSpec::cancel` is the shared form of that check: a flag another thread sets ends the read
+  (between waits of at most `cancel_poll`, 20 ms) with outcome `Cancelled`, and the wrapper decides what it means.
+  The SynScan wrapper points it at its `set_interrupt()` flag, which the driver raises for a disconnect, so a
+  disconnect never waits out a silent handset's response timeout behind the wrapper's lock (#2070); its interrupted
+  read throws `NotConnected` with no fault text and no link loss. For the Celestron and SynScan binary payloads, a `Length`
   read, the same field keeps each payload byte within one read slice of the last, so a payload that starts after the
   timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
   to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the Celestron NexStar, iOptron mount and
@@ -62,10 +73,11 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   "<mount> network link lost (hangup): <errno text>" over TCP only, and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
-  `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and throws a
-  `DriverException` "OnStep network link lost (hangup): <errno text>" over its TCP test seam, which is never lost; its
+  `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and, since #2220, over
+  its TCP network link too: a hangup there, on a reply read or in a drain, is a lost link at once ("the controller at
+  <host>:<port> closed the connection"), and `link_alive()` polls the socket for one with no wait; its
   drain waits at least one read slice and ends after a quiet one, or at its 2 s cap on a line that never goes
-  quiet (#1449), and over TCP a hangup just ends it. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
+  quiet (#1449). Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
   the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening until their deadline as before.
   The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or overflowed reply as it stands;
   the Wanderer probes drop an overflowed token and keep listening. Still on their own loops, moving in later slices
@@ -253,7 +265,12 @@ independently broken the same way, before it was centralised:
   (`USB_Serial`), but the raw sysfs strings keep their spaces (`USB Serial`) —
   the helper matches patterns against both spellings, so udev-style patterns
   copied from a by-id name filter are fine, but don't "simplify" that
-  double-match away.
+  double-match away. Pass the wrapper's own `<x>_usb_tokens()` list, never a
+  braced list: the vendor's `<vendor>_catalog.cpp` registers the same list as the
+  device's USB identity (`DeviceCatalog::add_usb_serial_identity`), which
+  `GET /management/v1/attacheddevices` matches ports against without opening them
+  (issue #2312), and docs-drift check 29 fails on a braced list or a list no
+  catalog registers.
 - **`alpacacore::util::path_exists(path)`** instead of bare
   `std::filesystem::exists(path)` anywhere in an `enumerate_*` scan. The plain
   overload throws `filesystem_error` on a traversal error (e.g. EACCES on a

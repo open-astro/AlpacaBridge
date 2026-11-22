@@ -20,7 +20,6 @@
 #include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hardware_config_refusal.h>
-#include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/power_port_state_store.h>
@@ -72,6 +71,8 @@
 #include "../core/catalog_json.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "persisted_config_store.h"
+#include "router_helpers.h"
 #include "thread_join.h"
 
 namespace {
@@ -81,7 +82,11 @@ using alpacahttp::find_json_value;
 using alpacahttp::get_form_value;
 using alpacahttp::to_lower_copy;
 
-const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
+// An exception's text, made safe for a log line (issue #2087). Every log call
+// in this file passes `what()` through here: a message that quotes a decoded
+// client value would otherwise put its raw control bytes in the log and could
+// forge a line (#847). The 4096-byte cap matches the device-call path.
+std::string log_what(const std::exception& e) { return alpacahttp::util::escape_for_log(e.what(), 4096); }
 
 std::string log_level_to_string(LogLevel level) {
     switch (level) {
@@ -220,9 +225,12 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         lines.push_back(line);
     }
 
+    // A tab counts as indentation, as Config::load_config_from_yaml() reads
+    // it: a hand-edited key indented with a tab sits inside its section, so
+    // it neither ends the section nor is shadowed by a duplicate (#2087).
     auto leading_spaces = [](const std::string& text) {
         std::size_t count = 0;
-        while (count < text.size() && text[count] == ' ') {
+        while (count < text.size() && (text[count] == ' ' || text[count] == '\t')) {
             ++count;
         }
         return count;
@@ -308,7 +316,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                     if (values[i].first == key) {
                         // Keep the old line's trailing comment, with the
                         // whitespace that sat before the '#'.
-                        std::string replacement(indent, ' ');
+                        std::string replacement = current_line.substr(0, indent);
                         replacement += key;
                         replacement += ": \"";
                         replacement += escape_yaml_string(values[i].second);
@@ -359,70 +367,6 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         text += '\n';
     }
     return write_config_file(config_path, text, error_message);
-}
-
-// The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
-// through typed guards rather than value() (#388): a hand-edited file can
-// carry "deviceNumber": "3", and that entry stays in persisted_devices_ (only
-// its registration fails), so every walk over the list must step past it
-// instead of throwing type_error on a PUT or POST aimed at a different,
-// valid device. Absent or wrong-typed type/number yields no key; vendor is
-// "" when missing. deviceType is lowercased, since the web UI and the tests
-// post it lowercase while the registry answers "Telescope".
-struct PersistedKey {
-    std::string vendor{};
-    std::string device_type{};  // lowercase
-    int device_number = -1;
-};
-
-// Decision 0018: the persisted UniqueID of a configured device. A stored or
-// client-sent value is kept when it is a keepable ID (a version 4 UUID or a
-// long non-slot string such as ZWO_UID_<hex>) that no other entry holds (the
-// web UI edits a device by removing and re-adding it, sending the ID back);
-// only an entry with none, a device-number ID or a duplicate gets a fresh GUID.
-std::string stored_unique_id(const nlohmann::json& entry) {
-    const auto it = entry.find("uniqueId");
-    if (it == entry.end() || !it->is_string()) return {};
-    const std::string value = it->get<std::string>();
-    return alpacacore::util::is_keepable_unique_id(value) ? value : std::string();
-}
-
-std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
-    std::string value = stored_unique_id(entry);
-    while (value.empty() || taken.count(value) != 0) {
-        value = alpacacore::util::generate_unique_id();
-    }
-    return value;
-}
-
-using alpacahttp::catalog_json::whole_json_int;
-
-std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
-    if (!entry.is_object()) {
-        return std::nullopt;
-    }
-    const auto type_it = entry.find("deviceType");
-    const auto number_it = entry.find("deviceNumber");
-    // The numbers catalog_json::get_int() accepts at registration (whole_json_int):
-    // a hand-written 3.0 registers as device 3, so the walks over the
-    // persisted list must find that same entry or removedevice would drop it
-    // from the registry and leave it in the file. A number registration
-    // refuses (4294967299, 3.5) has no key, like a wrong-typed one.
-    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end()) {
-        return std::nullopt;
-    }
-    const auto number = whole_json_int(*number_it);
-    if (!number) {
-        return std::nullopt;
-    }
-    PersistedKey key;
-    key.device_type = to_lower_copy(type_it->get<std::string>());
-    key.device_number = *number;
-    const auto vendor_it = entry.find("vendor");
-    if (vendor_it != entry.end() && vendor_it->is_string()) {
-        key.vendor = vendor_it->get<std::string>();
-    }
-    return key;
 }
 
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
@@ -766,6 +710,31 @@ constexpr const char* kAnonymousClientKey = "<anonymous>";
 // device refreshes its registration, so ordinary polling keeps it alive.
 constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
 
+// open-astro#2292 (ADR 0007 rules 4 and 10): the most (address, ClientID)
+// registrations one device holds. A uint32 ClientID per request (#1738) still
+// let one host add an entry per request for the whole stale window; past this
+// a new client's Connected=true is refused until an entry leaves or goes
+// stale. A rig has a handful of clients per device.
+constexpr std::size_t kMaxClientsPerDevice = 256;
+
+// The answer to a Connected=true past kMaxClientsPerDevice. Returned, not
+// thrown: a client can cause it, so it logs at DEBUG (ADR 0007 rule 9), where
+// a thrown InvalidOperation logs at ERROR.
+alpacahttp::Response refuse_full_client_registry(const alpacahttp::DeviceCall& call) {
+    const std::string message = "Connected refused: " + std::to_string(kMaxClientsPerDevice) +
+                                " clients already hold this device; a client that stops polling is dropped after 10 "
+                                "minutes";
+    alpacahttp::util::log_debug(message);
+    return call.error(alpacacore::AlpacaError::InvalidOperation, message);
+}
+
+// Issue #1764: the web UI marks its own device requests (the Celestron
+// calibration action) with this header, so they never refresh a client's
+// registration and the Devices dot shows only real client activity. Kept in
+// step with WEB_UI_CLIENT_HEADER in web/format.js (tests/web/field_use.test.js).
+constexpr const char* kWebUiClientHeader = "X-AlpacaBridge-Client";
+constexpr const char* kWebUiClientValue = "web-ui";
+
 // The caller's registry identity plus whether it actually supplied a
 // ClientID — GET connected falls back to raw device state for ClientID-less
 // probes, which can't be told from the key alone once the peer address is
@@ -870,6 +839,8 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
     return reason.empty() ? std::string("Connection failed") : reason;
 }
 
+}  // namespace
+
 // open-astro#1660: SlewToCoordinates and SlewToTarget are served by starting
 // the async slew and waiting here, so a driver that cannot slew is refused
 // before anything is parsed or written.
@@ -904,6 +875,8 @@ void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
+
+namespace {
 
 // open-astro#711: libstdc++ std::regex recurses once per repeated character,
 // so a long path segment overflowed the worker stack and killed the server.
@@ -1139,17 +1112,6 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
     return resp;
 }
 
-// Defined further down with the management guards, but declared here because
-// every state-changing management handler needs it and handle_description()
-// is the first of them in file order. Also used by the four device setters
-// with a side effect beyond the driver: UTCDate steps the host clock
-// (open-astro#401) and the three site setters rewrite persisted config (#444).
-//
-// Takes the client's ClientTransactionID as well as the server's: the 403 body
-// echoes it like every other error path in these handlers (open-astro#384).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
-                                                    std::uint32_t server_tx_id, const char* what);
-
 // A verb the Alpaca Management API does not define for `what`: HTTP 400 with a
 // text/plain message (Alpaca API Reference s2.5, #1508).
 void set_wrong_verb_text(Response& response, const char* what);
@@ -1161,7 +1123,12 @@ void set_bad_request_text(Response& response, const std::string& message);
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
+Router::Router(const CatalogExtension& extend_catalog) : Router(extend_catalog, 0) {}
+
+Router::Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port)
+    : machine_hostname_(read_machine_hostname()),
+      persisted_store_(std::make_unique<PersistedConfigStore>(std::filesystem::path("config"))) {
+    listen_port_->store(listen_port, std::memory_order_release);
     learned_sink_->router = this;
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
@@ -1181,28 +1148,21 @@ void Router::store_learned_config(const nlohmann::json& entry, const nlohmann::j
                                   const std::string& unique_id) {
     const auto wanted = persisted_key(entry);
     if (!wanted.has_value()) return;
-    bool stored = false;
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        for (auto& saved : persisted_devices_) {
-            const auto key = persisted_key(saved);
-            if (!key.has_value() || key->vendor != wanted->vendor || key->device_type != wanted->device_type ||
-                key->device_number != wanted->device_number) {
-                continue;
+    const auto merge = [&](nlohmann::json& saved) {
+        // The number now names another device (a new ID, or another vendor configured there).
+        const auto now = persisted_key(saved);
+        if (!now || now->vendor != wanted->vendor) return false;
+        if (!unique_id.empty() && stored_unique_id(saved) != unique_id) return false;
+        for (const auto& [field, value] : learned.items()) {
+            if (value.is_null()) {
+                saved.erase(field);
+            } else {
+                saved[field] = value;
             }
-            if (!unique_id.empty() && stored_unique_id(saved) != unique_id) break;  // the number now names another
-            for (const auto& [field, value] : learned.items()) {
-                if (value.is_null()) {
-                    saved.erase(field);
-                } else {
-                    saved[field] = value;
-                }
-            }
-            stored = true;
-            break;
         }
-    }
-    if (stored) save_persisted_devices();
+        return true;
+    };
+    persisted_store_->edit_by_type_and_number(wanted->device_type, wanted->device_number, merge);
 }
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
@@ -1230,7 +1190,7 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
             // the loop stays safe if that function ever loses noexcept; the
             // real guard is the try/catch inside the function itself.
             util::log_error("Motion watchdog check failed for telescope #" +
-                            std::to_string(telescope->get_device_number()) + ": " + ex.what());
+                            std::to_string(telescope->get_device_number()) + ": " + log_what(ex));
         }
     }
 }
@@ -1248,8 +1208,9 @@ void Router::check_host_clock(std::chrono::system_clock::time_point sys, std::ch
         }
         util::log_info("Host clock stepped by " + std::to_string(step->count()) + " ms (now " + text + ")");
         // Something set the clock (an outside clock_settime, NTP's first step).
-        // Never host_clock_.mark_stepped() here: that writes the hardware RTC
-        // with a time nothing has verified.
+        // Marked here, not in HostClock: HostClock only marks a set it made,
+        // and an observed step must never reach its RTC write, which would
+        // store a time nothing has verified.
         HostClockTrust::mark_set("host clock step");
         event = HostClockEvent{HostClockEvent::Kind::Stepped, *step};
     }
@@ -1313,8 +1274,9 @@ void Router::set_config_path(std::string config_path) {
 // longer has to save and restore them.
 void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn is_synchronized,
                                   alpacacore::util::HostClock::SetTimeFn set_time,
-                                  alpacacore::util::HostClock::HasRtcFn has_rtc) {
-    host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc));
+                                  alpacacore::util::HostClock::HasRtcFn has_rtc,
+                                  alpacacore::util::HostClock::WriteRtcFn write_rtc) {
+    host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc), std::move(write_rtc));
 }
 
 // open-astro#675: the HostClock::set_hooks() shape (#399). A plain
@@ -1332,11 +1294,13 @@ std::shared_ptr<const Router::NowFn> Router::current_now_fn() const {
 }
 
 void Router::set_shutdown_callback(std::function<void()> callback) {
-    shutdown_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    shutdown_callback_ = std::move(callback);
 }
 
 void Router::set_restart_callback(std::function<void()> callback) {
-    restart_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    restart_callback_ = std::move(callback);
 }
 
 void Router::start_delayed_callback(std::function<void()> callback) {
@@ -1461,7 +1425,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             return handle_device(request, match, server_transaction_id);
         }
     } catch (const std::exception& e) {
-        util::log_error("Router error: " + std::string(e.what()));
+        util::log_error("Router error: " + log_what(e));
         AlpacaResponse alpaca_response = make_error_response(
             0, server_transaction_id,
             util::ErrorCode::DRIVER_ERROR,
@@ -1521,6 +1485,16 @@ RouteMatch Router::parse_route(const std::string& path) {
     if (path == "/management/v1/attachedcameras" || path == "/management/attachedcameras") {
         match.is_management = true;
         match.management_endpoint = "attachedcameras";
+        return match;
+    }
+    if (path == "/management/v1/attacheddevices" || path == "/management/attacheddevices") {
+        match.is_management = true;
+        match.management_endpoint = "attacheddevices";
+        return match;
+    }
+    if (path == "/management/v1/networkadapters" || path == "/management/networkadapters") {
+        match.is_management = true;
+        match.management_endpoint = "networkadapters";
         return match;
     }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
@@ -1657,6 +1631,10 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_thermal_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "attachedcameras") {
         return handle_attached_cameras(request, server_tx_id);
+    } else if (match.management_endpoint == "attacheddevices") {
+        return handle_attached_devices(request, server_tx_id);
+    } else if (match.management_endpoint == "networkadapters") {
+        return handle_network_adapters(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -1874,6 +1852,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             const std::optional<std::string> new_location = read_string_field({"Location", "location"});
             const std::optional<std::string> new_profile_name =
                 read_string_field({"ProfileName", "profileName", "profile_name"});
+            if (new_location) refuse_over_long("Location", *new_location, kMaxNameBytes);
+            if (new_profile_name) refuse_over_long("ProfileName", *new_profile_name, kMaxNameBytes);
 
             std::optional<bool> new_sync_clock;
             for (const char* key :
@@ -2116,11 +2096,11 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         // write that fails (persist error, management driver) stays HTTP 200.
         // A client can trigger the 400, so it logs at DEBUG (ADR 0007 rule 9).
         if (is_write && error_code == util::ErrorCode::INVALID_VALUE) {
-            util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
+            util::log_debug("Refused description write: " + log_what(e));
             response.set_status(400, "Bad Request");
         } else {
             util::log_error(std::string(is_write ? "Error writing description: " : "Error getting description: ") +
-                            e.what());
+                            log_what(e));
         }
     }
 
@@ -2144,22 +2124,14 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     try {
         load_persisted_devices();
 
-        // Snapshot under the mutex so the iteration below (which calls into
-        // the device registry) never races configure/remove handlers.
-        std::vector<nlohmann::json> persisted_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            persisted_snapshot = persisted_devices_;
-        }
+        // A snapshot, so the iteration below (which calls into the device
+        // registry) never races configure/remove handlers.
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
 
         auto find_config = [&persisted_snapshot](const std::string& device_type,
                                                  int device_number) -> const nlohmann::json* {
-            std::string target_type = device_type;
-            std::transform(target_type.begin(), target_type.end(), target_type.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             for (const auto& entry : persisted_snapshot) {
-                const auto key = persisted_key(entry);
-                if (key && key->device_type == target_type && key->device_number == device_number) {
+                if (PersistedConfigStore::matches(entry, device_type, device_number)) {
                     return &entry;
                 }
             }
@@ -2191,6 +2163,14 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             // disconnected). Firmware and SdkVersion are distinct: Firmware is
             // the device's own firmware, SdkVersion is the vendor library version.
             if (auto driver = registry.get_device(cap.type, cap.device_number)) {
+                // Issue #1764: client activity for the web UI status dot, read
+                // from the router's per-client registry only (no driver call,
+                // no hardware). The web UI's own requests never refresh it.
+                const auto activity = client_activity(driver.get());
+                device["ActiveClients"] = activity.active_clients;
+                if (activity.last_request_age) {
+                    device["LastClientRequestAgeMs"] = activity.last_request_age->count();
+                }
                 // Connected feeds the web UI status dot (green/yellow). Omitted
                 // when the call throws, so the UI shows "unknown" (red).
                 // get_connecting() is lock-free; a driver mid-connect can hold its
@@ -2199,7 +2179,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 try {
                     device["Connected"] = !driver->get_connecting() && driver->get_connected();
                 } catch (const std::exception& e) {
-                    util::log_warning("Connected query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Connected query failed for " + cap.name + ": " + log_what(e));
                 }
                 // LinkFault: the latched link-health text of a driver that keeps
                 // one. Connected stays true while it stands. Only when non-empty.
@@ -2208,21 +2188,30 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                         device["LinkFault"] = std::move(link_fault);
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("LinkFault query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("LinkFault query failed for " + cap.name + ": " + log_what(e));
                 }
                 try {
                     if (auto firmware = driver->get_device_firmware(); firmware.has_value()) {
                         device["Firmware"] = *firmware;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("Firmware query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Firmware query failed for " + cap.name + ": " + log_what(e));
                 }
                 try {
                     if (auto sdk = driver->get_device_sdk_version(); sdk.has_value()) {
                         device["SdkVersion"] = *sdk;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("SDK version query failed for " + cap.name + ": " + log_what(e));
+                }
+                // Decision 0024: the name is brand + model only, so the connection path and driver state a
+                // driver used to append to it (the Sky-Watcher EQMOD eps source) reach the web UI here.
+                try {
+                    if (auto description = driver->get_description(); !description.empty()) {
+                        device["Description"] = std::move(description);
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Description query failed for " + cap.name + ": " + log_what(e));
                 }
 
                 // Issue #358, the Platform 7 half. PUT /connect returns success
@@ -2245,7 +2234,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                         device["LastConnectError"] = reason;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Connect-error query failed for " + cap.name + ": " + log_what(e));
                 }
             }
             // #1969: what registration said about this entry (a ZWO camera bound by
@@ -2260,7 +2249,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        util::log_error("Error getting configured devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -2291,11 +2280,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
     try {
         load_persisted_devices();
 
-        std::vector<nlohmann::json> persisted_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            persisted_snapshot = persisted_devices_;
-        }
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
         auto capabilities = alpacacore::management::DeviceRegistry::instance().get_all_device_capabilities();
 
         nlohmann::json devices = nlohmann::json::array();
@@ -2305,13 +2290,8 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
             int pnum = pkey ? pkey->device_number : -1;
             bool already_listed = false;
             for (const auto& cap : capabilities) {
-                std::string cap_type = alpacacore::device_type_to_string(cap.type);
-                std::transform(cap_type.begin(), cap_type.end(), cap_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                std::string entry_type = ptype;
-                std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (cap_type == entry_type && cap.device_number == pnum) {
+                if (PersistedConfigStore::matches(entry, alpacacore::device_type_to_string(cap.type),
+                                                  cap.device_number)) {
                     already_listed = true;
                     break;
                 }
@@ -2333,7 +2313,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting failed devices: " + std::string(e.what()));
+        util::log_error("Error getting failed devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -2418,8 +2398,10 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
         // Any request from a registered client refreshes its Connected
         // registration so routine polling keeps it from expiring as stale
-        // (issue #160).
-        touch_client_connection(device.get(), extract_client_key(request).key);
+        // (issue #160). The web UI's own requests do not (issue #1764).
+        if (request.get_header(kWebUiClientHeader) != kWebUiClientValue) {
+            touch_client_connection(device.get(), extract_client_key(request).key);
+        }
 
         // open-astro#547: the single device-dispatch choke point for the
         // client-silence motion watchdog. Any request addressed to this
@@ -2458,7 +2440,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         return dispatch_device_method(device, match.method_name, call);
 
     } catch (const std::exception& e) {
-        util::log_error("Device error: " + std::string(e.what()));
+        util::log_error("Device error: " + log_what(e));
         auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, error_code, e.what());
         apply_error_status(response, error_code);
@@ -2500,8 +2482,9 @@ void set_wrong_verb_text(Response& response, const char* what) {
 }  // namespace
 
 namespace {
-void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
-    const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
+void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients,
+                                    std::chrono::steady_clock::time_point now) {
+    const auto cutoff = now - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
         if (it->second < cutoff) {
             it = clients.erase(it);
@@ -2513,11 +2496,15 @@ void prune_stale_client_connections(std::unordered_map<std::string, std::chrono:
 
 }  // namespace
 
-std::size_t Router::register_client_connection(const void* device, const std::string& client_key) {
+std::optional<std::size_t> Router::register_client_connection(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto& clients = client_connections_[device];
-    prune_stale_client_connections(clients);
-    clients[client_key] = std::chrono::steady_clock::now();
+    const auto now = client_clock_();
+    prune_stale_client_connections(clients, now);
+    if (clients.size() >= kMaxClientsPerDevice && clients.find(client_key) == clients.end()) {
+        return std::nullopt;
+    }
+    clients[client_key] = now;
     return clients.size();
 }
 
@@ -2528,7 +2515,7 @@ std::size_t Router::unregister_client_connection(const void* device, const std::
         return 0;
     }
     it->second.erase(client_key);
-    prune_stale_client_connections(it->second);
+    prune_stale_client_connections(it->second, client_clock_());
     if (it->second.empty()) {
         client_connections_.erase(it);
         return 0;
@@ -2547,7 +2534,7 @@ bool Router::client_connection_registered(const void* device, const std::string&
         return false;
     }
     // A lookup is client activity: refresh so steady polling never goes stale.
-    client_it->second = std::chrono::steady_clock::now();
+    client_it->second = client_clock_();
     return true;
 }
 
@@ -2559,8 +2546,37 @@ void Router::touch_client_connection(const void* device, const std::string& clie
     }
     auto client_it = it->second.find(client_key);
     if (client_it != it->second.end()) {
-        client_it->second = std::chrono::steady_clock::now();
+        client_it->second = client_clock_();
     }
+}
+
+Router::ClientActivity Router::client_activity(const void* device) const {
+    std::lock_guard<std::mutex> lock(client_connections_mutex_);
+    ClientActivity activity;
+    auto it = client_connections_.find(device);
+    if (it == client_connections_.end()) {
+        return activity;
+    }
+    // Read-only: an entry past the stale window is skipped here and left for
+    // the next register/unregister to prune, as the disconnect rule does.
+    const auto now = client_clock_();
+    const auto cutoff = now - kClientConnectionStaleAfter;
+    std::optional<std::chrono::steady_clock::time_point> newest;
+    for (const auto& entry : it->second) {
+        const auto seen = entry.second;
+        if (seen < cutoff) {
+            continue;
+        }
+        ++activity.active_clients;
+        if (!newest || seen > *newest) {
+            newest = seen;
+        }
+    }
+    if (newest) {
+        activity.last_request_age = std::max(std::chrono::milliseconds{0},
+                                             std::chrono::duration_cast<std::chrono::milliseconds>(now - *newest));
+    }
+    return activity;
 }
 
 void Router::clear_client_connections(const void* device) {
@@ -2712,7 +2728,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         throw alpacacore::AlpacaException("Device has been removed",
                                                           alpacacore::AlpacaError::InvalidOperation);
                     }
-                    register_client_connection(device.get(), client_key);
+                    if (!register_client_connection(device.get(), client_key)) {
+                        return refuse_full_client_registry(call);
+                    }
                 }
 
                 // get_connecting() is read first at every step here: a
@@ -2858,7 +2876,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (action_name.empty()) {
                     throw_bad_request("Missing parameter: Action");
                 }
-                
+                refuse_over_long("Action", action_name, kMaxActionNameBytes);
+                refuse_over_long("Parameters", action_parameters, kMaxActionParametersBytes);
+
                 std::string result = device->action(action_name, action_parameters);
                 return call.ok(result);
             }
@@ -2894,7 +2914,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 device->command_blind(command, raw);
                 return call.ok_void();
             }
@@ -2930,7 +2951,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 bool result = device->command_bool(command, raw);
                 return call.ok(result);
             }
@@ -2966,7 +2988,8 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
-                
+                refuse_over_long("Command", command, kMaxCommandBytes);
+
                 std::string result = device->command_string(command, raw);
                 return call.ok(result);
             }
@@ -2990,7 +3013,9 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                     throw alpacacore::AlpacaException("Device has been removed",
                                                       alpacacore::AlpacaError::InvalidOperation);
                 }
-                register_client_connection(device.get(), extract_client_key(request).key);
+                if (!register_client_connection(device.get(), extract_client_key(request).key)) {
+                    return refuse_full_client_registry(call);
+                }
                 // get_connecting() first (see PUT connected): a mid-task
                 // connect goes to the driver, whose base class reconciles it.
                 if (device->get_connecting() || !device->get_connected()) {
@@ -3119,1272 +3144,6 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
     });
 }
 
-Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::TelescopeDriver> telescope,
-                                           const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("telescope method '" + method_name + "'", [&]() -> Response {
-        // GET-only boolean properties
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "cansetrightascensionrate") {
-                return call.ok(telescope->get_can_set_right_ascension_rate());
-            }
-            else if (method_name == "cansetdeclinationrate") {
-                return call.ok(telescope->get_can_set_declination_rate());
-            }
-            else if (method_name == "cansetguiderates") {
-                return call.ok(telescope->get_can_set_guide_rates());
-            }
-            else if (method_name == "cansettracking") {
-                return call.ok(telescope->get_can_set_tracking());
-            }
-            else if (method_name == "cansetpark") {
-                return call.ok(telescope->get_can_set_park());
-            }
-            else if (method_name == "cansetpierside") {
-                return call.ok(telescope->get_can_set_pier_side());
-            }
-            else if (method_name == "canfindhome") {
-                return call.ok(telescope->get_can_find_home());
-            }
-            else if (method_name == "canpark") {
-                return call.ok(telescope->get_can_park());
-            }
-            else if (method_name == "canpulseguide") {
-                return call.ok(telescope->get_can_pulse_guide());
-            }
-            else if (method_name == "canslew") {
-                return call.ok(telescope->get_can_slew());  // #1660: the driver's value again
-            }
-            else if (method_name == "canslewasync") {
-                return call.ok(telescope->get_can_slew_async());
-            }
-            else if (method_name == "cansync") {
-                return call.ok(telescope->get_can_sync());
-            }
-            else if (method_name == "canunpark") {
-                return call.ok(telescope->get_can_unpark());
-            }
-            else if (method_name == "canslewaltaz") {
-                return call.ok(false);  // #775: synchronous slews are not served
-            }
-            else if (method_name == "canslewaltazasync") {
-                return call.ok(telescope->get_can_slew_alt_az_async());
-            }
-            else if (method_name == "cansyncaltaz") {
-                return call.ok(telescope->get_can_sync_alt_az());
-            }
-            else if (method_name == "alignmentmode") {
-                int mode = static_cast<int>(telescope->get_alignment_mode());
-                return call.ok(mode);
-            }
-            else if (method_name == "equatorialsystem") {
-                return call.ok(static_cast<int>(telescope->get_equatorial_system()));
-            }
-            else if (method_name == "doesrefraction") {
-                return call.ok(telescope->get_does_refraction());
-            }
-            else if (method_name == "ispulseguiding") {
-                return call.ok(telescope->get_is_pulse_guiding());
-            }
-            else if (method_name == "slewsettletime") {
-                return call.ok(telescope->get_slew_settle_time());
-            } else if (method_name == "utcdate") {
-                return call.ok(alpacacore::device_state_timestamp(telescope->get_utc_date()));
-            } else if (method_name == "axisrates") {
-                int axis = call.get_int("Axis");
-                // AxisRates must return an array of rate objects, even if only one range.
-                auto ranges = telescope->get_axis_rate_ranges(axis);
-                nlohmann::json rates_array = nlohmann::json::array();
-                for (const auto& range : ranges) {
-                    nlohmann::json rate_obj;
-                    rate_obj["Minimum"] = range.first;
-                    rate_obj["Maximum"] = range.second;
-                    rates_array.push_back(rate_obj);
-                }
-                return call.ok(rates_array);
-            } else if (method_name == "canmoveaxis") {
-                int axis = call.get_int("Axis");
-                bool can_move = telescope->get_can_move_axis(axis);
-                return call.ok(can_move);
-            } else if (method_name == "destinationsideofpier") {
-                if (!request.has_query_param("RightAscension")) {
-                    throw_bad_request("Missing parameter: RightAscension");
-                }
-                if (!request.has_query_param("Declination")) {
-                    throw_bad_request("Missing parameter: Declination");
-                }
-                double ra = parse_double_value(request.get_query_param("RightAscension"), "RightAscension");
-                double dec = parse_double_value(request.get_query_param("Declination"), "Declination");
-                int side = telescope->get_destination_side_of_pier(ra, dec);
-                return call.ok(side);
-            } else if (method_name == "athome") {
-                return call.ok(telescope->get_at_home());
-            } else if (method_name == "atpark") {
-                return call.ok(telescope->get_at_park());
-            } else if (method_name == "slewing") {
-                return call.ok(telescope->get_slewing());
-            } else if (method_name == "tracking") {
-                return call.ok(telescope->get_tracking());
-            } else if (method_name == "altitude") {
-                return call.ok(telescope->get_altitude());
-            } else if (method_name == "azimuth") {
-                return call.ok(telescope->get_azimuth());
-            } else if (method_name == "declination") {
-                return call.ok(telescope->get_declination());
-            } else if (method_name == "rightascension") {
-                return call.ok(telescope->get_right_ascension());
-            } else if (method_name == "declinationrate") {
-                return call.ok(telescope->get_declination_rate());
-            } else if (method_name == "rightascensionrate") {
-                return call.ok(telescope->get_right_ascension_rate());
-            } else if (method_name == "trackingrate") {
-                int rate = telescope->get_tracking_rate();
-                return call.ok(rate);
-            } else if (method_name == "trackingrates") {
-                auto rates = telescope->get_tracking_rates();
-                nlohmann::json rates_array = nlohmann::json::array();
-                for (int rate : rates) {
-                    rates_array.push_back(rate);
-                }
-                return call.ok(rates_array);
-            } else if (method_name == "targetdeclination") {
-                return call.ok(telescope->get_target_declination());
-            } else if (method_name == "targetrightascension") {
-                return call.ok(telescope->get_target_right_ascension());
-            } else if (method_name == "siderealtime") {
-                return call.ok(telescope->get_sidereal_time());
-            } else if (method_name == "siteelevation") {
-                return call.ok(telescope->get_site_elevation());
-            } else if (method_name == "sitelatitude") {
-                return call.ok(telescope->get_site_latitude());
-            } else if (method_name == "sitelongitude") {
-                return call.ok(telescope->get_site_longitude());
-            } else if (method_name == "focallength") {
-                return call.ok(telescope->get_focal_length());
-            } else if (method_name == "aperturediameter") {
-                return call.ok(telescope->get_aperture_diameter());
-            } else if (method_name == "aperturearea") {
-                return call.ok(telescope->get_aperture_area());
-            } else if (method_name == "sideofpier") {
-                return call.ok(telescope->get_side_of_pier());
-            } else if (method_name == "guideratedeclination") {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.dec);
-            } else if (method_name == "guideraterightascension") {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.ra);
-            }
-        }
-        
-        // GET/PUT properties
-        if (method_name == "doesrefraction") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_does_refraction());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                bool value = call.get_bool("DoesRefraction");
-                telescope->set_does_refraction(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "slewsettletime") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_slew_settle_time());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("SlewSettleTime");
-                telescope->set_slew_settle_time(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "utcdate") {
-            // open-astro#401: a UTCDate write can step the host clock (#289)
-            // and latch ClockSource, the same host-level effect the synctime
-            // endpoint guards. A browser page on another origin must not be
-            // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected =
-                    reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(), "UTCDate")) {
-                return *rejected;
-            }
-            if (request.method() == HttpMethod::GET) {
-                auto utc = telescope->get_utc_date();
-                auto time_t = std::chrono::system_clock::to_time_t(utc);
-                std::ostringstream oss;
-                oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    utc.time_since_epoch()) % 1000;
-                oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
-                return call.ok(oss.str());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                const std::string date_str = call.find_string("UTCDate").value_or("");
-                if (date_str.empty()) {
-                    throw_bad_request("Missing parameter: UTCDate or Value");
-                }
-                std::string cleaned = date_str;
-                if (!cleaned.empty() && (cleaned.back() == 'Z' || cleaned.back() == 'z')) {
-                    cleaned.pop_back();
-                }
-                std::string base = cleaned;
-                int millis = 0;
-                auto dot_pos = cleaned.find('.');
-                if (dot_pos != std::string::npos) {
-                    base = cleaned.substr(0, dot_pos);
-                    std::string frac = cleaned.substr(dot_pos + 1);
-                    if (frac.size() > 3) {
-                        frac.resize(3);
-                    }
-                    while (frac.size() < 3) {
-                        frac.push_back('0');
-                    }
-                    try {
-                        millis = std::stoi(frac);
-                    } catch (const std::exception&) {
-                        throw_bad_request("Invalid UTC date format: " + date_str);
-                    }
-                }
-
-                std::tm tm = {};
-                std::istringstream ss(base);
-                ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-                if (ss.fail()) {
-                    throw_bad_request("Invalid UTC date format: " + date_str);
-                }
-                auto utc_time = timegm(&tm);
-                if (utc_time == static_cast<std::time_t>(-1)) {
-                    throw_bad_request("Failed to convert UTC date: " + date_str);
-                }
-                auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
-                    std::chrono::milliseconds(millis);
-                // open-astro#289: on an SBC with no NTP and no RTC this write is
-                // the only correct time the host will ever see. Step the system
-                // clock from it when the kernel reports the clock undisciplined
-                // (never over NTP/chrony/GPS), then hand the driver the same value.
-                {
-                    const auto step = host_clock_.step_from_client(time_point);
-                    using Outcome = alpacacore::util::HostClock::Outcome;
-                    const std::string what = "UTCDate from " + request.remote_address() + " for telescope/" +
-                                             std::to_string(telescope->get_device_number()) + ": host clock " +
-                                             alpacacore::util::HostClock::outcome_name(step.outcome) +
-                                             " (client - host = " + std::to_string(step.delta.count()) + " ms)";
-                    // open-astro#2419: a client set the host clock, or confirmed
-                    // it to within 1 s, so a mount that keeps its own clock may
-                    // take it. The timer's step or trust-edge check re-syncs it.
-                    if (step.outcome == Outcome::Stepped || step.outcome == Outcome::SkippedSmall) {
-                        alpacacore::util::HostClockTrust::mark_set("client UTCDate");
-                    }
-                    if (step.outcome == Outcome::Stepped) {
-                        util::log_info(what);
-                    } else if (step.outcome == Outcome::Failed) {
-                        util::log_warning(what + ": " + step.error);
-                    } else if (step.outcome == Outcome::SkippedSynchronized &&
-                               (step.delta > alpacacore::util::HostClock::kClientDisagreementWarn ||
-                                step.delta < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
-                        // Rendered in ms, not seconds: the threshold is a
-                        // millisecond constant, and dividing by 1000 would
-                        // log "2 s" for a future 2500 ms value -- which
-                        // defeats the point of having one shared constant.
-                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than " +
-                                          std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count()) +
-                                          " ms");
-                    } else {
-                        util::log_debug(what);
-                    }
-                }
-                telescope->set_utc_date(time_point);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "tracking") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_tracking());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                bool value = call.get_bool("Tracking");
-                telescope->set_tracking(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "declinationrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_declination_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("DeclinationRate");
-                telescope->set_declination_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "rightascensionrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_right_ascension_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("RightAscensionRate");
-                telescope->set_right_ascension_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "trackingrate") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_tracking_rate());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("TrackingRate");
-                telescope->set_tracking_rate(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "targetdeclination") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_target_declination());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("TargetDeclination");
-                telescope->set_target_declination(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "targetrightascension") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_target_right_ascension());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("TargetRightAscension");
-                telescope->set_target_right_ascension(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "siteelevation") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_elevation());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteElevation")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteElevation");
-                telescope->set_site_elevation(value);
-                persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sitelatitude") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_latitude());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLatitude")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteLatitude");
-                telescope->set_site_latitude(value);
-                persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sitelongitude") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_site_longitude());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLongitude")) {
-                    return *rejected;
-                }
-                double value = call.get_double("SiteLongitude");
-                telescope->set_site_longitude(value);
-                persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "sideofpier") {
-            if (request.method() == HttpMethod::GET) {
-                return call.ok(telescope->get_side_of_pier());
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                int value = call.get_int("SideOfPier");
-                telescope->set_side_of_pier(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "guideratedeclination") {
-            if (request.method() == HttpMethod::GET) {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.dec);
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("GuideRateDeclination");
-                telescope->set_guide_rate_declination(value);
-                return call.ok_void();
-            }
-        }
-        else if (method_name == "guideraterightascension") {
-            if (request.method() == HttpMethod::GET) {
-                auto guide_rate = telescope->get_guide_rate();
-                return call.ok(guide_rate.ra);
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                double value = call.get_double("GuideRateRightAscension");
-                telescope->set_guide_rate_right_ascension(value);
-                return call.ok_void();
-            }
-        }
-        
-        // PUT-only methods (actions)
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "abortslew") {
-                telescope->abort_slew();
-                return call.ok_void();
-            }
-            else if (method_name == "moveaxis") {
-                // Debug logging
-                if (!request.body().empty()) {
-                    util::log_info("moveaxis body: " + util::escape_for_log(request.body()));
-                }
-                int axis = call.get_int("Axis");
-                double rate = call.get_double("Rate");
-                util::log_info("moveaxis parsed: Axis=" + std::to_string(axis) + ", Rate=" + std::to_string(rate));
-                telescope->move_axis(axis, rate);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtoaltazasync") {
-                double altitude = call.get_double("Altitude");
-                double azimuth = call.get_double("Azimuth");
-                telescope->slew_to_alt_az_async(altitude, azimuth);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtoaltaz") {
-                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
-                // any parameter parse, target write or driver call.
-                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
-                                                  alpacacore::AlpacaError::MethodNotImplemented);
-            }
-            else if (method_name == "synctoaltaz") {
-                double altitude = call.get_double("Altitude");
-                double azimuth = call.get_double("Azimuth");
-                telescope->sync_to_alt_az(altitude, azimuth);
-                return call.ok_void();
-            }
-            else if (method_name == "park") {
-                telescope->park();
-                return call.ok_void();
-            }
-            else if (method_name == "unpark") {
-                telescope->unpark();
-                return call.ok_void();
-            }
-            else if (method_name == "findhome") {
-                telescope->find_home();
-                return call.ok_void();
-            }
-            else if (method_name == "setpark") {
-                telescope->set_park();
-                return call.ok_void();
-            }
-            else if (method_name == "slewtotarget") {
-                // #1660: refused untouched when the driver cannot slew; else the
-                // async initiator, then a bounded wait for Slewing to clear.
-                require_can_slew(*telescope);
-                telescope->slew_to_target_async();
-                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtotargetasync") {
-                telescope->slew_to_target_async();
-                return call.ok_void();
-            }
-            else if (method_name == "slewtocoordinates") {
-                require_can_slew(*telescope);
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                telescope->slew_to_coordinates_async(ra, dec);
-                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
-                return call.ok_void();
-            }
-            else if (method_name == "slewtocoordinatesasync") {
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                // slew_to_coordinates_async sets targets internally; skip
-                // redundant set_target calls to avoid extra mutex round-trips.
-                telescope->slew_to_coordinates_async(ra, dec);
-                return call.ok_void();
-            }
-            else if (method_name == "synctotarget") {
-                telescope->sync_to_target();
-                return call.ok_void();
-            }
-            else if (method_name == "synctocoordinates") {
-                double ra = call.get_double("RightAscension");
-                double dec = call.get_double("Declination");
-                telescope->sync_to_coordinates(ra, dec);
-                return call.ok_void();
-            }
-            else if (method_name == "pulseguide") {
-                int direction = call.get_int("Direction");
-                int duration = call.get_int("Duration");
-                telescope->pulse_guide(direction, duration);
-                return call.ok_void();
-            }
-        }
-        
-        // Method not found
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Telescope");
-    });
-}
-
-Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver> camera,
-                                        const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    auto dispatch_start = std::chrono::steady_clock::now();
-    alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
-        "dispatch_camera_method entry: method=" + method_name);
-    struct DispatchExitLog {
-        std::string method_name;
-        std::chrono::steady_clock::time_point start;
-        ~DispatchExitLog() {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
-                "dispatch_camera_method exit: method=" + method_name + " duration_ms=" + std::to_string(ms));
-        }
-    } dispatch_exit_log{method_name, dispatch_start};
-
-    auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
-        auto time_t = std::chrono::system_clock::to_time_t(time_point);
-        std::ostringstream oss;
-        oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-        return oss.str();
-    };
-
-    return call.run("camera method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "bayeroffsetx") {
-                return call.ok(camera->get_bayer_offset_x());
-            } else if (method_name == "bayeroffsety") {
-                return call.ok(camera->get_bayer_offset_y());
-            } else if (method_name == "binx") {
-                return call.ok(camera->get_bin_x());
-            } else if (method_name == "biny") {
-                return call.ok(camera->get_bin_y());
-            } else if (method_name == "camerastate") {
-                return call.ok(static_cast<int>(camera->get_camera_state()));
-            } else if (method_name == "cameraxsize") {
-                return call.ok(camera->get_camera_x_size());
-            } else if (method_name == "cameraysize") {
-                return call.ok(camera->get_camera_y_size());
-            } else if (method_name == "canabortexposure") {
-                return call.ok(camera->get_can_abort_exposure());
-            } else if (method_name == "canasymmetricbin") {
-                return call.ok(camera->get_can_asymmetric_bin());
-            } else if (method_name == "canfastreadout") {
-                return call.ok(camera->get_can_fast_readout());
-            } else if (method_name == "cangetcoolerpower") {
-                return call.ok(camera->get_can_get_cooler_power());
-            } else if (method_name == "canpulseguide") {
-                return call.ok(camera->get_can_pulse_guide());
-            } else if (method_name == "cansetccdtemperature") {
-                return call.ok(camera->get_can_set_ccd_temperature());
-            } else if (method_name == "canstopexposure") {
-                return call.ok(camera->get_can_stop_exposure());
-            } else if (method_name == "ccdtemperature") {
-                return call.ok(camera->get_ccd_temperature());
-            } else if (method_name == "cooleron") {
-                return call.ok(camera->get_cooler_on());
-            } else if (method_name == "coolerpower") {
-                return call.ok(camera->get_cooler_power());
-            } else if (method_name == "electronsperadu") {
-                return call.ok(camera->get_electrons_per_adu());
-            } else if (method_name == "exposuremax") {
-                return call.ok(camera->get_exposure_max());
-            } else if (method_name == "exposuremin") {
-                return call.ok(camera->get_exposure_min());
-            } else if (method_name == "exposureresolution") {
-                return call.ok(camera->get_exposure_resolution());
-            } else if (method_name == "fastreadout") {
-                return call.ok(camera->get_fast_readout());
-            } else if (method_name == "fullwellcapacity") {
-                return call.ok(camera->get_full_well_capacity());
-            } else if (method_name == "gain") {
-                return call.ok(camera->get_gain());
-            } else if (method_name == "gainmax") {
-                return call.ok(camera->get_gain_max());
-            } else if (method_name == "gainmin") {
-                return call.ok(camera->get_gain_min());
-            } else if (method_name == "gains") {
-                nlohmann::json gains = nlohmann::json::array();
-                for (const auto& gain : camera->get_gains()) {
-                    gains.push_back(gain);
-                }
-                return call.ok(gains);
-            } else if (method_name == "hasshutter") {
-                return call.ok(camera->get_has_shutter());
-            } else if (method_name == "heatsinktemperature") {
-                return call.ok(camera->get_heat_sink_temperature());
-            } else if (method_name == "imagearray") {
-                const bool has_accept = request.has_header("accept");
-                const std::string accept = has_accept ? request.get_header("accept") : std::string();
-                util::log_debug("Camera imagearray Accept: " + (has_accept ? util::escape_for_log(accept) : "<none>") +
-                                ", imagebytes=" + std::string(accepts_imagebytes(accept) ? "true" : "false"));
-                auto payload =
-                    build_shared(camera.get(), [&camera] { return camera->get_image_array(); }, accept, call);
-                Response response;
-                response.set_content_type(payload.content_type);
-                response.set_body(std::move(payload.body), std::move(payload.tail), payload.tail_offset);
-                return response;
-            } else if (method_name == "imagearrayvariant") {
-                if (camera->get_connecting() || !camera->get_connected()) {
-                    throw alpacacore::AlpacaException("Camera is not connected", alpacacore::AlpacaError::NotConnected);
-                }
-                // ImageArrayVariant is COM-only; Alpaca must refuse it without retrieving a frame.
-                throw alpacacore::AlpacaException("ImageArrayVariant is not supported by Alpaca; use ImageArray",
-                                                  alpacacore::AlpacaError::PropertyNotImplemented);
-            } else if (method_name == "imageready") {
-                return call.ok(camera->get_image_ready());
-            } else if (method_name == "ispulseguiding") {
-                return call.ok(camera->get_is_pulse_guiding());
-            } else if (method_name == "lastexposureduration") {
-                return call.ok(camera->get_last_exposure_duration());
-            } else if (method_name == "lastexposurestarttime") {
-                return call.ok(format_utc(camera->get_last_exposure_start_time()));
-            } else if (method_name == "maxadu") {
-                return call.ok(camera->get_max_adu());
-            } else if (method_name == "maxbinx") {
-                return call.ok(camera->get_max_bin_x());
-            } else if (method_name == "maxbiny") {
-                return call.ok(camera->get_max_bin_y());
-            } else if (method_name == "numx") {
-                return call.ok(camera->get_num_x());
-            } else if (method_name == "numy") {
-                return call.ok(camera->get_num_y());
-            } else if (method_name == "offset") {
-                return call.ok(camera->get_offset());
-            } else if (method_name == "offsetmax") {
-                return call.ok(camera->get_offset_max());
-            } else if (method_name == "offsetmin") {
-                return call.ok(camera->get_offset_min());
-            } else if (method_name == "offsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (const auto& offset : camera->get_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            } else if (method_name == "percentcompleted") {
-                auto percent = camera->get_percent_completed_checked();
-                auto value = static_cast<std::int32_t>(percent);
-                return call.ok(value);
-            } else if (method_name == "pixelsizex") {
-                return call.ok(camera->get_pixel_size_x());
-            } else if (method_name == "pixelsizey") {
-                return call.ok(camera->get_pixel_size_y());
-            } else if (method_name == "readoutmode") {
-                return call.ok(camera->get_readout_mode());
-            } else if (method_name == "readoutmodes") {
-                nlohmann::json modes = nlohmann::json::array();
-                for (const auto& mode : camera->get_readout_modes()) {
-                    modes.push_back(mode);
-                }
-                return call.ok(modes);
-            } else if (method_name == "sensorname") {
-                return call.ok(camera->get_sensor_name());
-            } else if (method_name == "sensortype") {
-                return call.ok(static_cast<int>(camera->get_sensor_type()));
-            } else if (method_name == "setccdtemperature") {
-                return call.ok(camera->get_set_ccd_temperature());
-            } else if (method_name == "startx") {
-                return call.ok(camera->get_start_x());
-            } else if (method_name == "starty") {
-                return call.ok(camera->get_start_y());
-            } else if (method_name == "subexposureduration") {
-                return call.ok(camera->get_sub_exposure_duration());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "binx") {
-                int value = call.get_int("BinX");
-                camera->set_bin_x(value);
-                return call.ok_void();
-            } else if (method_name == "biny") {
-                int value = call.get_int("BinY");
-                camera->set_bin_y(value);
-                return call.ok_void();
-            } else if (method_name == "fastreadout") {
-                bool value = call.get_bool("FastReadout");
-                camera->set_fast_readout(value);
-                return call.ok_void();
-            } else if (method_name == "gain") {
-                int value = call.get_int("Gain");
-                camera->set_gain(value);
-                return call.ok_void();
-            } else if (method_name == "cooleron") {
-                bool value = call.get_bool("CoolerOn");
-                camera->set_cooler_on(value);
-                return call.ok_void();
-            } else if (method_name == "setccdtemperature") {
-                double value = call.get_double("SetCCDTemperature");
-                camera->set_set_ccd_temperature(value);
-                return call.ok_void();
-            } else if (method_name == "numx") {
-                int value = call.get_int("NumX");
-                camera->set_num_x(value);
-                return call.ok_void();
-            } else if (method_name == "numy") {
-                int value = call.get_int("NumY");
-                camera->set_num_y(value);
-                return call.ok_void();
-            } else if (method_name == "offset") {
-                int value = call.get_int("Offset");
-                camera->set_offset(value);
-                return call.ok_void();
-            } else if (method_name == "readoutmode") {
-                int value = call.get_int("ReadoutMode");
-                camera->set_readout_mode(value);
-                return call.ok_void();
-            } else if (method_name == "startx") {
-                int value = call.get_int("StartX");
-                camera->set_start_x(value);
-                return call.ok_void();
-            } else if (method_name == "starty") {
-                int value = call.get_int("StartY");
-                camera->set_start_y(value);
-                return call.ok_void();
-            } else if (method_name == "subexposureduration") {
-                double value = call.get_double("SubExposureDuration");
-                camera->set_sub_exposure_duration(value);
-                return call.ok_void();
-            } else if (method_name == "startexposure") {
-                double duration = call.get_double("Duration");
-                bool light = call.get_bool("Light");
-                camera->start_exposure(duration, light);
-                return call.ok_void();
-            } else if (method_name == "pulseguide") {
-                int direction = call.get_int("Direction");
-                int duration = call.get_int("Duration");
-                camera->pulse_guide(direction, duration);
-                return call.ok_void();
-            } else if (method_name == "stopexposure") {
-                camera->stop_exposure();
-                return call.ok_void();
-            } else if (method_name == "abortexposure") {
-                camera->abort_exposure();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Camera");
-    });
-}
-
-Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver> sw, const std::string& method_name,
-                                        const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("switch method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "maxswitch") {
-                return call.ok(sw->get_max_switch());
-            } else if (method_name == "cancelasync") {
-                // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576). The Id is
-                // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(call.get_int("Id"));
-                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
-                                                  alpacacore::AlpacaError::NotImplemented);
-            } else if (method_name == "canasync") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_can_async(id));
-            } else if (method_name == "canwrite") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_can_write(id));
-            } else if (method_name == "getswitch") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch(id));
-            } else if (method_name == "getswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_value(id));
-            } else if (method_name == "getswitchname") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_name(id));
-            } else if (method_name == "getswitchdescription") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_description(id));
-            } else if (method_name == "minswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_min_switch_value(id));
-            } else if (method_name == "maxswitchvalue") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_max_switch_value(id));
-            } else if (method_name == "statechangecomplete") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_state_change_complete(id));
-            } else if (method_name == "switchstep") {
-                int id = call.get_int("Id");
-                return call.ok(sw->get_switch_step(id));
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "setswitch") {
-                int id = call.get_int("Id");
-                bool state = call.get_bool("State");
-                sw->set_switch(id, state);
-                return call.ok_void();
-            } else if (method_name == "cancelasync") {
-                // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576). The Id is
-                // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(call.get_int("Id"));
-                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
-                                                  alpacacore::AlpacaError::NotImplemented);
-            } else if (method_name == "setasync") {
-                int id = call.get_int("Id");
-                bool state = call.get_bool("State");
-                sw->set_async(id, state);
-                return call.ok_void();
-            } else if (method_name == "setswitchvalue") {
-                int id = call.get_int("Id");
-                double value = call.get_double("Value");
-                sw->set_switch_value(id, value);
-                return call.ok_void();
-            } else if (method_name == "setasyncvalue") {
-                int id = call.get_int("Id");
-                double value = call.get_double("Value");
-                sw->set_async_value(id, value);
-                return call.ok_void();
-            } else if (method_name == "setswitchname") {
-                int id = call.get_int("Id");
-                std::string name = call.get_string("Name");
-                sw->set_switch_name(id, name);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Switch");
-    });
-}
-
-Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-                                             const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("filter wheel method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "position") {
-                return call.ok(filterwheel->get_position());
-            } else if (method_name == "names") {
-                nlohmann::json names = nlohmann::json::array();
-                for (const auto& name : filterwheel->get_names()) {
-                    names.push_back(name);
-                }
-                return call.ok(names);
-            } else if (method_name == "focusoffsets") {
-                nlohmann::json offsets = nlohmann::json::array();
-                for (int offset : filterwheel->get_focus_offsets()) {
-                    offsets.push_back(offset);
-                }
-                return call.ok(offsets);
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "position") {
-                int value = call.get_int("Position");
-                filterwheel->set_position(value);
-                return call.ok_void();
-            } else if (method_name == "names") {
-                const auto* names_val = call.json_field("Names");
-                if (!names_val) {
-                    throw_bad_request("Missing parameter: Names");
-                }
-                if (!names_val->is_array()) {
-                    throw_bad_request("Names must be an array of strings");
-                }
-                for (const auto& name : *names_val) {
-                    if (!name.is_string()) {
-                        throw_bad_request("Names must be an array of strings");
-                    }
-                }
-                std::vector<std::string> names = names_val->get<std::vector<std::string>>();
-                filterwheel->set_names(names);
-                return call.ok_void();
-            } else if (method_name == "focusoffsets") {
-                const auto* offsets_val = call.json_field("FocusOffsets");
-                if (!offsets_val) {
-                    throw_bad_request("Missing parameter: FocusOffsets");
-                }
-                if (!offsets_val->is_array()) {
-                    throw_bad_request("FocusOffsets must be an array of integers");
-                }
-                std::vector<int> offsets;
-                offsets.reserve(offsets_val->size());
-                for (const auto& offset : *offsets_val) {
-                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
-                }
-                filterwheel->set_focus_offsets(offsets);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for FilterWheel");
-    });
-}
-
-Response Router::dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser,
-                                         const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("focuser method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "absolute") {
-                return call.ok(focuser->get_absolute());
-            } else if (method_name == "ismoving") {
-                return call.ok(focuser->get_is_moving());
-            } else if (method_name == "maxincrement") {
-                return call.ok(focuser->get_max_increment());
-            } else if (method_name == "maxstep") {
-                return call.ok(focuser->get_max_step());
-            } else if (method_name == "position") {
-                return call.ok(focuser->get_position());
-            } else if (method_name == "stepsize") {
-                return call.ok(focuser->get_step_size());
-            } else if (method_name == "tempcompavailable") {
-                return call.ok(focuser->get_temp_comp_available());
-            } else if (method_name == "tempcomp") {
-                return call.ok(focuser->get_temp_comp());
-            } else if (method_name == "temperature") {
-                return call.ok(focuser->get_temperature());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "tempcomp") {
-                bool value = call.get_bool("TempComp");
-                focuser->set_temp_comp(value);
-                return call.ok_void();
-            } else if (method_name == "move") {
-                int position = call.get_int("Position");
-                focuser->move(position);
-                return call.ok_void();
-            } else if (method_name == "halt") {
-                focuser->halt();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Focuser");
-    });
-}
-
-Response Router::dispatch_rotator_method(std::shared_ptr<alpacacore::RotatorDriver> rotator,
-                                         const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("rotator method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "canreverse") {
-                return call.ok(rotator->get_can_reverse());
-            } else if (method_name == "reverse") {
-                return call.ok(rotator->get_reverse());
-            } else if (method_name == "ismoving") {
-                return call.ok(rotator->get_is_moving());
-            } else if (method_name == "mechanicalposition") {
-                return call.ok(rotator->get_mechanical_position());
-            } else if (method_name == "position") {
-                return call.ok(rotator->get_position());
-            } else if (method_name == "stepsize") {
-                return call.ok(rotator->get_step_size());
-            } else if (method_name == "targetposition") {
-                return call.ok(rotator->get_target_position());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "reverse") {
-                bool value = call.get_bool("Reverse");
-                rotator->set_reverse(value);
-                return call.ok_void();
-            } else if (method_name == "move") {
-                double position = call.get_double("Position");
-                rotator->move(position);
-                return call.ok_void();
-            } else if (method_name == "moveabsolute") {
-                double position = call.get_double("Position");
-                rotator->move_absolute(position);
-                return call.ok_void();
-            } else if (method_name == "movemechanical") {
-                double position = call.get_double("Position");
-                rotator->move_mechanical(position);
-                return call.ok_void();
-            } else if (method_name == "halt") {
-                rotator->halt();
-                return call.ok_void();
-            } else if (method_name == "sync") {
-                double position = call.get_double("Position");
-                rotator->sync(position);
-                return call.ok_void();
-            } else if (method_name == "targetposition") {
-                double position = call.get_double("TargetPosition");
-                rotator->set_target_position(position);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Rotator");
-    });
-}
-
-Response Router::dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> dome, const std::string& method_name,
-                                      const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("dome method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "altitude") {
-                return call.ok(dome->get_altitude());
-            } else if (method_name == "athome") {
-                return call.ok(dome->get_at_home());
-            } else if (method_name == "atpark") {
-                return call.ok(dome->get_at_park());
-            } else if (method_name == "azimuth") {
-                return call.ok(dome->get_azimuth());
-            } else if (method_name == "canfindhome") {
-                return call.ok(dome->get_can_find_home());
-            } else if (method_name == "canpark") {
-                return call.ok(dome->get_can_park());
-            } else if (method_name == "cansetaltitude") {
-                return call.ok(dome->get_can_set_altitude());
-            } else if (method_name == "cansetazimuth") {
-                return call.ok(dome->get_can_set_azimuth());
-            } else if (method_name == "cansetpark") {
-                return call.ok(dome->get_can_set_park());
-            } else if (method_name == "cansetshutter") {
-                return call.ok(dome->get_can_set_shutter());
-            } else if (method_name == "cansyncazimuth") {
-                return call.ok(dome->get_can_sync_azimuth());
-            } else if (method_name == "canslave") {
-                return call.ok(dome->get_can_slave());
-            } else if (method_name == "slaved") {
-                return call.ok(dome->get_slaved());
-            } else if (method_name == "slewing") {
-                return call.ok(dome->get_slewing());
-            } else if (method_name == "shutterstatus") {
-                return call.ok(dome->get_shutter_status());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "slaved") {
-                bool value = call.get_bool("Slaved");
-                dome->set_slaved(value);
-                return call.ok_void();
-            } else if (method_name == "abortslew") {
-                dome->abort_slew();
-                return call.ok_void();
-            } else if (method_name == "closeshutter") {
-                dome->close_shutter();
-                return call.ok_void();
-            } else if (method_name == "findhome") {
-                dome->find_home();
-                return call.ok_void();
-            } else if (method_name == "openshutter") {
-                dome->open_shutter();
-                return call.ok_void();
-            } else if (method_name == "park") {
-                dome->park();
-                return call.ok_void();
-            } else if (method_name == "setpark") {
-                dome->set_park();
-                return call.ok_void();
-            } else if (method_name == "slewtoazimuth") {
-                double azimuth = call.get_double("Azimuth");
-                dome->slew_to_azimuth(azimuth);
-                return call.ok_void();
-            } else if (method_name == "slewtoaltitude") {
-                double altitude = call.get_double("Altitude");
-                dome->slew_to_altitude(altitude);
-                return call.ok_void();
-            } else if (method_name == "synctoazimuth") {
-                double azimuth = call.get_double("Azimuth");
-                dome->sync_to_azimuth(azimuth);
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for Dome");
-    });
-}
-
-Response Router::dispatch_covercalibrator_method(std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
-                                                 const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("cover calibrator method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "brightness") {
-                return call.ok(covercalibrator->get_brightness());
-            } else if (method_name == "calibratorchanging") {
-                return call.ok(covercalibrator->get_calibrator_changing());
-            } else if (method_name == "calibratorstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_calibrator_state()));
-            } else if (method_name == "covermoving") {
-                return call.ok(covercalibrator->get_cover_moving());
-            } else if (method_name == "coverstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_cover_state()));
-            } else if (method_name == "maxbrightness") {
-                return call.ok(covercalibrator->get_max_brightness());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "calibratoron") {
-                int brightness = call.get_int("Brightness");
-                covercalibrator->calibrator_on(brightness);
-                return call.ok_void();
-            } else if (method_name == "calibratoroff") {
-                covercalibrator->calibrator_off();
-                return call.ok_void();
-            } else if (method_name == "opencover") {
-                covercalibrator->open_cover();
-                return call.ok_void();
-            } else if (method_name == "closecover") {
-                covercalibrator->close_cover();
-                return call.ok_void();
-            } else if (method_name == "haltcover") {
-                covercalibrator->halt_cover();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for CoverCalibrator");
-    });
-}
-
-Response Router::dispatch_observingconditions_method(
-    std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
-    const DeviceCall& call) {
-    const Request& request = call.request();
-
-    auto parse_property_name = [&]() -> std::string {
-        if (request.has_query_param("PropertyName")) {
-            return request.get_query_param("PropertyName");
-        }
-        if (request.has_query_param("SensorName")) {
-            return request.get_query_param("SensorName");
-        }
-        if (const auto* val = call.json_field("PropertyName")) {
-            if (!val->is_string()) {
-                throw_bad_request("Invalid JSON value for parameter: PropertyName");
-            }
-            return val->get<std::string>();
-        }
-        if (const auto* val = call.json_field("SensorName")) {
-            if (!val->is_string()) {
-                throw_bad_request("Invalid JSON value for parameter: SensorName");
-            }
-            return val->get<std::string>();
-        }
-        if (auto value = call.form_field("PropertyName")) {
-            return *value;
-        }
-        if (auto value = call.form_field("SensorName")) {
-            return *value;
-        }
-        throw_bad_request("Missing parameter: SensorName");
-    };
-
-    return call.run("observing conditions method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "averageperiod") {
-                return call.ok(observingconditions->get_average_period());
-            } else if (method_name == "cloudcover") {
-                return call.ok(observingconditions->get_cloud_cover());
-            } else if (method_name == "dewpoint") {
-                return call.ok(observingconditions->get_dew_point());
-            } else if (method_name == "humidity") {
-                return call.ok(observingconditions->get_humidity());
-            } else if (method_name == "pressure") {
-                return call.ok(observingconditions->get_pressure());
-            } else if (method_name == "rainrate") {
-                return call.ok(observingconditions->get_rain_rate());
-            } else if (method_name == "skybrightness") {
-                return call.ok(observingconditions->get_sky_brightness());
-            } else if (method_name == "skyquality") {
-                return call.ok(observingconditions->get_sky_quality());
-            } else if (method_name == "skytemperature") {
-                return call.ok(observingconditions->get_sky_temperature());
-            } else if (method_name == "starfwhm") {
-                return call.ok(observingconditions->get_star_fwhm());
-            } else if (method_name == "temperature") {
-                return call.ok(observingconditions->get_temperature());
-            } else if (method_name == "winddirection") {
-                return call.ok(observingconditions->get_wind_direction());
-            } else if (method_name == "windgust") {
-                return call.ok(observingconditions->get_wind_gust());
-            } else if (method_name == "windspeed") {
-                return call.ok(observingconditions->get_wind_speed());
-            } else if (method_name == "timesincelastupdate") {
-                std::string property_name = parse_property_name();
-                return call.ok(observingconditions->get_time_since_last_update(property_name));
-            } else if (method_name == "sensordescription") {
-                std::string property_name = parse_property_name();
-                return call.ok(observingconditions->get_sensor_description(property_name));
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "averageperiod") {
-                double value = call.get_double("AveragePeriod");
-                observingconditions->set_average_period(value);
-                return call.ok_void();
-            } else if (method_name == "refresh") {
-                observingconditions->refresh();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for ObservingConditions");
-    });
-}
-
-Response Router::dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
-                                               const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    // No SafetyMonitor method reads a parameter today, so the 400 text path of run()
-    // is unreachable here. Kept so a method that adds one answers 400 text like the
-    // other dispatchers.
-    return call.run("safety monitor method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "issafe") {
-                return call.ok(safetymonitor->get_is_safe());
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for SafetyMonitor");
-    });
-}
-
 Response Router::handle_root(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
@@ -4451,7 +3210,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         
         util::log_info("API versions response: " + versions.dump());
     } catch (const std::exception& e) {
-        util::log_error("Error getting API versions: " + std::string(e.what()));
+        util::log_error("Error getting API versions: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4485,7 +3244,7 @@ Response Router::handle_build_info(const Request& request, std::uint32_t server_
         alpaca_response.value = info;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting build info: " + std::string(e.what()));
+        util::log_error("Error getting build info: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4518,7 +3277,7 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
         alpaca_response.value = catalog_json::describe_json(catalog_);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting device catalog: " + std::string(e.what()));
+        util::log_error("Error getting device catalog: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4571,7 +3330,7 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
         alpaca_response.value = std::move(list);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error listing thermal switch cameras: " + std::string(e.what()));
+        util::log_error("Error listing thermal switch cameras: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4621,7 +3380,188 @@ Response Router::handle_attached_cameras(const Request& request, std::uint32_t s
         alpaca_response.value = std::move(list);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error listing attached cameras: " + std::string(e.what()));
+        util::log_error("Error listing attached cameras: " + log_what(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+// The adapters a vendor's network devices announce on the LAN, for the web form's "Find adapter" button:
+// GET /management/v1/networkadapters?vendor=celestron. The finder (registered in the catalog when the vendor is
+// built) listens for its whole window on this worker and sends nothing. No router lock is held across it, so
+// every other request is served meanwhile; one search runs at a time, so repeated clicks cannot pin the pool.
+Response Router::handle_network_adapters(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for networkadapters endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
+        return response;
+    }
+
+    if (network_adapter_search_.exchange(true)) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "A search for network adapters is already running; try again when it ends");
+        response.set_body(alpaca_response);
+        return response;
+    }
+    struct SearchEnd {
+        std::atomic<bool>& running;
+        ~SearchEnd() { running.store(false); }
+    } search_end{network_adapter_search_};
+
+    const std::string vendor = request.get_query_param("vendor");
+    try {
+        const auto adapters = catalog_.find_network_adapters(vendor);
+        if (!adapters.has_value()) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "No network adapter search for vendor '" + util::escape_for_log(vendor) + "' in this build");
+            response.set_body(alpaca_response);
+            return response;
+        }
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& adapter : *adapters) {
+            list.push_back({{"Host", adapter.host}, {"Ssid", adapter.ssid}, {"Module", adapter.module}});
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::move(list);
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        // INFO, not ERROR: any LAN host can start a search (decision 0007 rule 9).
+        util::log_info("Search for network adapters failed: " + log_what(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+namespace {
+
+const char* attached_kind_name(alpacacore::catalog::AttachedKind kind) {
+    switch (kind) {
+        case alpacacore::catalog::AttachedKind::Serial:
+            return "serial";
+        case alpacacore::catalog::AttachedKind::Hid:
+            return "hid";
+        case alpacacore::catalog::AttachedKind::Camera:
+            return "camera";
+    }
+    return "serial";
+}
+
+}  // namespace
+
+// What is plugged in, for a setup flow (#2312): GET /management/v1/attacheddevices.
+// Serial ports come from the by-id directory and sysfs without opening a port
+// or taking a claim; each lists every catalog entry its USB identity matches,
+// with the config a configuredevice call needs. A lister that throws is
+// reported in Errors beside what the others found.
+Response Router::handle_attached_devices(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for attacheddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
+        return response;
+    }
+
+    try {
+        load_persisted_devices();
+        const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
+        // The configured devices as the catalog reads them. An entry the
+        // catalog cannot read (unknown type, wrong-typed field) cannot hold a
+        // port this listing could match, so it is skipped.
+        std::vector<alpacacore::catalog::ConfiguredDevice> configured;
+        for (const auto& entry : persisted_snapshot) {
+            const auto key = persisted_key(entry);
+            if (!key || key->vendor.empty()) continue;
+            try {
+                const alpacacore::catalog::DeviceKey device_key{key->vendor, string_to_device_type(key->device_type)};
+                const auto view = catalog_.describe(device_key);
+                if (!view) continue;
+                configured.push_back(
+                    {device_key, key->device_number, catalog_json::config_from_json(entry, view->fields)});
+            } catch (const std::exception& e) {
+                util::log_debug("attacheddevices: skipping configured entry " + util::escape_for_log(key->vendor) +
+                                " " + util::escape_for_log(key->device_type) + " " +
+                                std::to_string(key->device_number) + ": " + log_what(e));
+            }
+        }
+
+        const auto listed = alpacacore::catalog::list_attached_devices(catalog_, configured, attached_device_roots_);
+
+        nlohmann::json devices = nlohmann::json::array();
+        for (const auto& device : listed.devices) {
+            nlohmann::json candidates = nlohmann::json::array();
+            for (const auto& candidate : device.candidates) {
+                std::string type_lower = alpacacore::device_type_to_string(candidate.key.type);
+                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                nlohmann::json config = catalog_json::json_from_config(candidate.config);
+                config["vendor"] = candidate.key.vendor;
+                config["deviceType"] = type_lower;
+                candidates.push_back({{"Vendor", candidate.key.vendor},
+                                      {"DeviceType", alpacacore::device_type_to_string(candidate.key.type)},
+                                      {"Config", std::move(config)}});
+            }
+            nlohmann::json configured_as = nlohmann::json::array();
+            for (const auto& ref : device.configured_as) {
+                configured_as.push_back(
+                    {{"DeviceType", alpacacore::device_type_to_string(ref.type)}, {"DeviceNumber", ref.device_number}});
+            }
+            nlohmann::json item{{"Kind", attached_kind_name(device.kind)},
+                                {"Name", device.name},
+                                {"Candidates", std::move(candidates)},
+                                {"Configured", !configured_as.empty()},
+                                {"ConfiguredAs", std::move(configured_as)}};
+            if (device.kind == alpacacore::catalog::AttachedKind::Camera) {
+                item["Index"] = device.camera_index;
+                item["SerialNumber"] = device.serial_number;
+            } else {
+                item["Port"] = device.port;
+                if (!device.node.empty()) item["Node"] = device.node;
+            }
+            devices.push_back(std::move(item));
+        }
+        nlohmann::json errors = nlohmann::json::array();
+        for (const auto& error : listed.errors) {
+            // INFO, not WARNING: a client's GET triggers the listing (decision 0007 rule 9).
+            util::log_info("attacheddevices: " + error.source + " failed: " + util::escape_for_log(error.message));
+            errors.push_back({{"Source", error.source}, {"Message", error.message}});
+        }
+
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = nlohmann::json{{"Devices", std::move(devices)}, {"Errors", std::move(errors)}};
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error listing attached devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4715,6 +3655,9 @@ Response Router::handle_static_file(const Request& request) {
             path_str[root_str.size()] != std::filesystem::path::preferred_separator) {
             continue;
         }
+        if (!std::filesystem::is_regular_file(canonical_path, ec)) {
+            continue;  // a directory or a missing file is not served (#1741)
+        }
         file.open(canonical_path, std::ios::binary);
         if (file.is_open()) {
             full_path = path_str;
@@ -4742,20 +3685,27 @@ Response Router::handle_static_file(const Request& request) {
     // Read file content
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
-    
-    // Set appropriate content type
-    if (file_path.find(".html") != std::string::npos) {
+
+    // Content type from the file's extension, not a substring of the path (#1741).
+    const std::string extension = std::filesystem::path(full_path).extension().string();
+    if (extension == ".html") {
         response.set_content_type("text/html");
-    } else if (file_path.find(".css") != std::string::npos) {
+    } else if (extension == ".css") {
         response.set_content_type("text/css");
-    } else if (file_path.find(".js") != std::string::npos) {
+    } else if (extension == ".js") {
         response.set_content_type("application/javascript");
-    } else if (file_path.find(".json") != std::string::npos) {
+    } else if (extension == ".json") {
         response.set_content_type("application/json");
+    } else if (extension == ".ico") {
+        response.set_content_type("image/x-icon");
+    } else if (extension == ".svg") {
+        response.set_content_type("image/svg+xml");
+    } else if (extension == ".png") {
+        response.set_content_type("image/png");
     } else {
         response.set_content_type("text/plain");
     }
-    
+
     response.set_body(content);
     return response;
 }
@@ -4917,10 +3867,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -4971,35 +3918,16 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a stored ID the client sends back (the web UI's edit
-        // removes the entry first, so its own ID is free again) unless another
-        // entry holds it, or another configuredevice call chose it and has not
-        // stored its entry yet; otherwise mint one. The entry this call replaces
-        // (same vendor, type and number, as add_or_replace_persisted_device()
-        // matches) is not another entry. The choice is reserved until this call
-        // stores its entry or fails.
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            std::set<std::string> taken = reserved_unique_ids_;
-            const auto replaced = persisted_key(config);
-            for (const auto& entry : persisted_devices_) {
-                const auto key = persisted_key(entry);
-                if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
-                    key->device_number == replaced->device_number) {
-                    continue;
-                }
-                if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
-            }
-            config["uniqueId"] = choose_unique_id(config, taken);
-            reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
+        // Decision 0018 and open-astro#2292: the uniqueId this call keeps or mints,
+        // and its slot under the entry cap, held until this call returns.
+        const auto reservation = persisted_store_->reserve_unique_id(config);
+        if (!reservation) {
+            response.set_body(
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                    "The server holds " + std::to_string(PersistedConfigStore::kMaxEntries) +
+                                        " configured devices, the most it keeps; remove one before adding another"));
+            return response;
         }
-        struct UniqueIdReservation {
-            std::function<void()> release;
-            ~UniqueIdReservation() { release(); }
-        } reservation{[this, unique_id = config["uniqueId"].get<std::string>()] {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            reserved_unique_ids_.erase(unique_id);
-        }};
 
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
@@ -5027,8 +3955,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
 
         nlohmann::json stored_config = config;
         stored_config.update(learned_config);
-        add_or_replace_persisted_device(sanitize_device_config(stored_config));
-        save_persisted_devices();
+        persisted_store_->add_or_replace(sanitize_device_config(stored_config));
+        persisted_store_->save();
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         // #1969: the web UI shows the text after "Warning: " (configureWarning() in format.js).
@@ -5041,7 +3969,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error configuring device", *alpaca);
         } else {
-            util::log_error("Error configuring device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error configuring device: " + log_what(e));
         }
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
@@ -5074,10 +4002,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -5102,7 +4027,6 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         }
 
         std::string device_type_str = catalog_json::get_string(config, "deviceType");
-        std::string vendor = catalog_json::get_string(config, "vendor");
         int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
         if (device_type_str.empty() || device_number < 0) {
@@ -5158,12 +4082,12 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             was_registered = registry.unregister_device(device_type, device_number);
         }
 
-        bool was_persisted = remove_persisted_device(vendor, device_type_str, device_number);
+        bool was_persisted = persisted_store_->remove(device_type_str, device_number);
         set_registration_warning(device_type, device_number, {});
 
         if (was_registered || was_persisted) {
             if (was_persisted) {
-                save_persisted_devices();
+                persisted_store_->save();
             }
             AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             alpaca_response.value = std::string("Device removed successfully");
@@ -5185,7 +4109,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error removing device", *alpaca);
         } else {
-            util::log_error("Error removing device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error removing device: " + log_what(e));
         }
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
@@ -5207,7 +4131,7 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
         return *rejected;
     }
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
                                               "Method not allowed. Use POST or PUT."));
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
@@ -5273,14 +4197,9 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
             }
         }
         // Not gated by learnSiteFromClient: that opt-out protects a surveyed site, not optics.
-        bool changed = false;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            for (auto& entry : persisted_devices_) {
-                const auto pkey = persisted_key(entry);
-                if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
-                    continue;
-                }
+        const auto edit =
+            persisted_store_->edit_by_type_and_number("telescope", device_number, [&updates](nlohmann::json& entry) {
+                bool changed = false;
                 for (const auto& [key, value] : updates) {
                     const auto current = entry.find(key);
                     if (current == entry.end() || !current->is_number() || current->get<double>() != value) {
@@ -5288,10 +4207,9 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
                         changed = true;
                     }
                 }
-                break;
-            }
-        }
-        if (changed && !save_persisted_devices()) {
+                return changed;
+            });
+        if (edit.changed && !edit.saved) {
             util::log_warning("Telescope " + std::to_string(device_number) +
                               " optics are in use for this session but could NOT be written to "
                               "config/registered_devices.json (see the error above)");
@@ -5304,7 +4222,7 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error updating device", *alpaca);
         } else {
-            util::log_error("Error updating device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error updating device: " + log_what(e));
         }
         response.set_body(make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what()));
         return response;
@@ -5415,8 +4333,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
                 util::save_runtime_log_level(*parsed_level);
             } catch (const std::exception& save_err) {
                 // Persistence is best-effort; failure must not block the API.
-                util::log_warning(std::string("Failed to persist log level: ") +
-                                  save_err.what());
+                util::log_warning(std::string("Failed to persist log level: ") + log_what(save_err));
             }
             util::log_info("Log level set to " + log_level_to_string(*parsed_level));
             return send_payload(client_tx_id);
@@ -5428,6 +4345,8 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             "Unsupported HTTP method for log level endpoint"
         );
         response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, POST, PUT");
         return response;
     } catch (const std::exception& e) {
         AlpacaResponse err = make_error_response(
@@ -5456,6 +4375,8 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
             "Unsupported HTTP method for logs endpoint"
         );
         response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -5562,7 +4483,7 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             // Partial deletion is possible — tell the caller exactly how far
             // it got rather than leaving the outcome ambiguous. Details (which
             // can include errno text) go to the server log, not the response.
-            util::log_warning("Delete log files failed: " + std::string(e.what()));
+            util::log_warning("Delete log files failed: " + log_what(e));
             AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
                                                      "Failed to delete log files (deleted " + std::to_string(deleted) +
                                                          " of " + std::to_string(files.size()) +
@@ -5579,6 +4500,8 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             "Unsupported HTTP method for log files endpoint"
         );
         response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, DELETE");
         return response;
     }
 
@@ -5699,6 +4622,17 @@ Response Router::handle_log_file_item(const Request& request,
         return *rejected;
     }
 
+    // A wrong verb is answered before the name is checked, so the answer does not depend on the name (#2484).
+    if (request.method() != HttpMethod::GET && request.method() != HttpMethod::DELETE_) {
+        response.set_content_type("application/json");
+        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                                 "Unsupported HTTP method for log file endpoint");
+        response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, DELETE");
+        return response;
+    }
+
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -5736,37 +4670,23 @@ Response Router::handle_log_file_item(const Request& request,
         }
     }
 
-    if (request.method() == HttpMethod::DELETE_) {
-        try {
-            util::delete_log_file(filename);
-            util::log_info("Deleted log file " + filename);
-            response.set_content_type("application/json");
-            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-            nlohmann::json payload;
-            payload["Deleted"] = filename;
-            alpaca_response.value = payload;
-            response.set_body(alpaca_response);
-            return response;
-        } catch (const std::exception& e) {
-            response.set_content_type("application/json");
-            AlpacaResponse err = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::DRIVER_ERROR,
-                std::string("Failed to delete log file: ") + e.what()
-            );
-            response.set_body(err);
-            return response;
-        }
+    try {
+        util::delete_log_file(filename);
+        util::log_info("Deleted log file " + filename);
+        response.set_content_type("application/json");
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        nlohmann::json payload;
+        payload["Deleted"] = filename;
+        alpaca_response.value = payload;
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        response.set_content_type("application/json");
+        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                 std::string("Failed to delete log file: ") + e.what());
+        response.set_body(err);
+        return response;
     }
-
-    response.set_content_type("application/json");
-    AlpacaResponse err = make_error_response(
-        client_tx_id, server_tx_id,
-        util::ErrorCode::INVALID_OPERATION,
-        "Unsupported HTTP method for log file endpoint"
-    );
-    response.set_body(err);
-    return response;
 }
 
 Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx_id) {
@@ -5793,25 +4713,26 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
         return response;
     }
-    
-    // Call shutdown callback if set
-    if (shutdown_callback_) {
+
+    std::function<void()> shutdown_callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        shutdown_callback = shutdown_callback_;
+    }
+    if (shutdown_callback) {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Shutdown initiated");
         response.set_body(alpaca_response);
 
         // Call callback asynchronously (after response is sent). The delay
         // lets the response go out first; the Router owns and joins the thread.
-        start_delayed_callback(shutdown_callback_);
+        start_delayed_callback(std::move(shutdown_callback));
 
         return response;
     } else {
@@ -5824,8 +4745,6 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         return response;
     }
 }
-
-namespace {
 
 // CSRF guard shared by the state-changing management endpoints (PR #198
 // follow-up; extended to synctime by issue #298). These endpoints are
@@ -5876,8 +4795,6 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
     return resp;
 }
 
-}  // namespace
-
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
     // Note: like the restart/shutdown management endpoints, this is
     // intentionally unauthenticated — the web UI is served on the LAN and the
@@ -5900,10 +4817,11 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // open-astro#674: an ID sent only in the JSON body is echoed on every
     // reply, not only on the cross-origin 403 (#509), with the same
     // precedence: a non-zero query-string ID wins.
-    if (client_tx_id == 0 && !request.body().empty()) {
-        if (auto json_opt = parse_json(request.body())) {
-            client_tx_id = extract_client_transaction_id(*json_opt);
-        }
+    // Parsed once: the ID here and Epoch/Value below read the same body.
+    // parse_json() catches the JSON errors itself and returns nullopt; it never throws.
+    const auto body_json = request.body().empty() ? decltype(parse_json(request.body())){} : parse_json(request.body());
+    if (client_tx_id == 0 && body_json) {
+        client_tx_id = extract_client_transaction_id(*body_json);
     }
 
     // Since open-astro#291 a successful set has a second effect beyond the
@@ -5938,7 +4856,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // Only POST or PUT may set the clock.
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
                                 "Method not allowed. GET reads the server time; POST or PUT sets it.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
@@ -5950,8 +4868,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // {"Value": n} for compatibility with the other management endpoints.
     std::int64_t epoch_seconds = -1;
     try {
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
+        if (const auto& json_opt = body_json) {
             if (const auto* val = find_json_value(*json_opt, "Epoch")) {
                 if (val->is_number_integer() || val->is_number_unsigned()) {
                     epoch_seconds = val->get<std::int64_t>();
@@ -5977,25 +4894,18 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         return response;
     }
 
-    struct timespec ts {};
-    ts.tv_sec = static_cast<time_t>(epoch_seconds);
-    ts.tv_nsec = 0;
-    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        // open-astro#292: an operator who only ever presses Sync Time would
-        // otherwise never trip the latch, and the connect line would keep
-        // claiming the clock is about to be corrected.
-        host_clock_.mark_step_failed();
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-            std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
+    // open-astro#2479: HostClock sets the clock, writes the RTC and marks the
+    // host clock trusted (ClockSource, connect-time warning, mount clocks).
+    const auto set =
+        host_clock_.set_from_operator(std::chrono::system_clock::time_point(std::chrono::seconds(epoch_seconds)));
+    if (set.outcome == HostClock::Outcome::Failed) {
+        // open-astro#292: HostClock latched the failure, so the connect line
+        // stops claiming the clock is about to be corrected.
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR, set.error);
         response.set_body(alpaca_response);
         return response;
     }
-    // The clock is now client-set for the management readout and the
-    // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
-    host_clock_.mark_stepped();
-    // open-astro#2419: and trusted for a mount's own clock.
-    alpacacore::util::HostClockTrust::mark_set("Sync Time");
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;
@@ -6133,6 +5043,17 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
                 enabled = e->get<bool>();
             }
             ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
+        } else if (sub == "adapter" && is_put) {
+            // Issue #856: the client adapter preference, a permanent MAC or "" to
+            // clear. The manager validates the form before it touches the bus; the
+            // length cap bounds the string first (decision 0007 rule 4).
+            auto body = body_json();
+            const auto* mac = find_json_value(body, "Mac");
+            if (!mac || !mac->is_string()) throw util::WifiError("Mac (string) is required");
+            if (mac->get_ref<const std::string&>().size() > 17) {
+                throw util::WifiError("Mac must be six hex pairs separated by ':' (or empty to clear)");
+            }
+            ok.value = wifi.set_client_adapter(mac->get<std::string>());
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {
@@ -6255,22 +5176,24 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
 
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Method not allowed. Use POST or PUT."
-        );
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         response.set_header("Allow", "POST, PUT");
         return response;
     }
 
-    if (restart_callback_) {
+    std::function<void()> restart_callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        restart_callback = restart_callback_;
+    }
+    if (restart_callback) {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Restart initiated");
         response.set_body(alpaca_response);
 
-        start_delayed_callback(restart_callback_);
+        start_delayed_callback(std::move(restart_callback));
 
         return response;
     }
@@ -6289,17 +5212,6 @@ namespace {
 // telescope 1". Kept in one place so the two lines read alike in the log.
 std::string persisted_device_subject(const std::string& vendor, const std::string& device_type, int device_number) {
     return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
-}
-
-// open-astro#664: the catalog consult in register_device_from_config() below.
-// DeviceCatalog::find_schema is private, so the router can only ask
-// describe() for the DescriptorView of a key.
-std::optional<alpacacore::catalog::DescriptorView> find_descriptor(const alpacacore::catalog::DeviceCatalog& catalog,
-                                                                   const alpacacore::catalog::DeviceKey& key) {
-    for (const auto& view : catalog.describe()) {
-        if (view.key == key) return view;
-    }
-    return std::nullopt;
 }
 
 // The vendor as the deleted arm texts spelled it: Schema::vendor_label when the
@@ -6351,12 +5263,11 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
     } catch (const std::exception& ex) {
         // Unknown device_type_str: answer not supported.
         util::log_debug("register_device_from_config: device type \"" + util::escape_for_log(device_type_str) +
-                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); the device is answered as not supported");
+                        "\" is not catalog-recognized (" + log_what(ex) + "); the device is answered as not supported");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
-        if (auto view = find_descriptor(catalog_, key)) {
+        if (auto view = catalog_.describe(key)) {
             nlohmann::json prepared =
                 with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields);
             if (view->forget_dropped_selectors && source == ConfigSource::Persisted) {
@@ -6425,14 +5336,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                 return false;
             }
             // A factory with a bind hook sees the other stored entries of its key
-            // (copied under the mutex, which is released before the hook runs: it may
+            // (read from a snapshot, so no store lock is held when the hook runs: it may
             // enumerate the SDK) and may hand learned config back. Any other factory
             // gets no peers and learns nothing.
             std::vector<alpacacore::catalog::PeerEntry> peers;
             if (catalog_.has_bind(key)) {
                 const std::string wanted_type = to_lower_copy(device_type_str);
-                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-                for (const auto& other : persisted_devices_) {
+                for (const auto& other : persisted_store_->snapshot()) {
                     const auto other_key = persisted_key(other);
                     if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
                         continue;
@@ -6453,8 +5363,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                                 (void)catalog_json::config_from_json(single, view->fields);
                             } catch (const std::exception& ex) {
                                 util::log_debug("register_device_from_config: ignoring field " + std::string(f.key) +
-                                                " of a stored " + subject + " as a peer (" +
-                                                util::escape_for_log(ex.what()) + ")");
+                                                " of a stored " + subject + " as a peer (" + log_what(ex) + ")");
                                 neighbour.erase(f.key);
                             }
                         }
@@ -6462,7 +5371,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                             {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
                     } catch (const std::exception& ex) {
                         util::log_debug("register_device_from_config: ignoring a stored " + subject + " as a peer (" +
-                                        util::escape_for_log(ex.what()) + ")");
+                                        log_what(ex) + ")");
                     }
                 }
             }
@@ -6480,6 +5389,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                      if (sink->router != nullptr) {
                          sink->router->store_learned_config(entry, catalog_json::json_from_config(learned), unique_id);
                      }
+                 },
+                 // Decision 0023 rule 4: the listener binds the wildcard of both families, so every local and
+                 // loopback address on this port is this server.
+                 [port = listen_port_]() -> std::vector<alpacacore::catalog::ListenAddress> {
+                     const int listening = port->load(std::memory_order_acquire);
+                     if (listening == 0) return {};
+                     return {{"0.0.0.0", listening}, {"::", listening}};
                  }});
             if (bound.rejection) {
                 error_message = *bound.rejection;
@@ -6563,7 +5479,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     // kept for any config, as they were through the deleted arms.
     try {
         const alpacacore::catalog::DeviceKey key{vendor, string_to_device_type(device_type)};
-        if (auto view = find_descriptor(catalog_, key)) {
+        if (auto view = catalog_.describe(key)) {
             const auto extra = sanitize_fields_json(without_unknown_alignment_mode(config, view->fields), view->fields);
             for (const auto& [k, v] : extra.items()) {
                 sanitized[k] = v;
@@ -6572,8 +5488,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     } catch (const std::exception& ex) {
         // Unknown device_type: only the vendor-agnostic keys below are kept.
         util::log_debug("sanitize_device_config: device type \"" + util::escape_for_log(device_type) +
-                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); only the vendor-agnostic keys are kept");
+                        "\" is not catalog-recognized (" + log_what(ex) + "); only the vendor-agnostic keys are kept");
     }
 
     copy_if_present("responseTimeoutMs");
@@ -6605,59 +5520,51 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
         return;
     }
     const int device_number = device.get_device_number();
-    bool changed = false;
     bool declined = false;
     std::string vendor{};
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        for (auto& entry : persisted_devices_) {
-            // Typed reads (persisted_key), never value(): a malformed
-            // neighbour in the list is simply not a match.
-            const auto pkey = persisted_key(entry);
-            if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
-                continue;
-            }
-            vendor = pkey->vendor;
-            // The opt-out: an operator with a surveyed pier position does not
-            // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
-            // on, because the value the mount is using RIGHT NOW is the one
-            // the client set, and a restart should start from the same site
-            // the last session ended on rather than an older one.
-            // Typed, not value(): a hand-edited file can carry "false" or 0
-            // here, and nlohmann's value() throws on that, which would turn
-            // every site PUT into an error. Only a boolean false is the
-            // opt-out; the API path refuses any other type at registration.
-            const auto flag = entry.find("learnSiteFromClient");
-            if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
-                declined = true;
-                break;
-            }
-            // Unchanged: no file write on a client that re-sends its site on
-            // every connect (most do).
-            const auto current = entry.find(key);
-            if (current != entry.end() && current->is_number() && current->get<double>() == value) {
-                break;
-            }
-            entry[key] = value;
-            changed = true;
-            break;
+    // Typed reads (persisted_key), never value(): a malformed neighbour in
+    // the list is simply not a match. The store saves a change, outside its
+    // list lock; the file I/O is on a PUT setter, not on a getter or
+    // DeviceState, so a polling client never waits on it (the lock-free
+    // get_connected() rule in alpaca-http-conformance.instructions.md is
+    // unaffected); it runs once per changed value.
+    const auto edit = persisted_store_->edit_by_type_and_number("telescope", device_number, [&](nlohmann::json& entry) {
+        if (const auto pkey = persisted_key(entry)) vendor = pkey->vendor;
+        // The opt-out: an operator with a surveyed pier position does not
+        // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
+        // on, because the value the mount is using RIGHT NOW is the one
+        // the client set, and a restart should start from the same site
+        // the last session ended on rather than an older one.
+        // Typed, not value(): a hand-edited file can carry "false" or 0
+        // here, and nlohmann's value() throws on that, which would turn
+        // every site PUT into an error. Only a boolean false is the
+        // opt-out; the API path refuses any other type at registration.
+        const auto flag = entry.find("learnSiteFromClient");
+        if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
+            declined = true;
+            return false;
         }
-    }
+        // Unchanged: no file write on a client that re-sends its site on
+        // every connect (most do).
+        const auto current = entry.find(key);
+        if (current != entry.end() && current->is_number() && current->get<double>() == value) {
+            return false;
+        }
+        entry[key] = value;
+        return true;
+    });
     if (declined) {
         util::log_debug("Telescope " + std::to_string(device_number) + ": client " + key +
                         " not persisted (learnSiteFromClient is false)");
         return;
     }
-    if (!changed) {
+    if (!edit.changed) {
         return;  // no persisted entry (a device registered for this process only), or same value
     }
-    // File I/O on a PUT setter, not on a getter or DeviceState, so a polling client never waits on it
-    // (the lock-free get_connected() rule in alpaca-http-conformance.instructions.md is unaffected);
-    // it runs once per changed value.
     std::ostringstream msg;
     msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed
         << std::setprecision(6) << value;
-    if (save_persisted_devices()) {
+    if (edit.saved) {
         util::log_info(msg.str() + " persisted to config/registered_devices.json");
     } else {
         // The entry in memory holds the value (the driver is using it), so
@@ -6669,166 +5576,25 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     }
 }
 
-void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
-    if (!catalog_json::has_value(config, "deviceType") || !catalog_json::has_value(config, "vendor") ||
-        !catalog_json::has_value(config, "deviceNumber")) {
+void Router::load_persisted_devices() {
+    // The store reads the file and keeps the list; the loaded devices register
+    // afterwards, with no store lock held, since driver-registry calls may
+    // block on hardware.
+    PersistedConfigStore::LoadResult loaded =
+        persisted_store_->load([this](const nlohmann::json& entry) { return sanitize_device_config(entry); });
+    if (!loaded.first) {
         return;
     }
-
-    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    const std::string vendor = catalog_json::get_string(config, "vendor");
-    const std::string device_type = to_lower_copy(catalog_json::get_string(config, "deviceType"));
-    const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
-    for (auto& existing : persisted_devices_) {
-        const auto key = persisted_key(existing);
-        if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {
-            existing = config;
-            return;
-        }
+    // Decision 0021: once per start, whatever the file holds, so the boot ID
+    // is recorded even before the first device is configured.
+    const bool new_boot = alpacacore::util::PowerPortStateStore::begin_server_start();
+    if (!loaded.parsed) {
+        return;
     }
-
-    persisted_devices_.push_back(config);
-}
-
-bool Router::remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number) {
-    if (device_type.empty() || device_number < 0) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    std::size_t before = persisted_devices_.size();
-    persisted_devices_.erase(std::remove_if(persisted_devices_.begin(), persisted_devices_.end(),
-                                            [&](const nlohmann::json& entry) {
-                                                const auto key = persisted_key(entry);
-                                                if (!key || key->device_type != to_lower_copy(device_type) ||
-                                                    key->device_number != device_number) {
-                                                    return false;
-                                                }
-                                                return vendor.empty() || key->vendor == vendor;
-                                            }),
-                             persisted_devices_.end());
-    return persisted_devices_.size() < before;
-}
-
-bool Router::save_persisted_devices() const {
-    try {
-        if (kPersistedDevicesFile.has_parent_path()) {
-            std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
-        }
-
-        // One writer at a time, and never in place: site PUTs from two
-        // clients run on two workers (#444), and two truncate-and-write
-        // passes on the same file end as one dump's head plus the other's
-        // tail, which the next start cannot parse and so loads NO devices.
-        // Writing a sibling temp file and renaming it over the real one
-        // makes each save atomic for a concurrent reader: the file is always
-        // a complete dump. write_file_atomic also fsyncs the temp file and the
-        // directory, so a crash or a full disk keeps the previous file (#1688).
-        //
-        // The file lock is taken BEFORE the snapshot (lock order: file, then
-        // list, the same everywhere). Snapshotting first let worker A copy
-        // the list, lose the CPU, and rename its older copy over the newer
-        // dump worker B had just written: memory right, disk one revision
-        // stale until the next changed PUT, lost across a restart.
-        std::lock_guard<std::mutex> file_lock(persisted_file_mutex_);
-        nlohmann::json payload;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            payload = persisted_devices_;
-        }
-        alpacacore::util::write_file_atomic(kPersistedDevicesFile, payload.dump(4));
-        return true;
-    } catch (const std::exception& e) {
-        util::log_error("Failed to persist registered devices: " + std::string(e.what()));
-        return false;
-    }
-}
-
-void Router::load_persisted_devices() {
-    // Read the file and populate persisted_devices_ under the mutex; register
-    // the loaded devices afterwards so the lock is never held across
-    // driver-registry calls (which may block on hardware).
-    nlohmann::json payload = nlohmann::json::array();
-    bool assigned_unique_ids = false;
-    std::set<std::string> live_unique_ids;
+    const std::set<std::string>& live_unique_ids = loaded.live_unique_ids;
     // Entries this start gives their first GUID (the upgrade, or a hand-edited
     // file): only their drivers adopt state saved under a driver-built ID.
-    std::set<std::string> first_unique_ids;
-    bool new_boot = false;
-    {
-        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-        if (persisted_devices_loaded_) {
-            return;
-        }
-
-        persisted_devices_loaded_ = true;
-        // Decision 0021: once per start, whatever the file holds, so the boot ID
-        // is recorded even before the first device is configured.
-        new_boot = alpacacore::util::PowerPortStateStore::begin_server_start();
-
-        try {
-            if (!std::filesystem::exists(kPersistedDevicesFile)) {
-                persisted_devices_.clear();
-                return;
-            }
-
-            std::ifstream in(kPersistedDevicesFile);
-            if (!in) {
-                throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for reading");
-            }
-
-            try {
-                in >> payload;
-                if (!payload.is_array()) {
-                    throw std::runtime_error("Persisted device file must contain a JSON array");
-                }
-            } catch (const std::exception& parse_error) {
-                // Set the file aside: the next save would otherwise overwrite the only copy (#1688).
-                const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
-                                       std::chrono::system_clock::now().time_since_epoch())
-                                       .count();
-                const std::filesystem::path aside =
-                    kPersistedDevicesFile.string() + ".corrupt-" + std::to_string(stamp);
-                std::error_code rename_ec;
-                std::filesystem::rename(kPersistedDevicesFile, aside, rename_ec);
-                util::log_error(
-                    "Registered devices file is unreadable (" + std::string(parse_error.what()) + "); " +
-                    (rename_ec ? "could not set it aside: " + rename_ec.message() : "kept as " + aside.string()));
-                persisted_devices_.clear();
-                return;
-            }
-
-            persisted_devices_.clear();
-            // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
-            // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
-            std::set<std::string> taken;
-            for (auto& entry : payload) {
-                nlohmann::json sanitized = sanitize_device_config(entry);
-                const std::string unique_id = choose_unique_id(sanitized, taken);
-                if (stored_unique_id(sanitized).empty()) first_unique_ids.insert(unique_id);
-                if (stored_unique_id(sanitized) != unique_id) {
-                    assigned_unique_ids = true;
-                    if (entry.is_object()) entry["uniqueId"] = unique_id;
-                    sanitized["uniqueId"] = unique_id;
-                }
-                taken.insert(unique_id);
-                persisted_devices_.push_back(std::move(sanitized));
-            }
-            live_unique_ids = std::move(taken);
-        } catch (const std::exception& e) {
-            util::log_error("Failed to load registered devices: " + std::string(e.what()));
-            return;
-        }
-    }
-    if (assigned_unique_ids) {
-        util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
-        if (!save_persisted_devices() && !first_unique_ids.empty()) {
-            // The next start would mint other GUIDs and prune whatever moved onto
-            // these, so nothing moves until the file can keep them.
-            util::log_warning("Could not store the new UniqueIDs; saved rotator offsets stay under their old IDs");
-            first_unique_ids.clear();
-        }
-    }
+    const std::set<std::string>& first_unique_ids = loaded.first_unique_ids;
     // A removed rotator's offset goes here, not at removal: the web UI's edit
     // removes and re-adds the entry with the same stored ID (decisions 0008, 0018).
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
@@ -6841,7 +5607,7 @@ void Router::load_persisted_devices() {
                        " saved power port state(s) of devices no longer configured");
     }
 
-    for (const auto& entry : payload) {
+    for (const auto& entry : loaded.entries) {
         std::string error_message;
         try {
             nlohmann::json learned_config = nlohmann::json::object();
@@ -6857,7 +5623,7 @@ void Router::load_persisted_devices() {
                 store_learned_config(entry, learned_config, std::string());
             }
         } catch (const std::exception& e) {
-            util::log_error("Failed to load persisted device: " + std::string(e.what()));
+            util::log_error("Failed to load persisted device: " + log_what(e));
         }
     }
 
@@ -6873,7 +5639,7 @@ void Router::load_persisted_devices() {
             try {
                 device->adopt_legacy_state();
             } catch (const std::exception& e) {
-                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + e.what());
+                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + log_what(e));
             }
         }
     }
@@ -6885,7 +5651,7 @@ void Router::load_persisted_devices() {
         try {
             device->apply_power_on_state(new_boot);
         } catch (const std::exception& e) {
-            util::log_warning("Could not apply the power-on state of " + device->get_unique_id() + ": " + e.what());
+            util::log_warning("Could not apply the power-on state of " + device->get_unique_id() + ": " + log_what(e));
         }
     }
 }

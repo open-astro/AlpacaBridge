@@ -42,6 +42,10 @@ public:
 
     void clear() { until_ = mono::min(); }
 
+    /// The deadline, for deadline arithmetic only (a wait's remaining time, a staleness base); a client-visible read
+    /// uses active(). mono::min() while cleared.
+    mono until() const { return until_; }
+
 private:
     mono until_ = mono::min();
 };

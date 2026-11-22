@@ -1,0 +1,2 @@
+### Changed
+- **Celestron NexStar telescope: PulseGuide, MoveAxis, the equatorial slews and the guide-rate finite check run through the telescope command gate** (AlpacaCore), issue #2258. No error code, message, limit or order changes: the synchronous slew keeps its own state checks (its slew-safety check sits between the parked and Tracking checks), and the guide-rate write keeps its sign check after the connection.

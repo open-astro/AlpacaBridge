@@ -163,18 +163,7 @@ public:
     // reconnect.
     bool get_connected() const override { return connected_.load() && !link_lost(); }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Celestron", "Focuser disconnect error: " + std::string(e.what()));
-        }
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // One transition at a time (open-astro#333); getters never take this.
@@ -295,18 +284,6 @@ public:
     bool can_action(std::string_view action_name) const override {
         return same_action(action_name, kActionCalibrate) || same_action(action_name, kActionAbortCalibration) ||
                same_action(action_name, kActionCalibrationStatus);
-    }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     // --- Focuser interface ---

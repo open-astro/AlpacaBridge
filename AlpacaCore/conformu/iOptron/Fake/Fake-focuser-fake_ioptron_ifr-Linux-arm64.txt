@@ -1,0 +1,87 @@
+FAKE REPORT: ConformU against FakeIoptronIfr (simulated iFR over a pseudo-terminal), not hardware. Not hardware validation.
+10:34:46.925 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 08:09:42          
+10:34:46.925                                              
+10:34:46.925 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+10:34:46.925                                              
+10:34:46.925 Alpaca device: QHY CFW3 (127.0.0.1:11120 Focuser/0)          
+10:34:46.925                                              
+10:34:46.925 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11120, Alpaca device number: 0
+10:34:46.928 CreateDevice                        INFO     Alpaca device created OK
+10:34:46.928 CreateDevice                        INFO     Successfully created driver
+10:34:47.957 CreateDevice                        OK       Found a valid interface version: 4
+10:34:47.957 CreateDevice                        OK       Driver instance created successfully
+10:34:47.957                                              
+10:34:47.957 Connect to device                            
+10:34:48.124 Connected                           OK       Connected to device successfully using Connected = True
+10:34:48.677 Connected                           OK       Disconnected from device successfully using Connected = False
+10:34:49.181 Connect                             OK       Connected to device successfully using Connect()
+10:34:49.181                                              
+10:34:49.182 Common Driver Methods                        
+10:34:49.182 InterfaceVersion                    OK       4
+10:34:49.183 Connected                           OK       True
+10:34:49.184 Description                         OK       iOptron iFR 3" focuser-rotator, focuser
+10:34:49.184 DriverInfo                          OK       AlpacaCore iOptron iFR Focuser Driver
+10:34:49.185 DriverVersion                       OK       5.0.2
+10:34:49.185 Name                                OK       iOptron iFR 3" Focuser
+10:34:49.185                                              
+10:34:49.186 SupportedActions                    OK       Driver returned an empty action list
+10:34:49.186 Action                              INFO     Conform cannot test the Action method
+10:34:49.186                                              
+10:34:49.187 DeviceState                         OK       Received 4 operational state properties.
+10:34:49.188 DeviceState                         OK         IsMoving = False
+10:34:49.188 DeviceState                         OK         Position = 1000
+10:34:49.188 DeviceState                         OK         Temperature = 25.430000000000007
+10:34:49.188 DeviceState                         OK         TimeStamp = 11/18/2026 5:34:49 PM
+10:34:49.188 DeviceState                         OK       Found all expected operational properties
+10:34:49.188                                              
+10:34:49.189 Properties                                   
+10:34:49.189 Absolute                            OK       True
+10:34:49.189 IsMoving                            OK       False
+10:34:49.190 MaxStep                             OK       62500
+10:34:49.190 MaxIncrement                        OK       62500
+10:34:49.190 Position                            OK       1000
+10:34:49.191 StepSize                            OK       0.4
+10:34:49.191 TempCompAvailable                   OK       False
+10:34:49.194 TempComp Read                       OK       False
+10:34:49.199 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+10:34:49.203 Temperature                         OK       25.430000000000007
+10:34:49.203                                              
+10:34:49.203 Methods                                      
+10:34:49.204 Halt                                OK       Focuser halted OK
+10:34:49.708 Move - TempComp False               OK       Absolute move OK
+10:34:50.211                                              
+10:34:50.211 Disconnect from device                       
+10:34:50.212 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+10:34:50.212                                              
+10:34:50.212 Conformance test has finished                
+10:34:50.212                                              
+10:34:50.212 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+10:34:50.212                                     
+10:34:50.212 Timing Summary                               See Help for further information.
+10:34:50.212 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+10:34:50.212 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+10:34:50.212 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+10:34:50.212 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+10:34:50.212                                              
+10:34:50.212 Connect                                      At 10:34:48.677 Connect                  0.000 seconds. ✓ (STANDARD)
+10:34:50.212 InterfaceVersion                             At 10:34:49.182 InterfaceVersion         0.000 seconds. ✓ (FAST)
+10:34:50.212 Connected                                    At 10:34:49.183 Connected                0.001 seconds. ✓ (FAST)
+10:34:50.212 Description                                  At 10:34:49.184 Description              0.001 seconds. ✓ (FAST)
+10:34:50.212 DriverInfo                                   At 10:34:49.184 DriverInfo               0.000 seconds. ✓ (FAST)
+10:34:50.212 DriverVersion                                At 10:34:49.185 DriverVersion            0.000 seconds. ✓ (FAST)
+10:34:50.212 Name                                         At 10:34:49.185 Name                     0.000 seconds. ✓ (FAST)
+10:34:50.212 SupportedActions                             At 10:34:49.186 SupportedActions         0.001 seconds. ✓ (FAST)
+10:34:50.212 DeviceState                                  At 10:34:49.187 DeviceState              0.001 seconds. ✓ (FAST)
+10:34:50.212 Absolute                                     At 10:34:49.189 Absolute                 0.000 seconds. ✓ (FAST)
+10:34:50.212 IsMoving                                     At 10:34:49.189 IsMoving                 0.000 seconds. ✓ (FAST)
+10:34:50.212 MaxStep                                      At 10:34:49.190 MaxStep                  0.001 seconds. ✓ (FAST)
+10:34:50.212 MaxIncrement                                 At 10:34:49.190 MaxIncrement             0.000 seconds. ✓ (FAST)
+10:34:50.212 Position                                     At 10:34:49.190 Position                 0.000 seconds. ✓ (FAST)
+10:34:50.212 TempCompAvailable                            At 10:34:49.191 TempCompAvailable        0.000 seconds. ✓ (FAST)
+10:34:50.212 TempComp Read                                At 10:34:49.194 TempComp Read            0.002 seconds. ✓ (FAST)
+10:34:50.212 Temperature                                  At 10:34:49.203 Temperature              0.000 seconds. ✓ (FAST)
+10:34:50.212 Halt                                         At 10:34:49.204 Halt                     0.000 seconds. ✓ (STANDARD)
+10:34:50.212 Move to 7250                                 At 10:34:49.205 Move to 7250             0.001 seconds. ✓ (STANDARD)
+10:34:50.212 Disconnect                                   At 10:34:50.211 Disconnect               0.000 seconds. ✓ (STANDARD)
+10:34:50.212                                              
+10:34:50.212 Congratulations, all members returned within their target response times!!          

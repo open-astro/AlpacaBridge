@@ -26,6 +26,9 @@ namespace alpacacore::vendor::celestron {
 
 struct CelestronCgxConnectionInfo {
     std::string port_path;
+    /// SkyPortal WiFi: a numeric IPv4 or IPv6 adapter address selects AUX over TCP, and port_path is then unused.
+    std::string host;
+    int tcp_port = 2000;
     std::optional<double> site_latitude_degrees;
     std::optional<double> site_longitude_degrees;
     std::optional<double> site_elevation_meters;
@@ -49,5 +52,17 @@ void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 void poll_state_now_for_testing(TelescopeDriver& driver);
 /// Reads and clears the link-loss stamp (decision 0009 point 3); nullopt when none is held.
 std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver);
+/// Runs `hook` on the body's thread at the top of every motion body's checked stop, before that stop takes the
+/// motion-start lock; a case blocks there to land a newer command between a body's two supersede checks. Pass an
+/// empty function to clear it.
+void set_stop_worker_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the initiator's thread inside every motion transition's guide handoff (the join of the pulse bodies,
+/// or a slew, Park or FindHome's wait on the mount), while the motion-start lock is released and before the new
+/// command claims; a case blocks there to let a running body reach a stage. Pass an empty function to clear it.
+void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the pulse body's thread at the top of every guide poll, before the body reads its stop reason, with
+/// no driver lock held; a case blocks there to hold a pulse body while another command runs. Pass an empty function
+/// to clear it.
+void set_pulse_poll_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::celestron

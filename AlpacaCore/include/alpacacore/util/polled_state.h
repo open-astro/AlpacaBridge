@@ -47,6 +47,11 @@ namespace alpacacore::util {
  *   lock held: `probe()` does the device I/O and returns the frame (it throws
  *   when the exchange failed), and the module publishes it. A write() that
  *   landed since the probe began drops the frame; the next poll publishes.
+ * - A probe that must publish under its own driver lock (it applies a result in the
+ *   same hold as the frame) takes begin_poll() itself, publishes with publish() and
+ *   returns std::nullopt: the device answered, the module publishes nothing. That
+ *   counts as a good probe for the fault latch; the frame's age is then the only loss
+ *   evidence, so a probe that never publishes ages the last frame to loss.
  * - `fault_threshold` failed probes in a row latch a fault. A latched fault
  *   refuses the cache (served() throws DriverException) but the probe keeps
  *   running; the next good probe clears it.
@@ -70,6 +75,7 @@ template <typename Frame>
 class PolledState {
 public:
     using Reading = typename StateSnapshot<Frame>::Reading;
+    using Token = typename StateSnapshot<Frame>::Token;
 
     struct Config {
         std::chrono::nanoseconds period{std::chrono::milliseconds(250)};
@@ -80,10 +86,11 @@ public:
         std::string log_tag;
     };
 
-    /// `probe` runs the device exchange and returns the frame, or throws.
+    /// `probe` runs the device exchange and returns the frame, or throws; nullopt means it answered and
+    /// published through publish() itself, or had nothing to publish (a probe returning Frame converts).
     /// `on_lost` releases the transport; it runs once per loss.
-    PolledState(TaskClock& clock, OperationGeneration& generation, Config config, std::function<Frame()> probe,
-                std::function<void()> on_lost)
+    PolledState(TaskClock& clock, OperationGeneration& generation, Config config,
+                std::function<std::optional<Frame>()> probe, std::function<void()> on_lost)
         : clock_(clock),
           config_(std::move(config)),
           probe_(std::move(probe)),
@@ -140,6 +147,14 @@ public:
     void write(Apply&& apply) {
         snapshot_.write(std::forward<Apply>(apply));
     }
+
+    /// For a probe that publishes itself (StateSnapshot::begin_poll): take it under the driver lock that
+    /// decides what the probe samples, before the exchange.
+    Token begin_poll() const { return snapshot_.begin_poll(); }
+
+    /// StateSnapshot::publish: false (frame dropped) when a write() or reset() landed since `token`. Call it
+    /// under the driver lock that applies the probe's other results, so they take effect with the frame.
+    bool publish(Token token, Frame frame) { return snapshot_.publish(token, std::move(frame)); }
 
     /// The frame for a getter. Throws NotConnected when the link is lost (or no
     /// frame is held) and DriverException with the fault text while a fault is
@@ -198,6 +213,12 @@ public:
     }
     void pause_for_testing(bool paused) { paused_.store(paused); }
 
+    /// Test seam: starts the poll slot again, with none of the inline probes start() runs, after a stop_and_join()
+    /// that left the poll thread off the task clock.
+    void restart_poll_for_testing() {
+        slot_.start([this](OperationContext& ctx) { run(ctx); });
+    }
+
     /// Test seam: one poll cycle on the calling thread, `on_lost()` included.
     void poll_now_for_testing() { cycle(); }
 
@@ -225,6 +246,7 @@ private:
     // can carry the device's reply; AlpacaCore has no log escaper (CWE-117), so
     // the lines state the fact only.
     void poll_once() {
+        const auto epoch = current_epoch();
         const auto token = snapshot_.begin_poll();
         std::optional<Frame> frame;
         try {
@@ -239,7 +261,19 @@ private:
                 ALPACA_LOG_INFO(config_.log_tag, "Communications restored");
             }
         }
-        snapshot_.publish(token, std::move(*frame));
+        if (frame.has_value()) {
+            snapshot_.publish(token, std::move(*frame));
+            return;
+        }
+        // The probe published for itself, or had nothing to: a frame no publish refreshed still ages to loss.
+        const auto reading = snapshot_.read();
+        if (reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound && latch_lost(epoch)) {
+            ALPACA_LOG_ERROR(
+                config_.log_tag,
+                "Link lost: no state frame published for " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(kLinkStalenessBound).count()) +
+                    " s; set Connected false then true to reconnect");
+        }
     }
 
     void note_failure() {
@@ -301,7 +335,7 @@ private:
 
     TaskClock& clock_;
     Config config_;
-    std::function<Frame()> probe_;
+    std::function<std::optional<Frame>()> probe_;
     std::function<void()> on_lost_;
     StateSnapshot<Frame> snapshot_;
     // Narrow: held for a counter or a string, never across an exchange.

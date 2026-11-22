@@ -33,6 +33,10 @@ struct CelestronPortInfo {
 // probes each with NexStar echo command to identify Celestron mounts.
 std::vector<CelestronPortInfo> enumerate_celestron_ports();
 
+/// The USB descriptor tokens of a Celestron mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& celestron_usb_tokens();
 
 enum class ConnectionType {
     Serial,
@@ -80,9 +84,9 @@ public:
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;
-    /// False once an exchange over serial has seen the port gone (a hangup on a read, or EIO/ENXIO/ENODEV on a
-    /// write); the port is then already released and the exchange threw NotConnected (decision 0009 rule 2a).
-    /// Cleared by the next connect(). Lock-free.
+    /// False once an exchange over serial has seen the port gone (a hangup on a read, or EIO/ENXIO/ENODEV/EBADF on a
+    /// write: the util::SerialLink verdict since #2262); the port is then already released and the exchange threw
+    /// NotConnected (decision 0009 rule 2a). Cleared by the next connect(). Lock-free.
     bool link_alive() const noexcept;
     /// Why the link was lost, or empty; kept until the next connect() for the driver's get_link_fault() (decision
     /// 0009 rule 5). Takes only a small text mutex that no exchange holds, so it never waits on the wire.

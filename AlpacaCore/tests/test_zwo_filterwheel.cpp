@@ -92,6 +92,31 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Device metadata", "[zwo][filterwheel][u
     CHECK(driver->get_unique_id() == "ZWO_EFW_3");
 }
 
+// Required case 7 (issue #1863). Position is NotConnected while disconnected, the wheel's slot while idle, the ASCOM
+// moving sentinel -1 for as long as the SDK reports the wheel turning and the target once it stops, then
+// NotConnected again after a Disconnect. The fake task clock never ages the 100 ms status frame, so a held -1
+// frame would be served for the rest of the case.
+TEST_CASE("ZWO EFW Filter Wheel Driver - State machine", "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    sdk.position = 2;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk, clock);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 2);
+    sdk.moving_reads = 2;
+    driver->set_position(5);
+    CHECK(sdk.last_set_position == 5);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 5);
+    CHECK(driver->get_position() == 5);
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("ZWO EFW Filter Wheel Driver - Device Number Assignment", "[zwo][filterwheel][unit]") {
     auto d0 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0);
     auto d1 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(1, 0);
@@ -197,4 +222,21 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Firmware answers while a status read is
     CHECK(timed([&] { CHECK(driver->get_device_firmware().has_value()); }) < kGetterBudget);
     reader.join();
     driver->set_connected(false);
+}
+
+// Issue #1991 spec rule 6: every disconnect returns the slot count to unknown, also for a wheel opened by SDK id.
+// Falsified by: zwo_filterwheel_driver.cpp set_connected(false) calling slots_.clear_slot_count() only inside the
+// `if (wheel_index_.has_value())` block (the by-id wheel then still rejects the 2-entry names after Disconnect).
+TEST_CASE("ZWO EFW Filter Wheel Driver - A wheel opened by id accepts any names length after a disconnect",
+          "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == static_cast<std::size_t>(sdk.slot_count));
+    require_alpaca_error([&] { driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
 }

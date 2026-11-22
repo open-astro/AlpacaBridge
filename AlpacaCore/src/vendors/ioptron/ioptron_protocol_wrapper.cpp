@@ -370,8 +370,7 @@ uint32_t get_interface_gateway(const std::string& iface_name) {
 bool raw_port_looks_like_ioptron_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "Silicon_Labs", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, ioptron_mount_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -1152,7 +1151,7 @@ public:
         spec.skip.clear();  // every byte is an ack byte, CR/LF included
         spec.max_len = kMaxReplyLen;
         // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
-        const auto r = util::read_until(link_.fd(), spec,
+        const auto r = util::read_until(link_, spec,
                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
                                             spec.idle_gap * static_cast<int>(spec.max_len));
         if (r.outcome == util::ReadOutcome::LinkDead) {
@@ -1500,7 +1499,7 @@ private:
         }
         return true;
 #else
-        return util::tty_write_all(link_.fd(), data.c_str(), data.length());
+        return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
 #endif
     }
 
@@ -1535,7 +1534,7 @@ private:
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(link_.fd(), spec, deadline);
+            return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
 #else
@@ -1557,12 +1556,12 @@ private:
         throw AlpacaException(reason);
     }
 
-    // A failed serial write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
-    // a socket errno instead, so the network link keeps its fault latch.
+    // A failed serial write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the
+    // util::SerialLink verdict, #2262) is the port gone: the link is lost at once. A write timeout is not; a TCP send
+    // fails with a socket errno instead, so the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
 #ifndef _WIN32
-        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
+        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
             fail_link_locked("iOptron mount serial link lost (write): " + util::errno_string(err));
         }
 #else
@@ -1935,18 +1934,25 @@ SiteInfo iOptronProtocolWrapper::get_site_location() {
 
 SiteInfo iOptronProtocolWrapper::get_site_info() {
     SiteInfo site = get_site_location();
-    std::string gut_response = strip_status_prefix(send_command(":GUT"));
+    apply_gut_site_fields(site, strip_status_prefix(send_command(":GUT")));
+    return site;
+}
 
+SiteInfo iOptronProtocolWrapper::get_site_info(const std::string& gut_reply) {
+    SiteInfo site = get_site_location();
+    apply_gut_site_fields(site, gut_reply);
+    return site;
+}
+
+// Timezone and DST from a :GUT# reply (status prefix stripped). Only the first 17 characters must be there: the
+// UTC field after them is parse_utc_time()'s to judge, so an unusable UTC still leaves usable site fields.
+void iOptronProtocolWrapper::apply_gut_site_fields(SiteInfo& site, const std::string& gut_response) {
     if (gut_response.length() < 17) {
         throw AlpacaException("Invalid site info response from mount");
     }
-
-    // Timezone and DST from :GUT#
     std::string tz_str = gut_response.substr(0, 4);  // Sign + 3 digits
     site.timezone_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
     site.dst_observed = (gut_response[4] == '1');
-
-    return site;
 }
 
 AltAz iOptronProtocolWrapper::get_park_position() {
@@ -2059,7 +2065,7 @@ bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
             zero_distance =
                 std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
                 std::fabs(std::remainder(current.azimuth_degrees - park_pos.azimuth_degrees, 360.0)) < kEpsDeg;
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a plain park follows
             // Position unavailable — proceed with a plain park attempt.
         }
 
@@ -2165,10 +2171,16 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
 }
 
 std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
+    return parse_utc_time(read_utc_reply());
+}
+
+std::string iOptronProtocolWrapper::read_utc_reply() {
     // Some mounts reply to :GUT without a trailing '#', so allow responses
     // that omit the terminator.
-    std::string response = send_command(":GUT", false);
-    response = strip_status_prefix(std::move(response));
+    return strip_status_prefix(send_command(":GUT", false));
+}
+
+std::chrono::system_clock::time_point iOptronProtocolWrapper::parse_utc_time(const std::string& response) {
     if (response.length() != 18 || (response[0] != '+' && response[0] != '-') ||
         (response[4] != '0' && response[4] != '1') ||
         !std::all_of(response.begin() + 1, response.end(), [](char c) { return c >= '0' && c <= '9'; })) {
@@ -2286,6 +2298,12 @@ void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {
         << std::setfill('0') << std::setw(2) << dec_value << "#";
     // Some mounts do not respond to :RG; fire-and-forget to avoid timeouts.
     send_command_blind(cmd.str());
+}
+
+const std::vector<std::string>& ioptron_mount_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",       "067b",       "FTDI",
+                                                 "CP210",    "Silicon_Labs", "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::ioptron

@@ -11,8 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // OnStep serial-port ownership (issue #1202), over a pty that answers every
-// '#'-framed LX200 command with "0#". The other OnStep tests drive the
-// wrapper's TCP test seam; this file covers the serial link itself: a port
+// '#'-framed LX200 command with "0#". Most other OnStep tests drive the
+// wrapper's TCP network link; this file covers the serial link itself: a port
 // another device holds is refused untouched, the connected port is claimed
 // and released, and a port another program retunes (its own baud,
 // VMIN=1/VTIME=0) can no longer park a read, and gets the driver's settings
@@ -134,7 +134,7 @@ TEST_CASE("OnStep serial - a port another device holds is refused untouched, nam
     }
     CHECK(message.find("Other device") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
-    CHECK_FALSE(onstep::OnStepProtocolWrapper::instance().is_connected());
+    CHECK(onstep::detail::registered_link_for_testing(serial_info(fake.slave_path())) == nullptr);  // nothing opened
     // Refused before the open: the 9600 baud the driver would set never reached the line.
     CHECK(line_speed(fake.keepalive_fd()) == B19200);
 }
@@ -142,7 +142,7 @@ TEST_CASE("OnStep serial - a port another device holds is refused untouched, nam
 TEST_CASE("OnStep serial - the connected port is claimed, released on disconnect, and reconnects",
           "[onstep][serial][issue1202]") {
     OnStepPty fake;
-    auto& proto = onstep::OnStepProtocolWrapper::instance();
+    onstep::OnStepProtocolWrapper proto;  // a link of its own, outside the registry (#2223)
     REQUIRE(proto.connect(serial_info(fake.slave_path())));
     CHECK(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
     CHECK(proto.get_product_name() == "0");
@@ -161,7 +161,7 @@ TEST_CASE("OnStep serial - the connected port is claimed, released on disconnect
 TEST_CASE("OnStep serial - a blind command on a port retuned to VMIN=1 returns and the line is restored",
           "[onstep][serial][issue1202]") {
     OnStepPty fake;
-    auto& proto = onstep::OnStepProtocolWrapper::instance();
+    onstep::OnStepProtocolWrapper proto;  // a link of its own, outside the registry (#2223)
     REQUIRE(proto.connect(serial_info(fake.slave_path())));
 
     // Another program retunes the live port to its own baud, with a blocking

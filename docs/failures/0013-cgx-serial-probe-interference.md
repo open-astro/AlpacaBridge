@@ -1,6 +1,62 @@
 # CGX USB interference from another daemon's serial probe
 
-## Incident and recovery
+## Summary
+
+On 2026-10-13 the lab CGX link lost AUX replies and reconnects failed with
+`Device or resource busy`. The OpenAstro Ara service's intermittent serial probe
+was opening the CGX tty, retuning it and taking `TIOCEXCL`, while the CGX wrapper
+held only an in-process registry claim. The wrapper now takes kernel exclusivity
+on open and releases it on close, pinned by a regression test and a rig check.
+
+## Root Cause
+
+`strace` on the running OpenAstro Ara service (main PID 2357960) captured its thread
+2749988 doing the following on `/dev/ttyACM1`, the CGX USB endpoint:
+
+```text
+openat(..., "/dev/ttyACM1", O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC) = 323
+ioctl(323, TIOCEXCL) = 0
+ioctl(323, TCSETS, {... c_cflag=B9600|CS8|CREAD|CLOCAL ...}) = 0
+ioctl(323, FIONREAD, [0]) = 0   # repeated during probing
+ioctl(323, TIOCNXCL) = 0
+```
+
+The probe is intermittent, so point-in-time `fuser` checks had shown no competing
+owner. The Ara service runs as `openastroara`, with only CAP_SYS_TIME in its
+capability bounding set; it cannot bypass TIOCEXCL with CAP_SYS_ADMIN. GPSD was
+checked separately and held only the configured u-blox receiver at `/dev/ttyACM0`.
+
+The CGX wrapper previously had only an in-process registry. Its kernel tty remained
+available to external probes, which could change line settings, consume replies,
+and claim exclusivity while AlpacaBridge already held its original descriptor.
+
+## Prevention
+
+The raw USB wrapper now checks TIOCEXCL immediately after opening, before line
+configuration. One cleanup region covers every subsequent initialization failure,
+including cache allocation, dropping exclusivity, closing the fd and removing the
+registry claim. Disconnect and reconnect explicitly drop TIOCEXCL with TIOCNXCL
+before closing. Stop recovery now logs the thrown reconnect reason.
+
+Sibling set: initial open/configure, every post-open failure, explicit disconnect,
+destructor (delegates to disconnect), same-wrapper reconnect, and the emergency
+stop reopen path. All use the same ownership lifecycle. No vendor SDK, HTTP API,
+or OpenAstro Ara configuration change is part of this fix.
+
+`Celestron CGX AUX link - claims kernel exclusive ownership and releases it on reconnect`
+holds an observer fd open, checks TIOCGEXCL, checks a non-root second open returns
+EBUSY, reconnects the wrapper, then checks exclusivity clears and a new open works.
+The observer prevents last-close behavior from hiding a missing TIOCNXCL. The old
+code fails the claim and second-open assertions. Removing the TIOCEXCL claim or
+the disconnect TIOCNXCL is a falsifying mutation. Root runs still check the kernel
+flag and release, but skip the second-open refusal because root may bypass it.
+
+This record requires post-fix rig verification before claiming the cancellation
+or small-slew-abort tests passed.
+
+## Evidence
+
+### Incident and recovery
 
 On 2026-10-13, bounded lab tests on the northern CGX 7.17.25 first lost an AUX
 position reply during an RA tracking baseline, before the requested guide pulse
@@ -19,55 +75,7 @@ all four stop/zero-rate acknowledgements and confirmed both controllers idle.
 These failed motion tests are not passes, and a clean rerun did not resolve the
 underlying defect.
 
-## Confirmed competing owner
-
-`strace` on the running OpenAstro Ara service (main PID 2357960) captured its thread
-2749988 doing the following on `/dev/ttyACM1`, the CGX USB endpoint:
-
-```text
-openat(..., "/dev/ttyACM1", O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC) = 323
-ioctl(323, TIOCEXCL) = 0
-ioctl(323, TCSETS, {... c_cflag=B9600|CS8|CREAD|CLOCAL ...}) = 0
-ioctl(323, FIONREAD, [0]) = 0   # repeated during probing
-ioctl(323, TIOCNXCL) = 0
-```
-
-The probe is intermittent, so point-in-time `fuser` checks had shown no competing
-owner. The Ara service runs as `openastroara`, with only CAP_SYS_TIME in its
-capability bounding set; it cannot bypass TIOCEXCL with CAP_SYS_ADMIN. GPSD was
-checked separately and held only the configured u-blox receiver at `/dev/ttyACM0`.
-
-## Fix and sibling sweep
-
-The CGX wrapper previously had only an in-process registry. Its kernel tty remained
-available to external probes, which could change line settings, consume replies,
-and claim exclusivity while AlpacaBridge already held its original descriptor.
-
-The raw USB wrapper now checks TIOCEXCL immediately after opening, before line
-configuration. One cleanup region covers every subsequent initialization failure,
-including cache allocation, dropping exclusivity, closing the fd and removing the
-registry claim. Disconnect and reconnect explicitly drop TIOCEXCL with TIOCNXCL
-before closing. Stop recovery now logs the thrown reconnect reason.
-
-Sibling set: initial open/configure, every post-open failure, explicit disconnect,
-destructor (delegates to disconnect), same-wrapper reconnect, and the emergency
-stop reopen path. All use the same ownership lifecycle. No vendor SDK, HTTP API,
-or OpenAstro Ara configuration change is part of this fix.
-
-## Regression
-
-`Celestron CGX AUX link - claims kernel exclusive ownership and releases it on reconnect`
-holds an observer fd open, checks TIOCGEXCL, checks a non-root second open returns
-EBUSY, reconnects the wrapper, then checks exclusivity clears and a new open works.
-The observer prevents last-close behavior from hiding a missing TIOCNXCL. The old
-code fails the claim and second-open assertions. Removing the TIOCEXCL claim or
-the disconnect TIOCNXCL is a falsifying mutation. Root runs still check the kernel
-flag and release, but skip the second-open refusal because root may bypass it.
-
-This record requires post-fix rig verification before claiming the cancellation
-or small-slew-abort tests passed.
-
-## Post-fix verification
+### Post-fix verification
 
 - Native arm64 focused suite with the ownership regression: 58 cases / 704
   assertions passed. Later stop/Sync additions expanded it to 62 / 725.
