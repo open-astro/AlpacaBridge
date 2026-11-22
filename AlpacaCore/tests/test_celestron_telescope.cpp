@@ -1470,6 +1470,23 @@ TEST_CASE("Celestron PolledState - three failed probes latch the fault and one g
     CHECK(driver.get_right_ascension() == ra_at_connect);
 }
 
+TEST_CASE("Celestron PolledState - a FindHome tick that reaches nothing keeps a latched fault",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    rig.pause(true);
+    rig.fake().st->mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll_now();
+    REQUIRE_FALSE(driver.get_link_fault().empty());
+    rig.fake().st->mute = false;
+    driver.find_home();
+    rig.fake().st->mute = true;
+    rig.poll_now();  // the home check gets no answer: a failed probe, not a good one
+    CHECK_FALSE(driver.get_link_fault().empty());
+    rig.expect_error(alpacacore::AlpacaError::DriverException, [&] { (void)driver.get_right_ascension(); });
+}
+
 TEST_CASE("Celestron PolledState - a fault standing for the staleness bound drops Connected once",
           "[celestron][telescope][snapshot][polledstate]") {
     PolledMountRig rig;

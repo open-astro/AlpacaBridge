@@ -481,13 +481,13 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        throw_if_link_faulted();
         // AtHome is affected only by FindHome failures. A failed goto or Park
         // still surfaces through Slewing without making this independent flag
-        // unreadable.
+        // unreadable. The FindHome failure names the failed operation, so it precedes the link fault.
         if (!last_home_error_.empty()) {
             throw AlpacaException(last_home_error_);
         }
+        throw_if_link_faulted();
         // The status poll checks a FindHome for completion; the getter serves its result.
         return at_home_;
     }
@@ -3417,8 +3417,9 @@ private:
     // across I/O; the frame is decoded here and the module publishes it. So do a FindHome in flight's completion check
     // and the stops of its third failure (decision 0016 rule 1). A throw is a failed tick (the module's fault latch and
     // loss verdict): the sample's, and a site-read timeout's (the tick ends there, one timeout at most, and the link
-    // did not answer). nullopt: nothing to publish, because the session ended under the tick or a FindHome completion
-    // check failed (the FindHome's own counter judges that).
+    // did not answer). nullopt: nothing to publish, because the session ended under the tick. A FindHome completion
+    // check that got no answer throws too: it is the FindHome's own failure (its counter) and a failed probe (the
+    // module's).
     std::optional<PolledFrame> probe() {
         if (seeding_.load()) {
             return seed_;
@@ -3493,10 +3494,11 @@ private:
                 send_failure_stop(home_claim, failure, true);
             }
             if (home.error) {
-                // A failed check is the FindHome's own failure (its counter above stops the mount on the third), not
-                // a failed state poll: no second timeout in this tick (Disconnect waits for the tick) and no
-                // sample. The frame ages meanwhile, and a frame past util::kLinkStalenessBound is a lost link.
-                return std::nullopt;
+                // A check that got no answer is a failed probe (decision 0010 rule 7: nullopt means the device
+                // answered): the FindHome's counter above has judged it, and the module counts it too. No second
+                // timeout in this tick (Disconnect waits for the tick) and no sample.
+                throw AlpacaException("Celestron FindHome completion check got no answer",
+                                      AlpacaError::DriverException);
             }
         }
         {
@@ -4539,7 +4541,7 @@ private:
     // did not answer). Set by the connect thread alone, around polled_.start().
     PolledFrame seed_;
     std::atomic<bool> seeding_{false};
-    std::atomic<int> probe_tick_{0};  // probe count this session; a multiple of kSlowPollEvery is a full sample
+    std::atomic<int> probe_tick_{0};  // probe count since construction; a multiple of kSlowPollEvery is a full sample
     // Decision 0010: the polled frame the getters and DeviceState read, with the poll that fills it, the fault latch
     // and the link-loss rule (decision 0009). Loss closes the transport on the poll thread (no autonomous reconnect).
     // Declared after every member the probe touches, so its poll joins before they die, and before the re-sync slot,
