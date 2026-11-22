@@ -133,3 +133,4 @@ referred to by its slug until it is written, and numbered then.
 - [Device names](0024-device-names.md)
 - [Daemon privilege](0025-daemon-privilege.md)
 - [Vendored SDK binaries](0026-vendored-sdk-binaries.md)
+- [GPIO soft-PWM composition](0027-gpio-soft-pwm-composition.md)
