@@ -200,6 +200,28 @@ TEST_CASE("SoftPwmPorts - PWM 50 % at 50 Hz is one high at t0 and one low 10 ms 
     CHECK(rig.ports.get_value(0) == 50);
 }
 
+// Falsified by: soft_pwm_ports.cpp pwm_loop() starting each period at the clock's now() instead of at the previous
+// period's start plus the period (the late wake then moves every later edge).
+TEST_CASE("SoftPwmPorts - edges are absolute deadlines, a late wake does not shift the next period",
+          "[util][soft-pwm][unit]") {
+    Rig rig(board(50, {{"Dew", 5u, true, true}}));
+    rig.ports.open();
+    const auto base = rig.clock.wait_count();
+    rig.ports.set_value(0, 50);
+    wait_for_waits(rig, base + 1);
+    rig.clock.advance(12ms);  // the worker wakes 2 ms after its low edge was due
+    wait_for_waits(rig, base + 2);
+    rig.clock.advance(13ms);  // and 5 ms after the next period's high edge was due (20 ms)
+    wait_for_waits(rig, base + 3);
+    rig.clock.advance(5ms);   // the low edge is due at 20 ms + 10 ms
+    wait_for_waits(rig, base + 4);
+    const auto writes = rig.backend.writes_to(0);
+    REQUIRE(writes.size() == 4);
+    CHECK(at_us(writes[1]) == 12000);
+    CHECK(at_us(writes[2]) == 25000);
+    CHECK(at_us(writes[3]) == 30000);
+}
+
 // Falsified by: soft_pwm_ports.cpp pwm_loop() using a fixed half period instead of duty / 100 of the period.
 TEST_CASE("SoftPwmPorts - PWM 25 % puts the low edge at 5 ms", "[util][soft-pwm][unit]") {
     Rig rig(board(50, {{"Dew", 5u, true, true}}));
