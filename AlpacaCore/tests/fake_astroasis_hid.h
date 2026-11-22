@@ -14,9 +14,11 @@
 
 #include <alpacacore/vendor/astroasis/astroasis_hid_transport.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -47,10 +49,32 @@ struct FakeHidState {
     int closes = 0;
     int opens = 0;                    // open() calls that returned true
     bool move_reports_moving = true;  // the device reports "moving" after a Move (0x36)
+    // Opt-in: a Move (0x36) travels to its target at this many steps per second, worked out from steady_clock when
+    // the device is asked, instead of leaving `position` alone. 0 (the default) keeps the scripted behaviour.
+    int travel_rate = 0;
+    int travel_target = 0;
+    std::chrono::steady_clock::time_point travel_stamp = std::chrono::steady_clock::now();
     std::uint8_t gate_cmd = 0;        // hold this command's exchange open until released
     bool gate_entered = false;        // the gated exchange reached the gate
     std::condition_variable cv;
     std::vector<std::uint8_t> pending;
+
+    // Moves `position` along the Move for the time since the last look and clears `moving` on arrival. Caller holds
+    // `mutex`.
+    void advance_travel() {
+        if (travel_rate <= 0 || !moving) return;
+        const auto now = std::chrono::steady_clock::now();
+        const auto step = static_cast<int>(std::chrono::duration<double>(now - travel_stamp).count() * travel_rate);
+        if (step == 0) return;  // keep the stamp so a fast poll does not lose the fraction of a step
+        travel_stamp = now;
+        const int remaining = travel_target - position;
+        if (std::abs(remaining) <= step) {
+            position = travel_target;
+            moving = false;
+        } else {
+            position += remaining > 0 ? step : -step;
+        }
+    }
 
     int transactions() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -92,6 +116,7 @@ public:
             case 0x32:
                 ++state_->status_reads;
                 hold_gate(lock, cmd);
+                state_->advance_travel();
                 if (state_->fail_status) break;
                 resp.push_back(14);
                 be32(2048);        // internal ADC
@@ -110,13 +135,19 @@ public:
                 break;
             case 0x36:
                 ++state_->moves;
+                state_->advance_travel();
                 state_->moving = state_->move_reports_moving;
+                if (state_->travel_rate > 0) {
+                    state_->travel_target = (data[3] << 24) | (data[4] << 16) | (data[5] << 8) | data[6];
+                    state_->travel_stamp = std::chrono::steady_clock::now();
+                }
                 hold_gate(lock, cmd);
                 if (state_->fail_move) break;
                 resp.insert(resp.end(), {1, 0});
                 break;
             case 0x37:
                 ++state_->halts;
+                state_->advance_travel();
                 state_->moving = false;
                 hold_gate(lock, cmd);
                 if (state_->fail_halt) break;

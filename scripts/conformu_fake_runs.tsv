@@ -9,7 +9,7 @@ zwo	rotator	fake_zwo_caa_sdk.h	pending	6	-	not yet tried: slice 6 decides whethe
 celestron	telescope	fake_mount_server.h	pending	6	-	needs a NexStar simulator: the row serves a fixed position-pair reply, and FakeCelestronHandset never moves the reported position on a GOTO, re-labels nothing on a Sync and keeps the tracking mode as a knob
 celestron	telescope	fake_celestron_cgx_mount.h	pending	6	-	needs a CGX simulator: motion completes only on a test opt-in (instant or scripted encoder steps), guide pulses do not move the encoders, and there is no sidereal drift or acceleration model
 celestron	telescope	fake_celestron_aux_tcp_adapter.h	pending	6	-	needs a CGX simulator behind the adapter: a GOTO moves linearly over a set time with no acceleration, a guide pulse moves nothing, tracking writes change nothing and there is no sidereal drift; the adapter's real loss mechanism is scripted per request
-celestron	focuser	fake_celestron_focuser.h	pending	6	-	needs a focus-motor simulator: FakeCelestronFocuser completes a move only when a test calls complete_move(), so a Move never ends on its own (ConformU: "Moving focuser" exceeded its 60 s timeout)
+celestron	focuser	fake_celestron_focuser.h	run	6	AlpacaCore/conformu/Celestron/Fake/Fake-focuser-fake_celestron_focuser-Linux-arm64.txt	-
 synscan	telescope	fake_mount_server.h	pending	6	-	needs a SynScan simulator: FakeSynScanHandset keeps one position pair for both frames that does not track the sky, a Sync changes nothing, and fixed-rate and Dec variable-rate moves move nothing
 onstep	telescope	fake_mount_server.h	pending	6	-	needs an OnStep simulator: the row serves FakeMountServer with an idle reply set (:GU# "nNp#"), so the mount never tracks, slews or parks
 onstep	focuser	fake_mount_server.h	run	3	AlpacaCore/conformu/OnStep/Fake/Fake-focuser-fake_mount_server-Linux-arm64.txt	-
@@ -21,7 +21,7 @@ ifr	focuser	fake_ioptron_ifr.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focus
 ifr	rotator	fake_ioptron_ifr.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 ioptron	switch	fake_ioptron_gpio.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 iguider	camera	fake_iguider_v4l2.h	run	5	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_iguider_v4l2-Linux-arm64.txt	-
-astroasis	focuser	fake_astroasis_hid.h	pending	6	-	needs a focuser simulator: FakeHidTransport sets the moving flag on a Move but never moves the position to the target, so a Move never ends (ConformU: "Moving focuser" exceeded its 60 s timeout)
+astroasis	focuser	fake_astroasis_hid.h	run	6	AlpacaCore/conformu/Astroasis/Fake/Fake-focuser-fake_astroasis_hid-Linux-arm64.txt	-
 gemini	focuser	fake_gemini_focuser.h	pending	6	-	driver timing, not the fake: TempComp is a live wire read by design (decision 0016, Gemini focuser row) that can wait behind the 250 ms state poll, and missed ConformU's 0.1 s FAST target in 3 of 6 local runs (0.17-0.18 s); runs once TempComp is served without device I/O
 gemini	covercalibrator	fake_gemini_flatpanel.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 gemini	switch	fake_gemini_pdh.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
