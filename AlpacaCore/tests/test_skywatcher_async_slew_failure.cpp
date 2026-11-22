@@ -521,6 +521,92 @@ TEST_CASE("SkyWatcher async - a disconnect whose stops are acked clears an owed 
     driver->set_connected(false);
 }
 
+// open-astro#2407: the far-miss bound measures RA on the sky. Near the pole an RA-axis error is a small distance
+// on the sky: 0.5 degree of RA axis at Dec +88 is about 63 arcsec, a landing, not a 1800 arcsec miss.
+TEST_CASE("SkyWatcher async - an RA-axis residual near the pole is measured on the sky",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.land_short_by(1, 10, 0.5, 3600000);  // every RA landing 0.5 degree of axis short, creeping in for an hour
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 88.0));
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        std::chrono::milliseconds(60000)));
+    CHECK(last == SlewingRead::False);  // landed: no "did not converge"
+    INFO(message);
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+// open-astro#2407: a slew body cancelled by a newer command stops the axes itself; when the board refuses that
+// ":L", the stop is owed to the next connect. AbortSlew is the newer command here, and its own ":L" on RA is
+// refused too, so it throws. The body's failed stop and the disconnect's sample of the motion flags both mark the
+// stop owed; the case pins that the next connect pays it.
+TEST_CASE("SkyWatcher async - a cancelled slew body whose stop the board refused is owed to the next connect",
+          "[skywatcher][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame to mark the motion instead
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(5000)));
+    mount.reject_instant_stop(1, 2);  // AbortSlew's ":L" and the cancelled body's ":L" on RA
+    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(1));
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+// open-astro#2407: a failed status read is not a stopped axis. The AbortSlew check reads both axes back; when the
+// last read it gets fails, Slewing raises "could not be confirmed" and the stop is owed to the next connect.
+TEST_CASE("SkyWatcher async - an AbortSlew whose status reads fail is not confirmed and stays owed",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    // Paused, the poll reads nothing, so the check's own reads are the only ones and the link latch (three failed
+    // exchanges in a row) is not reached: fail, good, fail.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    mount.ignore_instant_stops(2, 10);
+    driver->abort_slew();
+    const auto check_poll = [&](bool fail_read) {
+        if (fail_read) mount.fail_status_replies(1, 1);
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the paused poll and the check
+        clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    };
+    check_poll(true);
+    check_poll(false);
+    check_poll(true);
+    std::string message;
+    REQUIRE(read_slewing(*driver, &message) != SlewingRead::True);
+    CHECK(message.find("could not be confirmed (status reads failed)") != std::string::npos);
+    REQUIRE(mount.axis_running(2));
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 // open-astro#2407: every re-goto checks the altitude floor, as the first leg does. The first leg lands 1 degree
 // short in Dec; a latitude write while it lands puts the target below the floor, so the re-goto is refused.
 TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor is refused",

@@ -2661,8 +2661,10 @@ public:
                 const Wire protocol = wire();
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // Best effort; status polling still reports the true state.
+            } catch (...) {
+                // Best effort; status polling still reports the true state, and the next connect owes the
+                // stop (open-astro#2407), as for every other failed stop of a driver motion.
+                relink_stop_pending_ = true;
             }
             set_slewing_cached_false_locked();
             slew_hold_.clear();

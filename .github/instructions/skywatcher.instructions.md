@@ -374,7 +374,7 @@ datagrams before each send so replies cannot get off-by-one.
   stops the axes (#2407)` and its timeout and synchronous siblings.
 - **The rest of #2407's motion-safety rules** (#2396 AB-4, AB-7, AB-9; all fake-only, no Sky-Watcher hardware):
   - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
-    failure stop, cancelled-body stop or cap stop that did not reach the board, an AbortSlew check that ran out
+    failure stop, cancelled-body stop, Unpark stop or cap stop that did not reach the board, an AbortSlew check that ran out
     of stops, or a failed disconnect stop (judged on the flags sampled before `cancel_async_tasks()`, since a
     cancelled body clears them) sets `relink_stop_pending_`; a relink stop that fails sets it again, and a
     disconnect whose two stops are acked clears it
