@@ -30,6 +30,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace alpacacore::vendor::bisque {
@@ -38,6 +39,8 @@ namespace {
 
 constexpr const char* kErrorPrefix = "|No error. Error = 0.";
 constexpr int kErrorPrefixLen = 21; // strlen("|No error. Error = 0.")
+// The message of a wrapped command TheSkyX answered with an error (is_theskyx_refusal()).
+constexpr std::string_view kRefusalPrefix = "TheSkyX command failed: ";
 
 // Socket read timeout granularity (ms). This controls how often we poll
 // the socket for data via recv(). A shorter value means we detect the '#'
@@ -514,7 +517,7 @@ private:
         std::string response = read_until_hash_locked(effective_timeout);
 
         if (response != "|No error. Error = 0.OK") {
-            throw AlpacaException("TheSkyX command failed: " + response);
+            throw AlpacaException(std::string(kRefusalPrefix) + response);
         }
     }
 
@@ -523,6 +526,10 @@ private:
     bool connected_ = false;
     ConnectionInfo connection_info_;
 };
+
+bool is_theskyx_refusal(const std::exception& e) {
+    return std::string_view(e.what()).substr(0, kRefusalPrefix.size()) == kRefusalPrefix;
+}
 
 // Singleton
 BisqueProtocolWrapper& BisqueProtocolWrapper::instance() {
