@@ -607,6 +607,28 @@ TEST_CASE("SkyWatcher async - an AbortSlew whose status reads fail is not confir
     driver->set_connected(false);
 }
 
+// open-astro#2407: Unpark during a Park cancels the park body and stops the axes itself. When its ":K" fails, the
+// stop is owed to the next connect. The body's own ":L" is acked but ignored here, so only Unpark's failed stop
+// can mark it, and the paused poll publishes no Slewing frame that the disconnect would also read.
+TEST_CASE("SkyWatcher async - an Unpark stop the board refused is owed to the next connect",
+          "[skywatcher][async][park][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);  // away from the park position, so the park slew moves RA
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(5000)));
+    mount.ignore_instant_stops(1, 10);  // the cancelled body's ":L": acked, RA runs on
+    mount.reject_ramped_stops(1, 10);   // Unpark's ":K" throws
+    driver->unpark();
+    REQUIRE(mount.axis_running(1));
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
 // open-astro#2407: every re-goto checks the altitude floor, as the first leg does. The first leg lands 1 degree
 // short in Dec; a latitude write while it lands puts the target below the floor, so the re-goto is refused.
 TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor is refused",
