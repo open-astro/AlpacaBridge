@@ -4118,3 +4118,204 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
+
+// Issue #2396 (AB-9, AB-8, AB-7): the motion bound watchdog and the async landing gate.
+namespace {
+
+// The motion bound watchdog's newest thread, from the slot's spawn seam (every start supersedes the last body).
+struct MotionBoundThread {
+    std::mutex mutex;
+    std::thread::id id;
+    void attach(alpacacore::TelescopeDriver& driver) {
+        io::set_motion_bound_watchdog_spawn_for_testing(driver, [this](std::function<void()> body) {
+            std::thread thread(std::move(body));
+            std::lock_guard<std::mutex> lock(mutex);
+            id = thread.get_id();
+            return thread;
+        });
+    }
+    std::thread::id current() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return id;
+    }
+};
+
+std::string slewing_failure(alpacacore::TelescopeDriver& driver) {
+    try {
+        (void)driver.get_slewing();
+        return "";
+    } catch (const alpacacore::AlpacaException& e) {
+        return e.what();
+    }
+}
+
+}  // namespace
+
+TEST_CASE("iOptron motion bound - a MoveAxis left running past its dead-man is stopped",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(59));
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(driver->get_slewing());
+
+    clock.advance(std::chrono::seconds(2));
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
+    driver->abort_slew();  // clears the stored failure
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - a MoveAxis renewed before its dead-man keeps running",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    const double rate = driver->get_axis_rate_range(0).second;
+
+    driver->move_axis(0, rate);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(40));
+    driver->move_axis(0, rate);  // the client renews its move
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(40));  // 80 s after the first, 40 s after the renewal
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(driver->get_slewing());
+
+    clock.advance(std::chrono::seconds(21));
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - an async GOTO still slewing at 300 s is stopped with no client polling",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_system_status(2);  // the mount never reports the GOTO done
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(299));
+    CHECK(mount.count(":Q#") == 0);
+
+    clock.advance(std::chrono::seconds(2));
+    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - an async GOTO that landed is left alone at 300 s",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));                     // nobody polled; the mount reads tracking (1)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the body's status read at the bound
+    CHECK(mount.count(":Q#") == 0);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron async landing gate - Slewing stays true until two position reads agree",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);  // HEM27: no GOTO trim reads
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));  // past the 5 s dispatch hold; the status reads tracking, not slewing
+    mount.set_position(11.9, 19.0);          // the status lies: the mount still moves, 1.6 degrees out
+    CHECK(driver->get_slewing());            // first sample
+    clock.advance(std::chrono::milliseconds(600));
+    mount.set_position(11.99, 20.0);  // about 500 arcsec out: not on target, not a far miss
+    CHECK(driver->get_slewing());     // moved since the first sample
+    clock.advance(std::chrono::milliseconds(200));
+    CHECK(driver->get_slewing());  // agrees, but under the 500 ms gap
+    clock.advance(std::chrono::milliseconds(400));
+    CHECK_FALSE(driver->get_slewing());  // two samples 600 ms apart agree: landed
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(mount.count(":Q#") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron async landing gate - a GOTO that came to rest far from the target raises",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/3600.0);  // lands 1 degree of RA east
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(600));
+    const std::string failure = slewing_failure(*driver);
+    CHECK(contains(failure, "from the target"));
+    CHECK(contains(slewing_failure(*driver), "from the target"));  // kept until AbortSlew or a new initiator
+    CHECK(mount.count(":Q#") == 0);                                // at rest: no stop
+    driver->abort_slew();
+    CHECK(slewing_failure(*driver).empty());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron async landing gate - a failed position read keeps Slewing true",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/300.0);  // off the target, inside the far miss
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());  // first sample
+    clock.advance(std::chrono::milliseconds(600));
+    mount.fail_next_position_reads(1);  // the next :GEP# read fails, status reads still answer
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(600));
+    CHECK(driver->get_slewing());  // a fresh first sample after the failed read
+    clock.advance(std::chrono::milliseconds(600));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}

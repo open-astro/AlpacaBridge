@@ -37,6 +37,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -788,6 +789,12 @@ TEST_CASE("iOptron goto-safety - a superseded synchronous GOTO that times out do
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     const int stops_before = mount.count(":Q#");
+    // The newer async GOTO starts with the synchronous one, so its own 300 s bound (#2396 AB-8, the motion bound
+    // watchdog) would stop it at the same moment. Refusing that slot leaves this case about the waiter alone.
+    alpacacore::vendor::ioptron::set_motion_bound_watchdog_spawn_for_testing(
+        *driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
 
     const std::exception_ptr error = run_stepping_clock(clock, [&] {
         auto newer = std::async(std::launch::async, [&] {
