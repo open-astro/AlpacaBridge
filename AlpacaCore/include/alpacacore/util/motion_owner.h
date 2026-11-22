@@ -122,6 +122,19 @@ public:
         return StopReason::None;
     }
 
+    /// The current generation and cancel count of `axes`, claiming nothing: stop_reason() of it stays None until a
+    /// newer claim or a stop reaches one of those axes. For a watcher that runs no motion of its own (the Sky-Watcher
+    /// AbortSlew stop check, open-astro#2407). Call under the driver mutex_.
+    MotionClaim observe(std::uint8_t axes) const {
+        MotionClaim claim;
+        claim.axes = axes;
+        for (std::size_t i = 0; i < 2; ++i) {
+            claim.generation[i] = generation_[i].current();
+            claim.cancels[i] = cancels_[i].current();
+        }
+        return claim;
+    }
+
     /// A slew, park or home body calls this when it ends, cancelled or not, so a PulseGuide is accepted again.
     /// A body that is no longer the newest slew changes nothing. Call under the driver mutex_.
     void finished(const MotionClaim& claim) {

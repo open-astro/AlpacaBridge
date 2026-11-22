@@ -335,11 +335,11 @@ DELEGATING_FACTORIES = {
     "AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp": (
         "switch",
         "create_zwo_asiair_plus_switch() builds util::PowerPortSwitchDriver "
-        "(alpacacore/util/power_port_switch_driver.h) over the ASIAIR Plus RK3568 wrapper"),
+        "(alpacacore/util/power_port_switch_driver.h) over util::SoftPwmPorts and the ASIAIR Plus RK3568 backend"),
     "AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp": (
         "switch",
         "create_zwo_asiair_switch() builds util::PowerPortSwitchDriver "
-        "(alpacacore/util/power_port_switch_driver.h) over the ASIAIR libgpiod wrapper"),
+        "(alpacacore/util/power_port_switch_driver.h) over util::SoftPwmPorts and util::GpiodLineBackend"),
 }
 
 

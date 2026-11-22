@@ -58,9 +58,8 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
         zwo_thermal_listing.cpp
-        zwo_asiair_protocol_wrapper.cpp
         zwo_asiair_switch_driver.cpp
-        zwo_asiair_plus_protocol_wrapper.cpp
+        pwm_gpio_misc_backend.cpp
         zwo_asiair_plus_switch_driver.cpp
         zwo_eaf_wrapper.cpp
         zwo_focuser_driver.cpp

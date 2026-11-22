@@ -2122,8 +2122,6 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     }
 
     try {
-        load_persisted_devices();
-
         // A snapshot, so the iteration below (which calls into the device
         // registry) never races configure/remove handlers.
         const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
@@ -2278,8 +2276,6 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
     }
 
     try {
-        load_persisted_devices();
-
         const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
         auto capabilities = alpacacore::management::DeviceRegistry::instance().get_all_device_capabilities();
 
@@ -3493,7 +3489,6 @@ Response Router::handle_attached_devices(const Request& request, std::uint32_t s
     }
 
     try {
-        load_persisted_devices();
         const std::vector<nlohmann::json> persisted_snapshot = persisted_store_->snapshot();
         // The configured devices as the catalog reads them. An entry the
         // catalog cannot read (unknown type, wrong-typed field) cannot hold a
@@ -3873,10 +3868,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         response.set_header("Allow", "POST, PUT");
         return response;
     }
-    
-    try {
-        load_persisted_devices();
 
+    try {
         // Parse JSON body
         nlohmann::json config;
         try {
@@ -4008,10 +4001,8 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         response.set_header("Allow", "POST, PUT");
         return response;
     }
-    
-    try {
-        load_persisted_devices();
 
+    try {
         // Parse JSON body
         nlohmann::json config;
         try {
@@ -4103,7 +4094,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             response.set_body(alpaca_response);
             return response;
         }
-        
+
     } catch (const std::exception& e) {
         // A config field the client typed wrong is InvalidValue: DEBUG, not ERROR (ADR 0007 rule 9).
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
@@ -4143,7 +4134,6 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
         return response;
     };
     try {
-        load_persisted_devices();
         const auto config = nlohmann::json::parse(request.body(), nullptr, false);
         if (!config.is_object()) {
             return refuse("Invalid JSON body: expected an object");
@@ -4197,22 +4187,14 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
             }
         }
         // Not gated by learnSiteFromClient: that opt-out protects a surveyed site, not optics.
-        const auto edit =
-            persisted_store_->edit_by_type_and_number("telescope", device_number, [&updates](nlohmann::json& entry) {
-                bool changed = false;
-                for (const auto& [key, value] : updates) {
-                    const auto current = entry.find(key);
-                    if (current == entry.end() || !current->is_number() || current->get<double>() != value) {
-                        entry[key] = value;
-                        changed = true;
-                    }
-                }
-                return changed;
-            });
+        nlohmann::json fields = nlohmann::json::object();
+        for (const auto& [key, value] : updates) {
+            fields[key] = value;
+        }
+        const auto edit = persisted_store_->update_fields("telescope", device_number, fields);
         if (edit.changed && !edit.saved) {
             util::log_warning("Telescope " + std::to_string(device_number) +
-                              " optics are in use for this session but could NOT be written to "
-                              "config/registered_devices.json (see the error above)");
+                              " optics are in use for this session but " + persisted_store_->not_saved_text());
         }
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Device updated successfully");
@@ -5528,31 +5510,28 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     // DeviceState, so a polling client never waits on it (the lock-free
     // get_connected() rule in alpaca-http-conformance.instructions.md is
     // unaffected); it runs once per changed value.
-    const auto edit = persisted_store_->edit_by_type_and_number("telescope", device_number, [&](nlohmann::json& entry) {
-        if (const auto pkey = persisted_key(entry)) vendor = pkey->vendor;
-        // The opt-out: an operator with a surveyed pier position does not
-        // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
-        // on, because the value the mount is using RIGHT NOW is the one
-        // the client set, and a restart should start from the same site
-        // the last session ended on rather than an older one.
-        // Typed, not value(): a hand-edited file can carry "false" or 0
-        // here, and nlohmann's value() throws on that, which would turn
-        // every site PUT into an error. Only a boolean false is the
-        // opt-out; the API path refuses any other type at registration.
-        const auto flag = entry.find("learnSiteFromClient");
-        if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
-            declined = true;
-            return false;
-        }
-        // Unchanged: no file write on a client that re-sends its site on
-        // every connect (most do).
-        const auto current = entry.find(key);
-        if (current != entry.end() && current->is_number() && current->get<double>() == value) {
-            return false;
-        }
-        entry[key] = value;
-        return true;
-    });
+    nlohmann::json fields = nlohmann::json::object();
+    fields[key] = value;
+    // An unchanged value is not re-saved: most clients re-send their site on every connect.
+    const auto edit =
+        persisted_store_->update_fields("telescope", device_number, fields, [&](const nlohmann::json& entry) {
+            if (const auto pkey = persisted_key(entry)) vendor = pkey->vendor;
+            // The opt-out: an operator with a surveyed pier position does not
+            // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
+            // on, because the value the mount is using RIGHT NOW is the one
+            // the client set, and a restart should start from the same site
+            // the last session ended on rather than an older one.
+            // Typed, not value(): a hand-edited file can carry "false" or 0
+            // here, and nlohmann's value() throws on that, which would turn
+            // every site PUT into an error. Only a boolean false is the
+            // opt-out; the API path refuses any other type at registration.
+            const auto flag = entry.find("learnSiteFromClient");
+            if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
+                declined = true;
+                return false;
+            }
+            return true;
+        });
     if (declined) {
         util::log_debug("Telescope " + std::to_string(device_number) + ": client " + key +
                         " not persisted (learnSiteFromClient is false)");
@@ -5565,14 +5544,12 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed
         << std::setprecision(6) << value;
     if (edit.saved) {
-        util::log_info(msg.str() + " persisted to config/registered_devices.json");
+        util::log_info(msg.str() + " persisted to " + persisted_store_->file().generic_string());
     } else {
         // The entry in memory holds the value (the driver is using it), so
         // the same value re-sent takes the unchanged skip; say plainly that
         // the file does not have it rather than claiming it was persisted.
-        util::log_warning(msg.str() +
-                          " is in use for this session but could NOT be written to "
-                          "config/registered_devices.json (see the error above)");
+        util::log_warning(msg.str() + " is in use for this session but " + persisted_store_->not_saved_text());
     }
 }
 

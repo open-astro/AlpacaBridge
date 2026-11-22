@@ -33,7 +33,7 @@
 #include "power_port_test_dir.h"
 #include "zwo_asiair_stubs.h"
 
-// The wrapper's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of zwo_asiair_stubs.h when
+// The backend's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of zwo_asiair_stubs.h when
 // the device path is a StubDeviceFile; the default /dev/pwm-gpio-misc still reaches the real ioctl().
 namespace {
 
@@ -459,6 +459,25 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - a client's PWM write still reaches th
     }
     driver->set_connected(false);
     CHECK(wrote);
+}
+
+// Falsified by: pwm_gpio_misc_backend.cpp write() sending SET_MODE and ENABLE before every SET_LEVEL (dropping the
+// initialized_ guard).
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - SET_MODE and ENABLE go once per line, SET_LEVEL on every write",
+          "[zwo][switch][asiair-plus][unit]") {
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    driver->set_switch(0, false);
+    driver->set_switch(0, true);
+    driver->set_connected(false);
+    auto& st = ioctl_stub();
+    std::lock_guard<std::mutex> lock(st.m);
+    CHECK(st.set_modes == std::vector<std::int32_t>{4});
+    CHECK(st.enables == std::vector<std::int32_t>{4});
+    CHECK(st.levels.size() == 2);
 }
 
 TEST_CASE("ZWO ASIAIR Plus Switch Driver - connect with no PWM port writes nothing",

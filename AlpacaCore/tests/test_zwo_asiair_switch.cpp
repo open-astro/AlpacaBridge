@@ -12,15 +12,12 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
 
-#include <chrono>
 #include <cmath>
 #include <limits>
 #include <string>
-#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
@@ -246,7 +243,7 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Unsupported method error codes",
 
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
           "[zwo][switch][asiair][unit]") {
-    // Empty ports list must fail at construction (the wrapper has nothing to manage).
+    // Empty ports list must fail at construction (the engine has nothing to manage).
     alpacacore::vendor::zwo::AsiairSwitchConfig empty_cfg;
     empty_cfg.ports.clear();
     require_alpaca_error(
@@ -274,64 +271,6 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
         require_alpaca_error([&]() { alpacacore::vendor::zwo::create_zwo_asiair_switch(0, bad_chip); },
                              alpacacore::AlpacaError::InvalidValue);
     }
-}
-
-// Issue #772 (CC-15): close() stops the PWM workers wherever they are in the
-// cycle, so without a settle step a port at 50 % duty is released low about
-// half the time and the heater on it loses power at disconnect. ascom-contract.instructions.md
-// "Never power-cycle on disconnect": duty > 0 is released high, duty 0 low.
-TEST_CASE("ZWO ASIAIR Pro protocol wrapper - close releases each PWM line at its steady level",
-          "[zwo][switch][asiair][unit][gpio]") {
-    constexpr unsigned int kHalfLine = 5;
-    constexpr unsigned int kOffLine = 6;
-    constexpr int kCloses = 20;
-    int half_released_low = 0;
-    int off_released_high = 0;
-    int not_released = 0;
-    for (int i = 0; i < kCloses; ++i) {
-        alpacacore::vendor::zwo::AsiairProtocolWrapper wrapper(
-            kStubChip, {{"DC1", kHalfLine, true}, {"DC2", kOffLine, true}}, 100);
-        wrapper.open();
-        wrapper.set_value(0, 50);
-        wrapper.set_value(1, 0);
-        // Vary where in the 10 ms period close() lands.
-        std::this_thread::sleep_for(std::chrono::milliseconds(30 + (i * 7) % 20));
-        wrapper.close();
-        half_released_low += stub_level_at_release(kHalfLine) == 0 ? 1 : 0;
-        off_released_high += stub_level_at_release(kOffLine) == 1 ? 1 : 0;
-        not_released += stub_level_at_release(kHalfLine) < 0 ? 1 : 0;
-    }
-    INFO(half_released_low << "/" << kCloses << " closes released the 50 % port low");
-    CHECK(not_released == 0);
-    CHECK(half_released_low == 0);
-    CHECK(off_released_high == 0);
-}
-
-// Issue #300: claiming the lines reads each one and changes none. Before, open()
-// requested every line high, so a connect powered on a port the boot left off.
-TEST_CASE("ZWO ASIAIR Pro protocol wrapper - open claims each line at its level and changes none",
-          "[zwo][switch][asiair][unit][gpio][power-on]") {
-    stub_reset_levels(1);
-    stub_set_level(13, 0);
-    stub_set_level(18, 0);
-    alpacacore::vendor::zwo::AsiairProtocolWrapper wrapper(
-        kStubChip, {{"Port 1", 12, false}, {"Port 2", 13, false}, {"Port 3", 26, true}, {"Port 4", 18, true}}, 100);
-    wrapper.open();
-    CHECK(wrapper.get_value(0) == 1);
-    CHECK(wrapper.get_value(1) == 0);
-    CHECK(wrapper.get_value(2) == 100);  // PWM port, line high: full duty
-    CHECK(wrapper.get_value(3) == 0);    // PWM port, line low: 0 %, not 100 %
-    CHECK(stub_level_changes() == 0);
-    CHECK(stub_level(13) == 0);
-
-    // close() leaves a 40 % port at its steady level (high); a reconnect resumes 40 %.
-    wrapper.set_value(2, 40);
-    wrapper.close();
-    REQUIRE(stub_level(26) == 1);
-    wrapper.open();
-    CHECK(wrapper.get_value(2) == 40);
-    CHECK(wrapper.get_value(1) == 0);
-    wrapper.close();
 }
 
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - off at server start drives every port low before any connect",

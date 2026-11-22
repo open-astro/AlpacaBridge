@@ -282,6 +282,27 @@ PersistedConfigStore::EditResult PersistedConfigStore::edit_by_type_and_number(c
     return result;
 }
 
+PersistedConfigStore::EditResult PersistedConfigStore::update_fields(const std::string& device_type, int device_number,
+                                                                     const nlohmann::json& fields,
+                                                                     const Accept& accept) {
+    return edit_by_type_and_number(device_type, device_number, [&](nlohmann::json& entry) {
+        if (accept && !accept(entry)) return false;
+        bool changed = false;
+        for (const auto& [key, value] : fields.items()) {
+            const auto current = entry.find(key);
+            if (current == entry.end() || *current != value) {
+                entry[key] = value;
+                changed = true;
+            }
+        }
+        return changed;
+    });
+}
+
+std::string PersistedConfigStore::not_saved_text() const {
+    return "could NOT be written to " + file_.generic_string() + " (see the error above)";
+}
+
 PersistedConfigStore::Reservation::Reservation(PersistedConfigStore* store, std::string unique_id, bool adds_entry)
     : store_(store), unique_id_(std::move(unique_id)), adds_entry_(adds_entry) {}
 

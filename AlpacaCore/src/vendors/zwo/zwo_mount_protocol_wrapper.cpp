@@ -1567,7 +1567,11 @@ void ZWOMountProtocolWrapper::set_target_ra(double ra_hours) {
     const std::string command = ":Sr" + util::format_hms(ra_hours);
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sr");
-    if (!response.empty() && response[0] != '1') {
+    // #2408: an empty reply did not confirm the target, so the GOTO that follows would aim at whatever the mount held.
+    if (response.empty() || response[0] != '1') {
+        if (response.empty()) {
+            throw AlpacaException("ZWO mount did not confirm target RA", AlpacaError::DriverException);
+        }
         throw AlpacaException("ZWO mount rejected target RA", AlpacaError::InvalidValue);
     }
 }
@@ -1580,7 +1584,11 @@ void ZWOMountProtocolWrapper::set_target_dec(double dec_degrees) {
     const std::string command = ":Sd" + util::format_dms(dec_degrees, 2, ':');
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sd");
-    if (!response.empty() && response[0] != '1') {
+    // #2408: an empty reply did not confirm the target, so the GOTO that follows would aim at whatever the mount held.
+    if (response.empty() || response[0] != '1') {
+        if (response.empty()) {
+            throw AlpacaException("ZWO mount did not confirm target Dec", AlpacaError::DriverException);
+        }
         throw AlpacaException("ZWO mount rejected target Dec", AlpacaError::InvalidValue);
     }
 }
@@ -1605,15 +1613,15 @@ void ZWOMountProtocolWrapper::sync_target_equatorial(double ra_hours, double dec
 bool ZWOMountProtocolWrapper::goto_target() {
     const std::string response = trim_copy(send_command(":MS", false));
     throw_if_mount_error(response, ":MS");
-    if (response.empty()) {
-        // TODO: Confirm whether all mount firmware revisions always reply to :MS.
-        return true;
-    }
     if (response == "0" || response == "1") {
         return true;
     }
-    if (response == "N/A") {
-        return true;
+    // #2408 (#2396 AB-2): no reply, or "N/A", says nothing about whether the GOTO started, so it is not acceptance.
+    // The driver stops the mount and fails the slew (is_ms_unconfirmed_error()).
+    if (response.empty() || response == "N/A") {
+        throw AlpacaException(std::string(kGotoNotConfirmed) + " (\":MS\" got " +
+                                  (response.empty() ? std::string("no reply") : "\"" + response + "\"") + ")",
+                              AlpacaError::DriverException);
     }
     return false;
 }

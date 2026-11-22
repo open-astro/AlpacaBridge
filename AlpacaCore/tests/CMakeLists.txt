@@ -34,6 +34,7 @@ set(TEST_SOURCES
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
+    test_host_clock_write_gate.cpp
     test_image_validation.cpp
     test_motion_limits.cpp
     test_poll_settle.cpp
@@ -41,6 +42,7 @@ set(TEST_SOURCES
     test_device_location_store.cpp
     test_power_port_state_store.cpp
     test_power_port_switch_driver.cpp
+    test_soft_pwm_ports.cpp
     test_rotator_sync_offset_store.cpp
     test_unique_id.cpp
     test_polled_state.cpp

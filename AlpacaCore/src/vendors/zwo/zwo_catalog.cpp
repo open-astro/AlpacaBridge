@@ -134,7 +134,7 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
         }
         asiair_config.power_on_state =
             util::parse_power_on_state(config.get(kZwoPowerOnState)).value_or(util::PowerOnState::Leave);
-        return vendor::zwo::create_zwo_asiair_switch(device_number, std::move(asiair_config));
+        return vendor::zwo::create_zwo_asiair_switch(device_number, asiair_config);
     }
 
     const ZwoDewHeaterBinding binding = zwo_dew_heater_binding(config);

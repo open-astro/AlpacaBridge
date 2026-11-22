@@ -1,0 +1,88 @@
+FAKE REPORT: ConformU against FakeCelestronFocuser (simulated focus motor over a pseudo-terminal), not hardware. Not hardware validation.
+12:41:15.016 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 14:09:42          
+12:41:15.016                                              
+12:41:15.017 Operating system is Ubuntu 24.04.5 LTS, Processor is ARM 64bit, Application is 64bit.          
+12:41:15.017                                              
+12:41:15.017 Alpaca device:  (127.0.0.1:11111 Focuser/0)          
+12:41:15.017                                              
+12:41:15.017 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11111, Alpaca device number: 0
+12:41:15.024 CreateDevice                        INFO     Alpaca device created OK
+12:41:15.024 CreateDevice                        INFO     Successfully created driver
+12:41:16.082 CreateDevice                        OK       Found a valid interface version: 4
+12:41:16.082 CreateDevice                        OK       Driver instance created successfully
+12:41:16.082                                              
+12:41:16.082 Connect to device                            
+12:41:16.161 Connected                           OK       Connected to device successfully using Connected = True
+12:41:16.715 Connected                           OK       Disconnected from device successfully using Connected = False
+12:41:17.219 Connect                             OK       Connected to device successfully using Connect()
+12:41:17.219                                              
+12:41:17.220 Common Driver Methods                        
+12:41:17.220 InterfaceVersion                    OK       4
+12:41:17.221 Connected                           OK       True
+12:41:17.223 Description                         OK       Celestron Focus Motor (USB)
+12:41:17.224 DriverInfo                          OK       AlpacaCore Celestron Focuser Driver
+12:41:17.225 DriverVersion                       OK       5.0.2
+12:41:17.225 Name                                OK       Celestron Focus Motor
+12:41:17.225                                              
+12:41:17.228 SupportedActions                    OK       Found action: Calibrate
+12:41:17.234 SupportedActions                    OK       Found action: AbortCalibration
+12:41:17.234 SupportedActions                    OK       Found action: CalibrationStatus
+12:41:17.234                                              
+12:41:17.234 Action                              INFO     Conform cannot test the Action method
+12:41:17.234                                              
+12:41:17.238 DeviceState                         OK       Received 3 operational state properties.
+12:41:17.238 DeviceState                         OK         IsMoving = False
+12:41:17.238 DeviceState                         OK         Position = 31000
+12:41:17.238 DeviceState                         OK         TimeStamp = 11/22/2026 12:41:17
+12:41:17.242 DeviceState                         INFO     Operational property Temperature was not included in the DeviceState response.
+12:41:17.242                                              
+12:41:17.242 Properties                                   
+12:41:17.243 Absolute                            OK       True
+12:41:17.243 IsMoving                            OK       False
+12:41:17.245 MaxStep                             OK       60000
+12:41:17.246 MaxIncrement                        OK       60000
+12:41:17.246 Position                            OK       31000
+12:41:17.255 StepSize                            OK       Optional member returned a NotImplementedException error.
+12:41:17.257 TempCompAvailable                   OK       False
+12:41:17.258 TempComp Read                       OK       False
+12:41:17.259 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+12:41:17.260 Temperature                         OK       Optional member returned a NotImplementedException error.
+12:41:17.264                                              
+12:41:17.264 Methods                                      
+12:41:17.266 Halt                                OK       Focuser halted OK
+12:41:18.274 Move - TempComp False               OK       Absolute move OK
+12:41:19.277                                              
+12:41:19.277 Disconnect from device                       
+12:41:19.280 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+12:41:19.280                                              
+12:41:19.280 Conformance test has finished                
+12:41:19.280                                              
+12:41:19.280 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+12:41:19.280                                     
+12:41:19.280 Timing Summary                               See Help for further information.
+12:41:19.280 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+12:41:19.280 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+12:41:19.280 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+12:41:19.280 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+12:41:19.280                                              
+12:41:19.280 Connect                                      At 12:41:16.716 Connect                  0.001 seconds. ✓ (STANDARD)
+12:41:19.280 InterfaceVersion                             At 12:41:17.220 InterfaceVersion         0.000 seconds. ✓ (FAST)
+12:41:19.280 Connected                                    At 12:41:17.220 Connected                0.001 seconds. ✓ (FAST)
+12:41:19.280 Description                                  At 12:41:17.223 Description              0.002 seconds. ✓ (FAST)
+12:41:19.280 DriverInfo                                   At 12:41:17.224 DriverInfo               0.001 seconds. ✓ (FAST)
+12:41:19.280 DriverVersion                                At 12:41:17.225 DriverVersion            0.001 seconds. ✓ (FAST)
+12:41:19.280 Name                                         At 12:41:17.225 Name                     0.001 seconds. ✓ (FAST)
+12:41:19.280 SupportedActions                             At 12:41:17.228 SupportedActions         0.002 seconds. ✓ (FAST)
+12:41:19.280 DeviceState                                  At 12:41:17.238 DeviceState              0.004 seconds. ✓ (FAST)
+12:41:19.280 Absolute                                     At 12:41:17.243 Absolute                 0.001 seconds. ✓ (FAST)
+12:41:19.280 IsMoving                                     At 12:41:17.243 IsMoving                 0.001 seconds. ✓ (FAST)
+12:41:19.280 MaxStep                                      At 12:41:17.245 MaxStep                  0.002 seconds. ✓ (FAST)
+12:41:19.280 MaxIncrement                                 At 12:41:17.246 MaxIncrement             0.001 seconds. ✓ (FAST)
+12:41:19.280 Position                                     At 12:41:17.246 Position                 0.001 seconds. ✓ (FAST)
+12:41:19.280 TempCompAvailable                            At 12:41:17.257 TempCompAvailable        0.001 seconds. ✓ (FAST)
+12:41:19.280 TempComp Read                                At 12:41:17.258 TempComp Read            0.001 seconds. ✓ (FAST)
+12:41:19.280 Halt                                         At 12:41:17.266 Halt                     0.003 seconds. ✓ (STANDARD)
+12:41:19.280 Move to 37000                                At 12:41:17.269 Move to 37000            0.001 seconds. ✓ (STANDARD)
+12:41:19.280 Disconnect                                   At 12:41:19.278 Disconnect               0.001 seconds. ✓ (STANDARD)
+12:41:19.280                                              
+12:41:19.280 Congratulations, all members returned within their target response times!!          

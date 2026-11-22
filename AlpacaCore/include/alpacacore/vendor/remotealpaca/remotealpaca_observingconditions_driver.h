@@ -14,10 +14,11 @@
 
 // The remotealpaca ObservingConditions proxied device (decision 0023, issue #1753 slice 3): one ObservingConditions
 // device of an upstream Alpaca server, served as a device of this server with this server's own device number and
-// UniqueID. The getters answer from a polled snapshot of the upstream (decision 0010) and never wait on it (decision
-// 0016); the poll's link health follows decision 0009 through util::PolledLinkHealth, and a refused connection is a
-// lost link at once. The upstream's ErrorNumber and ErrorMessage pass through unchanged, after its host (decision 0023
-// rule 5); an upstream that is this server is refused at configure and at Connect (rule 4).
+// UniqueID. The getters answer from a polled snapshot of the upstream through util::PolledState (decision 0010) and
+// never wait on it (decision 0016); the poll's link health follows decision 0009 with a loss bound of
+// max(util::kLinkStalenessBound, 3 x poll period), and a refused connection is a lost link at once. The upstream's
+// ErrorNumber and ErrorMessage pass through unchanged, after its host (decision 0023 rule 5); an upstream that is this
+// server is refused at configure and at Connect (rule 4).
 
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/util/http_client.h>

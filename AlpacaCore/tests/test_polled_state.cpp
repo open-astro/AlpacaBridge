@@ -66,11 +66,14 @@ struct Rig {
     std::function<void()> during;
     std::unique_ptr<PolledState<Frame>> state;
 
-    explicit Rig(int threshold = 3, std::chrono::nanoseconds max_age = 2 * kPeriod) {
+    // With no `loss_bound` the Config keeps its default.
+    explicit Rig(int threshold = 3, std::chrono::nanoseconds max_age = 2 * kPeriod,
+                 std::optional<std::chrono::nanoseconds> loss_bound = std::nullopt) {
         PolledState<Frame>::Config config;
         config.period = kPeriod;
         config.fault_threshold = threshold;
         config.max_age = max_age;
+        if (loss_bound) config.loss_bound = *loss_bound;
         config.log_tag = "Test";
         state = std::make_unique<PolledState<Frame>>(
             clock, generation, config,
@@ -369,6 +372,64 @@ TEST_CASE("PolledState - max_age must undercut the link staleness bound", "[poll
     config.max_age = alpacacore::util::kLinkStalenessBound;
     config.log_tag = "Test";
     CHECK_THROWS_AS(PolledState<Frame>(clock, generation, config, [] { return Frame{}; }, [] {}), AlpacaException);
+}
+
+// Falsified by: polled_state.h:poll_once() compare the frame's age with kLinkStalenessBound, not config_.loss_bound.
+TEST_CASE("PolledState - a longer loss_bound admits a longer max_age and moves the loss to it",
+          "[polled_state][unit]") {
+    SECTION("a 60 s max_age under a 90 s bound constructs; max_age at the bound is refused") {
+        CHECK_NOTHROW(Rig(3, 60s, 90s));
+        CHECK_THROWS_AS(Rig(3, 90s, 90s), AlpacaException);
+    }
+    SECTION("a frame 40 s old is stale but not lost; past 90 s it is lost") {
+        Rig rig(3, 20s, 90s);  // stale past 20 s, lost at 90 s
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.silent = true;  // answers every probe, publishes nothing: the frame ages
+
+        rig.clock.advance(40s);
+        const auto reading = rig.state->served();
+        CHECK(reading.stale);
+        CHECK(reading.value.value == 1);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+
+        rig.clock.advance(50s - 1ms);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+        rig.clock.advance(1ms);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        CHECK(rig.lost_calls.load() == 1);
+        rig.state->stop_and_join();
+    }
+    SECTION("a fault latched with the frame is lost at 90 s, not at 30 s") {
+        Rig rig(3, 60s, 90s);
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.fail = true;
+        for (int i = 0; i < 3; ++i) rig.state->poll_now_for_testing();
+        REQUIRE_FALSE(rig.state->fault().empty());
+
+        rig.clock.advance(40s);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+        rig.clock.advance(50s);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        CHECK(rig.lost_calls.load() == 1);
+        rig.state->stop_and_join();
+    }
+    SECTION("the default bound still loses the frame at util::kLinkStalenessBound") {
+        Rig rig(1000);
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.silent = true;
+        rig.clock.advance(alpacacore::util::kLinkStalenessBound);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        rig.state->stop_and_join();
+    }
 }
 
 namespace {
