@@ -377,7 +377,9 @@ datagrams before each send so replies cannot get off-by-one.
   `start_slew_body()`. A PulseGuide while `slew_running()` is refused with `InvalidOperation` (a Park
   keeps its earlier `InvalidWhileParked` refusal), and so is one while the driver's own goto or FindHome flags
   are up (`own_slew_in_flight_locked()`), because a jog between `start_goto()`'s or `find_home()`'s unlock and
-  the body's first dispatch takes an axis from the slew claim (#2503). A PulseGuide on the axis a non-zero
+  the body's first dispatch takes an axis from the slew claim (#2503). Those flags include `restoring_tracking_`,
+  so a PulseGuide right after a GOTO is refused with `InvalidOperation` until the post-GOTO tracking restore ends
+  (Slewing reads true until then). A PulseGuide on the axis a non-zero
   MoveAxis drives, from its claim (`jog_pending_`, over its dispatch stop-wait) until its stop is sent, is
   refused with `InvalidOperation` before anything is sent, and the jog runs on; the other axis is not checked
   (#2503, the maintainer decision of 2026-11-22, as #2467 for SynScan and #2506 for ZWO). A moving MoveAxis supersedes its own axis's pulse
