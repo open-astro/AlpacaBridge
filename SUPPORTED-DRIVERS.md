@@ -763,8 +763,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingCondi
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | CGX-L | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
-| CGX | USB (direct AUX) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/CGX/) |
-| CGX | WiFi (SkyPortal adapter) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/CGX/) |
+| CGX | USB (direct AUX) or WiFi (SkyPortal adapter) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/CGX/) |
 
 <details>
 <summary><strong>Celestron Driver Notes</strong></summary>
