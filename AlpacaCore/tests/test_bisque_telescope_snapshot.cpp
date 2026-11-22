@@ -620,7 +620,7 @@ TEST_CASE("Bisque snapshot - a getter is not blocked by the position measurement
     CHECK(rig.driver->get_right_ascension() == 5.75);
 }
 
-// Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the snapshot_.write on the success branch.
+// Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the polled_.write on the success branch.
 TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live read through to the frame",
           "[bisque][telescope][snapshot]") {
     Rig rig;
