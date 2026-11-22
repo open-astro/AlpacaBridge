@@ -1940,13 +1940,21 @@ public:
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
+        refuse_pulse_during_slew_locked();        // #2504: after the parked and fault checks, before anything is sent
+        const int axis = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
+        // #2503 (the #2467 rule): a pulse on the axis a non-zero MoveAxis drives would run into the jog, so it is
+        // refused and the jog runs on. The other axis is not checked. MoveAxis sets the flag under the operation lock
+        // this call holds, so no jog lands between the check and the send.
+        if (manual_axis_slewing_[axis]) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
+        }
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here:
         // IsPulseGuiding reads the axis's hold window. Each axis has its own
         // (OnStepX times each axis on its own), so a shorter pulse on one axis
         // does not end the other's.
-        const int axis = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
         const auto now = clock_.now();
         const auto pulse = std::chrono::milliseconds(duration);
         // The other axis's pulse outlasts this one: its pulse-end body, which measures after the later end, stays.
@@ -3693,6 +3701,22 @@ private:
         }
         if (frame_status_locked().is_homing) {
             throw AlpacaException(std::string(who) + " is not allowed while the mount is homing",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // #2504, ITelescopeV4: a guide pulse during a GOTO, a Park or a FindHome changes the motion the mount runs, so a
+    // PulseGuide is refused while one runs, before anything is sent. Both sources count. The driver's state covers what
+    // the mount's status does not show yet: its slew grace (decision 0022) and a Park or FindHome still to be sent once
+    // its stops have settled (park_home_request_). The frame covers the motion itself: a GOTO (written through at its
+    // dispatch), a park or home the mount took (written through as slewing), then 'I' parking and 'h' homing from the
+    // mount. The frame is read, not :GU#, so a guide pulse costs no extra exchange. A MoveAxis is not a slew here
+    // ('N' covers a GOTO only).
+    void refuse_pulse_during_slew_locked() const {
+        const MountStatus status = frame_status_locked();
+        if (slew_hold_.active(clock_.now()) || park_home_request_ || status.is_slewing || status.is_parking ||
+            status.is_homing) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
                                   AlpacaError::InvalidOperation);
         }
     }

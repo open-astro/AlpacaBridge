@@ -1953,6 +1953,7 @@ struct ParkHomeFake {
     bool tracking = true;       // false: 'n' in :GU#
     bool home_ack_25 = false;   // :hC# accepted with :GE# 25 instead of 0
     bool park_zero_ok = false;  // :hP# accepted, reply reads '0', :GE# 00
+    bool park_runs = false;     // :hP# accepted: the park runs ('I' and a GOTO) until the case ends it
     std::string ge_reply;       // non-empty: :GE# answers this instead of the code
     bool silent_after_ge = false;  // goes silent once it has answered a :GE#
     int brake_ms = 300;
@@ -2051,7 +2052,12 @@ struct ParkHomeFake {
             if (last_error == 9) parked = true;  // "already parked": the mount is parked
             if (last_error != 0) return "0";
             last_error = park_zero_ok ? 0 : 25;
-            parked = true;
+            if (park_runs) {
+                parking = true;
+                goto_active = true;
+            } else {
+                parked = true;
+            }
             return garbled_accept || park_zero_ok ? "0" : "1";
         }
         if (chunk.rfind(":hC", 0) == 0) {
@@ -2760,6 +2766,131 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew and a MoveAxis stop on its axis e
         driver->move_axis(0, 0.0);
         CHECK(driver->get_is_pulse_guiding());
     }
+    driver->set_connected(false);
+}
+
+// #2504, ITelescopeV4: a guide pulse during a GOTO, a Park or a FindHome changes the motion the mount runs, so a
+// PulseGuide is refused with InvalidOperation while the driver's own slew, park or home runs: before anything is sent,
+// with nothing stopped. Each leg covers the window the driver alone knows (the slew grace, the write-through of a
+// park or home the mount took, a Park still to be sent after its stops) and the one the mount's status shows (a GOTO,
+// 'I' parking, 'h' homing). Once the motion ends the pulse is accepted; a park ends parked, where InvalidWhileParked
+// answers, as before.
+TEST_CASE(
+    "OnStep Telescope Driver - PulseGuide while a GOTO, Park or FindHome runs is refused and sends nothing (#2504)",
+    "[onstep][telescope][unit][goto-safety]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    using alpacacore::test::error_code_of;
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto refused = [&](int direction) {
+        const auto stops = mount->count(":Q");
+        CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == AlpacaError::InvalidOperation);
+        CHECK(mount->count(":Mg") == 0);
+        CHECK(mount->count(":Q") == stops);  // the motion was not stopped
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    };
+    // The fake clock does not move in these legs, so the poll ticks only here: the case decides what each frame holds.
+    const auto poll = [&] { REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver)); };
+    const auto change = [&](const std::function<void(ParkHomeFake&)>& apply) {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        apply(*mount);
+    };
+
+    SECTION("a GOTO") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 10.0));
+        refused(0);  // in the slew grace
+        poll();      // the mount shows the GOTO
+        refused(2);
+        change([](ParkHomeFake& m) { m.goto_active = false; });
+        poll();  // landed
+        CHECK(error_code_of([&] { driver->pulse_guide(2, 1000); }) == 0);
+        CHECK(mount->count(":Mge1000#") == 1);
+    }
+    SECTION("a Park still to be sent after its stops") {
+        start_move(*driver, *mount, 0, 1.0);  // so the park waits in its body for the mount to be still
+        const auto waits_before = mount->clock.wait_count();
+        REQUIRE_NOTHROW(driver->park());
+        REQUIRE(driver->get_slewing());
+        refused(0);
+        settle(*mount, *driver, waits_before);
+        REQUIRE(driver->get_at_park());
+        CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == AlpacaError::InvalidWhileParked);
+        CHECK(mount->count(":Mg") == 0);
+    }
+    SECTION("a Park the mount runs") {
+        mount->park_runs = true;
+        REQUIRE_NOTHROW(driver->park());  // a still mount: :hP# goes out at once and the mount takes it
+        refused(0);                       // the park's write-through
+        poll();                           // the mount shows 'I' and the GOTO
+        refused(2);
+        change([](ParkHomeFake& m) {
+            m.parking = false;
+            m.goto_active = false;
+            m.parked = true;
+        });
+        poll();
+        CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == AlpacaError::InvalidWhileParked);
+        CHECK(mount->count(":Mg") == 0);
+    }
+    SECTION("a FindHome") {
+        REQUIRE_NOTHROW(driver->find_home());  // a still mount: :hC# goes out at once
+        refused(0);                            // the home's write-through
+        change([](ParkHomeFake& m) { m.homing = true; });
+        poll();  // a home with switches: 'h', no GOTO
+        refused(2);
+        change([](ParkHomeFake& m) { m.homing = false; });
+        poll();
+        CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == 0);
+        CHECK(mount->count(":Mgn1000#") == 1);
+    }
+    driver->set_connected(false);
+}
+
+// #2503 (maintainer decision of 2026-11-22, the #2467 rule): a PulseGuide on the axis a non-zero MoveAxis drives is
+// refused with InvalidOperation. Nothing is sent and the jog runs on. A pulse on the other axis is accepted and leaves
+// the jog running, and once the jog is stopped a pulse on its axis is accepted again.
+TEST_CASE("OnStep Telescope Driver - PulseGuide on the axis a MoveAxis drives is refused and the jog runs on (#2503)",
+          "[onstep][telescope][unit][goto-safety]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    using alpacacore::test::error_code_of;
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    const int direction = axis == 0 ? 2 : 0;        // East on RA, North on Dec
+    const int other_direction = axis == 0 ? 0 : 2;  // North on Dec, East on RA
+    const std::string guide = axis == 0 ? ":Mge" : ":Mgn";
+    const std::string other_guide = axis == 0 ? ":Mgn" : ":Mge";
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto jogging = [&] {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        return mount->guide_active && !mount->stopping;
+    };
+    start_move(*driver, *mount, axis, 1.0);
+    const auto stops = mount->count(":Q");
+
+    CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == AlpacaError::InvalidOperation);
+    CHECK(mount->count(":Mg") == 0);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(mount->count(":Q") == stops);  // nothing stopped the jog
+    CHECK(jogging());
+    CHECK(driver->get_slewing());
+
+    CHECK(error_code_of([&] { driver->pulse_guide(other_direction, 1000); }) == 0);  // the other axis is not refused
+    CHECK(mount->count(other_guide) == 1);
+    CHECK(mount->count(guide) == 0);
+    CHECK(mount->count(":Q") == stops);
+    CHECK(jogging());
+    CHECK(driver->get_slewing());
+
+    driver->move_axis(axis, 0.0);
+    CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == 0);  // the refusal ended with the jog
+    CHECK(mount->count(guide) == 1);
     driver->set_connected(false);
 }
 
