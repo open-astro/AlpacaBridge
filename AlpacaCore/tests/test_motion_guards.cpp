@@ -512,6 +512,35 @@ TEST_CASE("LandingGate - a still mount more than 600 arcsec off in RA or Dec is 
     }
 }
 
+// Falsified by: axis_miss_arcsec() returning the NaN that std::max keeps, so `NaN > tolerance` is false and a NaN or
+// infinite position reads as still and on target (#2464).
+TEST_CASE("LandingGate - a non-finite position is never still and never lands", "[motion-guards]") {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    SECTION("axis_miss_arcsec is +inf") {
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{nan, 20.0}, MountPosition{6.0, 20.0})));
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{6.0, nan}, MountPosition{6.0, 20.0})));
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{6.0, 20.0}, MountPosition{inf, 20.0})));
+    }
+    SECTION("NaN Dec") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(1000ms, 6.0, nan)) == Landing::Settling);
+    }
+    SECTION("NaN RA") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, nan, 20.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, nan, 20.0)) == Landing::Settling);
+    }
+    SECTION("a still mount on target after NaN reads still lands") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(100ms, 6.0, 20.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(600ms, 6.0, 20.0)) == Landing::Landed);
+    }
+}
+
 TEST_CASE("LandingGate - status stopped 4.7 deg off and still moving, then settling on target, lands",
           "[motion-guards]") {
     // #2396 rig evidence (HAE29C over USB): the status read stopped while Dec was still 4.7 deg from the target, and
@@ -663,8 +692,8 @@ TEST_CASE("RelinkMotionStop - a loss during a GoTo or MoveAxis owes one stop unt
 // verified stop; an AbortSlew on the test thread cancels the slot under a stand-in for the driver mutex_ and sends its
 // own stop over a stand-in for the I/O lock. In the gated rounds the body's first stop blocks on a latch until the
 // AbortSlew has run, so the AbortSlew provably lands while the deadline body is inside its stop; the ungated rounds
-// let the two race freely. Either way the deadline body sends at most one stop and keeps no error: the canceller
-// owns the mount (decision 0006 rule 6).
+// let the two race freely. Either way the deadline body sends at most one stop (exactly one in the gated rounds; none
+// when the cancel lands before it) and keeps no error: the canceller owns the mount (decision 0006 rule 6).
 TEST_CASE("enforce_motion_deadline - an AbortSlew racing the deadline expiry leaves one owner of the stop",
           "[motion-guards][stress-guard]") {
     for (int round = 0; round < 100; ++round) {
@@ -724,7 +753,9 @@ TEST_CASE("enforce_motion_deadline - an AbortSlew racing the deadline expiry lea
         CHECK_FALSE(slot.last_failure().has_value());
         CHECK(abort_stops == 1);
         CHECK(body_stops <= 1);
-        CHECK(reads == 0);  // a cancelled stop reads nothing more
+        // A cancelled stop reads nothing more. In the ungated rounds this also holds only because the fake clock never
+        // advances during the stop's kStopVerifyPollInterval wait, so the cancel always lands before a first poll.
+        CHECK(reads == 0);
         if (gated) {
             CHECK(body_stops == 1);
         }

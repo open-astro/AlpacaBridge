@@ -80,13 +80,12 @@ inline double wrap_hour_angle(double hours) {
     return wrapped;
 }
 
-/// `target - current` wrapped into [-12, 12] hours: the short way round.
+/// `target - current` wrapped into [-12, 12] hours: the short way round. NaN when either input is not finite (#2464).
 inline double shortest_ra_delta_hours(double target_hours, double current_hours) {
-    double delta = target_hours - current_hours;
-    while (delta > 12.0) {
+    double delta = std::fmod(target_hours - current_hours, 24.0);
+    if (delta > 12.0) {
         delta -= 24.0;
-    }
-    while (delta < -12.0) {
+    } else if (delta < -12.0) {
         delta += 24.0;
     }
     return delta;
@@ -302,6 +301,11 @@ inline void validate_longitude(double degrees) {
 /// Great-circle separation in arcseconds between two points given as longitude-like and latitude-like degrees
 /// (RA in degrees and Dec, or azimuth and altitude).
 inline double angular_separation_arcsec(double lon1_deg, double lat1_deg, double lon2_deg, double lat2_deg) {
+    // A non-finite input is the largest separation, 180 degrees, so every tolerance check fails closed and a
+    // caller can still print it (#2464).
+    if (!std::isfinite(lon1_deg) || !std::isfinite(lat1_deg) || !std::isfinite(lon2_deg) || !std::isfinite(lat2_deg)) {
+        return 648000.0;
+    }
     constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
     const double dlat = (lat2_deg - lat1_deg) * kDegToRad;
     const double dlon = (lon2_deg - lon1_deg) * kDegToRad;

@@ -164,6 +164,38 @@ TEST_CASE("pointing - shortest_ra_delta_hours keeps plus or minus 12 at the half
     CHECK(pointing::shortest_ra_delta_hours(23.99, 0.0) == Approx(-0.01).epsilon(0).margin(1e-9));
 }
 
+// Falsified by: shortest_ra_delta_hours() with the while loops back (+-inf never returns, so the run times out, and
+// 1e300 effectively never does), or a wrap that maps a non-finite delta to a finite value (#2464).
+TEST_CASE("pointing - shortest_ra_delta_hours returns NaN for a non-finite delta and wraps a huge one",
+          "[util][pointing]") {
+    const double inf = std::numeric_limits<double>::infinity();
+    CHECK(std::isnan(pointing::shortest_ra_delta_hours(inf, 0.0)));
+    CHECK(std::isnan(pointing::shortest_ra_delta_hours(-inf, 0.0)));
+    CHECK(std::isnan(pointing::shortest_ra_delta_hours(0.0, inf)));
+    CHECK(std::isnan(pointing::shortest_ra_delta_hours(std::numeric_limits<double>::quiet_NaN(), 0.0)));
+    const double huge = pointing::shortest_ra_delta_hours(1e300, 0.0);
+    CHECK(huge >= -12.0);
+    CHECK(huge <= 12.0);
+    CHECK(pointing::shortest_ra_delta_hours(36.0, 0.0) == 12.0);
+    CHECK(pointing::shortest_ra_delta_hours(-36.0, 0.0) == -12.0);
+    CHECK(pointing::shortest_ra_delta_hours(13.0, 0.0) == -11.0);
+    CHECK(pointing::shortest_ra_delta_hours(-13.0, 0.0) == 11.0);
+    CHECK(pointing::shortest_ra_delta_hours(50.0, 1.0) == 1.0);
+}
+
+// Falsified by: angular_separation_arcsec() without its finite check and with a NaN-propagating clamp, so a NaN
+// input returns NaN and SynScan's park message casts it to long (UB) (#2464).
+TEST_CASE("pointing - angular_separation_arcsec returns the largest separation for a non-finite input",
+          "[util][pointing]") {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    CHECK(pointing::angular_separation_arcsec(nan, 0.0, 0.0, 0.0) == 648000.0);
+    CHECK(pointing::angular_separation_arcsec(0.0, nan, 0.0, 0.0) == 648000.0);
+    CHECK(pointing::angular_separation_arcsec(0.0, 0.0, inf, 0.0) == 648000.0);
+    CHECK(pointing::angular_separation_arcsec(0.0, 0.0, 0.0, -inf) == 648000.0);
+    CHECK(pointing::angular_separation_arcsec(10.0, 20.0, 10.0, 20.0) == 0.0);
+}
+
 // Falsified by: pier_side_for_hour_angle() testing > 0 instead of >= 0 (HA 0
 // would be west), or returning the sides swapped.
 TEST_CASE("pointing - pier_side_for_hour_angle is 0 for HA at or above 0 and 1 below 0", "[util][pointing]") {
