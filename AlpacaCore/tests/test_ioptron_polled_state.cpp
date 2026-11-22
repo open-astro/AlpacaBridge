@@ -586,8 +586,9 @@ TEST_CASE("iOptron polled state - a wedged Park is finalized from the poll alone
 
 // The async landing gate runs in the poll (FINDINGS 1 of the plan). A GOTO at rest far from its target is a failed
 // operation, not a failed poll: the poll stores the error for Slewing to raise (the ASCOM async "Completion
-// property"), publishes the tick's frame (DeviceState's TimeStamp is that tick) and latches no fault however many
-// ticks follow. HEM27 (0025), so no GOTO trim reads run.
+// property") and publishes the tick's frame. The case checks right after the tick that decided it, before a later
+// good poll can hide a probe that threw: DeviceState's TimeStamp is that tick, and two failed polls after it do not
+// latch a fault (a deciding tick that threw would be failure 1 of 3). HEM27 (0025), so no GOTO trim reads run.
 TEST_CASE("iOptron polled state - a far miss the poll decides is raised by Slewing and is not a link fault",
           "[ioptron][telescope][polled][goto-safety]") {
     auto rig = make_tcp_rig();
@@ -604,23 +605,34 @@ TEST_CASE("iOptron polled state - a far miss the poll decides is raised by Slewi
     const int goto_before = mount.count(":MS1#");
     driver.slew_to_coordinates_async(12.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount, goto_before));
-    const int reads = poll_reads(mount);
-    for (int i = 0; i < 24; ++i) tick(clock);  // past the 5 s dispatch window and the landing samples, polls only
-    CHECK(poll_reads(mount) >= reads + 24);
-
-    const auto before = sent(mount);
+    // Past the 5 s dispatch window and the landing samples, one poll at a time, until Slewing raises.
     std::string message;
-    CHECK(alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_slewing()); }, &message) ==
-          AlpacaError::DriverException);
+    int code = 0;
+    for (int i = 0; i < 30 && code == 0; ++i) {
+        tick_and_require_a_poll(clock, mount);
+        code = alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_slewing()); }, &message);
+    }
+    REQUIRE(code == AlpacaError::DriverException);
+
+    // At once, after the deciding tick: its frame is published, and nothing is sent to read it.
+    const auto before = sent(mount);
     CHECK(contains(message, "from the target"));
     CHECK(driver.get_connected());
     CHECK(driver.get_link_fault().empty());
     const auto state = driver.get_device_state();
     REQUIRE_FALSE(state.empty());
     const auto stamped = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(state));
-    CHECK(std::chrono::system_clock::now() - stamped < kPollPeriod);
+    CHECK(std::chrono::system_clock::now() - stamped < kPollPeriod);  // a probe that threw left the tick before's
     CHECK(sent(mount) == before);
     CHECK(mount.count(":Q#") == 0);  // at rest: no stop
+
+    // The far miss was not a failed poll: two failed polls after it stay under the threshold of three.
+    mount.set_fail_reads(true);
+    tick_and_require_a_poll(clock, mount);
+    tick_and_require_a_poll(clock, mount);
+    CHECK(driver.get_link_fault().empty());
+    CHECK(alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_slewing()); }) ==
+          AlpacaError::DriverException);
 }
 
 // Issue #2491 rule 8 and decision 0010 rule 5: DeviceState's TimeStamp is when the frame was measured. A poll that
