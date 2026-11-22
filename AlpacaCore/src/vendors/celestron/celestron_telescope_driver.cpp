@@ -124,6 +124,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
 }();
 // #2263: a PulseGuide while a slew, Park or FindHome runs (util::MotionOwner's refusal text).
 constexpr const char* kPulseRefusedText = "PulseGuide is not allowed while a slew, park or home is running";
+constexpr const char* kPulseOnJogRefusedText = "PulseGuide is not allowed on an axis MoveAxis is moving";
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -1917,6 +1918,12 @@ public:
             // 0 North and 1 South move Dec (axis 1), 2 East and 3 West move RA (axis 0). North and West are positive
             // (East slows tracking, so RA increases on the sky); a rate that rounds to 0 still moves one step.
             axis = direction <= 1 ? 1 : 0;
+            // #2503: refused on the axis a non-zero MoveAxis drives, before the pier read, so the guide write never
+            // goes into the running jog. The other axis is not checked. The initiator lock keeps every MoveAxis out
+            // until this call returns, so the jog cannot start or stop after this check.
+            if (manual_axis_slewing_[axis]) {
+                throw AlpacaException(kPulseOnJogRefusedText, AlpacaError::InvalidOperation);
+            }
             const int sign = (direction == 0 || direction == 3) ? 1 : -1;
             const double rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
             velocity = sign * static_cast<int>(std::round((rate / kSiderealDegPerSec) * 100.0));
