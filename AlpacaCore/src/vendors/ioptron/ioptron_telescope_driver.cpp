@@ -315,6 +315,7 @@ public:
         // started after find_home() releases its locks, so the same applies.
         stop_clock_sync();
         stop_zero_search_watchdog();
+        stop_motion_bound_watchdog();
         reap_slew_dispatch();
     }
     
@@ -456,6 +457,7 @@ public:
             // search watchdog takes both locks the same way (#2432).
             stop_clock_sync();
             stop_zero_search_watchdog();
+            stop_motion_bound_watchdog();
             {
                 std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
                 reap_slew_dispatch();
@@ -935,7 +937,10 @@ public:
                 pulse_position_correction_[kDecAxis].clear();
                 last_dec_read_degrees_ = dec_value;
                 last_dec_read_valid_ = true;
-                return dec_value + sync_offset_dec_degrees_;
+                // The Sync offset model adds a constant, so at the pole it would report past +-90 (Dec 90.71 at the
+                // HAE29C's home after a plate-solve Sync, 2026-11-22). Declination is -90 to 90 (ASCOM); a slew target
+                // past the pole is already clamped where the wrapper writes :Sd (set_target_dec()).
+                return std::clamp(dec_value + sync_offset_dec_degrees_, -90.0, 90.0);
             });
     }
     
@@ -1303,6 +1308,12 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
+        move_axis_under_lock(axis, rate);
+        // Issue #2396 (AB-9): every MoveAxis with a non-zero rate restarts the dead-man (kMaxMoveAxisDuration).
+        if (rate != 0.0) start_motion_bound_watchdog();
+    }
+
+    void move_axis_under_lock(int axis, double rate) {
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
                                   AlpacaError::InvalidValue);
@@ -1389,6 +1400,7 @@ public:
             if (!was_any_axis_active && !tracking_state_before_move_.has_value()) {
                 tracking_state_before_move_ = cached_status_.is_tracking;
             }
+            move_axis_deadline_ = clock_.now() + kMaxMoveAxisDuration;
         }
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
@@ -1549,11 +1561,93 @@ public:
                         throw_if_link_lost();
                     }
                 }
+                // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
+                if (slew_in_progress_ && equatorial_slew_ && landing_gate_generation_ != 0 &&
+                    landing_gate_generation_ == slew_operation_generation_) {
+                    if (!lock_gate_.holds_io()) {
+                        throw RefillNeedsOperationLock{};
+                    }
+                    if (!async_goto_landed_locked(now)) {
+                        return true;
+                    }
+                }
                 slew_in_progress_ = false;
                 return false;
             });
     }
-    
+
+    // Issue #2396 (AB-7): the async GOTO landing gate, run by the Slewing read once the status reads stopped. The
+    // HAE29C status can read stopped while the mount still moves (over Wi-Fi by tens of degrees, and over USB 1 to 2 s
+    // early, #2396 RC51 trace), so Slewing stays true until two position reads at least kLandingSampleGap apart agree
+    // within kLandingStableArcsec, unless a read finds it within kLandingOnTargetArcsec of the target, which lands it
+    // at once (a GOTO that arrived reads as before). A failed read is no sample: Slewing stays true, and three in a row
+    // latch the fault.
+    // A mount that came to rest more than kSlewFarMissArcsec from the target did not land: the failure is stored and
+    // raised (the mount is at rest, so no stop is sent). The gate keeps one sample and its time and never sleeps.
+    bool async_goto_landed_locked(std::chrono::steady_clock::time_point now) const {
+        try {
+            refresh_position_cache_locked(true);
+        } catch (const std::exception&) {
+            throw_if_link_lost();
+            landing_prev_valid_ = false;
+            return false;
+        }
+        const double ra = cached_ra_hours_;
+        const double dec = cached_dec_degrees_;
+        const auto target_miss_arcsec = [&](double ra_hours, double dec_degrees) {
+            const double ra_sky = std::abs(util::shortest_ra_delta_hours(ra_hours, slew_target_ra_hours_)) * 15.0 *
+                                  3600.0 * std::cos(slew_target_dec_degrees_ * std::numbers::pi / 180.0);
+            return std::pair<double, double>{ra_sky, std::abs(dec_degrees - slew_target_dec_degrees_) * 3600.0};
+        };
+        // On the target: landed at once, so a GOTO that arrived reads as before (the gate only holds a mount that
+        // reads stopped away from its target).
+        if (const auto [ra_miss, dec_miss] = target_miss_arcsec(ra, dec);
+            ra_miss <= kLandingOnTargetArcsec && dec_miss <= kLandingOnTargetArcsec) {
+            landing_gate_generation_ = 0;
+            return true;
+        }
+        // The gate is bounded too: a mount still not settled at the GOTO's kSlewTimeout bound is stopped.
+        if (now >= slew_bound_deadline_) {
+            landing_gate_generation_ = 0;
+            if (!stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) +
+                                            " s")) {
+                throw_if_link_lost();  // NotConnected; the relink stop is recorded from the flags kept
+            }
+            throw AlpacaException(last_slew_error_);
+        }
+        if (!landing_prev_valid_) {
+            landing_prev_valid_ = true;
+            landing_prev_ra_hours_ = ra;
+            landing_prev_dec_degrees_ = dec;
+            landing_prev_time_ = now;
+            return false;
+        }
+        if (now - landing_prev_time_ < kLandingSampleGap) {
+            return false;
+        }
+        const double ra_delta = std::abs(util::shortest_ra_delta_hours(ra, landing_prev_ra_hours_)) * 15.0 * 3600.0 *
+                                std::cos(dec * std::numbers::pi / 180.0);
+        const double dec_delta = std::abs(dec - landing_prev_dec_degrees_) * 3600.0;
+        landing_prev_ra_hours_ = ra;
+        landing_prev_dec_degrees_ = dec;
+        landing_prev_time_ = now;
+        if (ra_delta >= kLandingStableArcsec || dec_delta >= kLandingStableArcsec) {
+            return false;
+        }
+        landing_gate_generation_ = 0;
+        const auto [ra_sky_arcsec, dec_arcsec] = target_miss_arcsec(ra, dec);
+        if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
+            slew_in_progress_ = false;
+            last_slew_error_ = "Async GoTo failed: the mount stopped " +
+                               std::to_string(static_cast<long>(std::lround(ra_sky_arcsec))) + " arcsec (RA) and " +
+                               std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
+                               " arcsec (Dec) from the target";
+            ALPACA_LOG_INFO("iOptron", last_slew_error_);  // a client-visible failure (decision 0007 rule 9)
+            throw AlpacaException(last_slew_error_);
+        }
+        return true;
+    }
+
     double get_target_declination() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
@@ -2012,6 +2106,7 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             equatorial_slew_ = true;
             generation = slew_operation_generation_;
+            arm_slew_bound_locked(generation);
         }
         start_slew_body(generation, previous_slew_error, "Failed to start async slew",
                         [this, phys_ra, phys_dec, generation](util::OperationContext& ctx) {
@@ -2019,6 +2114,7 @@ public:
                                 dispatch_slew_command_locked(phys_ra, phys_dec, &ctx, "SlewToCoordinatesAsync");
                             });
                         });
+        start_motion_bound_watchdog();
     }
     
     void slew_to_target() override {
@@ -2114,6 +2210,7 @@ public:
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
+            arm_slew_bound_locked(generation);
         }
 
         start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
@@ -2129,6 +2226,7 @@ public:
                                 dispatch_slew_command_locked(ra_hours, dec_degrees, &ctx, "SlewToAltAzAsync");
                             });
                         });
+        start_motion_bound_watchdog();
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -2616,6 +2714,15 @@ private:
         // slew complete before it started (caught by the loopback fake-mount
         // test). Every dispatch-failure path clears it again.
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
+    }
+
+    // Issue #2396 (AB-8): an async GOTO of @p generation that still moves kSlewTimeout after its start is stopped by
+    // the motion bound watchdog (the synchronous waiter has its own bound).
+    void arm_slew_bound_locked(std::uint64_t generation) {
+        slew_bound_deadline_ = clock_.now() + kSlewTimeout;
+        slew_bound_generation_ = generation;
+        landing_gate_generation_ = generation;  // AB-7: the Slewing read waits for a confirmed landing
+        landing_prev_valid_ = false;
     }
 
     void invalidate_slew_error_locked() {
@@ -3201,6 +3308,109 @@ private:
     // Cancel and join the zero search watchdog. Without mutex_ held; under transition_mutex_ (set_connected()) or in
     // the destructor, which serializes its reapers. The body never takes transition_mutex_.
     void stop_zero_search_watchdog() { zero_search_watchdog_.cancel_all_and_join(); }
+
+    // Issue #2396 (AB-8, AB-9): (re)starts the motion bound watchdog. Call with no driver lock held (decision 0006
+    // rule 4), after the MoveAxis or async GOTO published its deadline. The start supersedes a body already waiting,
+    // so a body that saw no motion and is on its way out can never leave the new motion unbounded. A start the slot
+    // refuses is logged and leaves the router's client-silence watchdog as the bound.
+    void start_motion_bound_watchdog() {
+        try {
+            motion_bound_watchdog_.start([this](util::OperationContext& ctx) { run_motion_bound_watchdog(ctx); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", std::string("Motion bound watchdog could not start: ") + e.what());
+        }
+    }
+
+    // Waits on the task clock for the nearer of the two deadlines. A MoveAxis still running at its deadline is
+    // stopped with :Q# and a stored error that Slewing raises. An async GOTO of the bounded generation is checked at
+    // its deadline: a status that still reads slewing, or one that cannot be read, stops it the same way; a mount that
+    // reads stopped is left for the Slewing read to land. Ends when no bounded motion runs, on a disconnect or when the
+    // slot stops it.
+    void run_motion_bound_watchdog(util::OperationContext& ctx) {
+        while (true) {
+            std::chrono::steady_clock::duration remaining{};
+            {
+                StateLock lock(lock_gate_);
+                // A lost link is the relink stop's (relink_stop_pending_, taken from the motion flags by the next
+                // Connect or Disconnect): send nothing and leave the flags for it.
+                if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None) return;
+                const bool axis_moving = axis_move_active_primary_ || axis_move_active_secondary_;
+                const bool slew_bounded = slew_in_progress_ && slew_bound_generation_ == slew_operation_generation_;
+                if (!axis_moving && !slew_bounded) return;
+                const auto now = clock_.now();
+                if (axis_moving && now >= move_axis_deadline_) {
+                    stop_bounded_motion_locked("MoveAxis ran for " + std::to_string(kMaxMoveAxisDuration.count()) +
+                                               " s with no new MoveAxis");
+                    return;
+                }
+                if (slew_bounded && now >= slew_bound_deadline_) {
+                    try {
+                        refresh_status_cache_locked(true);
+                        if (cached_status_.is_slewing) {
+                            stop_bounded_motion_locked("The slew did not end within " +
+                                                       std::to_string(kSlewTimeout.count()) + " s");
+                            return;
+                        }
+                    } catch (const std::exception& e) {
+                        if (link_lost()) return;
+                        stop_bounded_motion_locked("The slew status could not be read at its " +
+                                                   std::to_string(kSlewTimeout.count()) + " s bound (" + e.what() +
+                                                   ")");
+                        return;
+                    }
+                    slew_bound_generation_ = 0;  // checked once: the Slewing read lands it
+                    if (!axis_moving) return;
+                }
+                remaining = std::chrono::steady_clock::duration::max();
+                if (axis_moving) remaining = move_axis_deadline_ - now;
+                if (slew_bounded && slew_bound_generation_ != 0) {
+                    remaining = std::min(remaining, slew_bound_deadline_ - now);
+                }
+            }
+            if (!ctx.wait_for(remaining)) return;
+        }
+    }
+
+    // Ends the bounded motion: the error is stored before the stop goes out (the exchange gives up mutex_, and a
+    // reader in that gap must not take the motion for finished), then :Q#. The motion flags are cleared only after
+    // the stop was sent or failed on a live link: a stop the link loss refused leaves them, so the next Connect or
+    // Disconnect records the relink stop (relink_stop_pending_) from them. Returns false for that case (link lost).
+    // A bound that ends the motion is a client-visible failure (INFO, decision 0007 rule 9); a stop that could not
+    // be sent is WARN.
+    bool stop_bounded_motion_locked(const std::string& failure) const {
+        last_slew_error_ = failure + "; the mount was stopped";
+        bool stop_failed = false;
+        try {
+            wire().stop_slewing();
+        } catch (const std::exception& e) {
+            if (link_lost()) {
+                last_slew_error_ = failure + "; the link was lost before the stop, so the next Connect sends it";
+                ALPACA_LOG_WARN("iOptron", last_slew_error_);
+                return false;
+            }
+            last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
+            stop_failed = true;
+        }
+        slew_in_progress_ = false;
+        equatorial_slew_ = false;
+        axis_move_active_primary_ = false;
+        axis_move_active_secondary_ = false;
+        tracking_state_before_move_.reset();
+        driver_motion_ = DriverMotion::None;
+        slew_bound_generation_ = 0;
+        clear_slew_hold_locked();
+        if (stop_failed) {
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+        } else {
+            ALPACA_LOG_INFO("iOptron", last_slew_error_);
+        }
+        status_cache_valid_ = false;
+        position_cache_valid_ = false;
+        return true;
+    }
+
+    // Cancel and join the motion bound watchdog. Without mutex_ held; under transition_mutex_ or in the destructor.
+    void stop_motion_bound_watchdog() { motion_bound_watchdog_.cancel_all_and_join(); }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
     // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
@@ -3888,6 +4098,10 @@ public:
     void set_zero_search_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         zero_search_watchdog_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_motion_bound_watchdog_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        motion_bound_watchdog_.set_spawn_for_testing(std::move(spawn));
+    }
+    bool motion_bound_watchdog_running_for_testing() const { return motion_bound_watchdog_.running(); }
     void set_zero_search_poll_for_testing(bool enabled) { zero_search_poll_enabled_.store(enabled); }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
@@ -4139,12 +4353,25 @@ private:
     // Under mutex_: the GOTO in slew_in_progress_ came from SlewToCoordinates* or SlewToTarget* (which route through
     // them), so AbortSlew turns Tracking back on (issue #2000). False for an Alt/Az slew, cleared by a superseding
     // initiator and by AbortSlew.
-    bool equatorial_slew_ = false;
+    mutable bool equatorial_slew_ = false;
     mutable DriverMotion driver_motion_ = DriverMotion::None;
     // Task-clock instant past which a zero search with no status 7 is stopped (issue #2420). Set by find_home() for a
     // zero search only (#2432) and read only while driver_motion_ is HomeSearch (the status refresh and the zero
     // search watchdog), so the sites that end the motion need not reset it.
     std::chrono::steady_clock::time_point home_search_deadline_{};
+    // Issue #2396 (AB-8, AB-9): the motion bound watchdog's deadlines, task clock, under mutex_. A MoveAxis that runs
+    // past move_axis_deadline_ (refreshed by every MoveAxis with a non-zero rate) is stopped; an async GOTO of
+    // generation slew_bound_generation_ that still moves at slew_bound_deadline_ is stopped.
+    std::chrono::steady_clock::time_point move_axis_deadline_{};
+    std::chrono::steady_clock::time_point slew_bound_deadline_{};
+    mutable std::uint64_t slew_bound_generation_ = 0;
+    // Issue #2396 (AB-7): the async landing gate (async_goto_landed_locked()), under mutex_. The gate runs for the
+    // GOTO of landing_gate_generation_ (0: none) and keeps its last position sample.
+    mutable std::uint64_t landing_gate_generation_ = 0;
+    mutable bool landing_prev_valid_ = false;
+    mutable double landing_prev_ra_hours_ = 0.0;
+    mutable double landing_prev_dec_degrees_ = 0.0;
+    mutable std::chrono::steady_clock::time_point landing_prev_time_{};
     // Set by find_home() for a zero search and read only while driver_motion_ is HomeSearch: a fresh status since
     // :MSH# showed motion (status 2), and :MSH# was already sent a second time (check_zero_search_started_locked()).
     mutable bool home_search_seen_moving_ = false;
@@ -4166,6 +4393,15 @@ private:
     std::atomic<bool> zero_search_poll_enabled_{true};
     // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
     static constexpr std::chrono::seconds kZeroSearchTimeout{120};
+    // Issue #2396 (AB-9): a MoveAxis left running this long with no new MoveAxis is stopped (a dead-man for a client
+    // that went away while another client kept the router's client-silence watchdog quiet).
+    static constexpr std::chrono::seconds kMaxMoveAxisDuration{60};
+    // Issue #2396 (AB-7): the async landing gate's two samples are at least this far apart and agree within this.
+    static constexpr std::chrono::milliseconds kLandingSampleGap{500};
+    static constexpr double kLandingStableArcsec = 30.0;
+    // A first read this close to the target (on the sky, each axis) lands the GOTO at once: the HAE29C settles 11 to
+    // 16 arcsec off and the trim works up to 120 arcsec.
+    static constexpr double kLandingOnTargetArcsec = 120.0;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
@@ -4251,6 +4487,11 @@ private:
     util::OperationGeneration zero_search_watchdog_generation_;
     util::AsyncOperation zero_search_watchdog_{"iOptron zero search watchdog", zero_search_watchdog_generation_,
                                                clock_};
+    // Issue #2396 (AB-8, AB-9): the bound on a MoveAxis and an async GOTO (run_motion_bound_watchdog()); its own
+    // generation. Declared after everything the body touches.
+    util::OperationGeneration motion_bound_watchdog_generation_;
+    util::AsyncOperation motion_bound_watchdog_{"iOptron motion bound watchdog", motion_bound_watchdog_generation_,
+                                                clock_};
 };
 
 // Factory function implementation
@@ -4427,6 +4668,20 @@ void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_zero_search_watchdog_spawn_for_testing(std::move(spawn));
     }
+}
+
+void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
+                                                 std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_motion_bound_watchdog_spawn_for_testing(std::move(spawn));
+    }
+}
+
+bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        return ioptron->motion_bound_watchdog_running_for_testing();
+    }
+    return false;
 }
 
 void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled) {

@@ -24,13 +24,18 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace {
 
@@ -91,8 +96,29 @@ public:
     void set_tracking(bool) override {}
     double get_focal_length() const override { return 0.0; }
     void set_focal_length(double) override {}
-    alpacacore::GuideRate get_guide_rate() const override { return alpacacore::GuideRate{}; }
-    void set_guide_rate(const alpacacore::GuideRate&) override {}
+    // The guide-rate pair, under its own leaf lock, for the base per-axis setters (#2465). `on_get_guide_rate`, set
+    // before any thread starts, runs after each read has copied the pair (outside that lock) and receives the read's
+    // 1-based number, so a read parked there returns the pair as it was when it read it.
+    alpacacore::GuideRate get_guide_rate() const override {
+        const int call = ++guide_rate_reads;
+        alpacacore::GuideRate copy;
+        {
+            const std::lock_guard<std::mutex> lock(guide_rate_mutex);
+            copy = guide_rate;
+        }
+        if (on_get_guide_rate) {
+            on_get_guide_rate(call);
+        }
+        return copy;
+    }
+    void set_guide_rate(const alpacacore::GuideRate& rate) override {
+        const std::lock_guard<std::mutex> lock(guide_rate_mutex);
+        guide_rate = rate;
+    }
+    mutable std::mutex guide_rate_mutex;
+    alpacacore::GuideRate guide_rate{0.001, 0.001};
+    mutable std::atomic<int> guide_rate_reads{0};
+    std::function<void(int)> on_get_guide_rate;
     double get_right_ascension() const override { return 0.0; }
     double get_right_ascension_rate() const override { return 0.0; }
     void set_right_ascension_rate(double) override {}
@@ -305,4 +331,37 @@ TEST_CASE("TelescopeDriver watchdog - an in-flight request is never treated as s
     CHECK_FALSE(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(63), std::chrono::seconds(30)));
     CHECK(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(93), std::chrono::seconds(30)));
     CHECK(driver.aborts.load() == 1);
+}
+
+// Falsified by: TelescopeDriver::set_guide_rate_right_ascension() and set_guide_rate_declination() without the
+// guide_rate_axis_mutex_ lock (the Dec write reads the old pair while the RA write is parked in its read, and the RA
+// write then puts Dec back) (#2465).
+TEST_CASE("TelescopeDriver - concurrent per-axis guide rate writes keep both axes", "[telescope][unit]") {
+    WatchdogUnitStubDriver driver;
+    alpacacore::test::Latch ra_in_read;   // the RA write's read parks here
+    alpacacore::test::Latch dec_in_read;  // marks the Dec write's read; already open, never blocks
+    dec_in_read.release();
+    driver.on_get_guide_rate = [&](int call) {
+        if (call == 1) {
+            ra_in_read.block();
+        } else if (call == 2) {
+            dec_in_read.block();
+        }
+    };
+    std::thread ra([&] { driver.set_guide_rate_right_ascension(0.004); });
+    REQUIRE(ra_in_read.wait_entered());
+    std::thread dec([&] { driver.set_guide_rate_declination(0.005); });
+    {
+        // Without the base lock the Dec write reaches its read at once; with it, it waits for the RA write, so this
+        // wait only times out. Either way the RA write is released next.
+        std::unique_lock<std::mutex> lock(dec_in_read.mutex);
+        static_cast<void>(
+            dec_in_read.cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return dec_in_read.entered; }));
+    }
+    ra_in_read.release();
+    ra.join();
+    dec.join();
+    const auto rate = driver.get_guide_rate();
+    CHECK(rate.ra == 0.004);
+    CHECK(rate.dec == 0.005);
 }
