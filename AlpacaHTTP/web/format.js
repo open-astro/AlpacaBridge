@@ -1022,6 +1022,41 @@ function asiairRepeatedGpioPort(gpios) {
     return -1;
 }
 
+// Celestron CGX over USB or the SkyPortal WiFi adapter. The CGX has no auto-detect, so anything but 'network' is
+// its direct USB port, as the server reads a saved entry (celestron_schema.cpp). A new WiFi entry starts at the
+// address the adapter has on its own hotspot network.
+const CGX_SKYPORTAL_DEFAULT_HOST = '1.2.3.4';
+
+function cgxConnectionType(value) {
+    return value === 'network' ? 'network' : 'serial';
+}
+
+// The "Find adapter" result. `adapters` is the Value of GET /management/v1/networkadapters?vendor=celestron
+// ({Host, Ssid, Module} each), or null when the search failed with `error`. One adapter fills the address at once
+// (fill); two or more are listed for the operator to pick, and none is chosen for them. A pick or a fill only
+// changes the form: Save still applies it, and the connect still checks the mount's identity. Ssid is the adapter's
+// own access-point name, even while it is a station on another network, so the label calls it the adapter.
+function skyPortalAdapterOptions(adapters, error) {
+    if (!Array.isArray(adapters)) {
+        return { options: [], fill: '', status: 'Search failed: ' + (error || 'no answer') };
+    }
+    if (adapters.length === 0) {
+        return { options: [], fill: '',
+                 status: 'No SkyPortal adapter answered in 5 s. Put this board on the adapter\'s own WiFi ' +
+                         '(Celestron-XXXX), or the adapter on the same network as this board (this board\'s ' +
+                         'hotspot works too), and try again, or type its address.' };
+    }
+    const label = a => String(a.Host) + (a.Ssid ? ' (adapter ' + a.Ssid + (a.Module ? ', ' + a.Module : '') + ')'
+                                                : (a.Module ? ' (' + a.Module + ')' : ''));
+    if (adapters.length === 1) {
+        return { options: [], fill: String(adapters[0].Host),
+                 status: 'Found ' + label(adapters[0]) + '; its address is filled in.' };
+    }
+    const options = [{ value: '', label: 'Choose the adapter (' + adapters.length + ' answered)', disabled: true }];
+    adapters.forEach(a => options.push({ value: String(a.Host), label: label(a), disabled: false }));
+    return { options, fill: '', status: adapters.length + ' adapters answered; pick the one on this mount.' };
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -1040,5 +1075,5 @@ if (typeof module !== 'undefined' && module.exports) {
                        mayStartCalibration, calibrationStatusText, calibrationHint,
                         calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth,
                         HOST_CHECK_LOCKOUT_NOTE, CLIENT_REQUEST_FRESH_MS, WEB_UI_CLIENT_HEADER, headerClockText,
-                        nextTabIndex };
+                        nextTabIndex, CGX_SKYPORTAL_DEFAULT_HOST, cgxConnectionType, skyPortalAdapterOptions };
 }

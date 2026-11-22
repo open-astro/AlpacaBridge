@@ -69,6 +69,7 @@ int main() {
 - `GET /management/v1/configureddevices` - List configured devices that registered
 - `GET /management/v1/faileddevices` - Web UI extension (not an ASCOM path): saved devices that failed to load, in the `configureddevices` row shape with `LoadError: true`, the `UniqueID` stored in the entry (decision 0018) and the saved `Config`
 - `GET /management/v1/attacheddevices` - AlpacaBridge extension (not an ASCOM path): every detected serial port, HID device and listed camera of the built vendors, each with the catalog entries it could be (`Candidates`, each with the `Config` a `configuredevice` call needs), `Configured`/`ConfiguredAs` when a configured device already uses it, and an `Errors` list for a lister that failed. Serial ports come from `/dev/serial/by-id` and sysfs; no port is opened and no serial claim is taken. Any other verb is 405 (issue #2312)
+- `GET /management/v1/networkadapters?vendor=celestron` - AlpacaBridge extension (not an ASCOM path): listens 5 s for the beacons of the network adapters a vendor's devices use (the Celestron SkyPortal WiFi adapter) and lists each as `{Host, Ssid, Module}`; it sends nothing. One search runs at a time: a second request meanwhile answers `InvalidOperation` at once. An unknown vendor is `InvalidValue`, any other verb 405
 
 ### Device API
 

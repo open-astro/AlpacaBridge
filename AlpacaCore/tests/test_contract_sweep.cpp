@@ -77,6 +77,7 @@
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
 #include "cgx_clock_cleanup.h"
+#include "fake_celestron_aux_tcp_adapter.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_celestron_focuser.h"
 #endif
@@ -456,11 +457,17 @@ const std::vector<ProbeExemption> kProbeExemptions = {
 
     // Celestron CGX: CanSlew is false (only the async slew) and MoveAxis is not implemented; both check the axis first.
     {"celestron_telescope_cgx", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx", kOff, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     // #2287, Sky-Watcher.
     {"skywatcher_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"skywatcher_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
@@ -581,21 +588,37 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"bisque_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     // #2287, Celestron CGX.
     {"celestron_telescope_cgx", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx_tcp", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
 };
 // clang-format on
 
@@ -1987,6 +2010,45 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
     return host;
 }
 
+// The CGX over FakeCelestronAuxTcpAdapter, the loopback SkyPortal WiFi adapter (recipe of
+// test_celestron_cgx_tcp_driver.cpp). The adapter serves one client at a time, as the driver's endpoint claim does.
+Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    using alpacacore::test::FakeCelestronAuxTcpAdapter;
+    const auto make = [](const FakeCelestronAuxTcpAdapter& adapter,
+                         int device_number) -> std::unique_ptr<AlpacaDriver> {
+        cel::CelestronCgxConnectionInfo info;
+        info.host = "127.0.0.1";
+        info.tcp_port = adapter.port();
+        info.site_latitude_degrees = 45.0;
+        info.site_longitude_degrees = -75.0;
+        return cel::create_celestron_cgx_telescope(device_number, info);
+    };
+    auto adapter = std::make_shared<FakeCelestronAuxTcpAdapter>();
+    Tier2Host host{"celestron_telescope_cgx_tcp",
+                   "celestron",
+                   "telescope",
+                   "fake_celestron_aux_tcp_adapter.h",
+                   DeviceType::Telescope,
+                   "celestron_telescope_cgx_tcp",
+                   [adapter, make](bool) -> Hosted { return {adapter, make(*adapter, 0)}; },
+                   false,
+                   [make]() -> Hosted {
+                       // The adapter closes the connection instead of answering the first identity query: a lost link.
+                       auto closing = std::make_shared<FakeCelestronAuxTcpAdapter>();
+                       closing->script(0x10, 0xfe, 1, FakeCelestronAuxTcpAdapter::Fault::Close);
+                       return {closing, make(*closing, 0)};
+                   },
+                   "",
+                   "The adapter answers at once; the connect's 200 ms backlog drain may end before the first poll "
+                   "(fake_celestron_aux_tcp_adapter.h)",
+                   err::InvalidOperation};
+    host.at_park_unreachable =
+        "FakeCelestronAuxTcpAdapter models no park position, so a Park never lands and AtPark never reads true "
+        "(fake_celestron_aux_tcp_adapter.h)";
+    return host;
+}
+
 // FakeCelestronFocuser over a pty (recipe of test_celestron_focuser.cpp, issue #896).
 Tier2Host tier2_host_celestron_focuser() {
     Tier2Host h{"celestron_focuser",
@@ -3148,7 +3210,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL) X(celestron_focuser, NPR)
+#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL) X(celestron_cgx_tcp_telescope, TEL) X(celestron_focuser, NPR)
 #else
 #define CS2_CELESTRON(X)
 #endif
@@ -3600,6 +3662,28 @@ Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(true); },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(false); },
             "FakeCelestronCgxMount::set_muted(true) mid-goto"};
+}
+
+// CGX over WiFi: homed and tracking, a goto then runs for a minute on the adapter's motor model, and the adapter then
+// stops answering every request (each is swallowed, as when the adapter drops requests). Falsified by: the slew body
+// taking a status read the link gave up on as arrival.
+Tier3Recipe tier3_recipe_celestron_cgx_tcp_telescope() {
+    using alpacacore::test::FakeCelestronAuxTcpAdapter;
+    return {[](Hosted& hosted) {
+                auto& adapter = t3_fake<FakeCelestronAuxTcpAdapter>(hosted);
+                auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+                adapter.set_goto_duration(std::chrono::milliseconds(0));
+                t.find_home();
+                const auto deadline = Clock::now() + std::chrono::seconds(10);
+                while (t.get_slewing() && Clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                t.set_tracking(true);
+                adapter.set_goto_duration(std::chrono::seconds(60));
+                t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() + 23.0, 24.0), 85.0);
+            },
+            [](Hosted& hosted) { t3_fake<FakeCelestronAuxTcpAdapter>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<FakeCelestronAuxTcpAdapter>(hosted).set_muted(false); },
+            "FakeCelestronAuxTcpAdapter::set_muted(true) mid-goto"};
 }
 
 // Focus motor: a GOTO stays running until complete_move(); the motor then stops answering. Falsified by: the
@@ -4272,7 +4356,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 // driver violates the contract today; the case carries [!shouldfail] and its Fix removes the tag.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CT3_CELESTRON(X) X(celestron_telescope, OK) X(celestron_cgx_telescope, OK) X(celestron_focuser, OK)
+#define CT3_CELESTRON(X) X(celestron_telescope, OK) X(celestron_cgx_telescope, OK) X(celestron_cgx_tcp_telescope, OK) X(celestron_focuser, OK)
 #else
 #define CT3_CELESTRON(X)
 #endif

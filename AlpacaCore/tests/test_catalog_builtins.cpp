@@ -2104,7 +2104,7 @@ TEST_CASE("Builtin catalog - Celestron normalize requires the endpoint from the 
     CHECK_FALSE(catalog.normalize(kCelestronKey, automatic, Source::Api).rejection.has_value());
 }
 
-TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires explicit serial configuration",
+TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires an explicit USB or WiFi connection",
           "[catalog][celestron][unit]") {
     DeviceCatalog catalog;
     register_builtin_schemas(catalog);
@@ -2117,6 +2117,16 @@ TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires explicit serial
     direct.set("siteLongitude", -75.0);
     CHECK_FALSE(catalog.normalize(kCelestronKey, direct, Source::Api).rejection.has_value());
 
+    DeviceConfig wifi;
+    wifi.set("protocol", std::string{"cgx-aux"});
+    wifi.set("connectionType", std::string{"network"});
+    wifi.set("host", std::string{"1.2.3.4"});
+    wifi.set("siteLatitude", 45.0);
+    wifi.set("siteLongitude", -75.0);
+    const auto wifi_api = catalog.normalize(kCelestronKey, wifi, Source::Api);
+    CHECK_FALSE(wifi_api.rejection.has_value());
+    CHECK(string_at(wifi_api.config, "connectionType") == "network");
+
     DeviceConfig no_site;
     no_site.set("protocol", std::string{"cgx-aux"});
     no_site.set("connectionType", std::string{"serial"});
@@ -2124,18 +2134,129 @@ TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires explicit serial
     const auto missing_site = catalog.normalize(kCelestronKey, no_site, Source::Api);
     REQUIRE(missing_site.rejection.has_value());
     CHECK(*missing_site.rejection == "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude");
+    DeviceConfig wifi_no_site = wifi;
+    wifi_no_site.erase("siteLatitude");
+    const auto wifi_missing_site = catalog.normalize(kCelestronKey, wifi_no_site, Source::Api);
+    REQUIRE(wifi_missing_site.rejection.has_value());
+    CHECK(*wifi_missing_site.rejection == "Celestron CGX over WiFi requires SiteLatitude and SiteLongitude");
 
-    DeviceConfig automatic;
-    automatic.set("protocol", std::string{"cgx-aux"});
-    automatic.set("connectionType", std::string{"auto"});
-    const auto api = catalog.normalize(kCelestronKey, automatic, Source::Api);
-    REQUIRE(api.rejection.has_value());
-    CHECK(*api.rejection == "Celestron CGX AUX requires Connection Type 'serial' and a USB port path");
-
-    const auto persisted = catalog.normalize(kCelestronKey, automatic, Source::Persisted);
-    CHECK(string_at(persisted.config, "connectionType") == "serial");
-    CHECK_FALSE(persisted.warnings.empty());
+    for (const char* type : {"auto", "", "carrier-pigeon"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig other;
+        other.set("protocol", std::string{"cgx-aux"});
+        other.set("connectionType", std::string{type});
+        other.set("portPath", std::string{"/dev/ttyUSB3"});
+        other.set("siteLatitude", 45.0);
+        other.set("siteLongitude", -75.0);
+        const auto api = catalog.normalize(kCelestronKey, other, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              "Celestron CGX AUX requires Connection Type 'serial' (direct USB) or 'network' (SkyPortal WiFi)");
+        // A saved one is the direct USB link, never WiFi and never an auto-probe.
+        const auto persisted = catalog.normalize(kCelestronKey, other, Source::Persisted);
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        CHECK_FALSE(persisted.warnings.empty());
+    }
 }
+
+TEST_CASE("Builtin catalog - a saved Celestron CGX entry without a connection type is direct USB",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    // The shape every saved CGX entry had before WiFi, minus the connection type: an older or hand-edited file.
+    DeviceConfig saved;
+    saved.set("protocol", std::string{"cgx-aux"});
+    saved.set("portPath", std::string{"/dev/serial/by-id/usb-Celestron_CGX__CGX_v1-if00"});
+    saved.set("host", std::string{"1.2.3.4"});  // a stale WiFi address does not select WiFi
+    saved.set("siteLatitude", 45.0);
+    saved.set("siteLongitude", -75.0);
+    const auto persisted = catalog.normalize(kCelestronKey, saved, Source::Persisted);
+    REQUIRE_FALSE(persisted.rejection.has_value());
+    CHECK(string_at(persisted.config, "connectionType") == "serial");
+    CHECK(string_at(persisted.config, "portPath") == "/dev/serial/by-id/usb-Celestron_CGX__CGX_v1-if00");
+#ifdef ALPACACORE_ENABLE_CELESTRON
+    register_builtin_factories(catalog);
+    auto driver = catalog.create(kCelestronKey, persisted.config, 2);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
+#endif
+}
+
+TEST_CASE("Builtin catalog - Celestron CGX over WiFi needs the adapter's numeric address",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto wifi_with = [](const std::string& host) {
+        DeviceConfig config;
+        config.set("protocol", std::string{"cgx-aux"});
+        config.set("connectionType", std::string{"network"});
+        config.set("host", host);
+        config.set("siteLatitude", 45.0);
+        config.set("siteLongitude", -75.0);
+        return config;
+    };
+    for (const char* host : {"1.2.3.4", "192.168.4.37", "fe80::1", "::1"}) {
+        INFO(host);
+        CHECK_FALSE(catalog.normalize(kCelestronKey, wifi_with(host), Source::Api).rejection.has_value());
+    }
+
+    const std::string numeric_only =
+        "Celestron CGX over WiFi needs the SkyPortal adapter's numeric IPv4 or IPv6 address "
+        "(1.2.3.4 on the adapter's own network)";
+    for (const std::string& host : {std::string("skyportal.local"), std::string("1.2.3"), std::string("1.2.3.4:2000"),
+                                    std::string("fe80::1%eth0"), std::string("1.2.3.4\0evil", 12)}) {
+        INFO(host);
+        const auto api = catalog.normalize(kCelestronKey, wifi_with(host), Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == numeric_only);
+        // A saved one is kept, so it stays listed and editable (#380); its connect then fails on the address.
+        const auto persisted = catalog.normalize(kCelestronKey, wifi_with(host), Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(string_at(persisted.config, "host") == host);
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == numeric_only);
+    }
+
+    const auto empty = catalog.normalize(kCelestronKey, wifi_with(""), Source::Api);
+    REQUIRE(empty.rejection.has_value());
+    CHECK(*empty.rejection == "Host IP address is required");
+    DeviceConfig bad_port = wifi_with("1.2.3.4");
+    bad_port.set("tcpPort", std::int64_t{70000});
+    CHECK(catalog.normalize(kCelestronKey, bad_port, Source::Api).rejection.has_value());
+
+    // The NexStar network bridge keeps its host as it was: a name is still its business.
+    DeviceConfig nexstar;
+    nexstar.set("connectionType", std::string{"network"});
+    nexstar.set("host", std::string{"skyportal.local"});
+    CHECK_FALSE(catalog.normalize(kCelestronKey, nexstar, Source::Api).rejection.has_value());
+}
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+TEST_CASE("Builtin catalog - the Celestron CGX factory follows the USB or WiFi selector",
+          "[catalog][celestron][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    DeviceConfig config;
+    config.set("protocol", std::string{"cgx-aux"});
+    config.set("portPath", std::string{"/dev/ttyUSB-cgx"});
+    config.set("host", std::string{"1.2.3.4"});
+    config.set("tcpPort", std::int64_t{2000});
+    config.set("siteLatitude", 45.0);
+    config.set("siteLongitude", -75.0);
+
+    config.set("connectionType", std::string{"serial"});
+    auto usb = catalog.create(kCelestronKey, catalog.normalize(kCelestronKey, config, Source::Api).config, 1);
+    REQUIRE(usb != nullptr);
+    CHECK(usb->get_description() == "Celestron CGX/CGX-L direct USB mount");
+
+    config.set("connectionType", std::string{"network"});
+    auto wifi = catalog.create(kCelestronKey, catalog.normalize(kCelestronKey, config, Source::Api).config, 2);
+    REQUIRE(wifi != nullptr);
+    CHECK(wifi->get_device_number() == 2);
+    CHECK(wifi->get_name() == "Celestron CGX/CGX-L");
+    CHECK(wifi->get_description().find("SkyPortal WiFi") != std::string::npos);
+    CHECK_FALSE(wifi->get_connected());
+}
+#endif
 
 TEST_CASE("Builtin catalog - Celestron alignmentMode keeps a known value and drops an unknown one (#860)",
           "[catalog][celestron][unit]") {

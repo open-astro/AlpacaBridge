@@ -31,6 +31,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <future>
 #include <mutex>
@@ -79,6 +80,17 @@ constexpr std::chrono::milliseconds kGuideEndMargin{500};
 // A home search not done by then missed the sensor (#2213): on the rig a normal search ended within about 30 s, and a
 // missed one fell back to a crawl that needed about 420 s, so the axis is stopped and re-homed once from where it is.
 constexpr std::chrono::seconds kHomeSearchBound{60};
+// The home travel guard (docs/failures/0016-cgx-home-travel.md): each axis's encoder travel during one FindHome, Park
+// or meridian home route, summed across the #2213 re-home. No legitimate home found needs more than about 230 deg
+// (a direct home from the farthest slew position is 180 deg Dec; the #2213 rig miss with its re-home about 179 deg),
+// and no home needs a full turn, so an axis past 270 deg is a runaway. A re-home is sent only while the axis is at
+// 90 deg or less, leaving it the half turn any home can need: the #2213 miss had gone at most 83 deg at 60 s, while
+// the Oct-28 shape (a fast wrong-way search that never finds the switch) had gone about 190 deg.
+constexpr double kHomeTravelBoundDegrees = 270.0;
+constexpr double kHomeRehomeTravelLimitDegrees = kHomeTravelBoundDegrees - 180.0;
+// Added to every stop verification budget over TCP (slice 3): one WiFi status poll of both axes with a recovered
+// re-send. USB keeps its 500 ms cleanup and 3 s AbortSlew budgets.
+constexpr std::chrono::milliseconds kTcpStopVerifyAllowance{600};
 
 // The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
 // computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
@@ -86,6 +98,7 @@ struct CgxFrame {
     std::uint32_t ra_encoder = 0;
     std::uint32_t dec_encoder = 0;
     std::chrono::system_clock::time_point read_at{};
+    std::uint64_t poll_sequence = 0;  // the poll that read the pair; a control path's write_frame() keeps it
 };
 
 double configured_site_coordinate(const std::optional<double>& coordinate, const char* name) {
@@ -128,8 +141,9 @@ public:
 
     CelestronCgxTelescopeDriver(int device_number, CelestronCgxConnectionInfo info, util::TaskClock& clock,
                                 CgxSystemNow system_now)
-        : AsyncConnectable("Celestron CGX USB"),
+        : AsyncConnectable(info.host.empty() ? "Celestron CGX USB" : "Celestron CGX TCP"),
           device_number_(device_number),
+          tcp_(!info.host.empty()),
           info_(std::move(info)),
           clock_(clock),
           system_now_(std::move(system_now)),
@@ -176,7 +190,11 @@ public:
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
-    std::string get_description() const override { return "Celestron CGX/CGX-L direct USB mount"; }
+    std::string get_description() const override {
+        if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
+        return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: " +
+               std::to_string(protocol_.recovered_retries());
+    }
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }
@@ -483,6 +501,7 @@ private:
         try {
             if (!protocol_.is_healthy()) protocol_.resync();
             CgxFrame frame;
+            frame.poll_sequence = ++poll_sequence_;
             frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
             frame.read_at = system_now_();  // the RA encoder's read, the one tracking moves
             frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
@@ -534,12 +553,20 @@ private:
         std::array<util::TaskClock::clock::time_point, 2> started;
         std::array<bool, 2> rehomed{};
         std::array<bool, 2> done{};
+        // The home travel guard: each axis's last encoder read and the travel summed from read to read, and the
+        // poll_sequence of the poll frame it last took (or that was held at its own first read).
+        std::array<std::optional<std::uint32_t>, 2> last_encoder;
+        std::array<double, 2> travel_degrees{};
+        std::optional<std::uint64_t> poll_sequence;
     };
     // Called by both home waits between their polls (#2213): an axis not home-done kHomeSearchBound after its
     // MC_LEVEL_START is stopped, waited still and sent MC_LEVEL_START once more; a re-home that misses the bound too,
-    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). The stop and the home send
-    // are run_motion_stage() stages on `claim`, and the still-wait asks motion_stop_reason(), so a cancel or a
-    // supersede ends it sending nothing more; it then returns early and the caller's loop handles the reason.
+    // or the deadline during the wait, throws `timeout_message` with home_axes_status(). First it takes both encoders
+    // (the state poll's newest frame, else its own reads) and adds each axis's travel since the last reading: a sum
+    // past kHomeTravelBoundDegrees, or a re-home due above kHomeRehomeTravelLimitDegrees, throws the travel-guard error
+    // (the caller's catch stops the axes). The stop and the home send are run_motion_stage() stages on `claim`, and the
+    // still-wait asks motion_stop_reason(), so a cancel or a supersede ends it sending nothing more; it then returns
+    // early and the caller's loop handles the reason.
     void supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim, HomeSearch& search,
                                util::TaskClock::clock::time_point deadline, const char* timeout_message);
     void publish_guide_end_frame(util::OperationContext& context, const util::MotionClaim& claim);
@@ -579,6 +606,7 @@ private:
     std::pair<std::uint32_t, std::uint32_t> read_stopped_checkpoint();
 
     const int device_number_;
+    const bool tcp_;  // SkyPortal WiFi (a configured host) rather than direct USB, for the device's lifetime
     CelestronCgxConnectionInfo info_;
     util::TaskClock& clock_;
     CgxSystemNow system_now_;
@@ -674,6 +702,7 @@ private:
     // Nothing reads the value yet (no #521 consumer).
     util::LinkLostStamp link_lost_at_;
     util::OperationGeneration poll_generation_;
+    std::atomic<std::uint64_t> poll_sequence_{0};  // probe() only: numbers the poll's frames for the travel guard
     // The encoder pair the getters serve. Last: destroyed first, so its poll joins while protocol_, clock_ and the
     // stamp its callbacks use are alive.
     mutable util::PolledState<CgxFrame> polled_;
@@ -797,7 +826,8 @@ void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& 
 
 void CelestronCgxTelescopeDriver::require_connected() const {
     if (!connected_.load()) {
-        throw AlpacaException("Celestron CGX USB is not connected", AlpacaError::NotConnected);
+        throw AlpacaException(tcp_ ? "Celestron CGX TCP is not connected" : "Celestron CGX USB is not connected",
+                              AlpacaError::NotConnected);
     }
     if (link_lost()) {
         throw AlpacaException("Celestron CGX link lost; set Connected false then true to reconnect",
@@ -910,8 +940,10 @@ CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(std::unique_lock<s
     std::uint32_t dec;
     {
         const MutexRelease unlocked(lock);  // The I/O lock is never taken under mutex_.
-        ra = protocol_.get_axis_position(CgxAxis::RightAscension);
+        // Dec first: while tracking, RA moves and Dec does not, so the RA count read last is the one closest to the
+        // UTC the position is computed at. Read first, it lagged by the Dec exchange: ~0.3" at 21 ms over WiFi.
         dec = protocol_.get_axis_position(CgxAxis::Declination);
+        ra = protocol_.get_axis_position(CgxAxis::RightAscension);
     }
     // The pair may be from a session that no longer exists: re-validate.
     require_readable_locked();
@@ -977,12 +1009,17 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     // runs and the reference is dropped (decision 0011 rule 3: FindHome again).
     if (connected_.load()) teardown_locked();
     (void)link_lost_at_.consume();  // the relink consumes the loss stamp; nothing times motion by it yet
-    protocol_.connect_serial(info_.port_path);
+    // The one transport call site: a later beacon re-find of a silent adapter (station mode) wraps it.
+    if (tcp_)
+        protocol_.connect_tcp(info_.host, info_.tcp_port);
+    else
+        protocol_.connect_serial(info_.port_path);
     try {
-        const AuxFrame ra_version = protocol_.exchange(
-            {0x00, static_cast<std::uint8_t>(CgxAxis::RightAscension), 0xfe, {}}, std::chrono::milliseconds(500));
-        const AuxFrame dec_version = protocol_.exchange(
-            {0x00, static_cast<std::uint8_t>(CgxAxis::Declination), 0xfe, {}}, std::chrono::milliseconds(500));
+        // The exchanges here and below take the transport's timeout: 500 ms over USB, 1000 ms over TCP.
+        const AuxFrame ra_version =
+            protocol_.exchange({0x00, static_cast<std::uint8_t>(CgxAxis::RightAscension), 0xfe, {}});
+        const AuxFrame dec_version =
+            protocol_.exchange({0x00, static_cast<std::uint8_t>(CgxAxis::Declination), 0xfe, {}});
         const bool modern_version = ra_version.payload.size() == 4 && dec_version.payload.size() == 4;
         if (!modern_version && (ra_version.payload.size() != 2 || dec_version.payload.size() != 2)) {
             throw AlpacaException("Celestron CGX motor-controller identity response is malformed",
@@ -990,29 +1027,42 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         }
         if (modern_version) {
             // Raw AUX CGX 7.17.25 returns major/minor + a big-endian build.
-            // MC_GET_MODEL identifies both motors as CGX (0x1788); a reply
-            // from each assumed switch address is not a valid identity gate.
-            // Encoder scaling and home positions are the CGX's constants (#2204): an unknown motor is added, but
+            // MC_GET_MODEL identifies the motors: 0x1788 is the verified CGX, and 0x18xx the CGX-L (INDI
+            // celestronaux formatModelString, unqualified here), which has the CGX's mechanics and 2^24-count axes.
+            // A reply from each assumed switch address is not a valid identity gate. Encoder scaling and home
+            // positions are the CGX's constants (#2204): another motor, or a pair of two families, is added, but
             // require_known_motor_model() refuses to drive it with them.
-            bool unknown_motor = false;
+            std::vector<std::vector<std::uint8_t>> models;
             for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
-                const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}},
-                                                          std::chrono::milliseconds(500));
+                const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}});
                 if (model.payload.size() != 2) {
                     throw AlpacaException("Celestron CGX motor model reply is malformed", AlpacaError::DriverException);
                 }
-                if (model.payload != std::vector<std::uint8_t>{0x17, 0x88}) {
-                    unknown_motor = true;
-                    ALPACA_LOG_WARN("Celestron CGX",
-                                    "Motor reports unlisted model bytes " + std::to_string(model.payload[0]) + " " +
-                                        std::to_string(model.payload[1]) + "; connected, motion refused");
-                }
+                models.push_back(model.payload);
+            }
+            const auto family = [](const std::vector<std::uint8_t>& model) {
+                return model == std::vector<std::uint8_t>{0x17, 0x88} ? 0x17 : model[0] == 0x18 ? 0x18 : 0;
+            };
+            const auto id = [](const std::vector<std::uint8_t>& model) {
+                std::array<char, 8> text{};
+                std::snprintf(text.data(), text.size(), "0x%02x%02x", model[0], model[1]);
+                return std::string(text.data());
+            };
+            const std::string reported = "RA " + id(models[0]) + ", Dec " + id(models[1]);
+            const bool unknown_motor = family(models[0]) == 0 || family(models[0]) != family(models[1]);
+            if (unknown_motor) {
+                ALPACA_LOG_WARN("Celestron CGX", "Motors report model " + reported +
+                                                     ", not a CGX or CGX-L pair; connected, "
+                                                     "motion refused");
+            } else if (family(models[0]) == 0x18) {
+                ALPACA_LOG_INFO("Celestron CGX", "Motors report CGX-L model " + reported +
+                                                     "; driven as the CGX, the CGX-L is not yet qualified on hardware");
             }
             unknown_motor_model_.store(unknown_motor);
         } else {
             const auto query_home_switch = [this](std::uint8_t address) {
                 try {
-                    return protocol_.exchange({0x00, address, 0xfe, {}}, std::chrono::milliseconds(500));
+                    return protocol_.exchange({0x00, address, 0xfe, {}});
                 } catch (const std::exception&) {
                     throw_missing_cgx_home_switches();
                 }
@@ -1027,7 +1077,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             std::lock_guard<std::mutex> lock(mutex_);
             motion_state_unverified = motion_state_unverified_;
         }
-        if (motion_state_unverified) stop_axes_checked();
+        // Over TCP the adapter may have served another client (the SkyPortal app) since this driver last saw the
+        // mount, so every Connect takes it over with a verified stop; USB stops only after unverified motion.
+        if (motion_state_unverified || tcp_) stop_axes_checked();
         const auto format_version = [](const auto& bytes) {
             std::string version = std::to_string(bytes[0]) + "." + std::to_string(bytes[1]);
             if (bytes.size() == 4) {
@@ -1143,7 +1195,8 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
             stop_axes_checked();
             std::unique_lock<std::mutex> lock(mutex_);
             disconnected_checkpoint_.reset();
-            if (reference_valid_locked()) {
+            // Over TCP the socket closes below, and a new socket is a new session: no checkpoint could be used.
+            if (!tcp_ && reference_valid_locked()) {
                 const auto reference_generation = reference_generation_;
                 lock.unlock();
                 const auto checkpoint = read_stopped_checkpoint();
@@ -1189,8 +1242,10 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
     }
     // Keep the exclusive fd for the lifetime of this configured device, even
     // without a reference. Only a failed stop/initialization, a lost link (the
-    // poll's on_lost, decision 0009) and destruction release ownership.
-    if (stop_failure) protocol_.disconnect();
+    // poll's on_lost, decision 0009) and destruction release ownership. A TCP
+    // socket closes on every disconnect: the adapter session (and its backlog)
+    // is not trusted across clients, so the reference goes with it.
+    if (stop_failure || tcp_) protocol_.disconnect();
     motion_slot_.clear_failure();
     for (auto& slot : pulse_slots_) slot.clear_failure();
     stop_slot_.clear_failure();
@@ -1441,7 +1496,13 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                                                         util::TaskClock::clock::time_point deadline,
                                                         double right_ascension_hours, double declination_degrees,
                                                         CgxPointingSide pointing_side, const char* timeout_message) {
+    // The mount stands untracked from the moment a correction is aimed until it tracks, and the sky moves on: over WiFi
+    // (~21 ms an exchange) the check read came 140-270 ms, 2-4", after the aim (rig 2026-11-21). So each leg starts
+    // tracking as it lands, before the check reads it, and each correction is aimed at the sky that far ahead: its
+    // lead is the time from aiming the previous correction to its tracking start (the first has none to measure).
     int corrections = 0;
+    std::optional<util::TaskClock::clock::time_point> aimed_at;
+    util::TaskClock::clock::duration lead{};
     while (true) {
         if (!wait_for_slew_completion(context, claim, deadline, timeout_message,
                                       std::chrono::milliseconds(corrections == 0 ? 200 : 20)))
@@ -1449,6 +1510,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
         bool arrived = false;
         if (!run_motion_stage(context, claim, [&] {
                 std::unique_lock<std::mutex> lock(mutex_);
+                set_tracking_locked(true, lock);
+                if (aimed_at) lead = clock_.now() - *aimed_at;
                 const CgxSkyPosition actual = read_sky_position(lock);
                 const double ra_error_degrees =
                     std::abs(std::remainder(actual.right_ascension_hours - right_ascension_hours, 24.0)) * 15.0;
@@ -1464,10 +1527,13 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                 ALPACA_LOG_DEBUG("Celestron CGX", arrival_diagnostic);
                 if (ra_error_degrees <= kSlewArrivalToleranceDegrees &&
                     dec_error_degrees <= kSlewArrivalToleranceDegrees) {
-                    set_tracking_locked(true, lock);
                     arrived = true;
                     return;
                 }
+                // Off before a further GOTO_SLOW or the failure stop. TODO: whether MC_GOTO_SLOW while the axis tracks
+                // ends or adds to the tracking is not established on the controller; the stop's 0x24 ending tracking
+                // is the driver's assumption on every stop path.
+                set_tracking_locked(false, lock);
                 if (ra_error_degrees > kMaxSlewCorrectionDegrees || dec_error_degrees > kMaxSlewCorrectionDegrees ||
                     corrections >= kMaxSlewCorrections) {
                     ALPACA_LOG_ERROR("Celestron CGX", arrival_diagnostic + " bounded refinement failed");
@@ -1481,9 +1547,12 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                     throw AlpacaException(std::string(timeout_message) + ": " + arrival_diagnostic,
                                           AlpacaError::DriverException);
                 }
-                const auto utc = std::chrono::system_clock::time_point{
-                    std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                        std::chrono::duration<double>(current_utc_locked()))};
+                aimed_at = clock_.now();
+                const auto utc =
+                    std::chrono::system_clock::time_point{
+                        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                            std::chrono::duration<double>(current_utc_locked()))} +
+                    std::chrono::duration_cast<std::chrono::system_clock::duration>(lead);
                 const double lst = cgx_local_sidereal_time_hours(
                     utc, configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
                 const auto target = cgx_sky_position_to_encoders(right_ascension_hours, declination_degrees, lst,
@@ -1545,7 +1614,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         const auto send = [&](CgxAxis axis, std::uint8_t command, std::vector<std::uint8_t> payload) {
             try {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), command, std::move(payload)};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), operation);
+                require_cgx_ack(protocol_.exchange(request), operation);
             } catch (...) {
                 if (!failure) failure = std::current_exception();
             }
@@ -2126,7 +2195,7 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
         for (const auto axis : axes) {
             try {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+                require_cgx_ack(protocol_.exchange(request), "axis stop");
             } catch (...) {
                 if (!acknowledgement_failure) acknowledgement_failure = std::current_exception();
                 try {
@@ -2142,6 +2211,15 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
                 } catch (...) {
                     ALPACA_LOG_WARN("Celestron CGX", "Could not resynchronize AUX before retrying the axis stop");
                 }
+                if (tcp_) {
+                    // Over TCP the status could not confirm this stop: the stop and a zero rate go out at once,
+                    // without waiting for replies, before the other axis and the next round (they cost no wait).
+                    try {
+                        protocol_.send_stop(axis);
+                    } catch (const std::exception& error) {
+                        ALPACA_LOG_WARN("Celestron CGX", std::string("Send-only TCP stop failed: ") + error.what());
+                    }
+                }
             }
         }
         if (!acknowledgement_failure) {
@@ -2155,7 +2233,10 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
         tracking_state_valid_ = stop_acknowledged;
     }
     std::exception_ptr verification_failure;
-    const auto stop_deadline = clock_.now() + verification_budget;
+    // Over TCP one status poll of both axes can take one recovered re-send (6-8 exchanges at the WiFi p99 of 33 ms plus
+    // the 300 ms re-send point), so the budget grows by that much; it never verifies a status that reads busy.
+    const auto stop_deadline =
+        clock_.now() + verification_budget + (tcp_ ? kTcpStopVerifyAllowance : std::chrono::milliseconds{0});
     // A status can read done while an axis still moves (#2411). Each axis's angle is taken from its first read, so the
     // check never meets the encoder wrap.
     util::StillnessCheck still(clock_.now());
@@ -2394,6 +2475,39 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
     const auto timed_out = [&] {
         return AlpacaException(std::string(timeout_message) + ": " + home_axes_status(), AlpacaError::DriverException);
     };
+    // No status reads in this error: the catch's stop must go out at once (each read can take 1 s over WiFi).
+    const auto travel_exceeded = [&](std::size_t index, const std::string& what) {
+        return AlpacaException(std::string("Celestron CGX home travel guard: ") + (index == 0 ? "RA" : "Dec") +
+                                   " moved " + std::to_string(static_cast<int>(search.travel_degrees[index])) +
+                                   " deg without finding home" + what,
+                               AlpacaError::DriverException);
+    };
+    // The state poll reads both encoders every 250 ms; reading them here too doubled the bus traffic during a home,
+    // where the SkyPortal adapter lost requests in bursts (rig 2026-11-21). So a poll frame read since the last sample
+    // is taken; otherwise, and always for the first sample (a frame from before the home is never the baseline), both
+    // encoders are read here. Every sample is a reading, so the sum runs from the last good one and no travel goes
+    // uncounted; a poll read that went out just before an own read can only add to the sum.
+    const auto polled = polled_.read();
+    const std::uint64_t held = polled ? polled->value.poll_sequence : 0;
+    std::array<std::uint32_t, 2> encoders{};
+    if (polled && search.poll_sequence && polled->value.poll_sequence != *search.poll_sequence) {
+        encoders = {polled->value.ra_encoder, polled->value.dec_encoder};
+    } else {
+        encoders = {protocol_.get_axis_position(CgxAxis::RightAscension),
+                    protocol_.get_axis_position(CgxAxis::Declination)};
+    }
+    search.poll_sequence = held;
+    for (const std::size_t index : {std::size_t{0}, std::size_t{1}}) {
+        const std::uint32_t encoder = encoders[index];
+        std::optional<std::uint32_t>& last = search.last_encoder[index];
+        if (last)
+            search.travel_degrees[index] +=
+                std::abs(signed_cgx_encoder_delta(encoder, *last)) * 360.0 / kCgxEncoderStepsPerRevolution;
+        last = encoder;
+        if (search.travel_degrees[index] > kHomeTravelBoundDegrees)
+            throw travel_exceeded(index,
+                                  " (bound " + std::to_string(static_cast<int>(kHomeTravelBoundDegrees)) + " deg)");
+    }
     for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
         const std::size_t index = axis == CgxAxis::RightAscension ? 0 : 1;
         if (search.done[index] || clock_.now() - search.started[index] < kHomeSearchBound) continue;
@@ -2403,10 +2517,14 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
         }
         // The one exception to the no-retry rule (celestron instructions): never a third home.
         if (search.rehomed[index]) throw timed_out();
+        // A re-home must fit inside the same bound: a half turn of room.
+        if (search.travel_degrees[index] > kHomeRehomeTravelLimitDegrees)
+            throw travel_exceeded(index, "; not re-homing past " +
+                                             std::to_string(static_cast<int>(kHomeRehomeTravelLimitDegrees)) + " deg");
         // This axis only: the other one may be home-done already.
         if (!run_motion_stage(context, claim, [&] {
                 const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
-                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+                require_cgx_ack(protocol_.exchange(request), "axis stop");
             }))
             return;
         while (!protocol_.is_axis_slew_done(axis)) {

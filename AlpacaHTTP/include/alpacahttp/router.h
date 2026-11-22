@@ -340,6 +340,10 @@ private:
     std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
     std::atomic<std::chrono::milliseconds::rep> sync_slew_wait_limit_ms_{90000};
 
+    // True while a networkadapters search runs: it holds one of the shared workers for the finder's whole
+    // listen, so concurrent searches could pin the pool (decision 0007, surface 2 resource budget).
+    std::atomic<bool> network_adapter_search_{false};
+
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.
     // Persists its state (regulatory country) under the same relative
@@ -375,6 +379,11 @@ private:
     // open-astro#2312: GET /management/v1/attacheddevices, every detected serial,
     // HID and camera device with the catalog entries it could be; opens no serial port.
     Response handle_attached_devices(const Request& request, std::uint32_t server_tx_id);
+    // GET /management/v1/networkadapters?vendor=celestron: the adapters a vendor's finder hears announce
+    // themselves on the LAN (the SkyPortal WiFi beacon), for the web form's "Find adapter" button. The finder
+    // blocks for its whole listen (5 s for the SkyPortal) on this worker, with no router lock held; one search
+    // runs at a time, and a second request meanwhile is refused at once (network_adapter_search_).
+    Response handle_network_adapters(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     // open-astro#2057: in-place telescope optics update (apertureDiameter, focalLength), no re-registration.
     Response handle_update_device(const Request& request, std::uint32_t server_tx_id);

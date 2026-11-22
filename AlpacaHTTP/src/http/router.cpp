@@ -1488,6 +1488,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "attacheddevices";
         return match;
     }
+    if (path == "/management/v1/networkadapters" || path == "/management/networkadapters") {
+        match.is_management = true;
+        match.management_endpoint = "networkadapters";
+        return match;
+    }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
         match.is_management = true;
         match.management_endpoint = "configuredevice";
@@ -1624,6 +1629,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_attached_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "attacheddevices") {
         return handle_attached_devices(request, server_tx_id);
+    } else if (match.management_endpoint == "networkadapters") {
+        return handle_network_adapters(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -3370,6 +3377,69 @@ Response Router::handle_attached_cameras(const Request& request, std::uint32_t s
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error listing attached cameras: " + log_what(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+// The adapters a vendor's network devices announce on the LAN, for the web form's "Find adapter" button:
+// GET /management/v1/networkadapters?vendor=celestron. The finder (registered in the catalog when the vendor is
+// built) listens for its whole window on this worker and sends nothing. No router lock is held across it, so
+// every other request is served meanwhile; one search runs at a time, so repeated clicks cannot pin the pool.
+Response Router::handle_network_adapters(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for networkadapters endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
+        return response;
+    }
+
+    if (network_adapter_search_.exchange(true)) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "A search for network adapters is already running; try again when it ends");
+        response.set_body(alpaca_response);
+        return response;
+    }
+    struct SearchEnd {
+        std::atomic<bool>& running;
+        ~SearchEnd() { running.store(false); }
+    } search_end{network_adapter_search_};
+
+    const std::string vendor = request.get_query_param("vendor");
+    try {
+        const auto adapters = catalog_.find_network_adapters(vendor);
+        if (!adapters.has_value()) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "No network adapter search for vendor '" + util::escape_for_log(vendor) + "' in this build");
+            response.set_body(alpaca_response);
+            return response;
+        }
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& adapter : *adapters) {
+            list.push_back({{"Host", adapter.host}, {"Ssid", adapter.ssid}, {"Module", adapter.module}});
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::move(list);
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        // INFO, not ERROR: any LAN host can start a search (decision 0007 rule 9).
+        util::log_info("Search for network adapters failed: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);

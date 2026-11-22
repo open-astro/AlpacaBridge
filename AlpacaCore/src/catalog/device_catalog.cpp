@@ -351,6 +351,23 @@ void DeviceCatalog::add_hid_lister(DeviceKey key, HidLister lister) {
     hid_listers_.emplace_back(std::move(key), std::move(lister));
 }
 
+void DeviceCatalog::add_network_adapter_finder(std::string vendor, NetworkAdapterFinder finder) {
+    for (auto& entry : network_adapter_finders_) {
+        if (entry.first == vendor) {
+            entry.second = std::move(finder);
+            return;
+        }
+    }
+    network_adapter_finders_.emplace_back(std::move(vendor), std::move(finder));
+}
+
+std::optional<std::vector<FoundNetworkAdapter>> DeviceCatalog::find_network_adapters(std::string_view vendor) const {
+    for (const auto& entry : network_adapter_finders_) {
+        if (entry.first == vendor && entry.second) return entry.second();
+    }
+    return std::nullopt;
+}
+
 const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
     for (const Schema& s : schemas_) {
         if (s.key == key) return &s;

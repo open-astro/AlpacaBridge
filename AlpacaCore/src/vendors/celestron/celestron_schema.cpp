@@ -16,14 +16,17 @@
 // spelled it.
 //
 // Cross-field rules: protocol selection (NexStar default or CGX AUX), alignment
-// mode (#860), connection type, endpoint, and the direct backend's required
-// site coordinates. The API is refused; a saved config is registered so
+// mode (#860), connection type (the CGX: USB or SkyPortal WiFi), endpoint (the
+// CGX WiFi host: a numeric address), and the direct backend's required site
+// coordinates. The API is refused; a saved config is registered so
 // it stays listed and editable in the web UI (#380): an unknown connection type
 // is read as "serial", never "auto", so it cannot auto-probe, and an empty
 // endpoint is warned about and kept. An unknown alignmentMode is dropped from
 // either source and reads as "auto" (#860).
 
 #include <alpacacore/util/alignment_mode.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <string>
 
@@ -33,6 +36,13 @@
 namespace alpacacore::catalog {
 
 namespace {
+
+// A numeric IPv4 or IPv6 address, as the CGX TCP connect parses it. inet_pton stops at a NUL, so one is refused.
+bool is_numeric_ip(const std::string& host) {
+    if (host.find('\0') != std::string::npos) return false;
+    in6_addr address{};
+    return ::inet_pton(AF_INET, host.c_str(), &address) == 1 || ::inet_pton(AF_INET6, host.c_str(), &address) == 1;
+}
 
 NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
     NormalizeResult result;
@@ -51,18 +61,22 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
 
     const std::string protocol = result.config.get(kCelestronProtocol);
     std::string type = in.get(kCelestronConnectionType);
-    if (protocol == "cgx-aux" && type != "serial") {
+    // The CGX has two transports: "serial" is the direct USB port, "network" the SkyPortal WiFi adapter. A saved
+    // entry from before WiFi has "serial", and one with no connection type (or another value) is read as USB.
+    if (protocol == "cgx-aux" && type != "serial" && type != "network") {
         if (from_api) {
-            result.rejection = "Celestron CGX AUX requires Connection Type 'serial' and a USB port path";
+            result.rejection =
+                "Celestron CGX AUX requires Connection Type 'serial' (direct USB) or 'network' (SkyPortal WiFi)";
             return result;
         }
-        result.warnings.push_back("saved cgx-aux protocol requires the serial USB connection; using serial");
+        result.warnings.push_back("saved cgx-aux protocol has no USB or WiFi connection type; using serial (USB)");
         type = "serial";
         result.config.set(kCelestronConnectionType.key, type);
     }
     if (protocol == "cgx-aux" &&
         (!in.find(kCelestronSiteLatitude).has_value() || !in.find(kCelestronSiteLongitude).has_value())) {
-        const char* message = "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude";
+        const char* message = type == "network" ? "Celestron CGX over WiFi requires SiteLatitude and SiteLongitude"
+                                                : "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude";
         if (from_api) {
             result.rejection = message;
             return result;
@@ -86,6 +100,11 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
         endpoint_missing = "Serial port path is required";
     } else if (type == "network" && in.get(kCelestronHost).empty()) {
         endpoint_missing = "Host IP address is required";
+    } else if (type == "network" && protocol == "cgx-aux" && !is_numeric_ip(in.get(kCelestronHost))) {
+        // The CGX link names no host it would have to resolve under its I/O lock (celestron_cgx_protocol_wrapper.cpp).
+        endpoint_missing =
+            "Celestron CGX over WiFi needs the SkyPortal adapter's numeric IPv4 or IPv6 address "
+            "(1.2.3.4 on the adapter's own network)";
     } else if (type == "network") {
         endpoint_missing = network_port_fault(kCelestronTcpPort.key, result.config.get(kCelestronTcpPort));
     }

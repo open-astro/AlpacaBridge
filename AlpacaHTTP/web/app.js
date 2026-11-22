@@ -1566,10 +1566,10 @@ async function startEditDevice(device) {
     }
     setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
     setFormValue('synscan-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
-    // A direct CGX USB mount (cgx-aux) is serial only.
+    // A direct CGX mount (cgx-aux) is USB or SkyPortal WiFi, never auto-detected.
     const celestronConnection = document.getElementById('celestron-connection-type');
     if (celestronConnection && vendor === 'celestron' && deviceType === 'telescope') {
-        celestronConnection.value = config.protocol === 'cgx-aux' ? 'serial' : (config.connectionType || 'auto');
+        celestronConnection.value = config.protocol === 'cgx-aux' ? cgxConnectionType(config.connectionType) : (config.connectionType || 'auto');
         discriminators.unshift(celestronConnection);
     }
     // learnSiteFromClient is a key the router keeps for every device; absent means on.
@@ -3707,10 +3707,30 @@ function updateCelestronConnectionFields() {
     if (nexstarOnly) nexstarOnly.style.display = directUsb ? 'none' : 'block';
     const cgxSite = document.getElementById('celestron-cgx-site-config');
     if (cgxSite) cgxSite.style.display = directUsb ? 'block' : 'none';
-    if (directUsb && celestronConnectionType) celestronConnectionType.value = 'serial';
-    const type = directUsb ? 'serial' : (celestronConnectionType ? celestronConnectionType.value : 'auto');
+    // The CGX is USB or SkyPortal WiFi: no auto-detect.
+    const autoOption = celestronConnectionType && celestronConnectionType.querySelector('option[value="auto"]');
+    if (autoOption) {
+        autoOption.hidden = directUsb;
+        autoOption.disabled = directUsb;
+    }
+    if (directUsb && celestronConnectionType) {
+        celestronConnectionType.value = cgxConnectionType(celestronConnectionType.value);
+    }
+    const type = celestronConnectionType ? celestronConnectionType.value : 'auto';
     document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    const cgxWifi = directUsb && type === 'network';
+    const host = document.getElementById('celestron-host');
+    if (cgxWifi && host && !host.value.trim()) host.value = CGX_SKYPORTAL_DEFAULT_HOST;
+    const find = document.getElementById('celestron-cgx-find');
+    if (find) find.style.display = cgxWifi ? 'block' : 'none';
+    const connectionHelp = document.getElementById('celestron-connection-help');
+    if (connectionHelp) connectionHelp.style.display = directUsb ? 'block' : 'none';
+    const tcpPortHelp = document.getElementById('celestron-tcp-port-help');
+    if (tcpPortHelp) {
+        tcpPortHelp.textContent = directUsb ? 'The SkyPortal adapter listens on port 2000.'
+            : 'Default port for NexStar WiFi bridges.';
+    }
     const baudGroup = document.getElementById('celestron-baud-group');
     if (baudGroup) baudGroup.style.display = directUsb ? 'none' : 'block';
     const portHelp = document.getElementById('celestron-port-help');
@@ -3719,6 +3739,46 @@ function updateCelestronConnectionFields() {
             ? 'Select the mount USB serial device. The driver uses its fixed 115200-baud AUX protocol; no hand controller is required.'
             : 'Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.';
     }
+}
+
+// "Find adapter" on the CGX WiFi form: the server listens 5 s for the SkyPortal adapter's beacon
+// (GET /management/v1/networkadapters?vendor=celestron). The result only fills the IP Address box.
+const celestronFindButton = document.getElementById('celestron-cgx-find-button');
+const celestronAdapterSelect = document.getElementById('celestron-cgx-adapters');
+const celestronFindStatus = document.getElementById('celestron-cgx-find-status');
+const celestronHostInput = document.getElementById('celestron-host');
+async function findCelestronAdapters() {
+    celestronFindButton.disabled = true;
+    celestronAdapterSelect.style.display = 'none';
+    celestronFindStatus.textContent = 'Listening for the SkyPortal adapter (5 s)...';
+    let model;
+    try {
+        const response = await fetch(API_BASE + '/management/v1/networkadapters?vendor=celestron', { cache: 'no-store' });
+        const data = await response.json();
+        model = data.ErrorNumber && data.ErrorNumber !== 0
+            ? skyPortalAdapterOptions(null, data.ErrorMessage || 'error ' + data.ErrorNumber)
+            : skyPortalAdapterOptions(Array.isArray(data.Value) ? data.Value : []);
+    } catch (e) {
+        model = skyPortalAdapterOptions(null, e.message);
+    }
+    celestronFindButton.disabled = false;
+    celestronFindStatus.textContent = model.status;
+    if (model.fill) celestronHostInput.value = model.fill;
+    celestronAdapterSelect.replaceChildren(...model.options.map(o => {
+        const option = document.createElement('option');
+        option.value = o.value;
+        option.textContent = o.label;
+        option.disabled = o.disabled;
+        return option;
+    }));
+    celestronAdapterSelect.value = '';
+    celestronAdapterSelect.style.display = model.options.length ? 'block' : 'none';
+}
+if (celestronFindButton && celestronAdapterSelect && celestronFindStatus && celestronHostInput) {
+    celestronFindButton.addEventListener('click', findCelestronAdapters);
+    celestronAdapterSelect.addEventListener('change', () => {
+        if (celestronAdapterSelect.value) celestronHostInput.value = celestronAdapterSelect.value;
+    });
 }
 if (celestronConnectionType) {
     celestronConnectionType.addEventListener('change', updateCelestronConnectionFields);
@@ -4647,7 +4707,7 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'celestron') {
         deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';
         deviceData.connectionType = deviceData.protocol === 'cgx-aux'
-            ? 'serial'
+            ? cgxConnectionType(formData.get('celestronConnectionType'))
             : (formData.get('celestronConnectionType') || 'auto');
         deviceData.alignmentMode = normalizeAlignmentMode(formData.get('celestronAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
@@ -4656,7 +4716,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
             }
         } else if (deviceData.connectionType === 'network') {
-            deviceData.host = formData.get('celestronHost');
+            deviceData.host = (formData.get('celestronHost') || '').trim();
             deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
         }
         if (deviceData.protocol === 'cgx-aux') {
@@ -4664,7 +4724,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             const longitude = readOptionalNumber(formData, 'celestronSiteLongitude');
             if (latitude === null || longitude === null) {
                 showFieldError(latitude === null ? 'celestronSiteLatitude' : 'celestronSiteLongitude',
-                    'Site latitude and longitude are required for direct CGX USB. Enter both coordinates to identify the hemisphere and calculate pointing.');
+                    'Site latitude and longitude are required for the direct CGX (USB or WiFi). Enter both coordinates to identify the hemisphere and calculate pointing.');
                 return;
             }
             deviceData.siteLatitude = latitude;

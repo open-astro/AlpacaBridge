@@ -300,6 +300,8 @@ if(TARGET alpacacore_celestron)
          test_celestron_cgx_geometry.cpp test_celestron_cgx_telescope.cpp
          test_celestron_cgx_telemetry.cpp
          test_celestron_cgx_link_loss.cpp
+         test_celestron_cgx_tcp_transport.cpp
+         test_celestron_cgx_tcp_driver.cpp
          test_celestron_cgx_goto_safety.cpp
          test_celestron_cgx_getter_wait.cpp
          test_celestron_cgx_concurrency_stress.cpp)
@@ -315,6 +317,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_focuser.cpp test_celestron_focuser_concurrency_stress.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
+    # SkyPortal WiFi adapter beacon, for the CGX form's Find adapter button.
+    list(APPEND TEST_SOURCES test_celestron_aux_beacon.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)

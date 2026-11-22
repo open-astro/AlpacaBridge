@@ -15,10 +15,12 @@
 // #659) -- never resolve_celestron_serial_auto() directly, which would move the
 // scan here, onto the registration path. Compiled only under
 // ALPACACORE_ENABLE_CELESTRON (unlike celestron_schema.cpp), so the vendor
-// headers are fine here. The direct CGX AUX protocol currently requires an
-// explicit serial USB port and site coordinates.
+// headers are fine here. The direct CGX AUX protocol requires site coordinates
+// and an explicit endpoint: a USB port path, or the SkyPortal adapter's numeric
+// address over WiFi.
 
 #include <alpacacore/util/alignment_mode.h>
+#include <alpacacore/vendor/celestron/celestron_aux_beacon.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -26,6 +28,8 @@
 
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "celestron_fields.h"
@@ -56,7 +60,13 @@ void register_celestron_factory(DeviceCatalog& catalog) {
         const std::string type = config.get(kCelestronConnectionType);
         if (protocol == "cgx-aux") {
             vendor::celestron::CelestronCgxConnectionInfo info;
-            info.port_path = config.get(kCelestronPortPath);
+            // normalize has left "serial" (direct USB) or "network" (SkyPortal WiFi): a host selects TCP.
+            if (type == "network") {
+                info.host = config.get(kCelestronHost);
+                info.tcp_port = network_port_or_zero(config.get(kCelestronTcpPort));
+            } else {
+                info.port_path = config.get(kCelestronPortPath);
+            }
             info.site_latitude_degrees = latitude;
             info.site_longitude_degrees = longitude;
             info.site_elevation_meters = elevation;
@@ -112,6 +122,14 @@ void register_celestron_factory(DeviceCatalog& catalog) {
     // token list its raw-node scan filter matches, read from the wrapper.
     catalog.add_usb_serial_identity(
         {DeviceKey{"celestron", DeviceType::Telescope}, vendor::celestron::celestron_usb_tokens(), {}});
+
+    // The CGX form's "Find adapter" button: the SkyPortal adapters beaconing on this host's networks.
+    catalog.add_network_adapter_finder("celestron", [] {
+        std::vector<FoundNetworkAdapter> found;
+        for (auto& beacon : vendor::celestron::listen_for_aux_beacons(vendor::celestron::kAuxBeaconFindWindow))
+            found.push_back({std::move(beacon.ip), std::move(beacon.ssid), std::move(beacon.module)});
+        return found;
+    });
 }
 
 }  // namespace alpacacore::catalog

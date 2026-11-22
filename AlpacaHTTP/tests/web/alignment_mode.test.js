@@ -50,12 +50,12 @@ test('Celestron protocol picker distinguishes the handset and direct CGX USB tra
     assert.ok(select, 'no Celestron protocol selector');
     const values = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
     assert.deepEqual(values, ['nexstar', 'cgx-aux']);
-    assert.ok(html.includes('CGX / CGX-L direct USB (no hand controller)'));
+    assert.ok(html.includes('CGX / CGX-L direct, USB or SkyPortal WiFi (no hand controller)'));
     assert.ok(html.includes('id="celestron-cgx-site-latitude"'));
     assert.ok(html.includes('id="celestron-cgx-site-longitude"'));
 });
 
-test('Celestron direct USB config persists protocol and uses the fixed serial transport', () => {
+test('Celestron direct CGX config persists protocol and its USB or WiFi transport', () => {
     // The protocol and the CGX site are filled from the catalog (data-config-key);
     // the connection type and alignment mode stay hand-written (manual).
     const { readCatalogFixture, formFields } = require('./catalog_form_fields.js');
@@ -64,7 +64,7 @@ test('Celestron direct USB config persists protocol and uses the fixed serial tr
     const filled = (config) => new Map(editAssignments(descriptor, config, formFields(html)).map((a) => [a.id, a.value]));
     assert.equal(filled({ protocol: 'cgx-aux' }).get('celestron-protocol'), 'cgx-aux');
     assert.equal(filled({}).get('celestron-protocol'), 'nexstar');
-    assert.ok(app.includes("celestronConnection.value = config.protocol === 'cgx-aux' ? 'serial'"));
+    assert.ok(app.includes("'cgx-aux' ? cgxConnectionType(config.connectionType) : (config.connectionType || 'auto');"));
     assert.ok(app.includes("deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';"));
     assert.ok(app.includes("deviceData.protocol === 'cgx-aux'"));
     assert.ok(app.includes("baudGroup.style.display = directUsb ? 'none' : 'block';"));
@@ -72,7 +72,7 @@ test('Celestron direct USB config persists protocol and uses the fixed serial tr
     assert.equal(site.get('celestron-cgx-site-latitude'), -33.856784);
     assert.equal(site.get('celestron-cgx-site-longitude'), 151.215297);
     assert.equal(site.get('celestron-cgx-site-elevation'), 42);
-    assert.ok(app.includes("Site latitude and longitude are required for direct CGX USB."));
+    assert.ok(app.includes("Site latitude and longitude are required for the direct CGX (USB or WiFi)."));
 });
 
 test('Celestron visibility is recalculated whenever its form section is reselected', () => {

@@ -650,6 +650,51 @@ TEST_CASE("Fake Celestron CGX mount - reports home completion independently per 
     CHECK(transact(0x11, 0x12).payload == std::vector<std::uint8_t>{0xff});
 }
 
+TEST_CASE("Fake Celestron CGX mount - a scripted home search drives its legs, and a runaway drives until stopped",
+          "[celestron][cgx][protocol][integration]") {
+    using namespace std::chrono_literals;
+    using alpacacore::vendor::celestron::CgxAxis;
+    using HomeLeg = alpacacore::test::FakeCelestronCgxMount::HomeLeg;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {}), std::invalid_argument);
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {{2, 1000, 0}}), std::invalid_argument);
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {{1, 0, 0}}), std::invalid_argument);
+    mount.set_physical_position(0x10, 0x001000);
+    // RA: 1,000 counts the wrong way, then home; Dec: away forever (a switch never found).
+    mount.script_home_search(0x10, {HomeLeg{1, 1000, 1000}, HomeLeg{0, 2000, 0}});
+    mount.script_home_search(0x11, {HomeLeg{-1, 500, 0}});
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    protocol.start_axis_home(CgxAxis::RightAscension);
+    protocol.start_axis_home(CgxAxis::Declination);
+    mount.advance_motion(500ms);
+    CHECK(mount.axis_physical_position(0x10) == 0x001000U + 500);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 249);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::RightAscension));
+    CHECK_FALSE(protocol.is_axis_slew_done(CgxAxis::RightAscension));
+    mount.advance_motion(1s);  // the rest of the first leg, then 1,000 counts back toward home
+    CHECK(mount.axis_physical_position(0x10) == 0x001000U);
+    mount.advance_motion(10s);  // ends at the physical home
+    CHECK(mount.axis_physical_position(0x10) == 0U);
+    CHECK(protocol.is_axis_home_done(CgxAxis::RightAscension));
+    CHECK(protocol.is_axis_slew_done(CgxAxis::RightAscension));
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::Declination));
+
+    static_cast<void>(protocol.exchange(AuxFrame{.source = 0, .destination = 0x11, .command = 0x24, .payload = {0}},
+                                        std::chrono::milliseconds(500)));
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK(protocol.is_axis_home_done(CgxAxis::Declination));
+    // The script is used up: the next search is the usual one (no motion, explicit completion).
+    protocol.start_axis_home(CgxAxis::Declination);
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::Declination));
+}
+
 TEST_CASE("Fake Celestron CGX mount - advances GOTO and tracking from elapsed simulated time",
           "[celestron][cgx][protocol][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
