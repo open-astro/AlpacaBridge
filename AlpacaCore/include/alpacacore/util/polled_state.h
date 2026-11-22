@@ -75,6 +75,7 @@ template <typename Frame>
 class PolledState {
 public:
     using Reading = typename StateSnapshot<Frame>::Reading;
+    using Token = typename StateSnapshot<Frame>::Token;
 
     struct Config {
         std::chrono::nanoseconds period{std::chrono::milliseconds(250)};
@@ -149,13 +150,11 @@ public:
 
     /// For a probe that publishes itself (StateSnapshot::begin_poll): take it under the driver lock that
     /// decides what the probe samples, before the exchange.
-    typename StateSnapshot<Frame>::Token begin_poll() const { return snapshot_.begin_poll(); }
+    Token begin_poll() const { return snapshot_.begin_poll(); }
 
     /// StateSnapshot::publish: false (frame dropped) when a write() or reset() landed since `token`. Call it
     /// under the driver lock that applies the probe's other results, so they take effect with the frame.
-    bool publish(typename StateSnapshot<Frame>::Token token, Frame frame) {
-        return snapshot_.publish(token, std::move(frame));
-    }
+    bool publish(Token token, Frame frame) { return snapshot_.publish(token, std::move(frame)); }
 
     /// The frame for a getter. Throws NotConnected when the link is lost (or no
     /// frame is held) and DriverException with the fault text while a fault is
@@ -213,6 +212,12 @@ public:
         slot_.set_spawn_for_testing(std::move(spawn));
     }
     void pause_for_testing(bool paused) { paused_.store(paused); }
+
+    /// Test seam: starts the poll slot again, with none of the inline probes start() runs, after a stop_and_join()
+    /// that left the poll thread off the task clock.
+    void restart_poll_for_testing() {
+        slot_.start([this](OperationContext& ctx) { run(ctx); });
+    }
 
     /// Test seam: one poll cycle on the calling thread, `on_lost()` included.
     void poll_now_for_testing() { cycle(); }

@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -913,4 +914,104 @@ TEST_CASE("Bisque snapshot - Connected and Slewing answer while the Unpark comma
 TEST_CASE("Bisque snapshot - Connected and Slewing answer while the SetPark command is slow",
           "[bisque][telescope][snapshot]") {
     getters_answer_during_exchange(1, [](alpacacore::TelescopeDriver& d) { d.set_park(); });
+}
+
+namespace {
+
+// Holds the position read of one status tick in the fake, lets `write` land while it is held, then releases it. The
+// tick's token was taken before the read, so `write` (a state change made under mutex_ before it reaches the wire)
+// is newer than it. `landed` says when the write has taken effect.
+void tick_overtaken_by_write(Rig& rig, const std::function<void()>& write, const std::function<bool()>& landed) {
+    std::atomic<bool> in_read{false};
+    std::atomic<bool> release{false};
+    rig.mount.on_position_read = [&] {
+        in_read = true;
+        while (!release.load()) std::this_thread::sleep_for(milliseconds(1));
+    };
+    auto tick = std::async(std::launch::async, [&] { return rig.poll(); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (!in_read.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
+    REQUIRE(in_read.load());
+    std::thread writer(write);
+    while (!landed() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
+    release = true;
+    CHECK(tick.get());
+    writer.join();
+    rig.mount.on_position_read = nullptr;
+}
+
+}  // namespace
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): take the token with polled_.begin_poll() after the position
+// read instead of before the completion read (the write is then older than the token and the frame publishes).
+TEST_CASE("Bisque snapshot - a write between the tick's token and its publish drops the frame and the slew outcome",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.land_on_target = true;
+    rig.mount.slew_polls_needed = 0;
+    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.clock.advance(seconds(9));  // past the 8 s force window: the tick asks IsSlewComplete
+    REQUIRE(rig.driver->get_slewing());
+
+    // AbortSlew clears Slewing and drops the tick in flight under mutex_ before its command waits for the wire.
+    tick_overtaken_by_write(rig, [&] { rig.driver->abort_slew(); }, [&] { return !rig.driver->get_slewing(); });
+
+    // The tick measured the landed position and the completed slew, and neither is visible: the frame was dropped.
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_right_ascension() == 5.5);
+    CHECK(rig.driver->get_declination() == 20.0);
+
+    REQUIRE(rig.poll());  // the next tick publishes
+    CHECK(rig.driver->get_right_ascension() == 5.0);
+    CHECK(rig.driver->get_declination() == 10.0);
+}
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): drop the `slewing_cached_ = false` on a completed slew.
+TEST_CASE("Bisque snapshot - a tick's slew outcome and its frame arrive together",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.land_on_target = true;
+    rig.mount.slew_polls_needed = 0;
+    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.clock.advance(seconds(9));
+    REQUIRE(rig.poll());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_right_ascension() == 5.0);
+
+    // A failed completion read is kept with its frame too: Slewing stays true and says why until a reply clears it.
+    rig.mount.land_on_target = false;
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.fail_slew_polls = 1;
+    rig.driver->slew_to_coordinates_async(6.0, 11.0);
+    rig.clock.advance(seconds(9));
+    REQUIRE(rig.poll());
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    REQUIRE(rig.poll());
+    CHECK(rig.driver->get_slewing());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, probe(): hold mutex_ from the token to the publish, across the exchanges.
+TEST_CASE("Bisque snapshot - getters answer from the frame within the budget while a tick holds 200 ms replies",
+          "[bisque][telescope][snapshot][polled]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 200;
+    const int before = rig.mount.transactions.load();
+    auto tick = std::async(std::launch::async, [&] { return rig.poll(); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    REQUIRE(rig.mount.transactions.load() > before);
+    CHECK(tick.wait_for(milliseconds(0)) == std::future_status::timeout);  // the tick is on the wire
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_declination(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_tracking(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_slewing(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_device_state(); }) < kGetterBudget);
+    CHECK(tick.get());
 }

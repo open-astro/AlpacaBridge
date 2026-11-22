@@ -19,7 +19,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
@@ -44,11 +44,12 @@ namespace alpacacore::vendor::bisque {
 
 namespace {
 
-// Decision 0010, Bisque adoption. A poll body samples TheSkyX every kStatusPollPeriod (start to start; ticks missed
-// behind a slow link are skipped, never made up) and publishes one frame; the getters and DeviceState serve it from
-// memory and never touch the socket. kSnapshotMaxAge is the FRESHNESS bound: an older frame reads `stale` and is
-// still served. It is not the bound at which a getter refuses: that is the link-loss policy of decision 0009
-// (kPositionLinkFailureThreshold failed ticks latch a fault, util::kLinkStalenessBound of fault makes the link lost).
+// Decision 0010, Bisque adoption. util::PolledState polls TheSkyX every kStatusPollPeriod (start to start; ticks missed
+// behind a slow link are skipped, never made up) and the getters and DeviceState serve its frame from memory and never
+// touch the socket. kSnapshotMaxAge is the FRESHNESS bound: an older frame reads `stale` and is still served. It is not
+// the bound at which a getter refuses: that is the link-loss policy of decision 0009, which the module holds
+// (kPositionLinkFailureThreshold failed ticks latch a fault, util::kLinkStalenessBound of fault, or of a frame no tick
+// refreshed, makes the link lost and closes the transport through on_lost).
 constexpr auto kStatusPollPeriod = std::chrono::milliseconds(1000);
 constexpr auto kSnapshotMaxAge = std::chrono::milliseconds(3000);
 static_assert(kSnapshotMaxAge >= 2 * kStatusPollPeriod, "two poll periods, or a healthy link reads stale");
@@ -170,7 +171,7 @@ public:
             } catch (...) {
             }
         }
-        status_poll_.cancel_all_and_join();
+        polled_.stop_and_join();
         pulse_guide_op_.cancel_all_and_join();
     }
 
@@ -204,12 +205,9 @@ public:
     // Reads published_connected_: raised only at the end of a connect, dropped when the session ends or
     // the link is declared lost, so it takes no lock set_connected() holds and stays false while
     // Connecting is true (#910). The blocking-driver list lives in async_connectable.h.
-    bool get_connected() const override { return published_connected_.load(); }
+    bool get_connected() const override { return published_connected_.load() && !polled_.link_lost(); }
 
-    std::string get_link_fault() const override {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        return link_fault_text_;
-    }
+    std::string get_link_fault() const override { return polled_.fault(); }
 
     ALPACA_ASYNC_CONNECT_FORWARDERS()
 
@@ -220,7 +218,7 @@ public:
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        const bool effectively_connected = connected_ && !link_lost_;
+        const bool effectively_connected = connected_ && !polled_.link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(effectively_connected)) {
             return;
         }
@@ -232,7 +230,6 @@ public:
                 // A disconnect of a lost link: the transport is closed already; drop the rest of the session.
                 published_connected_ = false;
                 connected_ = false;
-                link_lost_ = false;
                 // Cancels a Park poll still running, which then leaves parking_ alone: clear it here, as the other
                 // cancel paths do, or the next session refuses every slew as parked (open-astro#2062).
                 parking_ = false;
@@ -242,9 +239,9 @@ public:
                 pulse_guiding_ = false;
                 slewing_cached_ = false;
                 slew_hold_.clear();  // decision 0022 rule 2
-                reset_snapshot_state_locked();
+                reset_snapshot_state_locked();  // clears the loss latch too
                 lock.unlock();
-                status_poll_.cancel_all_and_join();
+                polled_.stop_and_join();
                 pulse_guide_op_.cancel_all_and_join();
             }
             return;
@@ -256,14 +253,13 @@ public:
             // Connected=true gets here; the driver never reopens on its own (decision 0009 point 4).
             published_connected_ = false;
             connected_ = false;
-            link_lost_ = false;
             parking_ = false;  // cancels a Park poll still running, as the lost-link disconnect above does
             motion_owner_.cancel(util::MotionOwner::kBothAxes);  // (open-astro#2062)
             ++pulse_request_;
             pulse_generation_.bump();
             pulse_guiding_ = false;
             lock.unlock();
-            status_poll_.cancel_all_and_join();
+            polled_.stop_and_join();
             pulse_guide_op_.cancel_all_and_join();
             lock.lock();
         }
@@ -295,16 +291,8 @@ public:
                 parked_now = protocol.is_parked();
             } catch (...) {  // NOLINT(bugprone-empty-catch): no answer reads as not parked
             }
-            // The first frame, so the first property reads are served from memory. A TheSkyX that does not
-            // answer leaves a frame with nothing known; the poll fills it in.
-            PolledFrame seed;
-            try {
-                seed = sample_frame(seed);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the poll fills it in
-            }
 
             lock.lock();
-            connected_ = true;
             target_ra_set_ = false;
             target_dec_set_ = false;
             parked_ = parked_now;
@@ -319,15 +307,26 @@ public:
             pulse_guide_error_.clear();
             ++pulse_request_;
             pulse_generation_.bump();
-            seed_snapshot_locked(seed);
+            lock.unlock();  // the poll starts without mutex_ held (AsyncOperation rule 10)
 
-            ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
-                            std::string(parked_ ? "true" : "false"));
-            // Raised under mutex_, so a link-loss declaration (also under mutex_) cannot be
-            // overwritten by this store (decision 0009 rule 3).
+            // The first probe is the seed, so the first property reads are served from memory: a TheSkyX that
+            // does not answer the position leaves a frame with nothing known, which the poll fills in.
+            seeding_ = true;
+            const bool started = polled_.start();
+            seeding_ = false;
+            lock.lock();
+            if (!started) {
+                reset_snapshot_state_locked();
+                lock.unlock();
+                try {
+                    protocol.disconnect();
+                } catch (...) {  // NOLINT(bugprone-empty-catch): the connect fails either way
+                }
+                throw AlpacaException("Bisque status poll did not start", AlpacaError::DriverException);
+            }
+            connected_ = true;
+            ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" + std::string(parked_ ? "true" : "false"));
             published_connected_ = true;  // the connect is complete (#910)
-            lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
-            start_status_poller();
         } else {
             ++pulse_request_;
             pulse_generation_.bump();
@@ -342,7 +341,6 @@ public:
             at_home_ = false;
             slewing_cached_ = false;
             slew_hold_.clear();  // decision 0022 rule 2
-            link_lost_ = false;
             reset_snapshot_state_locked();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -354,7 +352,7 @@ public:
                 protocol.disconnect();
             } catch (...) {  // NOLINT(bugprone-empty-catch): state is already cleared
             }
-            status_poll_.cancel_all_and_join();
+            polled_.stop_and_join();
             pulse_guide_op_.cancel_all_and_join();
         }
     }
@@ -479,7 +477,7 @@ public:
         // Written through, so the next read sees it before the next poll runs.
         std::lock_guard<std::mutex> lock(mutex_);
         if (tracking) at_home_ = false;  // tracking moves the mount off home (#2461)
-        snapshot_.write([tracking](PolledFrame& frame) {
+        polled_.write([tracking](PolledFrame& frame) {
             frame.tracking = tracking;
             frame.tracking_known = true;
         });
@@ -911,7 +909,7 @@ public:
                     // The pulse moved the mount: read where it ended up. The sample is four TheSkyX exchanges,
                     // so it runs without mutex_ (every getter takes it). A write that lands meanwhile (an
                     // abort, a slew) is newer than the token and drops the publish.
-                    const auto token = snapshot_.begin_poll();
+                    const auto token = polled_.begin_poll();
                     lock.unlock();
                     const auto measured = measure_frame();
                     lock.lock();
@@ -1208,23 +1206,20 @@ public:
     }
 
     // Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling
-    // thread. A paused poll joins its slot, so it leaves no waiter on the task clock either.
+    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either.
     void set_status_poll_paused_for_testing(bool paused) {
-        status_poll_paused_for_testing_ = paused;
         if (paused) {
-            status_poll_.cancel_all_and_join();
+            polled_.stop_and_join();
         } else {
-            start_status_poller();
+            polled_.restart_poll_for_testing();
         }
     }
 
-    // One full tick on the calling thread, paused or not. False when the connection is gone.
+    // One full tick on the calling thread, paused or not, with the loss close that follows it. False when the link
+    // is lost.
     bool poll_status_now_for_testing() {
-        const bool alive = poll_status_once(nullptr);
-        if (close_lost_transport_.exchange(false)) {
-            BisqueProtocolWrapper::instance().disconnect();
-        }
-        return alive;
+        polled_.poll_now_for_testing();
+        return !polled_.link_lost();
     }
 
     void set_slew_complete_hook_for_testing(std::function<void()> hook) {
@@ -1244,7 +1239,7 @@ public:
 
 private:
     void check_connected() const {
-        if (!connected_ || link_lost_) {
+        if (!connected_ || polled_.link_lost()) {
             throw AlpacaException("Not connected to TheSkyX", AlpacaError::NotConnected);
         }
     }
@@ -1256,9 +1251,9 @@ private:
     }
 
     void check_no_fault_locked() const {
-        if (position_link_health_.faulted()) {
-            throw AlpacaException("Bisque mount communications compromised: " + position_link_health_.fault(),
-                                  AlpacaError::DriverException);
+        const std::string fault = polled_.fault();
+        if (!fault.empty()) {
+            throw AlpacaException("Bisque mount communications compromised: " + fault, AlpacaError::DriverException);
         }
     }
 
@@ -1315,15 +1310,14 @@ private:
     // The frame a getter serves, or the refusal that applies: a lost link (NotConnected), a latched fault
     // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
     // A frame past kSnapshotMaxAge is served as it is: stale is not lost.
-    util::StateSnapshot<PolledFrame>::Reading served_frame_locked() const {
+    util::PolledState<PolledFrame>::Reading served_frame_locked() const {
         check_link_locked();
-        auto reading = snapshot_.read();
-        if (!reading) {
+        if (!polled_.read()) {
             throw AlpacaException(
                 "Bisque mount state is not available yet: the first status poll has not been answered",
                 AlpacaError::DriverException);
         }
-        return *reading;
+        return polled_.served();
     }
 
     // {RA hours, Dec degrees}
@@ -1348,25 +1342,17 @@ private:
 
     // The age of the state DeviceState serves: how long ago the poll measured it, on the task clock. Takes only the
     // snapshot's own mutex.
-    std::optional<std::chrono::nanoseconds> device_state_age() const override {
-        const auto reading = snapshot_.read();
-        if (!reading) {
-            return std::nullopt;
-        }
-        return clock_.now() - reading->measured_at;
-    }
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return polled_.age(); }
 
     // A write that changed what the mount's position means (a slew start, a move): drops the poll in flight,
     // so its older sample cannot overwrite what the control path knows. The next poll publishes.
     void drop_poll_in_flight_locked() const {
-        snapshot_.write([](PolledFrame&) {});
+        polled_.write([](PolledFrame&) {});
     }
 
     void reset_snapshot_state_locked() {
-        snapshot_.reset();
-        position_link_health_.reset();
+        polled_.reset();
         slew_poll_error_.clear();
-        publish_link_fault_locked();
     }
 
     // Every motion start clears AtHome, which only FindHome sets (ITelescopeV4, #2461): the four equatorial slews
@@ -1468,10 +1454,6 @@ private:
         return frame;
     }
 
-    // Publishes the first frame, sampled by the connect before it took mutex_, so the getters have an answer the
-    // moment Connect returns.
-    void seed_snapshot_locked(const PolledFrame& frame) { snapshot_.publish(snapshot_.begin_poll(), frame); }
-
     // Where the control path ends or lands a move (sync, slew complete, home, park): reads the mount now and
     // publishes the frame, so a read right after sees the new position, not one from before the move. A failed
     // read leaves the position unknown, which the getters refuse until the next poll answers.
@@ -1480,7 +1462,7 @@ private:
     // drops it too.
     void publish_measurement() const {
         std::unique_lock<std::mutex> lock(mutex_);
-        const auto token = snapshot_.begin_poll();
+        const auto token = polled_.begin_poll();
         lock.unlock();
         const auto measured = measure_frame();
         lock.lock();
@@ -1493,7 +1475,7 @@ private:
     // The sample half of publish_measurement(), callable without mutex_. nullopt: the position read failed.
     std::optional<PolledFrame> measure_frame() const {
         try {
-            const auto previous = snapshot_.read();
+            const auto previous = polled_.read();
             return sample_frame(previous ? previous->value : PolledFrame{});
         } catch (const std::exception&) {
             return std::nullopt;
@@ -1501,13 +1483,13 @@ private:
     }
 
     // The publish half: `token` was taken before the sample, so a write since drops it.
-    void publish_measured_locked(const util::StateSnapshot<PolledFrame>::Token& token,
+    void publish_measured_locked(const util::PolledState<PolledFrame>::Token& token,
                                  const std::optional<PolledFrame>& measured) const {
         if (measured) {
-            snapshot_.publish(token, *measured);
+            polled_.publish(token, *measured);
             drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
         } else {
-            snapshot_.write([](PolledFrame& frame) {
+            polled_.write([](PolledFrame& frame) {
                 frame.equatorial_known = false;
                 frame.altaz_known = false;
             });
@@ -1531,32 +1513,23 @@ private:
         std::atomic<int>& count_;
     };
 
-    void publish_link_fault_locked() const {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        link_fault_text_ = position_link_health_.fault();
-    }
-
-    // One poll tick. The exchanges run WITHOUT mutex_, so a getter never waits behind a slow link and the snapshot
-    // mutex is never held across I/O; the result is published under mutex_. Returns false when the connection is
-    // gone or lost and the poll body should end. `ctx` is null for the test seam's direct tick, which ignores the
-    // pause.
-    bool poll_status_once(util::OperationContext* ctx) {
-        const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
-        if (ctx != nullptr && status_poll_paused_for_testing_.load()) {
-            return true;
-        }
+    // One poll tick for util::PolledState, on the poll thread with no driver lock held. The exchanges run WITHOUT
+    // mutex_, so a getter never waits behind a slow link; the result is published under mutex_ in the same hold that
+    // applies the slew outcome, and the probe returns nullopt so the module publishes nothing over it. A throw is a
+    // failed tick (the module's fault latch and loss verdict).
+    std::optional<PolledFrame> probe() {
         bool ask_slew = false;
-        util::StateSnapshot<PolledFrame>::Token token;
+        util::PolledState<PolledFrame>::Token token;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost_ || stopped()) {
-                return false;
+            if (!connected_ && !seeding_.load()) {
+                return std::nullopt;  // a session that ended under the tick: nothing to measure
             }
             ask_slew = slew_poll_due_locked();
             // Taken under the same mutex_ hold that decided ask_slew: a write (a retarget, an abort) that lands
             // after this point is newer than the token and drops the publish, and one before it is already in
             // the state slew_poll_due_locked() read.
-            token = snapshot_.begin_poll();
+            token = polled_.begin_poll();
         }
         // The completion flag is read BEFORE the position, so a frame that follows "complete" carries a position
         // measured after the stop.
@@ -1573,30 +1546,23 @@ private:
                 slew_error = ex.what();
             }
         }
-        const auto held = snapshot_.read();
+        const auto held = polled_.read();
         PolledFrame frame;
         try {
             frame = sample_frame(held ? held->value : PolledFrame{});
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost_ || stopped()) {
-                return false;
+        } catch (const std::exception&) {
+            if (!seeding_.load()) {
+                throw;
             }
-            note_position_failure_locked(e);
-            return !declare_link_lost_if_stale_locked();
+            // The seed publishes a frame with nothing known even when TheSkyX does not answer the position.
         }
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (!connected_ || link_lost_ || stopped()) {
-            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ && !seeding_.load()) {
+            return std::nullopt;
         }
-        // A reply, even one the snapshot drops because a write landed since the sample, proves the link.
-        if (position_link_health_.on_reply()) {
-            ALPACA_LOG_INFO("Bisque", "Position link recovered; mount readback is available again");
-        }
-        publish_link_fault_locked();
         // The slew outcome applies only with its frame: a write since the sample (a new slew, an abort) makes
         // the publish fail, and then the answer is about a slew that is no longer the current one.
-        if (snapshot_.publish(token, frame) && ask_slew && slewing_cached_) {
+        if (polled_.publish(token, std::move(frame)) && ask_slew && slewing_cached_) {
             if (!slew_error.empty()) {
                 slew_poll_error_ = slew_error;
                 slew_poll_error_code_ = slew_error_code;
@@ -1607,76 +1573,7 @@ private:
                 }
             }
         }
-        return true;
-    }
-
-    void note_position_failure_locked(const std::exception& e) {
-        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold, clock_.now())) {
-            ALPACA_LOG_ERROR("Bisque", "Position link faulted: " + *fault);
-        } else {
-            ALPACA_LOG_WARN("Bisque", "Position read failed (" +
-                                          std::to_string(position_link_health_.consecutive_failures()) +
-                                          " consecutive failures): " + e.what());
-        }
-        publish_link_fault_locked();
-    }
-
-    // Decision 0009 point 2(b): a fault that has stood past the bound is a LOST link. Connected reads false, the
-    // getters and setters throw NotConnected, DeviceState is empty, the transport is closed; only the client's
-    // Connected=true relinks. Caller holds mutex_ (the transport close waits on the wrapper, which a pending guide
-    // may hold, so it happens in the poll body after the lock is released). True when the link was just declared
-    // lost.
-    bool declare_link_lost_if_stale_locked() {
-        if (!position_link_health_.fault_stale(clock_.now())) {
-            return false;
-        }
-        ALPACA_LOG_ERROR(
-            "Bisque",
-            "Link to TheSkyX lost after " +
-                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
-                " s without a reply; reconnect to resume (" + position_link_health_.fault() + ")");
-        link_lost_ = true;
-        published_connected_ = false;
-        close_lost_transport_ = true;
-        return true;
-    }
-
-    void run_status_poller(util::OperationContext& ctx) {
-        // The first frame was seeded at connect: wait one period before the first tick.
-        if (!ctx.wait_for(kStatusPollPeriod)) {
-            return;
-        }
-        for (;;) {
-            const auto started = clock_.now();
-            const bool alive = poll_status_once(&ctx);
-            if (close_lost_transport_.exchange(false)) {
-                try {
-                    BisqueProtocolWrapper::instance().disconnect();
-                } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the link is lost already
-                }
-            }
-            if (!alive) {
-                return;
-            }
-            // Start to start: wait for the next tick, skipping any a slow poll ran over (no catch-up).
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatusPollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatusPollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
-    // Call without mutex_ held (AsyncOperation rule 10), after a connect.
-    void start_status_poller() {
-        if (status_poll_paused_for_testing_.load()) {
-            return;
-        }
-        try {
-            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
-        } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("Bisque", std::string("Status poll did not start: ") + e.what());
-        }
+        return std::nullopt;
     }
 
     bool get_slewing_locked() const {
@@ -1755,7 +1652,7 @@ private:
         try {
             const bool tracking = BisqueProtocolWrapper::instance().is_tracking();
             lock.lock();
-            snapshot_.write([tracking](PolledFrame& frame) {
+            polled_.write([tracking](PolledFrame& frame) {
                 frame.tracking = tracking;
                 frame.tracking_known = true;
             });
@@ -1765,7 +1662,7 @@ private:
                 lock.lock();
             }
             // A failed read keeps what the Tracking getter would answer: the frame's last value.
-            const auto held = snapshot_.read();
+            const auto held = polled_.read();
             return held && held->value.tracking_known && held->value.tracking;
         }
     }
@@ -1875,18 +1772,13 @@ private:
     std::atomic<double> aperture_diameter_m_ = 0.0;
     std::atomic<double> focal_length_m_ = 0.0;
 
-    // Snapshot-served state (decision 0010). The poll slot's body takes mutex_ only to publish.
-    mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
-    mutable util::PolledLinkHealth position_link_health_;  // under mutex_
-    bool link_lost_ = false;                               // decision 0009, under mutex_
-    std::atomic<bool> close_lost_transport_{false};        // set with link_lost_, consumed by the poll body
-    mutable std::mutex link_fault_mutex_;                  // narrow: get_link_fault() never waits on mutex_
-    mutable std::string link_fault_text_;
+    // Snapshot-served state (decision 0010): `polled_`, declared last. The probe takes mutex_ only around its token
+    // and its publish.
     mutable std::string slew_poll_error_;  // last failed IsSlewComplete poll, under mutex_
     int slew_poll_error_code_ = AlpacaError::DriverException;
     std::atomic<int> slew_waiters_{0};  // SlewToCoordinates waits polling by themselves; atomic: a wait that throws
                                         // leaves its guard without mutex_
-    std::atomic<bool> status_poll_paused_for_testing_{false};
+    std::atomic<bool> seeding_{false};  // the connect's first probe: it publishes a frame even when TheSkyX is silent
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
 
@@ -1917,11 +1809,24 @@ private:
     util::OperationGeneration pulse_generation_;
     util::AsyncOperation pulse_guide_op_{"Bisque pulse guide", pulse_generation_, clock_};
     util::OperationGeneration poll_generation_;
-    util::AsyncOperation status_poll_{"Bisque status poll", poll_generation_, clock_};
 
     int slew_settle_time_seconds_ = 0;
 
     GuideRate guide_rate_{};
+
+    // Last: destroyed first, so its poll body joins while every member the probe touches is alive. Loss closes the
+    // transport on the poll thread (decision 0009 point 4: no autonomous reconnect).
+    mutable util::PolledState<PolledFrame> polled_{
+        clock_,
+        poll_generation_,
+        {kStatusPollPeriod, kPositionLinkFailureThreshold, kSnapshotMaxAge, "Bisque mount"},
+        [this] { return probe(); },
+        [] {
+            try {
+                BisqueProtocolWrapper::instance().disconnect();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the link is lost already
+            }
+        }};
 };
 
 std::unique_ptr<TelescopeDriver> create_bisque_telescope(int device_number, const ConnectionInfo& connection_info,

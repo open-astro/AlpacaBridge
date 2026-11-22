@@ -1720,8 +1720,9 @@ TEST_CASE("Bisque SiderealTime - answers LST of the remote clock, not the bridge
     REQUIRE(poll_now(*rig.driver));
     CHECK(hours_apart(rig.driver->get_sidereal_time(), lst_at_millis(remote)) < 1e-6);
     const int before = rig.mount.transactions;
-    rig.clock.advance(std::chrono::seconds(90));
-    CHECK(hours_apart(rig.driver->get_sidereal_time(), lst_at_millis(remote + 90000)) < 1e-6);
+    // Under util::kLinkStalenessBound: a frame no tick refreshed for that long is a lost link (PolledState).
+    rig.clock.advance(std::chrono::seconds(20));
+    CHECK(hours_apart(rig.driver->get_sidereal_time(), lst_at_millis(remote + 20000)) < 1e-6);
     CHECK(rig.mount.transactions == before);
 }
 

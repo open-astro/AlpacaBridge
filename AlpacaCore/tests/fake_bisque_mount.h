@@ -58,6 +58,10 @@ namespace alpacacore::test {
  * `on_slew_command`, when set, runs on the server thread before a SlewToRaDec is answered, while the driver waits
  * for the reply; set it before the slew and leave it alone while one is in flight.
  *
+ * `on_position_read`, when set, runs on the server thread before every GetRaDec is answered, while the driver holds
+ * its wire lock for the exchange; a case that blocks in it holds the tick that asked. Set it while no exchange is in
+ * flight and leave it alone until the reads it holds are released.
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -70,6 +74,7 @@ public:
     std::atomic<int> fail_tracking_reads{0};
     std::atomic<int> fail_slew_commands{0};
     std::function<void()> on_slew_command;
+    std::function<void()> on_position_read;
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -138,6 +143,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(set_tracking_ms.load()));
         }
         if (has(command, "GetRaDec")) {
+            if (on_position_read) on_position_read();
             if (position_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(position_ms.load()));
             ++position_reads;
             return "|No error. Error = 0." + std::to_string(ra_hours.load()) + "," +
