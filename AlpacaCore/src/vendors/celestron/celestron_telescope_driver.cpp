@@ -2412,21 +2412,44 @@ public:
         if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
             throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
+        constexpr double kStopEpsilon = 1e-6;
+        const bool moving = std::abs(rate) > kStopEpsilon;
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        // #2458: the mount's GOTO drives both axes, so a stop while a GOTO runs (an async or blocking slew, a FindHome)
+        // stops both, as AbortSlew does. A rate 0 on one axis alone would leave the other moving after Slewing reads
+        // false. Decided here, before the pulse joins: such a stop joins both pulse chains, as AbortSlew does, so none
+        // re-arms a guide pulse after the stops.
+        bool stop_goto = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("MoveAxis");
+            stop_goto = !moving && goto_running_locked();
         }
-        pulse_ops_[axis].cancel_all_and_join();
+        if (stop_goto) {
+            join_pulse_bodies();
+        } else {
+            pulse_ops_[axis].cancel_all_and_join();
+        }
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
         const std::uint64_t mine = motion_generation_;
+        if (stop_goto) {
+            const std::string stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+            if (!stop_error.empty()) {
+                last_home_error_.clear();
+                last_slew_error_ = "MoveAxis stop failed: " + stop_error;
+                // The mount may still be moving: leave Slewing and the slew state as they were.
+                throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
+            }
+            homing_ = false;
+            slew_aborted_ = true;
+            manual_axis_slewing_[1 - axis] = false;
+            clear_pulse_guiding_locked();
+        }
 
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = std::abs(rate) > kStopEpsilon;
         set_slewing_locked(false);
         slew_force_until_ = util::TaskClock::clock::time_point::min();
         position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -2438,9 +2461,11 @@ public:
             parked_ = false;
             at_home_ = false;
         }
-        send_motion_locked(
-            lock, [this, mine] { return motion_generation_ == mine; },
-            [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+        if (!stop_goto) {  // the stops above already sent rate 0 to both axes
+            send_motion_locked(
+                lock, [this, mine] { return motion_generation_ == mine; },
+                [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+        }
         clear_motion_errors_locked();
     }
 
@@ -2931,6 +2956,11 @@ private:
         pulse_guide_active_.fill(false);
         pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
     }
+
+    // Under mutex_: a GOTO the driver sent may still be driving both axes (#2458): the async slew or Park body runs,
+    // a FindHome runs, or Slewing was published true by a slew (a blocking one waits with no body) and has not landed.
+    // A MoveAxis publishes Slewing false, so a jog alone never counts.
+    bool goto_running_locked() const { return slew_.running() || homing_ || slewing_cached_; }
 
     // A park in flight (parking_) gates the same members as a completed park:
     // otherwise a slew/MoveAxis/sync issued right after the async Park would

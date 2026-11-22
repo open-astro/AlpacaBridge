@@ -463,6 +463,7 @@ public:
         protocol.set_tracking(tracking, true, 0.0, 0.0);
         // Written through, so the next read sees it before the next poll runs.
         std::lock_guard<std::mutex> lock(mutex_);
+        if (tracking) at_home_ = false;  // tracking moves the mount off home (#2461)
         snapshot_.write([tracking](PolledFrame& frame) {
             frame.tracking = tracking;
             frame.tracking_known = true;
@@ -714,6 +715,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
                 parking_ = true;
+                at_home_ = false;  // a park moves the mount off home (#2461)
                 guard.epoch = ++park_epoch_;
                 guard.armed = true;
             }
@@ -795,6 +797,7 @@ public:
 
         pulse_guiding_ = true;
         pulse_guide_error_.clear();
+        at_home_ = false;  // a guide pulse moves the mount off home (#2461)
         // The request id is taken under mutex_ with the state it guards; abort,
         // connect and disconnect bump it, so the body compares it under mutex_
         // and a guide they retired neither sends nor records anything.
@@ -1057,6 +1060,7 @@ public:
         protocol.start_open_loop_motion(direction, speed_index);
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
+        at_home_ = false;  // see note_slew_started_locked()
         drop_poll_in_flight_locked();
     }
 
@@ -1255,7 +1259,10 @@ private:
         publish_link_fault_locked();
     }
 
+    // Every motion start clears AtHome, which only FindHome sets (ITelescopeV4, #2461): the four equatorial slews
+    // here, and MoveAxis, Park, PulseGuide and Tracking on at their own sites.
     void note_slew_started_locked() {
+        at_home_ = false;
         ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();

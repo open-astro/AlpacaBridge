@@ -51,6 +51,8 @@ namespace {
 constexpr double kSiderealRateDegPerSec = 360.0 / 86164.0905;
 
 constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
+// A guide-rate readback this close to the sent multiple confirms the write (the wrapper's own match bound).
+constexpr double kGuideRateReadbackTolerance = 0.02;
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
 constexpr double kMaxSiteElevationMeters = 10000.0;
@@ -1012,21 +1014,29 @@ public:
         }
 
         const double effective = std::max(std::abs(rate.ra), std::abs(rate.dec));
-        if (effective < 0.0 || effective > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("GuideRate must be in [0, max axis rate] deg/sec", AlpacaError::InvalidValue);
+        // open-astro#2462: a rate of 0 is refused, never stored unsent (a stored 0 made every PulseGuide a no-op).
+        if (effective <= 0.0 || effective > kMaxMoveAxisRateDegPerSec) {
+            throw AlpacaException("GuideRate must be in (0, max axis rate] deg/sec", AlpacaError::InvalidValue);
         }
         check_writable_state();
 
-        if (connected_.load() && effective > 0.0) {
+        if (connected_.load()) {
             double guide_rate_multiple = effective / kSiderealRateDegPerSec;
             guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
-            // set_guide_rate() returns the readback value from its internal
-            // verification — no extra round-trip needed.
+            // The wrapper returns the mount's own readback, after either encoding (#2462).
             const double actual_multiple = protocol_.set_guide_rate(guide_rate_multiple);
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
-            std::lock_guard<std::mutex> lock(mutex_);
-            guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
-            ++guide_rate_writes_;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+                ++guide_rate_writes_;
+            }
+            // GuideRate keeps what the mount reports; a write the mount did not take is an error, not a silent pass.
+            if (std::abs(actual_multiple - guide_rate_multiple) > kGuideRateReadbackTolerance) {
+                throw AlpacaException("ZWO mount did not accept guide rate " + std::to_string(guide_rate_multiple) +
+                                          "x; it reports " + std::to_string(actual_multiple) + "x",
+                                      AlpacaError::DriverException);
+            }
             return;
         }
 
@@ -1311,6 +1321,10 @@ public:
         // the command; it is released before the tracking restore.
         std::unique_lock<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
+        // open-astro#2094: like every motion initiator, cancel queued and running guide pulses (stop and jog), so the
+        // drain sends no further step and IsPulseGuiding reads false. A step already past its check can still land
+        // after this command; the counted send wait that closes that (#2072) is main-only.
+        reset_position_offsets();
         if (initiator_hook_) initiator_hook_("MoveAxis");
 
         auto& protocol = protocol_;
@@ -2192,23 +2206,17 @@ public:
                 protocol.sync_target();
             }
         }
+        // open-astro#2492: the offset is taken from a position read after the sync command. A cached sample can be
+        // from before it (the poll publishes every 250 ms), and a sync the mount applied would then count twice.
         EquatorialCoordinates raw;
         bool has_raw = false;
+        try {
+            raw = protocol.get_current_equatorial();
+            has_raw = true;
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // No offset change; the cached position is dropped below.
+        }
         const auto now = clock_.now();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
-                raw = cached_equatorial_.value();
-                has_raw = true;
-            }
-        }
-        if (!has_raw) {
-            try {
-                raw = protocol.get_current_equatorial();
-                has_raw = true;
-            } catch (const std::exception&) {
-            }
-        }
         if (has_raw) {
             const double ra_delta = util::wrap_hour_angle(target_ra - raw.ra_hours);
             const double dec_delta = target_dec - raw.dec_degrees;
@@ -2307,7 +2315,6 @@ private:
     // Longer TTL for equatorial cache so RA/Dec reads meet FAST target over high-latency (e.g. WiFi) links.
     static constexpr auto kFastEquatorialTtlForRead = std::chrono::seconds(5);
     static constexpr auto kFastTrackingTtl = std::chrono::seconds(2);
-    static constexpr auto kFastEquatorialTtl = std::chrono::seconds(2);
     static constexpr auto kFastParkTtl = std::chrono::seconds(2);
 
     enum class ParkEvaluation {
