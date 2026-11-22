@@ -1,0 +1,6 @@
+### Fixed
+- **Celestron NexStar Telescope Driver** (AlpacaCore): a MoveAxis left running is stopped after 60 s with no new MoveAxis, and Slewing reports it until the next motion command; each new MoveAxis starts the 60 s again. A Connect over a lost link now stops a motion the driver had under way before anything else is sent, so a jog that was running when the cable or Wi-Fi dropped no longer keeps going. If that Connect fails, or the client disconnects first, the next Connect that opens the port sends the stop instead. Issue #2409 (part of #2396).
+
+### Breaking changes
+- **Celestron NexStar site and time writes are refused while the mount moves** (issue #2409): `SiteLatitude`, `SiteLongitude` and `UTCDate` writes now fail with InvalidOperation while a GOTO, Park, FindHome or MoveAxis the driver started is running, because they change the hand controller's pointing maths mid-motion. **After upgrading:** write the site and time while the mount is stopped, before a slew or after it ends.
+- **Celestron NexStar MoveAxis stops after 60 s without a new MoveAxis** (issue #2409): a client that starts a MoveAxis and does not send another within 60 s now sees the axis stopped and Slewing raise an error. **After upgrading:** a client that jogs for longer must repeat its MoveAxis at least every 60 s.
