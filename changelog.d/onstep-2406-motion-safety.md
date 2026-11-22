@@ -1,0 +1,6 @@
+### Fixed
+- **OnStep Telescope Driver** (AlpacaCore, issue #2406): motion now fails closed. A GOTO still running 120 s after it started is stopped, for async slews too, and a synchronous slew that times out stops the mount before it reports the failure. A GOTO whose start command got no reply is followed by a stop. AbortSlew is checked: while the mount still reports motion the stops are sent again, three rounds in all, and Slewing then reports the failure. A MoveAxis is stopped after 60 s. Each of these failures is raised by Slewing until the next motion command or a reconnect.
+- **OnStep Telescope Driver** (AlpacaCore, issue #2435): `MoveAxis(axis, 0)` is no longer refused while the mount is parked. A stop is always allowed.
+
+### Breaking changes
+- **OnStep Telescope Driver** (AlpacaCore, issue #2406): `SiteLatitude`, `SiteLongitude` and `UTCDate` writes are refused with InvalidOperation while a GOTO, a MoveAxis, a Park or a FindHome started by the driver runs, because they change the mount's limit maths mid-motion. A MoveAxis that runs longer than 60 s is now stopped by the driver. **After upgrading:** write the site and time while the mount is still, and renew a long MoveAxis before 60 s if a client needs one.
