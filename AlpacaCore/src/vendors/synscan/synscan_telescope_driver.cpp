@@ -1919,6 +1919,7 @@ public:
         // never sees this move with an older move's deadline.
         manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
         manual_axis_capped_[axis] = false;
+        ++manual_axis_move_id_[axis];
         if (axis == 0) {
             ra_stop_unconfirmed_ = false;
         }
@@ -2166,20 +2167,29 @@ private:
     // test, with AbortSlew's stops. Under transition_mutex_ only. A stop that fails closes the port and fails the
     // Connect, and the record stays for the next one.
     void send_relink_stops(SynScanProtocolWrapper& protocol) {
-        try {
-            protocol.cancel_goto();
-            protocol.move_axis_fixed_rate(0, 0);
-            protocol.move_axis_fixed_rate(1, 0);
-            // The RA stop also stops sidereal tracking: the mode the client had asked for goes back, as AbortSlew's.
-            if (relink_tracking_mode_ > 0) {
-                protocol.set_tracking_mode(relink_tracking_mode_);
+        // Each stop on its own, as AbortSlew's (#781): one lost command does not skip the others.
+        std::string stop_error;
+        const auto try_stop = [&stop_error](const std::function<void()>& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) stop_error = ex.what();
             }
-        } catch (const std::exception& ex) {
+        };
+        try_stop([&] { protocol.cancel_goto(); });
+        try_stop([&] { protocol.move_axis_fixed_rate(0, 0); });
+        try_stop([&] { protocol.move_axis_fixed_rate(1, 0); });
+        // The RA stop also stops sidereal tracking: the mode the client had asked for goes back, as AbortSlew's,
+        // once every stop was answered.
+        if (stop_error.empty() && relink_tracking_mode_ > 0) {
+            try_stop([&] { protocol.set_tracking_mode(relink_tracking_mode_); });
+        }
+        if (!stop_error.empty()) {
             protocol.disconnect();
             throw AlpacaException(
-                std::string("Failed to connect to SynScan mount: the stop for the motion running when the link "
-                            "dropped could not be sent: ") +
-                ex.what());
+                "Failed to connect to SynScan mount: the stop for the motion running when the link dropped could not "
+                "be sent: " +
+                stop_error);
         }
         relink_stop_pending_ = false;
         ALPACA_LOG_WARN("SynScan", "Reconnected over a lost link with motion running; sent the stops");
@@ -2471,11 +2481,36 @@ private:
             motion_bound_active_ = false;
             const std::string why = ex.what();
             std::string stop_error;
+            // As MoveAxis(axis, 0): RA's tracking mode goes back after the stop. No initiator can land meanwhile
+            // (move_axis() holds initiator_mutex_ across this call), so the flags written after the send are still
+            // this move's.
+            int restore_mode = 0;
+            bool restored = false;
             try {
                 send_in_turn(
-                    lock, [&] { return connected_.load() && manual_axis_slewing_[axis]; },
-                    [&] { SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
+                    lock,
+                    [&] {
+                        restore_mode = axis == 0 && tracking_mode_valid_ ? tracking_mode_cached_ : 0;
+                        return connected_.load() && manual_axis_slewing_[axis];
+                    },
+                    [&] {
+                        SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
+                        if (restore_mode > 0) {
+                            try {
+                                SynScanProtocolWrapper::instance().set_tracking_mode(restore_mode);
+                                restored = true;
+                            } catch (...) {  // NOLINT(bugprone-empty-catch): an unconfirmed RA stop, below
+                            }
+                        }
+                    });
                 manual_axis_slewing_[axis] = false;
+                if (restore_mode > 0) {
+                    if (restored) {
+                        set_tracking_mode_cached_locked(restore_mode);
+                    } else {
+                        ra_stop_unconfirmed_ = true;
+                    }
+                }
             } catch (const std::exception& stop_ex) {
                 stop_error = stop_ex.what();
             }
@@ -2539,10 +2574,12 @@ private:
         bool restored = false;
         std::string stop_error;
         bool sent = false;
+        std::uint64_t move_id = manual_axis_move_id_[axis];
         try {
             sent = send_in_turn(
                 lock,
                 [&] {
+                    move_id = manual_axis_move_id_[axis];
                     // At the turn: a renewal, a stop, AbortSlew or a disconnect since the check owns the axis now.
                     if (!connected_.load() || !manual_axis_slewing_[axis] || manual_axis_capped_[axis] ||
                         clock_.now() < manual_axis_deadline_[axis]) {
@@ -2569,6 +2606,12 @@ private:
         }
         if (!sent && stop_error.empty()) {
             return;  // a newer command owns the axis
+        }
+        if (manual_axis_move_id_[axis] != move_id) {
+            // A MoveAxis on this axis landed while the stop was on the wire (mutex_ was released for it). Its rate
+            // command follows this stop in the turn order, and its flags, deadline and capped state are its own: the
+            // body keeps watching it and stops it at its own deadline.
+            return;
         }
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
         const std::string ran =
@@ -4475,6 +4518,9 @@ private:
     util::TaskClock::clock::time_point manual_axis_deadline_[2] = {util::TaskClock::clock::time_point::min(),
                                                                    util::TaskClock::clock::time_point::min()};
     bool manual_axis_capped_[2] = {false, false};
+    // Bumped by every MoveAxis on the axis: the bound's stop touches the axis flags after its send only while this is
+    // the move it stopped (decision 0016 rule 6), so a renewal that lands during that exchange keeps its own flags.
+    std::uint64_t manual_axis_move_id_[2] = {0, 0};
     // Under mutex_: the MoveAxis bound body is running or about to start; it clears this as it ends.
     bool motion_bound_active_ = false;
     // #2412 (#2396 AB-9): a GOTO, Park or MoveAxis was running when the link dropped. Taken by a Connect or a

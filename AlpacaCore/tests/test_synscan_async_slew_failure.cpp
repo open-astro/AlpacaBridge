@@ -78,6 +78,9 @@ struct FakeSynScanState {
     std::atomic<int> cancel_count{0};
     std::mutex landed_mutex;
     std::string landed;
+    // Runs on the server thread before each reply (unset: nothing), so a case can act while a command is in flight.
+    std::mutex before_reply_mutex;
+    std::function<void(const std::string&)> before_reply;
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -106,6 +109,14 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         st->requests.fetch_add(1);
+        {
+            std::function<void(const std::string&)> hook;
+            {
+                std::lock_guard<std::mutex> lock(st->before_reply_mutex);
+                hook = st->before_reply;
+            }
+            if (hook) hook(chunk);
+        }
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R' || chunk[0] == 'W' ||
@@ -1672,4 +1683,57 @@ TEST_CASE("SynScan - a site or time write is refused at its wire turn by a MoveA
     CHECK(queued_in_time.load());
     CHECK(writes() == before);
     CHECK(rig.starts(kRaMotor) == 1);  // the MoveAxis went out after the refused write
+}
+
+// Decision 0016 rule 6: the bound's stop releases mutex_ while it is on the wire. A renewing MoveAxis on the same axis
+// that lands then keeps its own flags: Slewing stays true behind it and the bound stops it at its own 60 s.
+TEST_CASE("SynScan MoveAxis - a renewal that lands while the bound's stop is on the wire stays bounded",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(0);
+    std::promise<void> renewal_queued;
+    std::atomic<bool> queued_in_time{false};
+    std::atomic<bool> fired{false};
+    std::atomic<std::thread::id> renewer_id{};  // set by the renewal's own thread before it calls MoveAxis
+    std::thread renewer;
+    struct Cleanup {
+        MoveAxisBoundRig& rig;
+        std::thread& renewer;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+                rig.st->before_reply = nullptr;
+            }
+            sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, nullptr);
+            if (renewer.joinable()) renewer.join();
+        }
+    } cleanup{rig, renewer};
+    // The renewal's turn wait signals it has set its flags and queued behind the stop.
+    sc_bound::set_wire_turn_wait_hook_for_testing(*rig.driver, [&] {
+        if (std::this_thread::get_id() == renewer_id.load()) renewal_queued.set_value();
+    });
+    {
+        std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+        rig.st->before_reply = [&](const std::string& chunk) {
+            // The bound's first stop command is on the wire: land a renewal now, before the handset answers.
+            if (is_variable_rate_command(chunk, kRaMotor) && is_zero_rate_command(chunk) && !fired.exchange(true)) {
+                renewer = std::thread([&] {
+                    renewer_id.store(std::this_thread::get_id());
+                    (void)rig.driver->move_axis(0, 2.0);
+                });
+                queued_in_time.store(renewal_queued.get_future().wait_for(std::chrono::seconds(5)) ==
+                                     std::future_status::ready);
+            }
+        };
+    }
+    const int starts = rig.starts(kRaMotor);
+    rig.advance(std::chrono::seconds(61));
+    renewer.join();
+    CHECK(queued_in_time.load());
+    CHECK(rig.starts(kRaMotor) == starts + 1);              // the renewal's rate went out after the stop
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);  // the renewed move, not the stopped one
+    const int stops = rig.stops(kRaMotor);
+    rig.advance(std::chrono::seconds(61));  // the renewal's own 60 s
+    CHECK(rig.stops(kRaMotor) == stops + kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
 }
