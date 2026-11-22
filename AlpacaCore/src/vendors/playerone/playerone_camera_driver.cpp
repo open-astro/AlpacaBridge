@@ -894,12 +894,12 @@ public:
         return static_cast<double>(with_camera([this](int id) { return sdk_.get_target_temp_c(id); }));
     }
     void set_set_ccd_temperature(double temperature) override {
+        if (!std::isfinite(temperature)) {
+            throw AlpacaException("Target temperature must be finite", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         if (!get_can_set_ccd_temperature()) {
             throw AlpacaException("Set CCD temperature not supported", AlpacaError::NotImplemented);
-        }
-        if (!std::isfinite(temperature)) {
-            throw AlpacaException("Target temperature must be finite", AlpacaError::InvalidValue);
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);

@@ -727,6 +727,9 @@ public:
     }
 
     void set_set_ccd_temperature(double temperature) override {
+        if (!std::isfinite(temperature)) {
+            throw AlpacaException("Target temperature must be finite", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         set_control_value_or_throw(ZWOControlType::TargetTemperature, static_cast<long>(std::lround(temperature)));
     }

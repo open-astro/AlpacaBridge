@@ -1143,6 +1143,9 @@ public:
 
     void set_set_ccd_temperature(double temperature) override {
         // Reject physically impossible or unreasonable setpoints before locking.
+        if (!std::isfinite(temperature)) {
+            throw AlpacaException("Set point must be finite", AlpacaError::InvalidValue);
+        }
         if (temperature <= -273.15) {
             throw AlpacaException(
                 "Set point " + std::to_string(temperature) + " is at or below absolute zero",
