@@ -9,7 +9,7 @@ Devices: Camera. Altair Astro cameras are ToupTek OEM hardware, so read the
 modes, odd-bin ROI rounding, the thermal poller, abort mechanics, the exposure
 guard) applies to an Altair camera unchanged, because it is the same driver.
 
-SDK location: `AlpacaCore/external/Altair/altaircamsdk.20260531/` (altaircam
+SDK location: `AlpacaCore/external/Altair/altaircamsdk/` (altaircam
 60.31589.20260531; `inc/altaircam.h`, `linux/arm64/glibc/libaltaircam.so`,
 `linux/udev/99-altaircam.rules`, `license.txt`). Only the arm64 glibc subset
 of Altair's download is vendored. The SDK ships no static library.

@@ -53,6 +53,7 @@ namespace onstep = alpacacore::vendor::onstep;
 
 namespace {
 
+using alpacacore::test::require_alpaca_error;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
@@ -766,9 +767,9 @@ TEST_CASE("OnStep getters - a connect on the wire holds up no getter and reads a
     while (!done.load() && sampled < 20) {
         const auto start = steady_clock::now();
         CHECK_FALSE(rig.driver->get_connected());
-        CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
-        CHECK_THROWS_AS(rig.driver->get_slewing(), alpacacore::AlpacaException);
-        CHECK_THROWS_AS(rig.driver->get_site_latitude(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)rig.driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)rig.driver->get_site_latitude(); }, alpacacore::AlpacaError::NotConnected);
         CHECK(rig.driver->get_device_state().empty());
         CHECK(std::chrono::duration_cast<milliseconds>(steady_clock::now() - start) < kGetterBudget);
         ++sampled;

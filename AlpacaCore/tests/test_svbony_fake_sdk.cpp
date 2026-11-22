@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_svbony_sdk.h"
@@ -60,19 +61,22 @@ void wait_for_driver_exception(alpacacore::CameraDriver& camera, std::string_vie
     FAIL("SVBONY exposure failure was not published");
 }
 
-// The worker retries the capture stop only after its held read returns, and
+// The exposure body retries the capture stop only after its held read returns, and
 // clears the unconfirmed-stop refusal after that; the fake's read counter moves
-// before either, so a check right after it can still see the refusal.
+// before either, so a check right after it can still see the refusal. The kept
+// message stays on ImageReady until the next StartExposure (decision 0020 rule 3),
+// so this waits until a StartExposure is accepted, which it is once the body's own
+// stop has cleared the refusal.
 void wait_until_stop_confirmed(alpacacore::CameraDriver& camera) {
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (std::chrono::steady_clock::now() < deadline) {
         try {
-            static_cast<void>(camera.get_image_ready());
+            camera.start_exposure(0.001, true);
             return;
         } catch (const alpacacore::AlpacaException& ex) {
-            if (std::string(ex.what()).find("capture stop was not confirmed") == std::string::npos) return;
+            if (std::string(ex.what()).find("capture stop was not confirmed") == std::string::npos) throw;
         }
-        std::this_thread::sleep_for(1ms);
+        std::this_thread::sleep_for(1ms);  // real time: the body's stop runs on its own thread
     }
     FAIL("SVBONY capture stop was never confirmed");
 }
@@ -172,7 +176,7 @@ TEST_CASE("SVBONY Camera - metadata stays unset until the first accepted frame",
         CHECK_FALSE(camera->get_image_ready());
         SECTION("watchdog rejects the late frame") {
             clock.advance(16s);
-            wait_for_driver_exception(*camera, "completion deadline");
+            wait_for_driver_exception(*camera, "did not complete before its deadline");
             require_metadata_unset(*camera);
         }
         SECTION("abort while the read is held") {
@@ -251,10 +255,12 @@ TEST_CASE("SVBONY Camera - pending failed and cancelled frames preserve successf
     }
     SECTION("late B cannot publish after the watchdog") {
         clock.advance(16s);
-        wait_for_driver_exception(*camera, "completion deadline");
-        camera->abort_exposure();  // Abort releases the held read; a finished worker makes abort a no-op.
+        wait_for_driver_exception(*camera, "did not complete before its deadline");
+        // Nothing is exposing, so the abort is a no-op and the kept failure stays (decision 0020 rule 3).
+        camera->abort_exposure();
         require_a();
-        CHECK_FALSE(camera->get_image_ready());
+        require_alpaca_error([&] { static_cast<void>(camera->get_image_ready()); },
+                             alpacacore::AlpacaError::DriverException);
     }
     SECTION("disconnect joins B and clears the session") {
         camera->set_connected(false);
@@ -263,10 +269,13 @@ TEST_CASE("SVBONY Camera - pending failed and cancelled frames preserve successf
         require_metadata_unset(*camera);
         CHECK_FALSE(camera->get_image_ready());
     }
-    SECTION("a replacement joins B before publishing C") {
-        camera->start_exposure(0.03, true);
+    // Decision 0020 rule 2: a StartExposure while B is exposing is refused, and B goes on to publish.
+    SECTION("a StartExposure during B is refused and B publishes") {
+        require_alpaca_error([&] { camera->start_exposure(0.03, true); }, alpacacore::AlpacaError::InvalidOperation);
+        require_a();
+        sdk.release_video_data();
         wait_until_ready(*camera);
-        CHECK(camera->get_last_exposure_duration() == 0.03);
+        CHECK(camera->get_last_exposure_duration() == 0.02);
         CHECK(camera->get_last_exposure_start_time() >= before_b);
     }
 }
@@ -493,7 +502,7 @@ TEST_CASE("SVBONY Camera - connect selects only supported default formats", "[sv
         alpacacore::test::FakeSVBSDK sdk;
         sdk.set_supported_formats({SVBImageType::Rgb32});
         auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
-        CHECK_THROWS_AS(camera->set_connected(true), alpacacore::AlpacaException);
+        require_alpaca_error([&] { camera->set_connected(true); }, alpacacore::AlpacaError::DriverException);
         CHECK_FALSE(camera->get_connected());
         CHECK(sdk.open_count() == 0);
     }
@@ -517,7 +526,7 @@ TEST_CASE("SVBONY Camera - exposure deadline watchdog reports blocked worker", "
             static_cast<void>(camera->get_image_ready());
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).find("completion deadline") != std::string::npos);
+            CHECK(std::string(ex.what()).find("did not complete before its deadline") != std::string::npos);
             watchdog_seen = true;
         }
         if (!watchdog_seen) std::this_thread::sleep_for(10ms);
@@ -560,7 +569,7 @@ TEST_CASE("SVBONY Camera - exposure deadline watchdog reports blocked worker", "
               sdk.call_count("set_control_value") ==
           writes_before_release);
     for (int attempt = 0; attempt < 3; ++attempt) {
-        wait_for_driver_exception(*camera, "completion deadline");
+        wait_for_driver_exception(*camera, "did not complete before its deadline");
         require_array_failure(*camera);
     }
 
@@ -586,7 +595,7 @@ TEST_CASE("SVBONY Camera - late SDK failure cannot replace the watchdog result",
             static_cast<void>(camera->get_image_ready());
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).find("completion deadline") != std::string::npos);
+            CHECK(std::string(ex.what()).find("did not complete before its deadline") != std::string::npos);
             watchdog_seen = true;
         }
         if (!watchdog_seen) std::this_thread::sleep_for(10ms);
@@ -609,7 +618,7 @@ TEST_CASE("SVBONY Camera - late SDK failure cannot replace the watchdog result",
         }
     }
     REQUIRE(worker_finished);
-    wait_for_driver_exception(*camera, "completion deadline");
+    wait_for_driver_exception(*camera, "did not complete before its deadline");
     require_array_failure(*camera);
 }
 
@@ -684,13 +693,19 @@ TEST_CASE("SVBONY Camera - replacement exposure joins the old read before changi
 
     camera->start_exposure(0.001, true);
     REQUIRE(sdk.wait_for_video_data(2s));
+    // Decision 0020 rule 2: a replacement while the old read is held is refused and changes no control.
+    const int exposure_writes = sdk.call_count("set_control_value.Exposure");
+    require_alpaca_error([&] { camera->start_exposure(0.002, true); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(sdk.call_count("set_control_value.Exposure") == exposure_writes);
+    sdk.release_video_data();
+    wait_until_ready(*camera);
     camera->start_exposure(0.002, true);
+    wait_until_ready(*camera);
     const auto events = sdk.events();
     const auto first_read_complete = std::find(events.begin(), events.end(), "get_video_data_complete");
     REQUIRE(first_read_complete != events.end());
     const auto second_exposure_write = std::find(first_read_complete + 1, events.end(), "set_control_value.Exposure");
     REQUIRE(second_exposure_write != events.end());
-    wait_until_ready(*camera);
     CHECK(camera->get_image_array().data.size() == 128);
 }
 
@@ -773,10 +788,7 @@ TEST_CASE("SVBONY Camera - abort reports stop failure and later recovers", "[svb
     const int reads = sdk.completed_video_data_reads();
     sdk.release_video_data();
     REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
-    wait_until_stop_confirmed(*camera);
-    CHECK_FALSE(camera->get_image_ready());
-
-    camera->start_exposure(0.001, true);
+    wait_until_stop_confirmed(*camera);  // starts the next exposure
     wait_until_ready(*camera);
     CHECK(camera->get_image_array().data.size() == 128);
 }
@@ -798,8 +810,8 @@ TEST_CASE("SVBONY Camera - persistent stop failure blocks reuse until a retry su
     REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
     wait_for_driver_exception(*camera, "capture stop was not confirmed");
     require_array_failure(*camera);
-    CHECK(camera->get_camera_state() == alpacacore::CameraState::Error);
-    CHECK(camera->get_percent_completed() == 0.0);
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);  // decision 0020 rule 3
+    alpacacore::test::require_percent_completed_unavailable(*camera);
 
     const int exposure_writes = sdk.call_count("set_control_value.Exposure");
     require_alpaca_error([&] { camera->start_exposure(0.001, true); }, alpacacore::AlpacaError::DriverException);
@@ -1249,7 +1261,7 @@ TEST_CASE("SVBONY Camera - unsupported returned format is not published", "[svbo
     camera->start_exposure(0.001, true);
     wait_for_driver_exception(*camera, "unsupported image format");
     require_array_failure(*camera);
-    CHECK_THROWS_AS(camera->get_image_ready(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)camera->get_image_ready(); }, alpacacore::AlpacaError::DriverException);
     CHECK(sdk.call_count("get_video_data") == reads_before);
 
     sdk.return_image_type(alpacacore::vendor::svbony::SVBImageType::Rgb32);
@@ -1291,10 +1303,12 @@ TEST_CASE("SVBONY Camera - frame storage validation rejects short spans", "[svbo
     CHECK(required_frame_storage(16, 8, SVBImageType::Raw16) == 256);
     std::vector<std::uint8_t> empty;
     std::vector<std::uint8_t> short_frame(255);
-    CHECK_THROWS_AS(validate_frame_storage(std::span<const std::uint8_t>(empty), 16, 8, SVBImageType::Raw16),
-                    alpacacore::AlpacaException);
-    CHECK_THROWS_AS(validate_frame_storage(std::span<const std::uint8_t>(short_frame), 16, 8, SVBImageType::Raw16),
-                    alpacacore::AlpacaException);
+    require_alpaca_error(
+        [&] { validate_frame_storage(std::span<const std::uint8_t>(empty), 16, 8, SVBImageType::Raw16); },
+        alpacacore::AlpacaError::DriverException);
+    require_alpaca_error(
+        [&] { validate_frame_storage(std::span<const std::uint8_t>(short_frame), 16, 8, SVBImageType::Raw16); },
+        alpacacore::AlpacaError::DriverException);
 }
 
 // The TaskClock cases below pin each driver wait to the injected clock. Virtual time starts at the epoch while
@@ -1346,7 +1360,7 @@ TEST_CASE("SVBONY Camera - exposure watchdog deadline reads the TaskClock", "[sv
 
     clock.advance(2ms);
     CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
-    wait_for_driver_exception(*camera, "completion deadline");
+    wait_for_driver_exception(*camera, "did not complete before its deadline");
 }
 
 TEST_CASE("SVBONY Camera - readout wait deadline reads the TaskClock", "[svbony][camera][unit][taskclock]") {

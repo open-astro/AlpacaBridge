@@ -7,8 +7,8 @@ checked against.
 
 - **COMMAND_REFERENCE.md** - the OnStepX command reference, copied unmodified from
   [hjd1964/OnStepX](https://github.com/hjd1964/OnStepX) `docs/COMMAND_REFERENCE.md`
-  - Commit: `097cc5797b4708e3787dd0b8bbbf81df66fdb5ff` (last changed upstream 2026-10-16)
-  - sha256: `d88f5541af19a8f1812d9aea836f6c311d0ac5393e239cdee61090af23786ebf`
+  - Commit: `66a4b3220371661d40d3df9f6e5e1203068842e4` (last changed upstream 2026-11-13)
+  - sha256: `833128bd2cfec370b3b2ccd17300db362fbf5d1787f055c2f1f7222587c41c56`
   - Covers OnStepX (firmware 10.x). The older OnStep firmware (4.x, branch `release-4.24`)
     documents its commands in the comments of `Command.ino` in
     [hjd1964/OnStep](https://github.com/hjd1964/OnStep); where the two differ for the commands

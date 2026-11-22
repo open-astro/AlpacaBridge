@@ -549,9 +549,6 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     UntrustedConnect rig;
     rig.connect();
     const auto sla = rig.mount.count(":SLA");
-    // Counted from the connect: on 6.0 a connect reads :GUT# for the UTC sample and again for the site (main's
-    // #1784 reads it once), so the case checks what the re-sync adds.
-    const auto gut = rig.mount.count(":GUT");
 
     // A client's UTCDate already set the mount (the router's own step): 1.5 s apart is inside the 2 s threshold.
     rig.mount.set_utc_reply(gut_reply_for(kStaleHost + std::chrono::milliseconds(1500)));
@@ -559,7 +556,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains("already agrees, no re-sync"); }));
     rig.driver->set_connected(false);
-    CHECK(rig.mount.count(":GUT") == gut + 1);  // the re-sync's check
+    CHECK(rig.mount.count(":GUT") == 2);  // the connect's sample and the re-sync's check
     CHECK(rig.mount.count(":SLA") == sla);
     CHECK(rig.mount.count(":SUT") == 0);
 }
@@ -956,12 +953,11 @@ TEST_CASE("iOptron Telescope Driver - a host clock change starts nothing while d
         REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(eventually([&] { return passes.load() == 1; }));
-        const auto gut = mount.count(":GUT");  // the connect's reads (two on 6.0, one on main after #1784)
         driver->on_host_clock_changed(kStepped);
         driver->on_host_clock_changed(kBecameTrusted);
         CHECK_FALSE(clock.wait_for_waiters(1, std::chrono::milliseconds(300)));
         driver->set_connected(false);
-        CHECK(mount.count(":GUT") == gut);  // no re-sync read
+        CHECK(mount.count(":GUT") == 1);
         CHECK(mount.count(":SUT") == 0);
     }
 }

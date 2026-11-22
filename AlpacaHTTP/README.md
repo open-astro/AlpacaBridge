@@ -37,7 +37,6 @@ cmake --build . --clean-first --parallel
 ### Build Options
 
 - `ALPACAHTTP_BUILD_TESTS`: Enable test suite (default: ON)
-- `ALPACAHTTP_ENABLE_DISCOVERY`: Enable Alpaca Discovery (default: ON)
 
 ## Configuration
 
@@ -69,6 +68,7 @@ int main() {
 - `GET /management/v1/description` - Server description
 - `GET /management/v1/configureddevices` - List configured devices that registered
 - `GET /management/v1/faileddevices` - Web UI extension (not an ASCOM path): saved devices that failed to load, in the `configureddevices` row shape with `LoadError: true`, the `UniqueID` stored in the entry (decision 0018) and the saved `Config`
+- `GET /management/v1/attacheddevices` - AlpacaBridge extension (not an ASCOM path): every detected serial port, HID device and listed camera of the built vendors, each with the catalog entries it could be (`Candidates`, each with the `Config` a `configuredevice` call needs), `Configured`/`ConfiguredAs` when a configured device already uses it, and an `Errors` list for a lister that failed. Serial ports come from `/dev/serial/by-id` and sysfs; no port is opened and no serial claim is taken. Any other verb is 405 (issue #2312)
 
 ### Device API
 

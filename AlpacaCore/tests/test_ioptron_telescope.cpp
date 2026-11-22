@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -221,15 +222,9 @@ TEST_CASE("iOptron Telescope Driver - Telescope Properties", "[ioptron][telescop
 
     CHECK(driver->get_interface_version() >= 3);
 
-    auto eq = driver->get_equatorial_system();
-    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
-           eq == alpacacore::EquatorialSystem::J2000 ||
-           eq == alpacacore::EquatorialSystem::Other));
-
-    auto align = driver->get_alignment_mode();
-    CHECK((align == alpacacore::AlignmentMode::AltAz ||
-           align == alpacacore::AlignmentMode::Polar ||
-           align == alpacacore::AlignmentMode::GermanPolar));
+    // Pinned, not an OR of every value (#1858): the driver reports Topocentric (equinox of date) and German polar.
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::Topocentric);
+    CHECK(driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
 }
 
 TEST_CASE("iOptron Telescope Driver - ASCOM Error Codes", "[ioptron][telescope][unit]") {
@@ -866,6 +861,25 @@ TEST_CASE("iOptron Link - EIO on a command write that waits for a reply loses th
     require_lost(*driver, "serial link lost (write)");
 }
 
+// Issue #2262: EBADF on the mount's own serial fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iOptron Link - EBADF on a command write loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost][issue2262]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    const auto before = alpacacore::test::fds_open_on(mount.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(mount.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->set_tracking(false); }, AlpacaError::NotConnected);
+    require_lost(*driver, "serial link lost (write): " + alpacacore::util::errno_string(EBADF));
+}
+
 TEST_CASE("iOptron Link - a hangup in a Park's ack drain loses the link at once",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
@@ -1399,7 +1413,8 @@ TEST_CASE("iOptron Telescope Driver - UTCDate stays unset until time is establis
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         REQUIRE_NOTHROW(driver->get_sidereal_time());
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
-        CHECK(server.count(":GUT") == 2 * (session + 1));  // Clock sample and the existing site-metadata read.
+        // One :GUT# per connect: the clock sample and the site metadata share its reply (#1784).
+        CHECK(server.count(":GUT") == session + 1);
         driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         driver->set_connected(false);
@@ -1420,10 +1435,34 @@ TEST_CASE("iOptron Telescope Driver - connect samples mount UTC before backgroun
     REQUIRE(driver->get_connected());
     const auto mount_utc = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)};
     CHECK(driver->get_utc_date() == mount_utc);
-    CHECK(mount.count(":GUT") == 2);  // Clock sample plus the existing site-metadata read.
+    // One :GUT# at connect: the clock sample and the site metadata share its reply (#1784).
+    CHECK(mount.count(":GUT") == 1);
     CHECK(mount.count(":SUT") == 0);
     CHECK(driver->get_utc_date() == mount_utc);
-    CHECK(mount.count(":GUT") == 2);
+    CHECK(mount.count(":GUT") == 1);
+    driver->set_connected(false);
+}
+
+// #1784: the connect reads :GUT# once and the site cache it primes is the same one two reads gave: the :GLS#
+// coordinates, served with no further exchange, and a UTC field the clock sample rejects leaves them usable.
+TEST_CASE("iOptron Telescope Driver - the connect's one :GUT# reply also primes the site",
+          "[ioptron][telescope][unit][utcdate]") {
+    alpacacore::test::FakeIoptronMount mount("0025", 0.0);
+    mount.set_gps(0, -33.856784, 151.215297);  // digit 0: the mount's stored site
+    const std::string utc_reply = GENERATE(std::string("-18010000000000000#"), std::string("+0000xxxxxxxxxxxxx#"));
+    mount.set_utc_reply(utc_reply);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.count(":GUT") == 1);
+    const int gls = mount.count(":GLS");
+    CHECK(driver->get_site_latitude() == Catch::Approx(-33.856784).margin(1e-5));
+    CHECK(driver->get_site_longitude() == Catch::Approx(151.215297).margin(1e-5));
+    CHECK(mount.count(":GLS") == gls);  // served from the cache the connect primed
+    CHECK(mount.count(":GUT") == 1);
     driver->set_connected(false);
 }
 
@@ -3753,6 +3792,136 @@ TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a 
     driver->set_connected(false);
 }
 
+// Issue #1864: the members a connected driver reads from the mount, value-checked against a fake state that gives a
+// non-default answer. The site is the mount's stored one (":GLS", GPS digit 1: no fix); SiderealTime is the LST of
+// the mount's UTC at that longitude; SideOfPier follows the hour angle, not the raw ":GEP" pier digit (always 0
+// here); TrackingRate is the ":GLS" rate digit, and a TrackingRate write is the ":RTn#" command. The fake task
+// clock holds the mount's UTC still, so the values are exact.
+TEST_CASE("iOptron Telescope Driver - connected site and pointing getters read the mount",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(1, 40.5, -75.25);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(std::abs(driver->get_site_latitude() - 40.5) < 1e-6);
+    CHECK(std::abs(driver->get_site_longitude() - -75.25) < 1e-6);
+    const double lst = alpacacore::util::local_sidereal_hours(driver->get_utc_date(), -75.25);
+    CHECK(std::abs(driver->get_sidereal_time() - lst) < 1e-6);
+
+    // Past the 30 s post-connect grace and the 5 s pier-side position window, the next read asks the mount again.
+    const auto past_the_position_window = [&] { clock.advance(std::chrono::seconds(31)); };
+    // Hour angle -3 h: pierWest (1).
+    mount.set_position(alpacacore::util::wrap_hours(lst + 3.0), 20.0);
+    past_the_position_window();
+    CHECK(driver->get_side_of_pier() == 1);
+    // Hour angle +3 h: pierEast (0).
+    mount.set_position(alpacacore::util::wrap_hours(lst - 3.0), 20.0);
+    past_the_position_window();
+    CHECK(driver->get_side_of_pier() == 0);
+
+    CHECK(driver->get_tracking_rate() == 0);
+    mount.set_tracking_rate_digit(2);  // the mount tracks at the solar rate (set from the hand controller)
+    clock.advance(std::chrono::seconds(2));
+    CHECK(driver->get_tracking_rate() == 2);
+    driver->set_tracking_rate(1);
+    CHECK(driver->get_tracking_rate() == 1);
+    const int status_reads = mount.count(":GLS#");
+    clock.advance(std::chrono::seconds(3));  // past the write's read-back window: the mount answers again
+    CHECK(driver->get_tracking_rate() == 1);
+    CHECK(mount.count(":GLS#") > status_reads);
+    // ":RTn#" is sent blind (its ack is drained for at most 50 ms), so the count is read only after the ":GLS"
+    // refill above: the fake answers in wire order, so the write was recorded before that reply went out.
+    CHECK(mount.count(":RT1#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #1864: the members the iOptron mount does not have, on a connected driver. Each keeps its ITelescopeV4
+// NotImplemented answer and sends nothing; the two rate getters read 0.0 (no rate offset is applied).
+TEST_CASE("iOptron Telescope Driver - connected unsupported pier-side and rate members are NotImplemented",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto sent = mount.commands().size();
+
+    CHECK_FALSE(driver->get_can_set_pier_side());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(driver->get_can_sync_alt_az());
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+    require_alpaca_error([&] { driver->set_declination_rate(0.1); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.1); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(1); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK(mount.commands().size() == sent);
+
+    driver->set_connected(false);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1864: SlewSettleTime, ApertureDiameter, ApertureArea and FocalLength on a connected driver. Each reads back
+// what was written; a negative settle time is InvalidValue and leaves the value as it was.
+TEST_CASE("iOptron Telescope Driver - connected settle time and optics read back what was written",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->set_slew_settle_time(4);
+    CHECK(driver->get_slew_settle_time() == 4);
+    require_alpaca_error([&] { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_slew_settle_time() == 4);
+    driver->set_slew_settle_time(0);
+    CHECK(driver->get_slew_settle_time() == 0);
+
+    driver->set_aperture_diameter(0.2);
+    driver->set_focal_length(1.2);
+    CHECK(driver->get_aperture_diameter() == 0.2);
+    CHECK(driver->get_aperture_area() == Catch::Approx(0.0314159265).epsilon(1e-6));
+    CHECK(driver->get_focal_length() == 1.2);
+    driver->set_connected(false);
+}
+
+// Issue #1864: SetPark on a connected driver stores where the mount points now as its park position: the ":GAC"
+// altitude goes out as ":SPH" (8 digits) and the azimuth as ":SPA" (9 digits), both in 0.01 arcsec. It does not
+// park the mount.
+TEST_CASE("iOptron Telescope Driver - connected SetPark stores the current Alt/Az as the park position",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_alt_az(30.0, 120.0);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    REQUIRE_NOTHROW(driver->set_park());
+    CHECK(mount.count(":SPH10800000#") == 1);   // 30 degrees
+    CHECK(mount.count(":SPA043200000#") == 1);  // 120 degrees
+    CHECK(mount.count(":MP1#") == 0);
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 
 TEST_CASE("iOptron Telescope Driver spec audit - DoesRefraction is not implemented",
@@ -3886,93 +4055,6 @@ TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait
 
     (void)reply.get();
     driver->set_connected(false);
-}
-
-// ── Issue #2424: the MoveAxis sign on both axes ──────────────────────────────────────────────────────────────
-//
-// AlpacaBridge's convention (ascom-contract.instructions.md, "iOptron MoveAxis signs"): a positive primary rate
-// turns the tube east, so the reported RightAscension rises; a positive secondary rate turns it north, so the
-// reported Declination rises, on both pier sides. The fake steps its position on each arrow command in iOptron's
-// own labels (fake_ioptron_mount.h); the HAE29C rig check of #2424 (2026-11-20, USB) confirmed that model on both
-// pier sides.
-namespace {
-
-// The first arrow command (:mw#, :me#, :mn#, :ms#) the mount received at or after index `from`.
-std::string arrow_command_since(const FakeIoptronMount& mount, std::size_t from) {
-    const auto sent = mount.commands();
-    for (std::size_t i = from; i < sent.size(); ++i) {
-        if (sent[i] == ":mw#" || sent[i] == ":me#" || sent[i] == ":mn#" || sent[i] == ":ms#") {
-            return sent[i];
-        }
-    }
-    return "";
-}
-
-}  // namespace
-
-TEST_CASE("iOptron MoveAxis - a positive primary rate sends :mw# and RightAscension rises, on both pier sides",
-          "[ioptron][telescope][unit][fake][moveaxis]") {
-    for (const int pier : {0, 1}) {
-        for (const double sign : {1.0, -1.0}) {
-            INFO("pier side digit " << pier << ", primary rate sign " << sign);
-            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
-            REQUIRE(mount.ok());
-            mount.set_position(10.0, 20.0);
-            mount.set_pier_side(pier);
-            FakeTaskClock clock;
-            auto driver = hold_driver(mount, clock);
-            const double ra0 = driver->get_right_ascension();
-
-            const std::size_t before = mount.commands().size();
-            driver->move_axis(0, sign * driver->get_axis_rate_range(0).first);
-            CHECK(arrow_command_since(mount, before) == (sign > 0.0 ? ":mw#" : ":me#"));
-            driver->move_axis(0, 0.0);
-
-            pass_connect_cache(clock);  // the next read reaches the mount
-            const double ra_moved_arcsec = (driver->get_right_ascension() - ra0) * 15.0 * 3600.0;
-            INFO("reported RA moved " << ra_moved_arcsec << " arcsec");
-            if (sign > 0.0) {
-                CHECK(ra_moved_arcsec > 30.0);  // east: RA rises
-            } else {
-                CHECK(ra_moved_arcsec < -30.0);  // west: RA falls
-            }
-            driver->set_connected(false);
-        }
-    }
-}
-
-TEST_CASE("iOptron MoveAxis - a positive secondary rate raises Declination on both pier sides",
-          "[ioptron][telescope][unit][fake][moveaxis]") {
-    for (const int pier : {0, 1}) {
-        for (const double sign : {1.0, -1.0}) {
-            INFO("pier side digit " << pier << ", secondary rate sign " << sign);
-            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
-            REQUIRE(mount.ok());
-            mount.set_position(10.0, 20.0);
-            mount.set_pier_side(pier);
-            FakeTaskClock clock;
-            auto driver = hold_driver(mount, clock);
-            const double dec0 = driver->get_declination();
-
-            // Dec+ (:ms#) is north on pier side 1 and south on side 0, the pulse-guide Dec polarity.
-            const bool north = sign > 0.0;
-            const std::string expected = (north == (pier == 1)) ? ":ms#" : ":mn#";
-            const std::size_t before = mount.commands().size();
-            driver->move_axis(1, sign * driver->get_axis_rate_range(1).first);
-            CHECK(arrow_command_since(mount, before) == expected);
-            driver->move_axis(1, 0.0);
-
-            pass_connect_cache(clock);  // the next read reaches the mount
-            const double dec_moved_arcsec = (driver->get_declination() - dec0) * 3600.0;
-            INFO("reported Dec moved " << dec_moved_arcsec << " arcsec");
-            if (north) {
-                CHECK(dec_moved_arcsec > 30.0);  // north: Dec rises
-            } else {
-                CHECK(dec_moved_arcsec < -30.0);  // south: Dec falls
-            }
-            driver->set_connected(false);
-        }
-    }
 }
 
 // Issue #2063: an async GOTO that nobody polls leaves slew_in_progress_ set after the mount stopped.
@@ -4117,4 +4199,91 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     clock.advance(std::chrono::milliseconds(2100));  // past the trim hold, inside the client's pulse window
     CHECK(driver->get_slewing());
     driver->set_connected(false);
+}
+
+// ── Issue #2424: the MoveAxis sign on both axes ──────────────────────────────────────────────────────────────
+//
+// AlpacaBridge's convention (ascom-contract.instructions.md, "iOptron MoveAxis signs"): a positive primary rate
+// turns the tube east, so the reported RightAscension rises; a positive secondary rate turns it north, so the
+// reported Declination rises, on both pier sides. The fake steps its position on each arrow command in iOptron's
+// own labels (fake_ioptron_mount.h); the HAE29C rig check of #2424 (2026-11-20, USB) confirmed that model on both
+// pier sides.
+namespace {
+
+// The first arrow command (:mw#, :me#, :mn#, :ms#) the mount received at or after index `from`.
+std::string arrow_command_since(const FakeIoptronMount& mount, std::size_t from) {
+    const auto sent = mount.commands();
+    for (std::size_t i = from; i < sent.size(); ++i) {
+        if (sent[i] == ":mw#" || sent[i] == ":me#" || sent[i] == ":mn#" || sent[i] == ":ms#") {
+            return sent[i];
+        }
+    }
+    return "";
+}
+
+}  // namespace
+
+TEST_CASE("iOptron MoveAxis - a positive primary rate sends :mw# and RightAscension rises, on both pier sides",
+          "[ioptron][telescope][unit][fake][moveaxis]") {
+    for (const int pier : {0, 1}) {
+        for (const double sign : {1.0, -1.0}) {
+            INFO("pier side digit " << pier << ", primary rate sign " << sign);
+            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            mount.set_position(10.0, 20.0);
+            mount.set_pier_side(pier);
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            const double ra0 = driver->get_right_ascension();
+
+            const std::size_t before = mount.commands().size();
+            driver->move_axis(0, sign * driver->get_axis_rate_range(0).first);
+            CHECK(arrow_command_since(mount, before) == (sign > 0.0 ? ":mw#" : ":me#"));
+            driver->move_axis(0, 0.0);
+
+            pass_connect_cache(clock);  // the next read reaches the mount
+            const double ra_moved_arcsec = (driver->get_right_ascension() - ra0) * 15.0 * 3600.0;
+            INFO("reported RA moved " << ra_moved_arcsec << " arcsec");
+            if (sign > 0.0) {
+                CHECK(ra_moved_arcsec > 30.0);  // east: RA rises
+            } else {
+                CHECK(ra_moved_arcsec < -30.0);  // west: RA falls
+            }
+            driver->set_connected(false);
+        }
+    }
+}
+
+TEST_CASE("iOptron MoveAxis - a positive secondary rate raises Declination on both pier sides",
+          "[ioptron][telescope][unit][fake][moveaxis]") {
+    for (const int pier : {0, 1}) {
+        for (const double sign : {1.0, -1.0}) {
+            INFO("pier side digit " << pier << ", secondary rate sign " << sign);
+            FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+            REQUIRE(mount.ok());
+            mount.set_position(10.0, 20.0);
+            mount.set_pier_side(pier);
+            FakeTaskClock clock;
+            auto driver = hold_driver(mount, clock);
+            const double dec0 = driver->get_declination();
+
+            // Dec+ (:ms#) is north on pier side 1 and south on side 0, the pulse-guide Dec polarity.
+            const bool north = sign > 0.0;
+            const std::string expected = (north == (pier == 1)) ? ":ms#" : ":mn#";
+            const std::size_t before = mount.commands().size();
+            driver->move_axis(1, sign * driver->get_axis_rate_range(1).first);
+            CHECK(arrow_command_since(mount, before) == expected);
+            driver->move_axis(1, 0.0);
+
+            pass_connect_cache(clock);  // the next read reaches the mount
+            const double dec_moved_arcsec = (driver->get_declination() - dec0) * 3600.0;
+            INFO("reported Dec moved " << dec_moved_arcsec << " arcsec");
+            if (north) {
+                CHECK(dec_moved_arcsec > 30.0);  // north: Dec rises
+            } else {
+                CHECK(dec_moved_arcsec < -30.0);  // south: Dec falls
+            }
+            driver->set_connected(false);
+        }
+    }
 }

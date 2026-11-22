@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -66,7 +67,10 @@ constexpr int kRequestTimeoutMs = 2500;
 // silence: long enough that one lost frame or a slow reply never trips it,
 // short enough that a client polling at 2-8 s sees the fault on its next
 // read instead of half an hour of byte-identical telemetry. A failed poll
-// write (EIO after a USB re-enumeration) counts the same as an unanswered one.
+// write that fails with anything but a hangup errno counts the same as an
+// unanswered one. A fault that stands for util::kLinkStalenessBound (30 s, so
+// about 36 s after the last frame) loses the link (decision 0009 rule 2b); the
+// bound is well past this threshold.
 constexpr int kLinkFaultPolls = 3;
 
 // Handshake cadence: the CH340 adapter asserts DTR on open, which resets the
@@ -141,8 +145,13 @@ void configure_pdh_line(struct termios& tty) {
 
 // Read one '#'-terminated frame (terminator stripped, CR/LF skipped) within
 // timeout_ms. @p carry preserves a partial frame across calls so a frame that
-// straddles two poll windows keeps its leading bytes.
-std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry) {
+// straddles two poll windows keeps its leading bytes. The read goes through
+// @p link, whose verdict judges a failure (util::SerialLink, #2262: EIO,
+// ENXIO, ENODEV, EBADF). With @p hangup set, a read the link judges lost ends
+// the call at once and stores the errno there; without it (the probe) the read
+// backs off and keeps trying until the window ends.
+std::optional<std::string> read_frame(util::SerialLink& link, int timeout_ms, std::string& carry,
+                                      int* hangup = nullptr) {
     std::string frame = std::move(carry);
     carry.clear();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -152,7 +161,7 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         // Bounded by poll() (util::tty_read), never by VMIN/VTIME: a port
         // another program retunes to VMIN=1 cannot park this read (#1202).
-        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(std::max<long long>(remaining.count(), 0)));
+        const ssize_t r = link.read(&ch, 1, static_cast<int>(std::max<long long>(remaining.count(), 0)));
         if (r == 1) {
             if (ch == '#') {
                 return frame;
@@ -167,9 +176,15 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
         } else if (r < 0) {
             // Persistent read error: the tty is hung up (unplugged adapter,
             // closed pty master), which tty_read reports at once as EIO
-            // (issue #772). Back off instead of spinning. Connected stays
-            // true; the unanswered polls latch the fault (#237). A 0 is the
-            // window running out, which ends the loop.
+            // (issue #772). The connected reader hands it up as a lost link
+            // (decision 0009); the probe backs off instead of spinning. A 0
+            // is the window running out, which ends the loop.
+            const int err = errno;
+            if (hangup != nullptr && link.lost()) {
+                *hangup = err;
+                carry = std::move(frame);
+                return std::nullopt;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -177,11 +192,11 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
     return std::nullopt;
 }
 
-bool write_line(int fd, const std::string& cmd) {
+// Through @p link, whose verdict judges a failure (#2262); errno is kept.
+bool write_line(util::SerialLink& link, const std::string& cmd) {
     // The vendor driver sends every command via SerialPort.WriteLine(), i.e.
     // ">X#\n". Mirror it exactly: the firmware is only proven against that.
-    const std::string payload = cmd + "\n";
-    return util::tty_write_all(fd, payload.data(), payload.size());
+    return link.write_all(cmd + "\n");
 }
 
 // Probe a serial port with the hub's identity handshake. Returns true only
@@ -206,7 +221,7 @@ bool probe_pdh_port(const std::string& port_path) {
         // First attempt waits out the post-DTR-reset boot (vendor: 2 s flat).
         std::this_thread::sleep_for(std::chrono::seconds(attempt == 0 ? 2 : 1));
         tcflush(fd, TCIOFLUSH);
-        if (!write_line(fd, ">H#")) {
+        if (!write_line(link, ">H#")) {
             continue;
         }
         // The firmware may interleave a streamed status frame before the
@@ -216,7 +231,7 @@ bool probe_pdh_port(const std::string& port_path) {
         while (std::chrono::steady_clock::now() < deadline) {
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-            auto frame = read_frame(fd, static_cast<int>(std::max<long long>(remaining.count(), 1)), carry);
+            auto frame = read_frame(link, static_cast<int>(std::max<long long>(remaining.count(), 1)), carry);
             if (!frame.has_value()) continue;
             if (is_pdh_handshake_reply(*frame)) {
                 found = true;
@@ -244,7 +259,7 @@ bool probe_pdh_port(const std::string& port_path) {
 bool raw_port_looks_like_pdh_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_pdh_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -426,7 +441,7 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
 
 class GeminiPdhProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(util::TaskClock& clock) : clock_(clock) {}
 
     ~Impl() { disconnect(); }
 
@@ -442,6 +457,13 @@ public:
                 throw AlpacaException("Gemini power hub already connected; call disconnect() first",
                                       AlpacaError::InvalidOperation);
             }
+        }
+        // A session the link loss ended left its reader exited but not joined
+        // (it never joins itself) and its loss reason kept: start clean. On a
+        // wrapper that was disconnected this only re-clears what is clear.
+        teardown_locked_free();
+        {
+            std::lock_guard<std::mutex> lock(io_mutex_);
             // configure_pdh_line() hardcodes B19200; reject any other rate
             // rather than silently ignoring it.
             if (config.baud_rate != kPdhBaudRate) {
@@ -454,9 +476,10 @@ public:
         }
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
-            polls_since_frame_ = 0;
-            link_fault_.clear();
+            health_.reset();
+            lost_reason_.clear();
         }
+        connect_hangup_errno_.store(0);
 
         // The reader thread owns every read from here on (handshake included),
         // so an unsolicited status frame arriving mid-handshake is routed to
@@ -468,6 +491,7 @@ public:
         try {
             bool success = false;
             for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
+                throw_if_lost_during_connect();
                 if (attempt == 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 } else if (attempt == 1) {
@@ -488,10 +512,13 @@ public:
                                                       " got an unexpected identity: " + reply);
                     }
                 } catch (const std::exception& e) {
+                    // A pulled cable is not worth another attempt.
+                    throw_if_lost_during_connect();
                     ALPACA_LOG_WARN("Gemini", "Power hub handshake attempt " + std::to_string(attempt + 1) +
                                                   " failed: " + e.what());
                 }
             }
+            throw_if_lost_during_connect();
             if (!success) {
                 throw AlpacaException(
                     "Gemini power hub handshake failed after " + std::to_string(kHandshakeRetries) + " attempts",
@@ -520,18 +547,22 @@ public:
                 throw AlpacaException("Gemini power hub returned an unparseable status frame: " + status_reply,
                                       AlpacaError::NotConnected);
             }
+
+            // The reader records a hangup under io_mutex_ and stops, so this
+            // check and the store are one step against it: either it saw the
+            // connect still running (the connect fails here, nothing latched)
+            // or it sees connected_ and takes the loss path. The firmware goes
+            // in first, so a loss right after the store clears it.
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            throw_if_lost_during_connect();
+            {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                firmware_ = format_pdh_firmware(firmware);
+            }
+            connected_ = true;
         } catch (...) {
             teardown_locked_free();
             throw;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(io_mutex_);
-            connected_ = true;
-        }
-        {
-            std::lock_guard<std::mutex> state_lock(state_mutex_);
-            firmware_ = format_pdh_firmware(firmware);
         }
         ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected on " + config_.serial_port + " (firmware " +
                                       format_pdh_firmware(firmware) + ")");
@@ -560,6 +591,8 @@ public:
         return connected_;
     }
 
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+
     PdhState get_state() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return state_;
@@ -575,12 +608,17 @@ public:
         return firmware_;
     }
 
+    // The loss reason first (kept until the next connect or disconnect,
+    // decision 0009 rule 5), else the latched fault.
     std::optional<std::string> link_fault() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        if (link_fault_.empty()) {
+        if (!lost_reason_.empty()) {
+            return lost_reason_;
+        }
+        if (!health_.faulted()) {
             return std::nullopt;
         }
-        return link_fault_;
+        return health_.fault();
     }
 
     void set_output(int channel, bool on) {
@@ -637,13 +675,75 @@ private:
     }
 
 #ifndef _WIN32
+    // Caller holds io_mutex_. A write the link judges lost (a hung-up tty, or
+    // EBADF on its fd: util::SerialLink, #2262) is a lost link (decision 0009
+    // point 2a): NotConnected, and once connected the loss is latched. Any
+    // other failure stays a DriverException.
     void write_locked(const std::string& cmd) {
         if (!link_.is_open()) {
             throw AlpacaException("Gemini power hub serial port is not open", AlpacaError::NotConnected);
         }
         ALPACA_LOG_TRACE("Gemini", "Power hub command: " + cmd);
-        if (!write_line(link_.fd(), cmd)) {
-            throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+        if (!write_line(link_, cmd)) {
+            const int err = errno;
+            if (link_.lost()) {
+                note_hangup_locked(err);
+                throw AlpacaException(lost_text(err), AlpacaError::NotConnected);
+            }
+            throw AlpacaException("Serial write failed: " + util::errno_string(err), AlpacaError::DriverException);
+        }
+    }
+
+    static std::string lost_text(int err) { return util::serial_link_lost_text(err); }
+
+    // Caller holds io_mutex_. Once connected, latch the loss; during the
+    // connect, record the errno for throw_if_lost_during_connect() and wake a
+    // request waiting on a reply that cannot come. Never closes the port: the
+    // reader is the one thread that reads the fd, so it closes it (at once
+    // when it saw the hangup itself, else on its next pass) or the connect's
+    // teardown does.
+    void note_hangup_locked(int err) {
+        if (connected_) {
+            latch_loss_locked(lost_text(err));
+            return;
+        }
+        connect_hangup_errno_.store(err);
+        std::lock_guard<std::mutex> pl(pending_mutex_);
+        pending_cv_.notify_all();
+    }
+
+    // Caller holds io_mutex_ and connected_ is true. Decision 0009 rule 3 in
+    // one critical section under state_mutex_: the cached status and the
+    // firmware go first (the driver's firmware getter relies on an empty
+    // cache whenever Connected reads false), then the lock-free latch. The
+    // reason stays for link_fault() until the next connect or disconnect.
+    void latch_loss_locked(const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            state_ = PdhState{};
+            firmware_.clear();
+            lost_reason_ = reason;
+            link_lost_.store(true);
+        }
+        connected_ = false;
+        ALPACA_LOG_ERROR("Gemini", "Power hub link lost on " + config_.serial_port + ": " + reason +
+                                       " (port released; Connect again once the hub is back)");
+    }
+
+    // Caller holds io_mutex_; only the reader calls it. Releases the port
+    // (and its registry claim) and ends the reader loop. The reader never
+    // joins itself: the next connect() or disconnect() joins it.
+    void release_lost_link_locked() {
+        link_.close();
+        reader_running_.store(false);
+    }
+
+    // A hangup the reader or a write saw while the connect was running: the
+    // connect fails with NotConnected and keeps no reason (decision 0009).
+    void throw_if_lost_during_connect() const {
+        if (const int err = connect_hangup_errno_.load(); err != 0) {
+            ALPACA_LOG_WARN("Gemini", "Power hub " + lost_text(err) + " during connect");
+            throw AlpacaException("Gemini power hub link lost during connect", AlpacaError::NotConnected);
         }
     }
 
@@ -667,11 +767,16 @@ private:
             throw;
         }
         std::unique_lock<std::mutex> pl(pending_mutex_);
-        const bool got =
-            pending_cv_.wait_for(pl, std::chrono::milliseconds(timeout_ms), [&] { return pending_reply_.has_value(); });
+        const bool got = pending_cv_.wait_for(pl, std::chrono::milliseconds(timeout_ms), [&] {
+            return pending_reply_.has_value() || connect_hangup_errno_.load() != 0;
+        });
         pending_active_ = false;
         std::optional<std::string> reply = std::move(pending_reply_);
         pending_reply_.reset();
+        pl.unlock();
+        if (!reply.has_value()) {
+            throw_if_lost_during_connect();
+        }
         if (!got || !reply.has_value()) {
             throw AlpacaException("Timeout waiting for the reply to " + cmd, AlpacaError::DriverException);
         }
@@ -691,11 +796,12 @@ private:
                 bool restored = false;
                 {
                     std::lock_guard<std::mutex> state_lock(state_mutex_);
+                    if (link_lost_.load()) {
+                        return;  // a write saw the port gone: the cleared cache stays cleared
+                    }
                     state_ = *state;
                     last_frame_ = std::chrono::steady_clock::now();
-                    polls_since_frame_ = 0;
-                    restored = !link_fault_.empty();
-                    link_fault_.clear();
+                    restored = health_.on_reply();
                 }
                 if (restored) {
                     ALPACA_LOG_INFO("Gemini", "Power hub: serial link restored, status frames are flowing again");
@@ -717,7 +823,8 @@ private:
 
     // Consume the port: frames are dispatched as they complete, and a fresh
     // >G# is requested whenever the cache goes stale so Switch reads never
-    // touch the wire.
+    // touch the wire. The reader is also the one thread that ends a lost link
+    // (decision 0009): it reads the fd, so it is the one that may close it.
     void reader_loop() {
         std::string carry;
         auto last_poll = std::chrono::steady_clock::now();
@@ -725,14 +832,29 @@ private:
             int fd;
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
+                if (link_lost_.load()) {
+                    release_lost_link_locked();  // a command write saw the port gone
+                    return;
+                }
                 fd = link_.fd();
             }
             if (fd < 0) {
                 return;  // closed under us
             }
-            auto frame = read_frame(fd, kReadWindowMs, carry);
+            int hangup = 0;
+            // link_ itself, not a copy of its fd: the read feeds the link's verdict. Only this thread closes it
+            // (release_lost_link_locked), and teardown joins this thread before it closes.
+            auto frame = read_frame(link_, kReadWindowMs, carry, &hangup);
             if (frame.has_value()) {
                 dispatch_frame(*frame);
+            }
+            if (hangup != 0) {
+                // A pulled cable is a lost link at once (decision 0009 point
+                // 2a); during the connect it fails the connect instead.
+                std::lock_guard<std::mutex> lock(io_mutex_);
+                note_hangup_locked(hangup);
+                release_lost_link_locked();
+                return;
             }
 
             const auto now = std::chrono::steady_clock::now();
@@ -749,8 +871,14 @@ private:
                     std::lock_guard<std::mutex> lock(io_mutex_);
                     if (connected_ && link_.is_open()) {
                         polled = true;
-                        if (!write_line(link_.fd(), ">G#")) {
-                            write_error = util::errno_string(errno);
+                        if (!write_line(link_, ">G#")) {
+                            const int err = errno;
+                            if (link_.lost()) {
+                                note_hangup_locked(err);
+                                release_lost_link_locked();
+                                return;
+                            }
+                            write_error = util::errno_string(err);
                         }
                     }
                 }
@@ -765,46 +893,68 @@ private:
                     util::restore_serial_line_settings(fd);
                 }
             }
+
+            // A fault that has stood for util::kLinkStalenessBound on the task
+            // clock is a lost link (decision 0009 point 2b). Checked on every
+            // pass; only this thread clears the fault (dispatch_frame), so the
+            // check cannot race a frame.
+            if (lose_link_if_fault_stale()) {
+                return;
+            }
         }
     }
 
+    // True when this call ended the link: the latched fault has stood for the
+    // staleness bound. The loss reason is the fault text.
+    bool lose_link_if_fault_stale() {
+        const auto now = clock_.now();
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            if (!health_.fault_stale(now)) {
+                return false;
+            }
+            reason = health_.fault();
+        }
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        if (connected_) {
+            latch_loss_locked(reason);
+        }
+        release_lost_link_locked();
+        return true;
+    }
+
     // Link health (issue #237): the cache is only as good as the link that
-    // fills it. Every >G# poll that goes out while the cache is stale counts;
-    // a status frame resets the count (dispatch_frame). Past kLinkFaultPolls
-    // the link is latched faulted -- the cache is invalidated and the driver
-    // refuses to serve it -- until a frame arrives again. Polling continues
-    // at the normal cadence so recovery (a re-plugged hub on the same node)
-    // is noticed without a reconnect. Returns true when this poll latched the
-    // fault (once per latch, not on every later unanswered poll).
+    // fills it. Every >G# poll that goes out while the cache is stale counts
+    // as a failure; a status frame clears the count (dispatch_frame). At
+    // kLinkFaultPolls the link is latched faulted, stamped on the task clock
+    // -- the cache is invalidated and the driver refuses to serve it --
+    // until a frame arrives again. Polling continues at the normal cadence so
+    // recovery (a hub that answers again within the staleness bound) is
+    // noticed without a reconnect; a re-plugged adapter is a hangup, which
+    // loses the link instead. Returns true when this poll latched the fault (once per
+    // latch, not on every later unanswered poll).
     bool record_poll_outcome(const std::optional<std::string>& write_error) {
-        std::string latched;
+        const std::string reason =
+            write_error.has_value() ? "status poll write failed: " + *write_error : "no status frame after a >G# poll";
+        const auto now = clock_.now();
+        std::optional<std::string> latched;
         std::string transient;
         int polls = 0;
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
-            polls = ++polls_since_frame_;
-            const bool already_faulted = !link_fault_.empty();
-            std::string detail;
-            if (write_error.has_value()) {
-                detail = "status poll write failed: " + *write_error;
-            } else {
-                detail = "no status frame for " + std::to_string(polls_since_frame_) + " consecutive polls (" +
-                         std::to_string(polls_since_frame_ * kStatusPollMs / 1000) + " s)";
-            }
-            if (polls_since_frame_ >= kLinkFaultPolls) {
-                if (!already_faulted) {
-                    latched = detail;
-                }
-                link_fault_ = detail;
+            latched = health_.note_failure(reason, kLinkFaultPolls, now);
+            polls = health_.consecutive_failures();
+            if (health_.faulted()) {
                 state_.valid = false;
-            } else if (write_error.has_value() || polls_since_frame_ > 1) {
+            } else if (write_error.has_value() || polls > 1) {
                 // First unanswered poll after a frame is normal cadence; a
                 // failed write or a second silent poll is worth a warning.
-                transient = detail;
+                transient = reason;
             }
         }
-        if (!latched.empty()) {
-            ALPACA_LOG_ERROR("Gemini", "Power hub: serial link faulted (" + latched +
+        if (latched) {
+            ALPACA_LOG_ERROR("Gemini", "Power hub: serial link faulted (" + *latched +
                                            "); cached status is invalid and reads will fail until frames resume");
         } else if (!transient.empty()) {
             ALPACA_LOG_WARN("Gemini", "Power hub: " + transient + " (" + std::to_string(polls) + "/" +
@@ -812,7 +962,7 @@ private:
         } else if (write_error.has_value()) {
             ALPACA_LOG_DEBUG("Gemini", "Power hub: status poll write failed: " + *write_error);
         }
-        return !latched.empty();
+        return latched.has_value();
     }
 
     void open_serial_locked() {
@@ -857,25 +1007,35 @@ private:
             state_ = PdhState{};
             firmware_.clear();
             last_frame_ = {};
-            polls_since_frame_ = 0;
-            link_fault_.clear();
+            health_.reset();
+            lost_reason_.clear();  // decision 0009 rule 5: a Disconnect clears the kept reason
+            link_lost_.store(false);
         }
+        connect_hangup_errno_.store(0);
 #ifndef _WIN32
         close_serial_locked();
+        link_.clear_loss();  // the link's own verdict too (#2262)
 #endif
     }
 
+    util::TaskClock& clock_;          // the fault stamp only (decision 0005 rule 6)
     std::mutex transition_mutex_;     // serializes connect()/disconnect()
-    mutable std::mutex io_mutex_;     // guards link_ + connected_/config_
-    mutable std::mutex state_mutex_;  // guards state_/firmware_/last_frame_
+    mutable std::mutex io_mutex_;     // guards link_ + connected_/config_; taken before state_mutex_
+    mutable std::mutex state_mutex_;  // guards state_/firmware_/last_frame_/health_/lost_reason_ (leaf)
     PdhConnectionConfig config_;
-    bool connected_ = false;
+    bool connected_ = false;  // a completed connect whose link is not lost
 
     PdhState state_;
     std::string firmware_;  // "3.0.8", from >V#
     std::chrono::steady_clock::time_point last_frame_{};
-    int polls_since_frame_ = 0;  // >G# polls sent since the last status frame (issue #237)
-    std::string link_fault_;     // non-empty while the link is latched faulted; the reason
+    util::PolledLinkHealth health_;             // the #237 fault latch, stamped on clock_ (decision 0009)
+    // Why the link was lost; kept until the next connect or disconnect. The wrapper publishes its own latch rather
+    // than read link_.lost(): Connected must not read false before the cache and firmware are cleared (rule 3, one
+    // critical section), and a fault past the staleness bound is a loss with no errno. The errno verdict itself is
+    // the link's (util::SerialLink, #2262).
+    std::string lost_reason_;
+    std::atomic<bool> link_lost_{false};        // lock-free for link_alive(); set under both mutexes
+    std::atomic<int> connect_hangup_errno_{0};  // a hangup seen before connected_, set under io_mutex_
 
     std::mutex request_mutex_;  // one in-flight request at a time
     std::mutex pending_mutex_;  // guards the pending_* fields
@@ -895,7 +1055,7 @@ private:
 
 // --- GeminiPdhProtocolWrapper public interface forwarding ---
 
-GeminiPdhProtocolWrapper::GeminiPdhProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+GeminiPdhProtocolWrapper::GeminiPdhProtocolWrapper(util::TaskClock& clock) : impl_(std::make_unique<Impl>(clock)) {}
 
 GeminiPdhProtocolWrapper::~GeminiPdhProtocolWrapper() = default;
 
@@ -905,6 +1065,8 @@ void GeminiPdhProtocolWrapper::disconnect() { impl_->disconnect(); }
 void GeminiPdhProtocolWrapper::clear_firmware() { impl_->clear_firmware(); }
 
 bool GeminiPdhProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+
+bool GeminiPdhProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 
 PdhState GeminiPdhProtocolWrapper::get_state() const { return impl_->get_state(); }
 
@@ -925,5 +1087,10 @@ void GeminiPdhProtocolWrapper::set_dew_enabled(int channel, bool on) { impl_->se
 void GeminiPdhProtocolWrapper::set_dew_mode(int channel, PdhDewMode mode) { impl_->set_dew_mode(channel, mode); }
 
 void GeminiPdhProtocolWrapper::request_status() { impl_->request_status(); }
+
+const std::vector<std::string>& gemini_pdh_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::gemini

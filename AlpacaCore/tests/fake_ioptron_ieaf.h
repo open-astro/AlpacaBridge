@@ -32,13 +32,14 @@
 //
 // The same fake answers the iEFW filter wheel (model 99 or 98) with its own commands, so the wheel
 // driver can run over it: :FW1# -> "<12 chars>#" firmware, :WP# -> "n#" slot or "-1#" while moving,
-// :WM<2d># -> "1" move, :WF<2d># -> "+00000#" stored offset. A move reads -1 for wheel_moving_polls()
-// :WP# polls, then the target. fail_wheel_position(true) makes :WP# answer "ERR#" (a reply the
+// :WM<2d># -> "1" move, :WF<2d># -> "+00000#" stored offset (set_stored_offset()). A move reads -1 for
+// wheel_moving_polls() :WP# polls, then the target. fail_wheel_position(true) makes :WP# answer "ERR#" (a reply the
 // wrapper cannot parse, so the read throws at once rather than after the serial timeout).
 
 #include <poll.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -48,6 +49,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -118,6 +120,8 @@ public:
     }
     /// Model code answered in the handshake: 2 = iEAF (default), 3 = iAFS2/3.
     void set_model(int m) { model_.store(m); }
+    /// The offset a :WF<slot># read answers (0 until set); set before connect.
+    void set_stored_offset(int slot, int offset) { stored_offsets_[static_cast<std::size_t>(slot)].store(offset); }
 
 private:
     void run() {
@@ -154,7 +158,7 @@ private:
         if (silent_.load()) return;
         char reply[40] = {};
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
         if (prefix_hold_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(prefix_hold_ms));
         if (cmd == ":DeviceInfo#") {
             std::snprintf(reply, sizeof(reply), "%+06d%02d%04d#", position_.load(), model_.load(), 100);
@@ -188,7 +192,9 @@ private:
             }
             std::snprintf(reply, sizeof(reply), "1");
         } else if (cmd.rfind(":WF", 0) == 0) {
-            std::snprintf(reply, sizeof(reply), "+00000#");
+            const int slot = std::atoi(cmd.c_str() + 3);
+            const int offset = slot >= 0 && slot < 8 ? stored_offsets_[static_cast<std::size_t>(slot)].load() : 0;
+            std::snprintf(reply, sizeof(reply), "%+06d#", offset);
         } else if (cmd == ":FQ#") {
             std::snprintf(reply, sizeof(reply), "1");
         } else if (cmd == ":FZ#") {
@@ -212,6 +218,7 @@ private:
 
     std::atomic<int> position_{1000};
     std::atomic<int> model_{2};
+    std::array<std::atomic<int>, 8> stored_offsets_{};
     std::atomic<int> wheel_slot_{0};
     std::atomic<int> wheel_target_{0};
     std::atomic<int> wheel_moving_polls_{0};

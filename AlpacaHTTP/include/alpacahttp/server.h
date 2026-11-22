@@ -116,6 +116,12 @@ public:
         send_buffer_bytes_ = send_buffer_bytes;
         send_min_bytes_per_second_ = min_bytes_per_second;
     }
+
+    // Test-only: shorten the header-phase deadline of every request (10 s,
+    // kHeaderDeadlineSeconds), so a test can trickle a request's headers past
+    // it without waiting out the production bound (issue #1694). Set before
+    // start().
+    void set_header_deadline_for_test(std::chrono::milliseconds deadline) { header_deadline_ = deadline; }
 #endif
 
     // Wait for server to stop
@@ -297,6 +303,9 @@ private:
     // when the test hook set one; zero keeps the override fixed.
     std::size_t send_min_bytes_per_second_{0};
     int send_buffer_bytes_{0};
+    // Header-phase deadline override; zero means kHeaderDeadlineSeconds
+    // (server.cpp). Only the test hook sets it.
+    std::chrono::milliseconds header_deadline_{0};
 
     void run_server();
     void reactor_loop();
@@ -322,6 +331,10 @@ private:
     // a thread, so it cannot be raced by a restart.
     void join_server_thread(std::thread::id current_id, bool only_if_stopped = false);
     void reset_queues_for_start();
+    // With a shutdown callback installed the callback owns the stop, and the
+    // request is single-shot: shutdown_requested_ is cleared only by a start, so
+    // an embedder whose callback declines to stop cannot shut down through the
+    // endpoint again (the response still says "Shutdown initiated").
     void handle_shutdown_request();
     void handle_restart_request();
 

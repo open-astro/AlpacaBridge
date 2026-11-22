@@ -60,13 +60,32 @@ struct WifiSettingValue {
 using WifiSettingSection = std::vector<std::pair<std::string, WifiSettingValue>>;
 using WifiSettings = std::vector<std::pair<std::string, WifiSettingSection>>;
 
+// One Wi-Fi device as NetworkManager lists it (issue #856).
+struct WifiAdapter {
+    std::string path;
+    std::string interface;
+    std::string mac;     // permanent MAC, lower case; empty when NM reports none (a virtual interface)
+    bool is_ap = false;  // the dedicated AP-type interface that carries the hotspot
+};
+
 struct WifiDeviceRoles {
     std::string client_path;
     std::string client_if;
     std::string ap_path;
     std::string ap_if;
     std::size_t count = 0;
+    std::vector<WifiAdapter> adapters;  // every Wi-Fi device, in NetworkManager's order
 };
+
+// The client role after the operator's adapter preference (issue #856). The
+// first adapter whose permanent MAC is `preferred_mac` and that is not the
+// dedicated AP interface becomes the client device; with none, the automatic
+// pick stays and `note` says the preferred adapter is absent. An empty
+// preference changes nothing.
+WifiDeviceRoles apply_client_preference(WifiDeviceRoles roles, const std::string& preferred_mac, std::string& note);
+
+// "aa:bb:cc:dd:ee:ff" from six hex pairs in either case, or nullopt.
+std::optional<std::string> normalize_mac(std::string_view mac);
 
 class WifiProfileBackend {
 public:
@@ -126,6 +145,7 @@ public:
     //
     // {"Available":bool, "WirelessEnabled":bool, "Device":str,
     //  "ApDevice":str, "DeviceCount":u32,
+    //  "Adapters":[{"Interface":str,"Mac":str,"IsAp":bool}], "PreferredMac":str,
     //  "State":str, "ConnectionId":str, "Ssid":display str, "SsidHex":exact bytes,
     //  "Mode":"infrastructure"|"ap",
     //  "FrequencyMhz":u32, "SignalPercent":u8, "Ip4Address":str,
@@ -183,6 +203,15 @@ public:
     nlohmann::json set_ap(const std::string& ssid, const std::string& passphrase, const std::string& band,
                           std::uint32_t channel, bool enabled);
 
+    // Client adapter preference (issue #856), stored as the adapter's
+    // permanent MAC in <state_dir>/wifi_client_adapter, never as an interface
+    // name. set takes "" to clear, or a MAC that a listed adapter reports and
+    // that is not the dedicated AP interface; anything else is refused before
+    // it is stored. A set re-pins every saved client profile to the resolved
+    // client interface on a board with more than one Wi-Fi device. Returns
+    // {"PreferredMac":str,"Device":str}.
+    nlohmann::json set_client_adapter(const std::string& mac);
+
     // Regulatory country. get returns {"Alpha2":str} ("" if never set).
     // set validates [A-Z]{2}, applies via nl80211 REQ_SET_REG (needs
     // CAP_NET_ADMIN) and persists to <state_dir>/wifi_country so
@@ -214,6 +243,16 @@ private:
     void ensure_bus_locked();
     detail::WifiProfileBackend& profile_backend_locked();
     std::string country_file() const;
+    std::string client_adapter_file() const;
+    // The stored preference, "" when unset or unreadable. mutex_ held.
+    std::string preferred_mac_locked() const;
+    // backend.device_roles() with the stored preference applied; logs an absent
+    // preferred adapter once per change. mutex_ held.
+    detail::WifiDeviceRoles resolved_roles_locked(detail::WifiProfileBackend& backend);
+    // Pins every saved client profile whose interface-name differs to the
+    // resolved client interface, on a board with more than one Wi-Fi device.
+    void repin_client_profiles_locked(detail::WifiProfileBackend& backend, const detail::WifiDeviceRoles& roles);
+    std::string logged_absent_note_;  // mutex_ held
     // Persist step of set_country; split out so tests reach it without CAP_NET_ADMIN.
     void persist_country(const std::string& alpha2);
     friend struct WifiManagerTestAccess;

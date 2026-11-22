@@ -506,6 +506,44 @@ TEST_CASE("ZWO host clock - a client UTCDate write after the re-sync's write win
     CHECK(rig.driver->get_utc_date() == kClientUtc);  // the re-sync did not publish over it
 }
 
+// Falsified by: run_clock_resync without its `client_utc_session_ == utc_session_` return (zwo_telescope_driver.cpp):
+// it reads the generation after the client's write and sends the host time over the client's UTCDate (#2286).
+TEST_CASE("ZWO host clock - a host clock step after a client UTCDate write on this connection sends no re-sync",
+          "[zwo][telescope][clock][utc][issue2419][issue2286]") {
+    HostClockTrustGuard trusted(true);
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.time_writes() == 1);  // the connect's host time
+    rig.driver->set_utc_date(kClientUtc);
+    REQUIRE(rig.time_writes() == 2);
+    rig.driver->on_host_clock_changed(kStepped);
+    REQUIRE(rig.wait_for_stage("done"));
+    CHECK(rig.seen("decided") == 0);
+    CHECK(rig.seen("sent") == 0);
+    CHECK(rig.time_writes() == 2);  // the client's write is still the last
+    CHECK(rig.last_time_write() == kClientTimeWrite);
+    CHECK(rig.driver->get_utc_date() == kClientUtc);  // virtual time has not moved
+}
+
+// Falsified by: the same deleted return; the trust edge would write the host time over the client's UTCDate.
+TEST_CASE("ZWO host clock - becoming trusted after a client UTCDate write on this connection sends no re-sync",
+          "[zwo][telescope][clock][utc][issue2419][issue2286]") {
+    HostClockTrustGuard untrusted(false);
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.time_writes() == 0);
+    rig.driver->set_utc_date(kClientUtc);
+    REQUIRE(rig.time_writes() == 1);
+    trust_host_clock();
+    rig.driver->on_host_clock_changed(kBecameTrusted);
+    REQUIRE(rig.wait_for_stage("done"));
+    CHECK(rig.seen("decided") == 0);
+    CHECK(rig.seen("sent") == 0);
+    CHECK(rig.time_writes() == 1);  // the client's alone
+    CHECK(rig.last_time_write() == kClientTimeWrite);
+    CHECK(rig.driver->get_utc_date() == kClientUtc);
+}
+
 TEST_CASE("ZWO host clock - a change seen during a connect re-syncs once the connect returns",
           "[zwo][telescope][clock][issue2419]") {
     HostClockTrustGuard untrusted(false);

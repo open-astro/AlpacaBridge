@@ -32,7 +32,8 @@ namespace alpacacore::test {
  * A park or slew is "in flight" until the driver has polled for it
  * `park_polls_needed` / `slew_polls_needed` times; a poll count of zero makes
  * the first poll report completion. fail_slew_polls > 0 makes that many
- * IsSlewComplete polls answer a TheSkyX error first.
+ * IsSlewComplete polls answer a TheSkyX error first. `slew_complete_queries` counts every IsSlewComplete query,
+ * answered or not, and a SlewToRaDec never resets it (`slew_polls` restarts at each slew).
  *
  * `latency_ms` > 0 delays every reply by that many real milliseconds, and `transactions` counts every command the
  * fake answers (or drops), so a case can tell a getter that asked TheSkyX from one served from memory. `mute`
@@ -47,7 +48,15 @@ namespace alpacacore::test {
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
  * default: most cases read the fixed position).
  *
- * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA.
+ * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA. `guide_commands` counts every DirectGuide and
+ * `guide_ms` delays its reply by that many real milliseconds. `find_home_commands` counts every FindHome; while
+ * `fail_find_home` > 0 a FindHome answers a TheSkyX error (the count drops by one).
+ *
+ * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
+ *
+ * While `fail_slew_commands` > 0, a SlewToRaDec answers a TheSkyX error and starts no slew (the count drops by one).
+ * `on_slew_command`, when set, runs on the server thread before a SlewToRaDec is answered, while the driver waits
+ * for the reply; set it before the slew and leave it alone while one is in flight.
  *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
@@ -59,6 +68,8 @@ public:
     std::atomic<int> fail_slew_polls{0};
     /// While > 0, every IsTracking query answers a TheSkyX error (and the count drops by one).
     std::atomic<int> fail_tracking_reads{0};
+    std::atomic<int> fail_slew_commands{0};
+    std::function<void()> on_slew_command;
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -66,9 +77,11 @@ public:
     std::atomic<bool> parked{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> park_commands{0};
+    std::atomic<int> unpark_commands{0};
     std::atomic<int> slew_commands{0};
     std::atomic<int> park_polls{0};
     std::atomic<int> slew_polls{0};
+    std::atomic<int> slew_complete_queries{0};
     std::atomic<int> position_reads{0};
     std::atomic<int> altaz_reads{0};
     // Models the remote computer clock, not chart JD; this fake does not execute JavaScript.
@@ -90,6 +103,10 @@ public:
     std::atomic<bool> land_on_target{false};
     /// Added to the reported RA by every DirectGuide pulse, as a guide pulse moves the mount.
     std::atomic<double> guide_ra_step_hours{0.0};
+    std::atomic<int> guide_commands{0};
+    std::atomic<int> guide_ms{0};
+    std::atomic<int> find_home_commands{0};
+    std::atomic<int> fail_find_home{0};
 
     std::function<std::string(const std::string&)> responder() {
         return [this](const std::string& command) { return answer(command); };
@@ -109,7 +126,12 @@ private:
                    (use_computer_clock ? std::to_string(utc_millis.load()) : std::string("unavailable")) + "#";
         }
         if (has(command, "FindHome")) {
+            ++find_home_commands;
             if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
+            if (fail_find_home.load() > 0) {
+                --fail_find_home;
+                return "|No error. Error = 0.TypeError: FindHome failed#";
+            }
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
@@ -140,6 +162,11 @@ private:
             }
             return parked ? "|No error. Error = 0.true#" : "|No error. Error = 0.false#";
         }
+        if (has(command, "sky6RASCOMTele.Unpark()")) {
+            ++unpark_commands;
+            parked = false;
+            return "|No error. Error = 0.OK#";
+        }
         if (has(command, "Sync(")) {
             double ra = 0.0, dec = 0.0;
             if (std::sscanf(command.c_str() + command.find("Sync("), "Sync(%lf, %lf", &ra, &dec) == 2) {
@@ -150,6 +177,11 @@ private:
         }
         if (has(command, "SlewToRaDec")) {
             ++slew_commands;
+            if (on_slew_command) on_slew_command();
+            if (fail_slew_commands.load() > 0) {
+                --fail_slew_commands;
+                return "|No error. Error = 0.TypeError: SlewToRaDec refused#";
+            }
             std::sscanf(command.c_str() + command.find("SlewToRaDec("), "SlewToRaDec(%lf, %lf", &target_ra_,
                         &target_dec_);
             slew_polls = 0;
@@ -157,6 +189,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
+            ++slew_complete_queries;
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }
@@ -174,6 +207,8 @@ private:
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
         }
         if (has(command, "DirectGuide")) {
+            ++guide_commands;
+            if (guide_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(guide_ms.load()));
             ra_hours = ra_hours.load() + guide_ra_step_hours.load();
             return "|No error. Error = 0.OK#";
         }

@@ -1,0 +1,62 @@
+# OpenSSF Scorecard (issue #1364): scores the repository's supply-chain
+# practices (branch protection, pinned actions, token permissions, signed
+# releases, dangerous workflows and more) and uploads the SARIF to Security >
+# Code scanning, next to CodeQL. Much of it the repo already does (SHA-pinned
+# actions, zizmor, attestations), so the score mainly catches a regression.
+# It does not gate merges.
+#
+# Runs on x86_64 (ubuntu-latest), like CodeQL: the action is a Docker image
+# (ghcr.io/ossf/scorecard-action) built for linux/amd64 only. It reads the
+# repository through the GitHub API and builds nothing, so the arm64-only
+# rule for builds and tests does not apply.
+#
+# publish_results is false (maintainer decision, 2026-11-05): no results go to
+# the public Scorecard API, so there is no public badge. Publishing needs
+# `publish_results: true` and `id-token: write` on the job; nothing else here
+# changes.
+
+name: OpenSSF Scorecard
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '29 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: scorecard
+  cancel-in-progress: false
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    # main only: the action scores the default branch and fails on any other,
+    # and scheduled-failure.yml would not see that failed run.
+    if: github.repository == 'open-astro/AlpacaBridge' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read           # check out the repository
+      actions: read            # read the workflow runs some checks score
+      security-events: write   # upload the SARIF to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e  # v2.5.0
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+
+      - name: Upload the SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
+        with:
+          sarif_file: scorecard.sarif

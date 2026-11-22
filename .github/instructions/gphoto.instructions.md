@@ -141,8 +141,8 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   named/discrete gain lists. If a future non-ISO-list camera type is added to this vendor, don't
   reflexively copy this shape — it exists because ISO specifically is a fixed list on this
   hardware class.
-- **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
-  `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
+- **Offset is unsupported** (`NotConnected` while disconnected, issue #1919, then
+  `NotImplemented`) — DSLRs have no analog-offset register concept over PTP.
 - **Bulb capture has two mechanisms: the standalone `"bulb"` toggle widget (Nikon) or, on Canon
   bodies without it, the `eosremoterelease` press/release pair (`Press Full MF` / `Release` on the bundled libgphoto2 2.5.34, `Press Full` / `Release Full` before it) plus the
   shutter-speed `"bulb"` choice (see the Canon paragraph below).** The toggle path (confirmed present in

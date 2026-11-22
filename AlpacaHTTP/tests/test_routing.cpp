@@ -65,6 +65,7 @@
 #include <tuple>
 #include <vector>
 
+#include "fake_usb_serial_tree.h"
 #include "route_table_stubs.h"
 #include "test_assert.h"
 #include "test_catalog_descriptor.h"
@@ -416,7 +417,7 @@ public:
     bool get_connected() const override {
         get_connected_calls.fetch_add(1);
         if (connected_throws) {
-            throw alpacacore::AlpacaException("link probe failed", alpacacore::AlpacaError::DriverException);
+            throw alpacacore::AlpacaException(connected_error, alpacacore::AlpacaError::DriverException);
         }
         return connected;
     }
@@ -433,6 +434,7 @@ public:
     bool connecting = false;
     mutable std::atomic<int> get_connected_calls{0};
     bool connected_throws = false;
+    std::string connected_error = "link probe failed";
     std::string link_fault;
     bool link_fault_throws = false;
 
@@ -493,6 +495,9 @@ public:
             // sample OTHER state (the host-clock step count) as of the moment
             // the driver was written to. It is not a pre-write hook.
             on_utc_write();
+        }
+        if (utc_throw_code != 0) {
+            throw alpacacore::AlpacaException("stub rejects UTCDate", utc_throw_code);
         }
     }
 
@@ -587,6 +592,7 @@ public:
     void sync_to_alt_az(double, double) override {}
 
     int utc_writes = 0;
+    int utc_throw_code = 0;  // non-zero: set_utc_date throws AlpacaException with this code
     std::function<void()> on_utc_write;
 
     // open-astro#2419: what Router::check_host_clock() handed this telescope.
@@ -652,6 +658,47 @@ public:
 private:
     int number_;
     bool connected_ = false;
+};
+
+// open-astro#2292: counts the Action and Command* calls that reach the driver,
+// so a test can show a refused field never did.
+class CommandRecordingStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    explicit CommandRecordingStubDriver(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Command Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string fallback_unique_id() const override { return "command-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override {
+        ++calls;
+        return "";
+    }
+    bool can_action(std::string_view) const override { return true; }
+    std::string command_blind(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+    bool command_bool(std::string_view, bool) override {
+        ++calls;
+        return false;
+    }
+    std::string command_string(std::string_view, bool) override {
+        ++calls;
+        return "";
+    }
+
+    int calls = 0;
+
+private:
+    int number_;
 };
 
 // Mirrors the shape the blocking-driver list in async_connectable.h guards
@@ -3966,6 +4013,27 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: remotealpaca observingconditions config round-trips every field (#1753)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "observingconditions"},
+                                           {"deviceNumber", 9630},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32324},
+                                           {"upstreamDeviceNumber", 2},
+                                           {"pollPeriodSeconds", 7}},
+                                          "ObservingConditions", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32324);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 2);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 7);
+        remove_device(router, "remotealpaca", "observingconditions", 9630);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_IOPTRON
     {
         // ioptron / telescope — asserts mountIndex survival: it is read by the
@@ -5409,14 +5477,13 @@ int main() {
         entries.push_back({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9646}, {"host", ""}});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        // OnStep is serial-only, so its valid list is shorter: a persisted
-        // "network" is unrecognised HERE even though it is valid for the other
-        // four, and normalises to serial rather than dropping the device.
+        // #2220: OnStep takes "network" too; a persisted one with an empty
+        // host is warned about and registered (#380), not dropped.
         entries.push_back({{"vendor", "onstep"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9645},
                            {"connectionType", "network"},
-                           {"host", "192.168.1.50"}});
+                           {"host", ""}});
 #endif
         std::filesystem::create_directories(persisted.parent_path());
         {
@@ -5538,7 +5605,7 @@ int main() {
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
             if (w.find("telescope 9645") != std::string::npos &&
-                w.find("has connectionType \"network\"") != std::string::npos) {
+                w.find("Host IP address is required") != std::string::npos) {
                 warned_onstep_network = true;
             }
 #endif
@@ -5604,27 +5671,113 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ONSTEP
     {
         // onstep / telescope — same mountIndex allowlist gap class as
-        // ioptron/synscan above; also asserts no "network" fields leak
-        // through (OnStep is serial-only for end users in this project): the
-        // posted host and tcpPort are dropped (#1762).
+        // ioptron/synscan above. #2220: host and tcpPort are declared fields
+        // now (the network connection type), so every field of a network
+        // entry survives, the unused serial ones included (ADR 0004).
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "onstep"},
                                            {"deviceType", "telescope"},
                                            {"deviceNumber", 9622},
-                                           {"connectionType", "serial"},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.0.1"},
+                                           {"tcpPort", 9996},
+                                           {"responseTimeoutMs", 3000},
                                            {"portPath", "/dev/ttyACM0"},
                                            {"baudRate", 9600},
-                                           {"mountIndex", 1},
-                                           {"host", "h"},
-                                           {"tcpPort", 1}},
+                                           {"mountIndex", 1}},
                                           "Telescope", 9622);
         EXPECT(cfg.is_object() && !cfg.empty());
-        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("host", "") == "192.168.0.1");
+        EXPECT(cfg.value("tcpPort", -1) == 9996);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 3000);
         EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
         EXPECT(cfg.value("baudRate", -1) == 9600);
         EXPECT(cfg.value("mountIndex", -1) == 1);
-        EXPECT(!cfg.contains("host") && !cfg.contains("tcpPort"));
         remove_device(router, "onstep", "telescope", 9622);
+    }
+    {
+        // case: onstep focuser config round-trips
+        // #2223: the focuser shares the telescope's connection fields and adds focuserNumber; every field of a
+        // serial entry survives the sanitizer, the unused network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9629},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM0"},
+                                           {"baudRate", 19200},
+                                           {"host", "192.168.0.2"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 2500},
+                                           {"mountIndex", 1},
+                                           {"focuserNumber", 4}},
+                                          "Focuser", 9629);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("host", "") == "192.168.0.2");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 2500);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        EXPECT(cfg.value("focuserNumber", -1) == 4);
+        remove_device(router, "onstep", "focuser", 9629);
+    }
+    {
+        // case: onstep rotator config round-trips
+        // #2221: the rotator shares the telescope's connection fields; every field of a network entry survives the
+        // sanitizer, the unused serial ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9630},
+                                           {"connectionType", "network"},
+                                           {"portPath", "/dev/ttyACM1"},
+                                           {"baudRate", 38400},
+                                           {"host", "192.168.0.3"},
+                                           {"tcpPort", 9996},
+                                           {"responseTimeoutMs", 1500},
+                                           {"mountIndex", 2}},
+                                          "Rotator", 9630);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM1");
+        EXPECT(cfg.value("baudRate", -1) == 38400);
+        EXPECT(cfg.value("host", "") == "192.168.0.3");
+        EXPECT(cfg.value("tcpPort", -1) == 9996);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 1500);
+        EXPECT(cfg.value("mountIndex", -1) == 2);
+        remove_device(router, "onstep", "rotator", 9630);
+    }
+    {
+        // case: onstep switch config round-trips
+        // #2222: the switch shares the telescope's connection fields; every field of an auto entry survives the
+        // sanitizer, the unused serial and network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9631},
+                                           {"connectionType", "auto"},
+                                           {"portPath", "/dev/ttyUSB3"},
+                                           {"baudRate", 57600},
+                                           {"host", "192.168.0.4"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 3000},
+                                           {"mountIndex", 3}},
+                                          "Switch", 9631);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB3");
+        EXPECT(cfg.value("baudRate", -1) == 57600);
+        EXPECT(cfg.value("host", "") == "192.168.0.4");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 3000);
+        EXPECT(cfg.value("mountIndex", -1) == 3);
+        remove_device(router, "onstep", "switch", 9631);
     }
 #endif
 
@@ -5902,9 +6055,14 @@ int main() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
+        // #2220: host and tcpPort are declared, so a serial entry keeps them too (ADR 0004); an undeclared
+        // key (udpPort) still drops.
         add("onstep", "telescope", "Telescope", "serial",
-            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h","udpPort":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})");
+        add("onstep", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.0.1","tcpPort":9998})",
+            R"({"connectionType":"network","host":"192.168.0.1","tcpPort":9998})");
         add("onstep", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");  // #659
 #endif
@@ -6122,7 +6280,7 @@ int main() {
         mounts.push_back({"celestron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", ""});
+        mounts.push_back({"onstep", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
         mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", ""});
@@ -6149,15 +6307,9 @@ int main() {
             // way into registration and into the stored entry, so "Network"
             // behaves exactly as "network" from the API and from a saved file:
             // registered as a network mount, host kept, no fallback WARN, and
-            // configureddevices lists the folded "network". OnStep has no
-            // network type, so there the folded value is refused (API) or
-            // read as "serial" (saved), naming the folded value.
-            if (vendor == "onstep") {
-                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
-                    obj({R"("connectionType":"Network")", site}), m.bad_type_message, "{}", true,
-                    obj({R"("connectionType":"network")", site}), {"has connectionType \"network\"", warned_serial},
-                    {"Skipping persisted device"});
-            } else {
+            // configureddevices lists the folded "network" (OnStep too since
+            // #2220).
+            {
                 const std::string network = obj({R"("connectionType":"network","host":"192.0.2.60")", site});
                 pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
                     obj({R"("connectionType":"Network","host":"192.0.2.60")", site}), "", network, true, network, {},
@@ -6197,13 +6349,19 @@ int main() {
         }
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        // #380: OnStep is serial-only, so a saved "network" is unrecognised for
-        // it (the other network-capable mounts accept it). The entry keeps
-        // "network" but not its host.
-        pin("connectionType \"network\" (#380)", "onstep", "telescope", "Telescope",
-            R"({"connectionType":"network","host":"192.168.1.60"})", "Invalid connection type. Use 'auto' or 'serial'",
-            "{}", true, R"({"connectionType":"network"})",
-            {"has connectionType \"network\"", "treating it as \"serial\""}, {"Skipping persisted device"});
+        // #2220 (the #380 rule): an OnStep network entry with an empty host, or a
+        // TCP port outside 1-65535, is refused from the API naming the field,
+        // and a saved one is warned about, kept as saved and registered, so
+        // the connect refuses it.
+        pin("OnStep network with empty host (#2220)", "onstep", "telescope", "Telescope",
+            R"({"connectionType":"network","host":""})", "Host IP address is required", "{}", true,
+            R"({"connectionType":"network","host":""})", {"config normalized: Host IP address is required"},
+            {"Skipping persisted device", "treating it as \"serial\""});
+        pin("OnStep network with port 0 (#2220)", "onstep", "telescope", "Telescope",
+            R"({"connectionType":"network","host":"192.0.2.61","tcpPort":0})",
+            "tcpPort is out of range (min 1) (max 65535)", "{}", true,
+            R"({"connectionType":"network","host":"192.0.2.61","tcpPort":0})",
+            {"config normalized: tcpPort is out of range (min 1) (max 65535)"}, {"Skipping persisted device"});
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
@@ -6437,6 +6595,53 @@ int main() {
             }
         }
         EXPECT(seen == 5);
+    }
+
+    // A driver's exception text reaches the router's log lines escaped (issue
+    // #2087): a newline in it must not start a forged log line, nor an escape
+    // sequence drive the operator's terminal.
+    {
+        // case: configureddevices logs a throwing driver's message escaped
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto forged = std::make_shared<FirmwareStubDriver>(9518, std::nullopt);
+        forged->connected_throws = true;
+        forged->connected_error = "probe failed\n2026-11-13 [ERROR] forged line\x1b[31m";
+        EXPECT(registry.register_device(forged));
+        std::mutex lines_mutex;
+        std::vector<std::string> lines;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                if (message.find("forged line") != std::string_view::npos) {
+                    std::lock_guard<std::mutex> lock(lines_mutex);
+                    lines.emplace_back(message);
+                }
+            });
+        route_request(router, "GET", "/management/v1/configureddevices");
+        alpacacore::logging::set_log_sink(previous_sink);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9518);
+        EXPECT(lines.size() == 1);
+        EXPECT(lines[0].find("Connected query failed") != std::string::npos);
+        EXPECT(lines[0].find("probe failed\\x0a2026-11-13 [ERROR] forged line\\x1b[31m") != std::string::npos);
+        EXPECT(lines[0].find_first_of("\n\x1b") == std::string::npos);
+    }
+
+    {
+        // case: configureddevices lists each device's Description
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto dev = std::make_shared<FirmwareStubDriver>(9517, std::nullopt);
+        EXPECT(registry.register_device(dev));
+        const auto json =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body());
+        int seen = 0;
+        for (const auto& entry : json["Value"]) {
+            if (entry.value("DeviceType", "") == "CoverCalibrator" && entry.value("DeviceNumber", -1) == 9517) {
+                EXPECT(entry.value("Description", "") == "fake device");
+                ++seen;
+            }
+        }
+        EXPECT(seen == 1);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9517);
     }
 
     // A device mid-connect is listed Connected=false without get_connected()
@@ -6714,6 +6919,16 @@ int main() {
         }
     }
 
+    {
+        // case: static files take the content type from the extension and a web/ directory is 404 (#1741)
+        const auto index = route_request(router, "GET", "/web/index.html");
+        EXPECT(index.status_code() == 200);  // the web root resolves from the test's cwd
+        EXPECT(index.get_header("Content-Type") == "text/html");
+        EXPECT(route_request(router, "GET", "/web/app.js").get_header("Content-Type") == "application/javascript");
+        EXPECT(route_request(router, "GET", "/web/favicon.ico").get_header("Content-Type") == "image/x-icon");
+        EXPECT(route_request(router, "GET", "/web/assets").status_code() == 404);
+    }
+
     // Security: Content-Length must be bounded and validated (audit finding
     // M1). An absurd or malformed value must fail parsing rather than drive a
     // multi-gigabyte body_.resize().
@@ -6832,13 +7047,14 @@ int main() {
             return desc["Value"][key];
         };
 
-        // The sub-blocks below (six, the last carrying the five UTCDate
+        // The sub-blocks below (eight, the last carrying the five UTCDate
         // ladder cases) share this stub, so each starts from a known count
         // rather than inheriting the previous block's. Calling
         // this is what makes a block order-independent; a block that forgets
         // would assert against a carried-over number.
         auto fresh_counts = [&] {
             scope->utc_writes = 0;
+            scope->utc_throw_code = 0;
             scope->on_utc_write = nullptr;
         };
 
@@ -6882,6 +7098,48 @@ int main() {
             EXPECT(clock_field(desc, "ClockSource") == "client");
         }
 
+        // The host step does not depend on the driver accepting the write: a
+        // rejection (Bisque refuses every write; most drivers throw
+        // NotConnected before connect, the ZWO AM mount caches the write and
+        // succeeds) says nothing about the client's time.
+        // The step happens first, once, and the driver's error goes back to
+        // the client unchanged.
+        for (const int code :
+             {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::NotConnected}) {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            scope->utc_throw_code = code;
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            scope->utc_throw_code = 0;
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == code);
+            EXPECT(set_calls == 1);
+            EXPECT(scope->utc_writes == 1);
+        }
+
+        // A malformed date is refused before the clock or the driver is touched.
+        {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", R"({"UTCDate":"not-a-date"})");
+            EXPECT(response.status_code() != 200 ||
+                   nlohmann::json::parse(response.body(), nullptr, false).value("ErrorNumber", 0) != 0);
+            EXPECT(set_calls == 0);
+            EXPECT(scope->utc_writes == 0);
+        }
+
         // A disciplined host (NTP/chrony/GPS) is never stepped, however wrong
         // the client is -- but the driver still receives the value, because
         // UTCDate is the client's property to set.
@@ -6899,6 +7157,7 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 1);
+            EXPECT(scope->get_utc_date() == expected);
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
@@ -7866,6 +8125,37 @@ int main() {
     }
 
     {
+        // case: PUT wifi/adapter refuses a missing or malformed Mac before NetworkManager, and a cross-origin write
+        // (#856)
+        alpacahttp::Router router;
+        for (const char* body : {"{}", "{\"Mac\": 5}", "{\"Mac\": \"wlan1\"}", "{\"Mac\": \"aa:bb:cc:dd:ee\"}",
+                                 "{\"Mac\": \"aa:bb:cc:dd:ee:ff:00:11\"}", "not json"}) {
+            const auto response = route_request(router, "PUT", "/management/v1/wifi/adapter", body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            const auto message = json.is_discarded() ? std::string{} : json.value("ErrorMessage", std::string{});
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            // The refusal names the field: it came from the validation, not from a missing system bus.
+            EXPECT(message.find("Mac") != std::string::npos || message.find("JSON object") != std::string::npos);
+        }
+        // GET is not a route for it: a state change is never a GET (decision 0007 rule 1).
+        const auto get =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/wifi/adapter").body(), nullptr, false);
+        EXPECT(!get.is_discarded() && get.value("ErrorMessage", "").find("Unknown wifi endpoint") != std::string::npos);
+
+        alpacahttp::Request cross_origin;
+        const std::string body = "{\"Mac\": \"aa:bb:cc:dd:ee:ff\"}";
+        std::ostringstream raw;
+        raw << "PUT /management/v1/wifi/adapter HTTP/1.1\r\n"
+            << "Host: localhost\r\n"
+            << "Origin: http://evil.example\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Content-Length: " << body.size() << "\r\n\r\n"
+            << body;
+        EXPECT(cross_origin.parse(raw.str()));
+        EXPECT(router.route(cross_origin, 1).status_code() == 403);
+    }
+
+    {
         // case: a Wi-Fi integer outside its field's type is refused by name, never wrapped (#1476, ADR 0007)
         // get<int>() wrapped Priority 4294967296 to 0 and get<uint32_t>() Channel
         // 4294967297 to 1. A wrapped call still fails later in NetworkManager,
@@ -8679,10 +8969,11 @@ int main() {
         // The one documented asymmetry, pinned so docs/wifi-api.md cannot
         // drift from it: the collection's guard sits inside its DELETE
         // branch, so a cross-origin PUT here is answered by the method check
-        // rather than refused, while the per-file form returns 403.
+        // (405, #2484) rather than refused, while the per-file form returns 403.
         const auto collection_put =
             router.route(request_with("PUT", "/management/v1/logfiles", "http://evil.example", ""), 1);
-        EXPECT(collection_put.status_code() == 200);
+        EXPECT(collection_put.status_code() == 405);
+        EXPECT(collection_put.get_header("Allow") == "GET, DELETE");
         const auto collection_json = nlohmann::json::parse(collection_put.body(), nullptr, false);
         EXPECT(!collection_json.is_discarded() && collection_json.value("ErrorNumber", 0) != 0);
         const auto item_put =
@@ -8891,7 +9182,7 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Altair, Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek, WandererAstro, WeeWX and ZWO descriptors plus the "zzz" test descriptor, schema only, so
+    // ToupTek, WandererAstro, WeeWX, remotealpaca and ZWO descriptors plus the "zzz" test descriptor, schema only, so
     // its `available` is false.
     {
         alpacahttp::Router router;
@@ -8902,7 +9193,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 43);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 47);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -9050,6 +9341,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "weewx") {
 #ifdef ALPACACORE_ENABLE_WEEWX
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "remotealpaca") {
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -9209,6 +9507,152 @@ int main() {
             route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz").body(), nullptr, false);
         EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) != 0);
         EXPECT(thrown.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
+    // GET /management/v1/attacheddevices (#2312): every detected serial, HID and
+    // camera device with the catalog entries it could be, over a fake tree.
+    {
+        // case: attacheddevices lists a fake port with its candidates, the configured marker and a lister error
+        using alpacacore::catalog::FieldRef;
+        using alpacacore::catalog::Role;
+        static const std::vector<FieldRef> serial_fields = [] {
+            FieldRef connection;
+            connection.key = "connectionType";
+            connection.role = Role::Discriminator;
+            connection.default_value = std::string("auto");
+            FieldRef port;
+            port.key = "portPath";
+            port.role = Role::PortPath;
+            port.applies_when = alpacacore::catalog::AppliesWhen{"connectionType", "serial"};
+            port.default_value = std::string();
+            return std::vector<FieldRef>{connection, port};
+        }();
+        static const std::vector<FieldRef> camera_fields = [] {
+            FieldRef index;
+            index.key = "cameraIndex";
+            index.kind = FieldRef::Kind::Int;
+            index.role = Role::EnumerationIndex;
+            index.default_value = std::int64_t{0};
+            return std::vector<FieldRef>{index};
+        }();
+        const auto schema = [](alpacacore::catalog::DeviceKey key, const std::vector<FieldRef>& fields) {
+            alpacacore::catalog::Schema s;
+            s.key = std::move(key);
+            s.display_name = "Attached";
+            s.build_option = "ALPACACORE_ENABLE_ATTACHED";
+            s.fields = fields;
+            return s;
+        };
+        const alpacacore::catalog::DeviceKey focuser{"yyy", alpacacore::DeviceType::Focuser};
+        const alpacacore::catalog::DeviceKey mount{"xxx", alpacacore::DeviceType::Telescope};
+
+        alpacacore::test::FakeUsbSerialTree tree;
+        const std::string node = tree.add_port("ttyUSB0", "1a86", "", "USB Serial", "usb-1a86_USB_Serial-if00-port0");
+        const std::string by_id = (tree.by_id() / "usb-1a86_USB_Serial-if00-port0").string();
+        const std::string node_canonical = std::filesystem::canonical(node).string();
+
+        // A saved yyy focuser on the raw node. yyy has no factory, so it fails
+        // to load and stays a saved entry, which is what the marker reads.
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        std::ofstream("config/registered_devices.json") << nlohmann::json::array({{{"vendor", "yyy"},
+                                                                                   {"deviceType", "focuser"},
+                                                                                   {"deviceNumber", 9491},
+                                                                                   {"connectionType", "serial"},
+                                                                                   {"portPath", node}}})
+                                                               .dump();
+        alpacahttp::Router router([&](alpacacore::catalog::DeviceCatalog& c) {
+            c.add(schema(focuser, serial_fields));
+            c.add(schema(mount, serial_fields));
+            c.add(schema({"yyy", alpacacore::DeviceType::Camera}, camera_fields));
+            c.add_usb_serial_identity({focuser, {"1a86", "CH340"}, {}});
+            c.add_usb_serial_identity({mount, {"CH340", "USB_Serial"}, {}});
+            c.add_camera_lister(
+                "yyy", [] { return std::vector<alpacacore::catalog::AttachedCamera>{{0, "ZWO ASI432MM", "1a2b"}}; });
+            c.add_hid_lister({"yyy", alpacacore::DeviceType::Focuser},
+                             []() -> std::vector<alpacacore::catalog::AttachedHidDevice> {
+                                 throw std::runtime_error("hid_init failed");
+                             });
+        });
+        router.set_attached_device_roots(tree.roots());
+
+        const auto response = route_request(router, "GET", "/management/v1/attacheddevices?ClientTransactionID=33");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 33);
+        // An all-vendors build registers the built-in serial identities and listers too: a built-in vendor that
+        // ships a CH340 adds its own candidates to the same port, and a built-in lister may add a device or an
+        // error. The test reads only the entries of its own vendors (yyy, xxx), in the order they were registered.
+        const auto own = [](const nlohmann::json& list, const char* key) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const auto& item : list) {
+                const std::string name = item.value(key, std::string());
+                if (name == "yyy" || name == "xxx" || name.rfind("yyy ", 0) == 0) kept.push_back(item);
+            }
+            return kept;
+        };
+        const nlohmann::json devices = json["Value"].value("Devices", nlohmann::json::array());
+        const nlohmann::json* port = nullptr;
+        const nlohmann::json* camera = nullptr;
+        for (const auto& device : devices) {
+            if (device.value("Port", "") == by_id) port = &device;
+            const auto candidates = device.value("Candidates", nlohmann::json::array());
+            if (device.value("Kind", "") == "camera" && !candidates.empty() &&
+                candidates[0].value("Vendor", "") == "yyy") {
+                camera = &device;
+            }
+        }
+        EXPECT(port != nullptr && camera != nullptr);
+        if (port != nullptr && camera != nullptr) {
+            EXPECT(port->value("Kind", "") == "serial");
+            EXPECT(port->value("Node", "") == node_canonical);
+            EXPECT(port->value("Name", "") == "usb-1a86_USB_Serial-if00-port0");
+            EXPECT(own((*port)["Candidates"], "Vendor") == nlohmann::json::array({{{"Vendor", "yyy"},
+                                                                                   {"DeviceType", "Focuser"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "yyy"},
+                                                                                     {"deviceType", "focuser"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}},
+                                                                                  {{"Vendor", "xxx"},
+                                                                                   {"DeviceType", "Telescope"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "xxx"},
+                                                                                     {"deviceType", "telescope"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}}}));
+            EXPECT(port->value("Configured", false));
+            EXPECT((*port)["ConfiguredAs"] ==
+                   nlohmann::json::array({{{"DeviceType", "Focuser"}, {"DeviceNumber", 9491}}}));
+            EXPECT(camera->value("Index", -1) == 0);
+            EXPECT(camera->value("SerialNumber", "") == "1a2b");
+            EXPECT(!camera->value("Configured", true));
+            EXPECT((*camera)["Candidates"] ==
+                   nlohmann::json::array(
+                       {{{"Vendor", "yyy"},
+                         {"DeviceType", "Camera"},
+                         {"Config", {{"vendor", "yyy"}, {"deviceType", "camera"}, {"cameraIndex", 0}}}}}));
+        }
+        EXPECT(own(json["Value"]["Errors"], "Source") ==
+               nlohmann::json::array({{{"Source", "yyy HID lister"}, {"Message", "hid_init failed"}}}));
+
+        // The unversioned alias answers the same; any verb but GET is 405.
+        const auto alias =
+            nlohmann::json::parse(route_request(router, "GET", "/management/attacheddevices").body(), nullptr, false);
+        EXPECT(!alias.is_discarded() && alias["Value"]["Devices"] == json["Value"]["Devices"]);
+        const auto put = route_request(router, "PUT", "/management/v1/attacheddevices", "");
+        EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
+        const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
+
+        // attachedcameras keeps its own shape over the same lister.
+        const auto cameras = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/attachedcameras?vendor=yyy").body(), nullptr, false);
+        EXPECT(!cameras.is_discarded() &&
+               cameras["Value"] ==
+                   nlohmann::json::array({{{"Index", 0}, {"Name", "ZWO ASI432MM"}, {"Serial", "1a2b"}}}));
     }
 
     {
@@ -10421,6 +10865,48 @@ int main() {
         }
     }
 
+    // A key indented with a tab (not valid YAML indentation, but a hand edit
+    // can leave one) stays inside its section (issue #2087). The writer read
+    // the tab as column 0: it ended the section there, appended both keys
+    // above that line and left the old allowed_hosts below it as a duplicate.
+    // The writer and the reader must agree, so the file is read back too.
+    {
+        // case: a tab-indented key stays inside its config section
+        char path_template[] = "/tmp/alpacahttp_test_routing_tab_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "\thost_check_enabled: false  # tabbed\n"
+                   "  allowed_hosts: \"\"\n"
+                   "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() ==
+               "http:\n"
+               "\thost_check_enabled: \"true\"  # tabbed\n"
+               "  allowed_hosts: \".lan\"\n"
+               "server:\n"
+               "  location: \"Old\"\n");
+        alpacahttp::Config reloaded;
+        EXPECT(reloaded.load(config_path));
+        EXPECT(reloaded.host_check_enabled());
+        EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+        EXPECT(reloaded.location() == "Old");
+        std::remove(config_path.c_str());
+    }
+
     // A key missing from an existing section is added after the section's last
     // content line, ahead of its trailing blank and comment lines.
     {
@@ -10583,6 +11069,30 @@ int main() {
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    {
+        // case: configuredevice refuses a remotealpaca upstream that is this server (decision 0023 rule 4)
+        // The router knows the port the server listens on (here 6800) and that it binds every address, so a proxied
+        // device whose upstream is 127.0.0.1:6800 would call itself: refused when configured, and not registered.
+        // Another port of the same host is another server.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "observingconditions"},
+                                     {"deviceNumber", 9631},
+                                     {"upstreamHost", "127.0.0.1"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "ObservingConditions");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "ObservingConditions", 9631).is_null());
+
+        nlohmann::json other = loop;
+        other["upstreamPort"] = 6801;
+        EXPECT(api_attempt(router, other, "ObservingConditions").ok);
+        remove_device(router, "remotealpaca", "observingconditions", 9631);
     }
 #endif
 
@@ -10804,6 +11314,41 @@ int main() {
         expect_allow("GET", "/management/v1/shutdown", "POST, PUT");
         expect_allow("GET", "/management/v1/restart", "POST, PUT");
         expect_allow("DELETE", "/management/v1/synctime", "GET, POST, PUT");
+    }
+    {
+        // case: a wrong verb on a log endpoint answers 405 with Allow, not 200 (#2484)
+        alpacahttp::Router router;
+        const auto expect_allow = [&](const std::string& method, const std::string& path, const std::string& allow) {
+            const auto resp = route_request(router, method, path, "");
+            EXPECT(resp.status_code() == 405);
+            EXPECT(resp.get_header("Allow") == allow);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        };
+        // Each probe uses a verb the endpoint does not accept: DELETE is real on both logfiles forms.
+        for (const std::string prefix : {"/management/v1", "/management"}) {
+            expect_allow("DELETE", prefix + "/loglevel", "GET, POST, PUT");
+            expect_allow("PUT", prefix + "/logs", "GET");
+            expect_allow("PUT", prefix + "/logfiles", "GET, DELETE");
+            expect_allow("POST", prefix + "/logfiles/alpaca.log", "GET, DELETE");
+        }
+    }
+    {
+        // case: every AlpacaBridge-only 405 carries InvalidOperation (0x40B) (#2484)
+        alpacahttp::Router router;
+        const auto expect_invalid_operation = [&](const std::string& method, const std::string& path) {
+            const auto resp = route_request(router, method, path, "");
+            EXPECT(resp.status_code() == 405);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        };
+        expect_invalid_operation("PUT", "/management/v1/faileddevices");
+        expect_invalid_operation("GET", "/management/v1/configuredevice");
+        expect_invalid_operation("GET", "/management/v1/removedevice");
+        expect_invalid_operation("GET", "/management/v1/updatedevice");
+        expect_invalid_operation("GET", "/management/v1/shutdown");
+        expect_invalid_operation("GET", "/management/v1/restart");
+        expect_invalid_operation("DELETE", "/management/v1/synctime");
     }
     {
         // case: routes outside the Alpaca schema are rejected (#576)
@@ -11171,6 +11716,244 @@ int main() {
         EXPECT(json.is_object());
         EXPECT(json.value("ErrorNumber", 0) == 0x40B);
         EXPECT(json.value("ErrorMessage", "") == "Log archive build already in progress; retry shortly");
+    }
+
+    {
+        // case: configureddevices reports ActiveClients and LastClientRequestAgeMs from the client registry (#1764)
+        const ScopedCwd scratch;
+        auto now = std::chrono::steady_clock::now();
+        alpacahttp::Router router;
+        router.set_client_clock_for_test([&now] { return now; });
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9764);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9764";
+        const auto row = [&router] { return listed_entry(router, "CoverCalibrator", 9764); };
+
+        // No client yet: zero active clients and no age.
+        EXPECT(row().value("ActiveClients", -1) == 0);
+        EXPECT(!row().contains("LastClientRequestAgeMs"));
+
+        put_connected(router, base, "1", true);
+        EXPECT(row().value("ActiveClients", -1) == 1);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+
+        // Past 60 s the age is reported, still one active client; reading the
+        // listing is not client activity.
+        now += std::chrono::seconds(61);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 61000);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 61000);
+        EXPECT(row().value("ActiveClients", -1) == 1);
+
+        // Any request from the client refreshes it; a second client counts too.
+        route_request(router, "GET", base + "/name?ClientID=1");
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+        now += std::chrono::seconds(5);
+        put_connected(router, base, "2", true);
+        EXPECT(row().value("ActiveClients", -1) == 2);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+
+        // Past the 10 minute window no slot is active and no age is reported;
+        // the device itself stays connected (the window is unchanged).
+        now += std::chrono::minutes(10) + std::chrono::seconds(1);
+        EXPECT(row().value("ActiveClients", -1) == 0);
+        EXPECT(!row().contains("LastClientRequestAgeMs"));
+        EXPECT(stub->get_connected());
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9764);
+    }
+
+    {
+        // case: the web UI's own device requests do not refresh client activity (#1764)
+        const ScopedCwd scratch;
+        auto now = std::chrono::steady_clock::now();
+        alpacahttp::Router router;
+        router.set_client_clock_for_test([&now] { return now; });
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9765);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9765";
+        const auto age = [&router] {
+            return listed_entry(router, "CoverCalibrator", 9765).value("LastClientRequestAgeMs", -1);
+        };
+        // A ClientID-less client and the browser share the peer address, so
+        // they share the anonymous slot: only the header tells them apart.
+        const std::string peer = "192.168.1.50";
+        put_connected(router, base, "", true, peer);
+        now += std::chrono::seconds(61);
+
+        const auto from_web_ui = [&] {
+            alpacahttp::Request request;
+            request.set_remote_address(peer);
+            EXPECT(request.parse("GET " + base +
+                                 "/name HTTP/1.1\r\nHost: localhost\r\nX-AlpacaBridge-Client: web-ui\r\n\r\n"));
+            return router.route(request, 1);
+        };
+        EXPECT(from_web_ui().status_code() == 200);
+        EXPECT(age() == 61000);
+
+        route_request(router, "GET", base + "/name", "", peer);
+        EXPECT(age() == 0);
+
+        put_connected(router, base, "", false, peer);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9765);
+    }
+
+    {
+        // case: an over-long Command, Action or Parameters is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<CommandRecordingStubDriver>(9292);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        const std::string base = "/api/v1/covercalibrator/9292";
+        const auto error_of = [](const alpacahttp::Response& response) {
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (const char* method : {"commandblind", "commandbool", "commandstring"}) {
+            const int before = stub->calls;
+            const auto [code, message] =
+                error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1025, 'c')));
+            EXPECT(code == 0x401);
+            EXPECT(message == "Command is 1025 bytes; the limit is 1024");
+            EXPECT(stub->calls == before);
+            EXPECT(error_of(route_request(router, "PUT", base + "/" + method, "Command=" + std::string(1024, 'c')))
+                       .first == 0);
+            EXPECT(stub->calls == before + 1);
+        }
+        const int before = stub->calls;
+        const auto [name_code, name_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=" + std::string(257, 'a')));
+        EXPECT(name_code == 0x401);
+        EXPECT(name_message == "Action is 257 bytes; the limit is 256");
+        const auto [params_code, params_message] =
+            error_of(route_request(router, "PUT", base + "/action", "Action=x&Parameters=" + std::string(8193, 'p')));
+        EXPECT(params_code == 0x401);
+        EXPECT(params_message == "Parameters is 8193 bytes; the limit is 8192");
+        EXPECT(stub->calls == before);
+        EXPECT(error_of(route_request(router, "PUT", base + "/action",
+                                      "Action=" + std::string(256, 'a') + "&Parameters=" + std::string(8192, 'p')))
+                   .first == 0);
+        EXPECT(stub->calls == before + 1);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9292);
+    }
+
+    {
+        // case: an over-long switch name or filter name is InvalidValue before the driver (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::SwitchStub>(9294)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(9294)));
+        alpacahttp::Router router;
+        const auto error_of = [&router](const std::string& path, const std::string& body) {
+            const auto response = route_request(router, "PUT", path, body);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        const std::string switch_path = "/api/v1/switch/9294/setswitchname";
+        const auto [switch_code, switch_message] = error_of(switch_path, "Id=0&Name=" + std::string(257, 'n'));
+        EXPECT(switch_code == 0x401);
+        EXPECT(switch_message == "Name is 257 bytes; the limit is 256");
+        EXPECT(error_of(switch_path, "Id=0&Name=" + std::string(256, 'n')).first == 0);
+        const std::string names_path = "/api/v1/filterwheel/9294/names";
+        const auto [names_code, names_message] =
+            error_of(names_path, nlohmann::json{{"Names", {"L", std::string(257, 'f')}}}.dump());
+        EXPECT(names_code == 0x401);
+        EXPECT(names_message == "A filter name is 257 bytes; the limit is 256");
+        EXPECT(error_of(names_path, nlohmann::json{{"Names", {"L", std::string(256, 'f')}}}.dump()).first == 0);
+        registry.unregister_device(alpacacore::DeviceType::Switch, 9294);
+        registry.unregister_device(alpacacore::DeviceType::FilterWheel, 9294);
+    }
+
+    {
+        // case: a Location or ProfileName over 256 bytes is refused with 400 and not applied (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const std::string path = "/management/v1/description";
+        const auto described = [&] {
+            const auto json = nlohmann::json::parse(route_request(router, "GET", path).body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return json.value("Value", nlohmann::json::object());
+        };
+        for (const char* field : {"Location", "ProfileName"}) {
+            const nlohmann::json before = described();
+            const auto response =
+                route_request(router, "PUT", path, nlohmann::json{{field, std::string(257, 'l')}}.dump());
+            EXPECT(response.status_code() == 400);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", std::string()) == std::string(field) + " is 257 bytes; the limit is 256");
+            EXPECT(described() == before);
+            const std::string at_limit(256, 'l');
+            EXPECT(route_request(router, "PUT", path, nlohmann::json{{field, at_limit}}.dump()).status_code() == 200);
+            EXPECT(described().value(field, std::string()) == at_limit);
+        }
+    }
+
+    {
+        // case: a device holds at most 256 client registrations and refuses a new client past them (#2292)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9293);
+        EXPECT(registry.register_device(stub));
+        alpacahttp::Router router;
+        auto now = std::chrono::steady_clock::now();
+        router.set_client_clock_for_test([&now] { return now; });
+        const std::string base = "/api/v1/covercalibrator/9293";
+        for (int id = 1; id <= 256; ++id) {
+            put_connected(router, base, std::to_string(id), true);
+        }
+        const auto refused = route_request(router, "PUT", base + "/connected", "Connected=true&ClientID=257");
+        const auto json = nlohmann::json::parse(refused.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The Platform 7 connect registers the same way and is refused the same way.
+        const auto refused_connect = route_request(router, "PUT", base + "/connect", "ClientID=257");
+        const auto connect_json = nlohmann::json::parse(refused_connect.body(), nullptr, false);
+        EXPECT(!connect_json.is_discarded() && connect_json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The refusal leaves the driver as the 256 clients left it.
+        EXPECT(stub->get_connected());
+        put_connected(router, base, "1", true);  // a registered client still refreshes
+        put_connected(router, base, "1", false);
+        put_connected(router, base, "257", true);  // a slot left, so the newcomer gets it
+        EXPECT(get_connected_value(router, base, "257"));
+        // Registrations past the stale window no longer count.
+        now += std::chrono::minutes(11);
+        put_connected(router, base, "258", true);
+        EXPECT(get_connected_value(router, base, "258"));
+        put_connected(router, base, "258", false);
+        EXPECT(!stub->get_connected());
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9293);
+    }
+
+    {
+        // case: configuredevice keeps at most 128 entries and a removal frees a place (#2292)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
+        const auto configure = [&](int number) {
+            const nlohmann::json body = {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", number}};
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return std::make_pair(json.value("ErrorNumber", -1), json.value("ErrorMessage", std::string()));
+        };
+        for (int number = 12000; number < 12128; ++number) {
+            EXPECT(configure(number).first == 0);
+        }
+        const auto [code, message] = configure(12128);
+        EXPECT(code == 0x40B);
+        EXPECT(message ==
+               "The server holds 128 configured devices, the most it keeps; remove one before adding another");
+        EXPECT(listed_entry(router, "Focuser", 12128).is_null());
+        remove_device(router, "zzz", "focuser", 12000);
+        EXPECT(configure(12128).first == 0);
+        for (int number = 12001; number <= 12128; ++number) {
+            remove_device(router, "zzz", "focuser", number);
+        }
     }
 
     std::cout << "All routing tests passed!\n";

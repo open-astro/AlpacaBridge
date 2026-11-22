@@ -20,6 +20,7 @@
 // so the vendor header here is fine.
 
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <optional>
@@ -84,7 +85,7 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
             if (type == "network") {
                 info.type = vendor::skywatcher::ConnectionType::Network;
                 info.host = config.get(kSkyWatcherHost);
-                info.udp_port = static_cast<int>(config.get(kSkyWatcherUdpPort));
+                info.udp_port = network_port_or_zero(config.get(kSkyWatcherUdpPort));
             } else {
                 info.type = vendor::skywatcher::ConnectionType::Serial;
                 info.port_path = config.get(kSkyWatcherPortPath);
@@ -105,6 +106,11 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
         return telescope;
     };
     catalog.add(std::move(factory));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"skywatcher", DeviceType::Telescope}, vendor::skywatcher::skywatcher_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

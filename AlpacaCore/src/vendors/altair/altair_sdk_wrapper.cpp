@@ -61,6 +61,8 @@ struct AltaircamApi {
 #undef ALTAIR_CONSTANT
 };
 
+static_assert(ALTAIRCAM_EVENT_IMAGE == touptek::kToupEventImage);
+
 }  // namespace
 
 touptek::ToupTekSDK& AltairSDKWrapper::instance() {

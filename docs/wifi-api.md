@@ -28,6 +28,14 @@ The one call a client needs for its WiFi UI state.
 {
   "Available": true,
   "Device": "wlan0",
+  "ApDevice": "ap0",
+  "DeviceCount": 3,
+  "Adapters": [
+    { "Interface": "wlan0", "Mac": "dc:a6:32:00:00:01", "IsAp": false },
+    { "Interface": "ap0", "Mac": "dc:a6:32:00:00:01", "IsAp": true },
+    { "Interface": "wlan1", "Mac": "9c:ef:d5:00:00:02", "IsAp": false }
+  ],
+  "PreferredMac": "",
   "WirelessEnabled": true,
   "State": "connected",
   "ConnectionId": "OpenAstro-AP",
@@ -60,6 +68,14 @@ The one call a client needs for its WiFi UI state.
 - `State`: `connected`, `disconnected`, `connecting`, `deactivating`,
   `unavailable`.
 - `Country`: ISO 3166-1 alpha-2, or `""` when never set.
+- `Device` is the client adapter: the one status, scan and join use. With a
+  `PreferredMac` set and that adapter present it is that adapter; otherwise
+  the automatic pick (the first Wi-Fi device that is not the hotspot's).
+- `Adapters` lists every Wi-Fi device NetworkManager reports, with its
+  permanent MAC (`""` when it reports none, as a virtual interface may; such
+  an adapter cannot be chosen) and `IsAp` for the dedicated hotspot interface.
+  `PreferredMac` is the stored client adapter choice, `""` when none is set
+  (issue #856).
 
 ### GET /management/v1/wifi/scan
 
@@ -160,6 +176,25 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
 - The web UI preserves the configured `SsidHex` when the displayed SSID text is
   unchanged. Change the text to set a new SSID.
 
+### PUT /management/v1/wifi/adapter
+
+`{ "Mac": "9c:ef:d5:00:00:02" }` — choose the client adapter by its permanent
+MAC (six hex pairs, either case; stored in lower case). `{ "Mac": "" }`
+clears the choice and returns to the automatic pick. The choice is stored with
+the Wi-Fi settings and survives a reboot and an interface rename; an interface
+name is never stored. Refused before anything changes: a malformed MAC, a MAC
+no listed adapter reports, and the hotspot's own interface on a board with a
+dedicated AP interface. On a board with more than one Wi-Fi device, every saved
+client profile is re-pinned (`connection.interface-name`) to the chosen
+adapter, and no other setting of the profile is touched; the hotspot profile is
+never changed. If the chosen adapter is later unplugged, the server logs it and
+uses the automatic pick. Returns `{"PreferredMac": "…", "Device": "…"}`.
+**Re-pinning can move a joined network** — see "Connection-drop pattern".
+
+Connecting a saved profile (`PUT …/connect`) on such a board also re-pins it
+when its interface name differs from the client adapter, as after a udev
+rename.
+
 ### PUT /management/v1/wifi/radio
 
 `{ "Enabled": true }` — WiFi radio on/off (NetworkManager
@@ -184,7 +219,8 @@ anything unrecognised, which the server treats as an unknown method and the
 guard refuses before the endpoint's own method check runs -- with one
 exception: on the `logfiles` collection the guard sits inside the `DELETE`
 branch, so a cross-origin `PUT /management/v1/logfiles` is answered by the
-method check (200 with `INVALID_OPERATION`) rather than 403, while
+method check (405 with `Allow: GET, DELETE` and `INVALID_OPERATION`)
+rather than 403, while
 `PUT /management/v1/logfiles/<name>` is refused at 403. Neither mutates
 anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
@@ -258,7 +294,11 @@ Since 3.6.0 the manual call is rarely needed: a client's
 connect) steps the SBC clock itself whenever the kernel reports the clock
 undisciplined (`adjtimex` `STA_UNSYNC`, the permanent state of an SBC without
 NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
-window, ignores sub-second deltas, and logs every step with the delta and the
+window, ignores sub-second deltas, does not depend on the device accepting the
+write (a Bisque mount that refuses every `UTCDate` write, or a telescope not yet
+connected, still gets the host step, and the client still receives the device's
+result: most drivers throw NotConnected before connect, while the ZWO AM mount
+caches an offline write and succeeds), and logs every step with the delta and the
 client address. `GET /management/v1/description` reports the state:
 `ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
 `rtc` | `none`), `SyncSystemClockFromClients` and `TimeZone` (the host's IANA
