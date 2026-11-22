@@ -1404,6 +1404,41 @@ TEST_CASE("Celestron MoveAxis - a MoveAxis with no new MoveAxis for 60 s is stop
     driver->set_connected(false);
 }
 
+// #2409 review: the poll retries a failed cap stop every tick until one lands; the failure is logged at ERROR once per
+// overdue MoveAxis, not once a second.
+TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is logged once",
+          "[celestron][telescope][async][goto-safety]") {
+    std::atomic<int> stop_errors{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Error && component == "Celestron" &&
+                message.find("with no new MoveAxis") != std::string_view::npos &&
+                message.find("the stop failed") != std::string_view::npos) {
+                ++stop_errors;
+            }
+        });
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    step_virtual(clock, std::chrono::seconds(59));
+    st->silent.store(true);  // every stop from here on goes unanswered
+    step_virtual(clock, std::chrono::seconds(6));
+    st->silent.store(false);
+    CHECK(stop_errors.load() == 1);
+    // The stop was retried on later ticks, not only sent once.
+    CHECK(st->muted_ra_stops.load() >= 2);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
           "[celestron][telescope][async][goto-safety]") {
     alpacacore::test::FakeTaskClock clock;

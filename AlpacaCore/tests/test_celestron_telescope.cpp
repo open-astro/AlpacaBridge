@@ -2326,6 +2326,58 @@ TEST_CASE("Celestron Link - a relink stop that fails is raised by Slewing",
     driver.set_connected(false);
 }
 
+// #2409 review: a relink stop the mount does not answer stays owed when a later handshake step then fails the
+// Connect, so the next Connect that opens the port sends the stops again ahead of the handshake.
+TEST_CASE("Celestron Link - a failed relink stop stays owed when the handshake then fails",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    rig.replug();
+    rig.st->m_mute.store(true);             // the relink cancel goes unanswered
+    rig.mount->unplug_on(on_command('V'));  // and the cable is pulled at the handshake's first read
+    CHECK_THROWS(driver.set_connected(true));
+    CHECK_FALSE(driver.get_connected());
+    rig.st->m_mute.store(false);
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.mount->received();
+    REQUIRE_FALSE(received.empty());
+    CHECK(received.front() == 'M');
+    CHECK(relink_stops_lead(received, 0x10));
+    CHECK(relink_stops_lead(received, 0x11));
+    driver.set_connected(false);
+}
+
+// A Connect that completes reports a failed relink stop through Slewing and owes no stop after it: a later
+// Disconnect and Connect over a healthy link sends no stops ahead of the handshake.
+TEST_CASE("Celestron Link - a completed Connect clears a failed relink stop",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    rig.replug();
+    rig.st->m_mute.store(true);  // the relink cancel goes unanswered, but the handshake completes
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    rig.st->m_mute.store(false);
+    driver.set_connected(false);
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.mount->received();
+    REQUIRE_FALSE(received.empty());
+    CHECK(received.front() != 'M');
+    driver.set_connected(false);
+}
+
 // #2409 review: a lost link clears neither motion flag (the relink stop reads them), so the site setters' motion check
 // must not answer first: while lost they answer NotConnected, as every member does (decision 0009 rule 3).
 TEST_CASE("Celestron Link - site writes answer NotConnected while lost with a MoveAxis running",

@@ -1984,6 +1984,7 @@ public:
         // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked). The mode is read at the turn, as
         // AbortSlew's: a Tracking write queued ahead has sent its `T` by then.
         int restore_mode = 0;
+        bool rate_sent = false;  // the rate command returned: its outcome is known, whatever the restore does
         try {
             if (!send_in_turn(
                     lock,
@@ -1993,6 +1994,7 @@ public:
                     },
                     [&] {
                         protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
+                        rate_sent = true;
                         if (restore_mode > 0) {
                             protocol.set_tracking_mode(restore_mode);
                         }
@@ -2011,6 +2013,11 @@ public:
             // false.
             if (restore_mode > 0) {
                 ra_stop_unconfirmed_ = true;
+            }
+            // Not for check_connected() after an overtaken turn (nothing was sent): the helper's connected_ guard
+            // returns first there.
+            if (!rate_sent) {
+                bound_unknown_rate_outcome_locked(lock, axis, claim);
             }
             throw;
         }
@@ -2598,6 +2605,31 @@ private:
                 "MoveAxis could not start its time limit (" + why + ")" +
                     (stop_error.empty() ? "; the axis was stopped" : "; stopping the axis failed: " + stop_error),
                 AlpacaError::DriverException);
+        }
+    }
+
+    // #2412: a rate command that threw may still have reached the handset (the write went out and only the reply
+    // failed), so the axis may be moving: a start that took effect, or a stop that did not. Fail closed: the axis keeps
+    // reading as moving and is watched by the MoveAxis bound, which stops it once its 60 s run out. Only for this
+    // move (a start's claim is not lost; a stop claims nothing and its caller still holds the initiator lock) and a
+    // link still up: over a lost link the flag is the relink stop's record. A bound that cannot start adds its own
+    // failure to nothing: the caller's exception is the one thrown. `lock` (mutex_) held on entry and on return.
+    void bound_unknown_rate_outcome_locked(std::unique_lock<std::mutex>& lock, int axis,
+                                           const std::optional<util::MotionClaim>& claim) {
+        if ((claim && claim_lost_locked(*claim)) || !connected_.load() || link_lost()) {
+            return;
+        }
+        manual_axis_slewing_[axis] = true;
+        manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
+        manual_axis_capped_[axis] = false;
+        ++manual_axis_move_id_[axis];
+        if (!motion_bound_active_) {
+            try {
+                start_motion_bound(lock, axis);
+            } catch (const std::exception& e) {
+                // start_motion_bound() already stopped the axis or tried; the caller's exception is the one thrown.
+                ALPACA_LOG_WARN("SynScan", std::string("MoveAxis after a failed rate command: ") + e.what());
+            }
         }
     }
 
