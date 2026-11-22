@@ -288,6 +288,7 @@ jobs:
             libusb-1.0-0-dev \
             libudev-dev \
             libsystemd-dev \
+            libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
