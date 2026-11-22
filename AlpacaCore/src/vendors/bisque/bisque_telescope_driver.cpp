@@ -802,15 +802,20 @@ public:
         };
         // Poll until parked.
         auto start = clock_.now();
+        std::string last_error;  // a failed poll retries; the timeout names the last failure
         while (true) {
             if (retired()) return;
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
-                throw AlpacaException("Park timed out after 120 seconds");
+                throw AlpacaException("Park timed out after 120 seconds" +
+                                      (last_error.empty() ? "" : "; last IsParked error: " + last_error));
             }
             try {
                 if (protocol.is_parked()) break;
+            } catch (const std::exception& e) {
+                last_error = e.what();
             } catch (...) {
+                last_error = "unknown error";
             }
             clock_.sleep_for(std::chrono::seconds(1));
             if (retired()) return;

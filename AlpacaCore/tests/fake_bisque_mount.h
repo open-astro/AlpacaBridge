@@ -71,6 +71,9 @@ public:
     std::atomic<int> park_polls_needed{0};
     std::atomic<int> slew_polls_needed{0};
     std::atomic<int> fail_slew_polls{0};
+    /// While > 0 and a park is in flight, every IsParked query answers a TheSkyX error (and the count drops by one),
+    /// so the connect's IsParked never uses it up.
+    std::atomic<int> fail_park_polls{0};
     /// While > 0, every IsTracking query answers a TheSkyX error (and the count drops by one).
     std::atomic<int> fail_tracking_reads{0};
     std::atomic<int> fail_slew_commands{0};
@@ -175,6 +178,10 @@ private:
         }
         if (has(command, "IsParked")) {
             if (is_parked_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(is_parked_ms.load()));
+            if (parking_ && fail_park_polls.load() > 0) {
+                --fail_park_polls;
+                return "|No error. Error = 1.IsParked unavailable#";
+            }
             if (parking_ && ++park_polls > park_polls_needed.load()) {
                 parking_ = false;
                 parked = true;

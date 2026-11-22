@@ -1099,6 +1099,23 @@ TEST_CASE("Bisque FindHome - the timeout names the last IsSlewComplete error", "
     CHECK_FALSE(rig.driver->get_at_home());
 }
 
+// Falsified by: bisque_telescope_driver.cpp, park: drop last_error from the 120 s timeout message.
+TEST_CASE("Bisque Park - the timeout names the last IsParked error", "[bisque][telescope][park]") {
+    ClockedBisque rig;
+    rig.mount.fail_park_polls = 100000;  // every IsParked while the park runs answers a TheSkyX error
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    REQUIRE(advance_until(rig.clock, [&] { return ready(parked); }));
+    try {
+        parked.get();
+        FAIL("Expected the Park deadline");
+    } catch (const alpacacore::AlpacaException& ex) {
+        const std::string text = ex.what();
+        CHECK(text.find("Park timed out after 120 seconds") != std::string::npos);
+        CHECK(text.find("IsParked unavailable") != std::string::npos);
+    }
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
 // #2461: AtHome is set only by FindHome and every motion start clears it (ITelescopeV4). Each case homes first.
 namespace {
 void home(ClockedBisque& rig) {
