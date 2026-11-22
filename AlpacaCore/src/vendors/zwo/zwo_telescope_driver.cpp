@@ -3181,8 +3181,8 @@ private:
         goto_accepted_at_.reset();
         const double miss = separation_arcsec(at.ra_hours, at.dec_degrees, goto_bound_ra_, goto_bound_dec_);
         if (miss <= kSlewFarMissArcsec || !last_slew_error_.empty()) return;
-        last_slew_error_ = "SlewToTargetAsync failed: the mount stopped " + std::to_string(std::lround(miss)) +
-                           " arcsec from the target";
+        last_slew_error_ =
+            "The slew failed: the mount stopped " + std::to_string(std::lround(miss)) + " arcsec from the target";
         ALPACA_LOG_WARN("ZWO", last_slew_error_);
     }
 

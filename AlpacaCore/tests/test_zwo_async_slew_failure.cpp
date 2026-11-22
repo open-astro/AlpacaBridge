@@ -1990,11 +1990,17 @@ TEST_CASE("ZWO goto-safety - site and time writes are refused while the driver m
     rig.driver->abort_slew();
 }
 
-TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a MoveAxis stops the mount first",
+TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a GOTO or a MoveAxis stops the mount first",
           "[zwo][telescope][async][goto-safety]") {
     Rig rig;
     rig.connect();
-    REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    const bool jog = GENERATE(true, false);
+    CAPTURE(jog);
+    if (jog) {
+        REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    } else {
+        start_held_goto(rig);
+    }
     REQUIRE(rig.mount.drop_link());
     for (int i = 0; i < 40 && rig.driver->get_connected(); ++i) rig.tick();
     REQUIRE_FALSE(rig.driver->get_connected());
