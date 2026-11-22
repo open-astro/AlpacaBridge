@@ -438,6 +438,8 @@ private:
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     // Loads persisted_store_ once, then registers its entries, prunes the
     // stores keyed by uniqueId, adopts legacy state and applies power-on state.
+    // Called from the constructor only, so the list is loaded before any request
+    // routes; no handler calls it (issue #2483).
     void load_persisted_devices();
 
     nlohmann::json build_description_payload() const;
