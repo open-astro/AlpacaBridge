@@ -182,9 +182,8 @@ TEST_CASE("HostClock - a refused step latches, so callers know the clock is unco
     auto d = g.clock();
     CHECK(d.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
     CHECK_FALSE(d.step_ever_failed());
-    // A path that sets the clock itself (the synctime endpoint) reports its own
-    // refusal the same way, so an operator who only presses Sync Time on a host
-    // without CAP_SYS_TIME still trips the latch.
+    // A caller that sets the clock itself reports its own refusal the same way
+    // through mark_step_failed().
     CHECK_FALSE(d.stepped_by_client());
     d.mark_step_failed();
     CHECK(d.step_ever_failed());
@@ -269,8 +268,7 @@ TEST_CASE("HostClock - the RTC probe is primed at construction and never re-run 
     CHECK(probes == 2);
 }
 
-TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",
-          "[util][hostclock][unit]") {
+TEST_CASE("HostClock - mark_stepped records an external clock set as a client step", "[util][hostclock][unit]") {
     Fake f;
     f.rtc = true;
     auto c = f.clock();
@@ -326,9 +324,9 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }
 
-TEST_CASE("HostClock - a manual sync marks the clock client-stepped", "[util][hostclock][unit]") {
-    // The web UI's Sync Time button sets the clock outside step_from_client;
-    // clock_settime leaves STA_UNSYNC set, so the readout must be told.
+TEST_CASE("HostClock - mark_stepped after a manual set marks the clock client-stepped", "[util][hostclock][unit]") {
+    // A caller that sets the clock itself, outside step_from_client, then calls
+    // mark_stepped(); clock_settime leaves STA_UNSYNC set, so the readout must be told.
     alpacacore::util::HostClock c([] { return false; },
                                   [](std::chrono::system_clock::time_point, std::string&) { return true; });
     CHECK(c.source() == "none");
@@ -706,7 +704,7 @@ TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][
     fs::remove_all(root);
 }
 
-TEST_CASE("HostClock - Sync Time with the opt-out off does not write the RTC (#296)", "[util][hostclock][unit]") {
+TEST_CASE("HostClock - mark_stepped with the opt-out off does not write the RTC (#296)", "[util][hostclock][unit]") {
     Fake f;
     auto c = f.clock();
     c.set_enabled(false);
