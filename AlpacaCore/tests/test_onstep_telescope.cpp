@@ -4198,3 +4198,18 @@ TEST_CASE("OnStep Telescope Driver - site and time writes are refused while a Mo
     CHECK(fake.count(":SC") == 0);
     driver->set_connected(false);
 }
+
+TEST_CASE("OnStep Telescope Driver - site and time writes are refused while a Park is being started",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    rig.mount->set_status("pEW180#");  // a GOTO from the hand controller: Park stops it and waits for it to end
+    rig.poll_after(std::chrono::seconds(1));
+    REQUIRE_NOTHROW(rig.driver->park());
+    REQUIRE(rig.driver->get_slewing());  // the Park body waits for the stop to settle
+    rig.mount->clear_log();
+    require_alpaca_error([&] { rig.driver->set_site_latitude(40.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::now()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount->count(":St") == 0);
+    CHECK(rig.mount->count(":SC") == 0);
+}
