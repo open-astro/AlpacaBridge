@@ -477,6 +477,50 @@ TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to t
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a relink stop that fails stays owed to the next connect",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    // The disconnect's ":K" fails (RA first), so the jog is owed a stop; the connect's own stop on Dec fails too.
+    mount.reject_ramped_stops(1, 10);
+    driver->set_connected(false);
+    mount.reject_ramped_stops(1, 0);
+    mount.reject_ramped_stops(2, 10);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(mount.axis_running(2));
+    // Still owed: a disconnect that fails again, then a connect the board obeys, stops it.
+    mount.reject_ramped_stops(2, 0);
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a disconnect whose stops are acked clears an owed stop",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.ignore_instant_stops(2, 10);
+    driver->abort_slew();
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver) == SlewingRead::Threw; }, std::chrono::milliseconds(4000)));
+    driver->set_connected(false);  // both ":K" acked: the jog is stopped, nothing stays owed
+    REQUIRE_FALSE(mount.axis_running(2));
+    mount.set_axis_running(2, true, /*speed_mode=*/true);  // a handset jog started while disconnected
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.axis_running(2));  // not this driver's motion: left alone
+    driver->set_connected(false);
+}
+
 // open-astro#2407: every re-goto checks the altitude floor, as the first leg does. The first leg lands 1 degree
 // short in Dec; a latitude write while it lands puts the target below the floor, so the re-goto is refused.
 TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor is refused",
