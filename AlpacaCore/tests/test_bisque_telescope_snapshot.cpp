@@ -677,30 +677,38 @@ static void advance_until_done(Rig& rig, const std::atomic<bool>& done) {
     }
 }
 
-// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across protocol.find_home().
+// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across protocol.is_slew_complete().
 TEST_CASE("Bisque snapshot - Name, Connected and RightAscension answer while FindHome runs in TheSkyX",
           "[bisque][telescope][snapshot]") {
     Rig rig(5000);
     REQUIRE(rig.poll());
     rig.mount.find_home_ms = 1500;
+    rig.mount.slew_complete_ms = 1000;  // the home's first IsSlewComplete poll is slow
+    const int queries_before = rig.mount.slew_complete_queries.load();
     std::atomic<bool> done{false};
-    auto worker = run_while_parked(rig.mount, [&] {
+    std::thread worker([&] {
         rig.driver->find_home();
         done = true;
     });
+    const auto poll_deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.slew_complete_queries.load() == queries_before &&
+           std::chrono::steady_clock::now() < poll_deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
     const auto budget = milliseconds(500);
     CHECK(timed([&] { (void)rig.driver->get_name(); }) < budget);
     CHECK(timed([&] { (void)rig.driver->get_connected(); }) < budget);
     CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < budget);
     rig.mount.find_home_ms = 0;  // TheSkyX arrives home: the next IsSlewComplete reports it
+    rig.mount.slew_complete_ms = 0;
     advance_until_done(rig, done);
     worker.join();
     // The control path read the mount after FindHome: a read right after sees it.
     CHECK(rig.driver->get_at_home());
 }
 
-// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across the IsSlewComplete poll loop (the poll()
-// below blocks). MUTATION: single-exchange FindHome not runnable here: the fake answers FindHome asynchronously only.
+// Falsified by: bisque_protocol_wrapper.cpp, find_home: send the in-script loop
+// "FindHome(); while(!IsSlewComplete) Sleep(1000);" with a 60 s timeout, as before #2494 (the fake holds the reply).
 TEST_CASE("Bisque snapshot - a FindHome past the link-loss bound does not read as a lost link",
           "[bisque][snapshot][polled]") {
     Rig rig(5000);
@@ -708,18 +716,25 @@ TEST_CASE("Bisque snapshot - a FindHome past the link-loss bound does not read a
     rig.mount.find_home_ms = 1000000;  // homing until the case says so
     std::atomic<bool> done{false};
     auto worker = run_while_parked(rig.mount, [&] {
-        rig.driver->find_home();
+        try {
+            rig.driver->find_home();
+        } catch (const std::exception&) {  // a lost link fails the checks below
+        }
         done = true;
     });
-    // The task clock runs 31 s while TheSkyX homes; each tick still gets the wire between the home's short polls.
+    // The task clock runs 31 s while TheSkyX homes; each tick still gets the wire between the home's short polls. A
+    // FindHome that holds the wire never sleeps on the task clock, and no tick can run: the clock runs on alone.
+    bool wire_held = false;
     for (int second = 0; second < 31; ++second) {
         const auto deadline = std::chrono::steady_clock::now() + seconds(5);
-        while (rig.clock.waiter_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+        while (!wire_held && rig.clock.waiter_count() == 0 && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(milliseconds(1));
         }
+        wire_held = wire_held || rig.clock.waiter_count() == 0;
         rig.clock.advance(seconds(1));
-        REQUIRE(rig.poll());
+        if (!wire_held) REQUIRE(rig.poll());
     }
+    CHECK_FALSE(wire_held);
     CHECK_NOTHROW((void)rig.driver->get_right_ascension());
     CHECK(rig.driver->get_connected());
     rig.mount.find_home_ms = 0;

@@ -42,7 +42,8 @@ namespace alpacacore::test {
  *
  * `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the SetTracking, GetRaDec,
  * IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in
- * one call. `find_home_ms` is how long an asynchronous FindHome runs: IsSlewComplete answers 0 until it has passed.
+ * one call. `find_home_ms` is how long a FindHome runs: after an asynchronous one IsSlewComplete answers 0 until it has
+ * passed; any other FindHome holds its reply that long, as TheSkyX's in-script home loop holds the link.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -120,6 +121,10 @@ public:
 private:
     static bool has(const std::string& command, const char* text) { return command.find(text) != std::string::npos; }
 
+    bool home_running() const {
+        return std::chrono::steady_clock::now() - home_started_ < std::chrono::milliseconds(find_home_ms.load());
+    }
+
     std::string answer(const std::string& command) {
         ++transactions;
         if (has(command, "ConnectAndDoNotUnpark")) return reject_connection ? "0#" : "1#";
@@ -136,10 +141,15 @@ private:
                 --fail_find_home;
                 return "|No error. Error = 0.TypeError: FindHome failed#";
             }
-            // Asynchronous, as TheSkyX: IsSlewComplete answers 0 until find_home_ms of real time have passed since
-            // this command; a case can end the home at once by setting find_home_ms to 0.
+            // As TheSkyX: an asynchronous FindHome answers at once and IsSlewComplete answers 0 until find_home_ms of
+            // real time have passed; any other (no Asynchronous = true, or an in-script IsSlewComplete loop) holds
+            // the reply that long. A case can end the home at once by setting find_home_ms to 0.
             home_started_ = std::chrono::steady_clock::now();
-            homing_ = true;
+            if (has(command, "Asynchronous = true") && !has(command, "IsSlewComplete")) {
+                homing_ = true;
+            } else {
+                while (home_running()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
@@ -199,14 +209,13 @@ private:
         }
         if (has(command, "IsSlewComplete")) {
             ++slew_complete_queries;
-            if (homing_ &&
-                std::chrono::steady_clock::now() - home_started_ < std::chrono::milliseconds(find_home_ms.load())) {
-                return "|No error. Error = 0.0#";
-            }
-            homing_ = false;
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }
+            if (homing_ && home_running()) {
+                return "|No error. Error = 0.0#";
+            }
+            homing_ = false;
             if (fail_slew_polls.load() > 0) {
                 --fail_slew_polls;
                 return "|No error. Error = 1.IsSlewComplete unavailable#";
