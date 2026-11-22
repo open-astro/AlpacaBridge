@@ -44,22 +44,25 @@ Config (`remotealpaca_fields.h`): `upstreamHost` (a name or an IP address, no sc
   measures the first frame, so the getters answer when Connect returns. A failure after the forwarded Connect
   forwards Disconnect. Disconnect is forwarded too, unless the link was lost. `UniqueID` is the router's stored ID.
 - **Snapshot (decision 0010).** The poll measures every sensor the upstream has, each sensor's
-  `TimeSinceLastUpdate`, the empty-name one and `AveragePeriod` into `util::StateSnapshot`, once per poll period;
-  `max_age` is two periods. A stale frame is served, never refused: the sensor getters, `AveragePeriod` and
+  `TimeSinceLastUpdate`, the empty-name one and `AveragePeriod` into `util::PolledState` (rule 7, #2496), once per
+  poll period, start to start; `max_age` is two periods. The driver holds no `PolledLinkHealth`, poll slot or loss
+  latch of its own. A stale frame is served, never refused: the sensor getters, `AveragePeriod` and
   `TimeSinceLastUpdate` (the upstream's value plus the frame's age on the task clock). `SensorDescription`, `Name` and
   `Description` are read at Connect. An upstream error on one member is kept in the frame and thrown unchanged by its
   getter; it is an answer, not a failed poll. `DeviceState` is the base class's, from the same getters: the upstream's
   values, omitted while this server's link is faulted and empty while it is lost (the base class is `final`, so no
   extra member is added).
 - **Link (decision 0009).** A poll with no usable reply is one failed exchange; three in a row latch the fault
-  (`util::PolledLinkHealth`: `Connected` stays true, the frame is refused with `DriverException`, the next good poll or
-  `Refresh` clears it), and a fault standing past `max(util::kLinkStalenessBound, 3 x poll period)` is a lost link. A
+  (`Connected` stays true, the frame is refused with `DriverException`, the next good poll clears it), and a fault
+  standing, or a frame no poll or `Refresh` refreshed, for `max(util::kLinkStalenessBound, 3 x poll period)` (the
+  module's `loss_bound`) is a lost link. A
   refused connection on the poll or a command is a lost link at once; on the Connect it fails the Connect, and the link
   was never up. Lost: `Connected` false, members
-  `NotConnected`, `DeviceState` empty, the poll ends, the frame is dropped; `get_link_fault()` keeps the reason until
+  `NotConnected`, `DeviceState` empty, the poll ends, the frame is no longer served; `get_link_fault()` keeps the reason until
   the next Connect or Disconnect; only the client's Connect relinks. No `LinkLostStamp` (no #521 consumer).
-- **Commands.** `Refresh` (forwarded, then a new frame measured) and an `AveragePeriod` write (forwarded, then written
-  through to the frame) run as bodies in a command `util::AsyncOperation` slot; the caller waits for the body and gets
+- **Commands.** `Refresh` (forwarded, then a new frame measured and published through the module, so its
+  `measured_at` is the Refresh's; it does not feed the fault latch) and an `AveragePeriod` write (forwarded, then
+  written through to the frame) run as bodies in a command `util::AsyncOperation` slot; the caller waits for the body and gets
   its error unchanged. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
 - Actions and `Command*` are not forwarded (`ActionNotImplemented`, `NotImplemented`).
 

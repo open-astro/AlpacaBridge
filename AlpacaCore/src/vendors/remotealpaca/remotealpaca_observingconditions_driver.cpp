@@ -18,7 +18,7 @@
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/vendor/remotealpaca/remote_alpaca_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
@@ -188,16 +188,19 @@ public:
                   new_client_id()),
           upstream_label_(config_.host + ":" + std::to_string(config_.port) + " device " +
                           std::to_string(config_.upstream_device_number)),
-          snapshot_(clock, 2 * config_.poll_period),
           name_("Remote Alpaca ObservingConditions"),
           description_(default_description()),
-          poll_op_("remotealpaca poll", poll_generation_, clock),
+          state_(
+              clock, poll_generation_,
+              {config_.poll_period, kFailuresToLatch, 2 * config_.poll_period,
+               std::string(kComponent) + " " + upstream_label_, loss_bound(config_.poll_period)},
+              [this] { return probe(); }, [this] { on_lost(); }),
           command_op_("remotealpaca command", command_generation_, clock) {}
 
     ~RemoteAlpacaObservingConditionsDriver() override {
         // Blocks new connection tasks, then joins the in-flight one: first, before members the task touches die.
         shutdown_connection();
-        stop_polling();
+        state_.stop_and_join();
         command_op_.cancel_all_and_join();
     }
 
@@ -224,7 +227,8 @@ public:
 
     int get_interface_version() const override { return 2; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // A loss the module latched (a frame or a fault past the bound) reads false at once, before on_lost() runs.
+    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
 
     ALPACA_ASYNC_CONNECT_FORWARDERS()
 
@@ -232,7 +236,8 @@ public:
     // Disconnect.
     std::string get_link_fault() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return loss_text_.empty() ? link_health_.fault() : loss_text_;
+        const std::string lost = loss_reason_locked();
+        return lost.empty() ? state_.fault() : lost;
     }
 
     void set_connected(bool connected) override {
@@ -246,7 +251,7 @@ public:
             return;
         }
         if (connected) {
-            if (connected_.load()) {
+            if (get_connected()) {
                 return;  // idempotent: connected, and the poll is running
             }
             connect_upstream();
@@ -295,8 +300,8 @@ public:
             // caller passed its check before a Disconnect: with no connection there is no frame, and the write's epoch
             // bump would drop the next Connect's first frame (decision 0010 rule 8, #2446).
             std::lock_guard<std::mutex> lock(mutex_);
-            if (ctx.stop_reason() == util::StopReason::Superseded || !connected_.load()) return;
-            snapshot_.write([period](Frame& frame) { frame.average_period = {period, 0, {}}; });
+            if (ctx.stop_reason() == util::StopReason::Superseded || !get_connected()) return;
+            state_.write([period](Frame& frame) { frame.average_period = {period, 0, {}}; });
         });
     }
 
@@ -325,8 +330,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         require_connected_locked();
         if (index && !supported_[*index]) (void)probe_[*index].get();  // the upstream lacks it: its own error
-        require_not_faulted_locked();
-        const auto reading = frame_locked();
+        const auto reading = state_.served();
         const double since = index ? reading.value.since_update[*index].get() : reading.value.since_any_update.get();
         if (since < 0.0) return since;  // the upstream's own "never updated" answer, as it gave it
         return since + std::chrono::duration<double>(clock_.now() - reading.measured_at).count();
@@ -345,8 +349,9 @@ public:
         return descriptions_[*index].get();
     }
 
-    // Forwards Refresh, then measures a new frame. Decision 0009 rule 1 as WeeWX: a failed Refresh reaches the caller
-    // and does not count towards the latch; a good measurement clears a standing fault like a good poll.
+    // Forwards Refresh, then measures a new frame and publishes it through the module (#2496), so measured_at is the
+    // Refresh's. Decision 0009 rule 1 as WeeWX: a failed Refresh reaches the caller and does not count towards the
+    // latch; only the poll's probes feed the latch, so a standing fault clears at the next good poll.
     void refresh() override {
         require_connected();
         run_command([this](util::OperationContext& ctx) {
@@ -356,16 +361,21 @@ public:
             // supersede lands during the measurement.
             const auto superseded = [&ctx] { return ctx.stop_reason() == util::StopReason::Superseded; };
             if (superseded()) return;
-            const auto token = snapshot_.begin_poll();
-            Frame frame = sample(supported_copy(), superseded);
-            if (superseded()) return;
-            if (note_reply(token, std::move(frame))) {
-                ALPACA_LOG_INFO(kComponent, "Upstream " + upstream_label_ + " restored: Refresh answered");
+            util::PolledState<Frame>::Token token;
+            std::array<bool, kSensorCount> supported{};
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                token = state_.begin_poll();
+                supported = supported_;
             }
+            Frame frame = sample(supported, superseded);
+            if (superseded()) return;
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (get_connected()) (void)state_.publish(token, std::move(frame));  // lost meanwhile: serve nothing
         });
     }
 
-    void set_poll_paused(bool paused) { poll_paused_.store(paused); }
+    void set_poll_paused(bool paused) { state_.pause_for_testing(paused); }
 
     // Set while no command runs; an AveragePeriod or Refresh body calls it after its PUT, before it touches state.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
@@ -393,7 +403,7 @@ private:
 
     // NotConnected before any other answer (ASCOM contract precedence); after a loss the text says why.
     void require_connected() const {
-        if (!connected_.load()) {
+        if (!get_connected()) {
             std::lock_guard<std::mutex> lock(mutex_);
             throw AlpacaException(not_connected_text_locked(), AlpacaError::NotConnected);
         }
@@ -401,46 +411,38 @@ private:
 
     // The re-check under mutex_: a loss drops connected_ under this lock.
     void require_connected_locked() const {
-        if (!connected_.load()) {
+        if (!get_connected()) {
             throw AlpacaException(not_connected_text_locked(), AlpacaError::NotConnected);
         }
     }
 
     std::string not_connected_text_locked() const {
-        if (!loss_text_.empty()) {
-            return "Upstream " + upstream_label_ + " lost (" + loss_text_ + "); Connect again when it answers";
+        const std::string lost = loss_reason_locked();
+        if (!lost.empty()) {
+            return "Upstream " + upstream_label_ + " lost (" + lost + "); Connect again when it answers";
         }
         return "Device not connected";
     }
 
-    // Decision 0009 rule 1: while the fault is latched the last frame is not served.
-    void require_not_faulted_locked() const {
-        if (link_health_.faulted()) {
-            throw AlpacaException(
-                "Upstream " + upstream_label_ + " communications compromised: " + link_health_.fault(),
-                AlpacaError::DriverException);
-        }
+    // Why the link was lost, empty while it is not: the refusal, the latched fault, or the frame's age.
+    std::string loss_reason_locked() const {
+        if (!loss_text_.empty() || !state_.link_lost()) return loss_text_;
+        std::string fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return "no answer for " +
+               std::to_string(
+                   std::chrono::duration_cast<std::chrono::seconds>(loss_bound(config_.poll_period)).count()) +
+               " s";
     }
 
-    // Decision 0010 rule 8: a connected driver holds a frame from the Connect on; none is a device that has not
-    // answered, never InvalidOperation.
-    util::StateSnapshot<Frame>::Reading frame_locked() const {
-        auto reading = snapshot_.read();
-        if (!reading) {
-            throw AlpacaException("Upstream " + upstream_label_ + " has not answered since the Connect",
-                                  AlpacaError::DriverException);
-        }
-        return *reading;
-    }
-
-    // A getter served from the frame (decisions 0010 and 0016): no upstream call. A stale frame is served.
+    // A getter served from the frame (decisions 0010 and 0016): no upstream call. A stale frame is served; a latched
+    // fault refuses it with DriverException (decision 0009 rule 1).
     template <class Fn>
     double served(Fn&& pick) const {
         require_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         require_connected_locked();
-        require_not_faulted_locked();
-        return pick(frame_locked().value);
+        return pick(state_.served().value);
     }
 
     // A sensor the upstream lacks answers the upstream's own error from the Connect's probe (NotImplemented).
@@ -449,8 +451,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         require_connected_locked();
         if (!supported_[index]) return probe_[index].get();
-        require_not_faulted_locked();
-        return frame_locked().value.sensors[index].get();
+        return state_.served().value.sensors[index].get();
     }
 
     std::array<bool, kSensorCount> supported_copy() const {
@@ -483,14 +484,14 @@ private:
     // Decision 0023 rule 4, then the forwarded Connect, the upstream's identity, which sensors it has, and the first
     // frame, so the getters answer when Connect returns. Decision 0009 rule 4: this is the only relink of a lost link.
     void connect_upstream() {
-        stop_polling();  // a lost link's poll has returned or is returning; join it so a fresh one starts
+        state_.stop_and_join();  // a lost link's poll has returned or is returning; join it so a fresh one starts
         // A command body from before (an AveragePeriod write-through) must not land on this Connect's frame.
         command_op_.cancel_all_and_join();
-        snapshot_.reset();
+        state_.reset();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            link_health_.reset();
             loss_text_.clear();  // rule 5: the kept text ends at the next Connect
+            probe_error_ = nullptr;
         }
         if (self_) {
             if (auto refusal = self_loop_refusal(config_.host, config_.port, self_())) {
@@ -519,8 +520,6 @@ private:
                         [&] { return client_.get_string("sensordescription", {{"SensorName", kSensors[i].name}}); });
                 }
             }
-            const auto token = snapshot_.begin_poll();
-            Frame frame = sample(supported);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 // Decision 0024 rule 4: what the brand-and-model Name leaves out of the upstream's Name goes in the
@@ -535,10 +534,20 @@ private:
                 supported_ = supported;
                 probe_ = std::move(probe);
                 descriptions_ = std::move(descriptions);
-                snapshot_.publish(token, std::move(frame));
+            }
+            // The first frame, then the poll: the getters answer when Connect returns. No frame fails the Connect
+            // with the last probe's own error.
+            if (!state_.start()) {
+                std::exception_ptr error;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    error = std::exchange(probe_error_, nullptr);
+                }
+                if (error) std::rethrow_exception(error);
+                throw AlpacaException("Upstream " + upstream_label_ + " state poll did not start",
+                                      AlpacaError::DriverException);
             }
             connected_.store(true);
-            start_polling();
         } catch (...) {
             connected_.store(false);
             if (forwarded_connect_) {
@@ -584,17 +593,16 @@ private:
     }
 
     void disconnect_upstream() {
-        stop_polling();
+        state_.stop_and_join();
         command_op_.cancel_all_and_join();
         bool lost = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            lost = !loss_text_.empty();
+            lost = !loss_reason_locked().empty();
             connected_.store(false);
-            snapshot_.reset();
-            link_health_.reset();
             loss_text_.clear();  // rule 5: the kept text ends at the next Disconnect
         }
+        state_.reset();
         if (forwarded_connect_) {
             if (lost) {
                 forwarded_connect_ = false;  // the upstream is gone: nothing to tell it, and the call would only wait
@@ -650,113 +658,58 @@ private:
         if (auto error = std::move(outcome->error)) std::rethrow_exception(error);
     }
 
-    // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under transition_mutex_, so a start never
-    // races a stop.
-    void start_polling() {
-        if (poll_op_.running()) return;
-        poll_op_.start([this](util::OperationContext& ctx) { poll_loop(ctx); });
-    }
-
-    void stop_polling() { poll_op_.cancel_all_and_join(); }
-
-    // The Connect measured the first frame; the poll measures one each period, start to end plus the period.
-    void poll_loop(util::OperationContext& ctx) {
-        while (ctx.wait_for(config_.poll_period)) {
-            // A command that met a refused connection lost the link: this poll ends too (decision 0009 rule 4).
-            if (!connected_.load()) return;
-            if (poll_paused_.load()) continue;
-            const auto token = snapshot_.begin_poll();
-            std::optional<Frame> frame;
-            std::string failure;
-            bool refused = false;
-            try {
-                frame = sample(supported_copy());
-            } catch (const RemoteConnectRefused& e) {
-                failure = e.what();
-                refused = true;
-            } catch (const std::exception& e) {
-                failure = e.what();
-            }
-            if (ctx.stop_reason() != util::StopReason::None) {
-                return;  // a Disconnect stopped this poll during the sample: it changes nothing
-            }
-            if (frame) {
-                if (note_reply(token, std::move(*frame))) {
-                    ALPACA_LOG_INFO(kComponent, "Upstream " + upstream_label_ + " restored: the poll answered again");
-                }
-            } else if (refused) {
-                lose_link(failure);
-                return;  // decision 0009 rule 4: a lost link's poll ends; only the client's Connect starts another
-            } else if (note_poll_failure(failure)) {
-                return;
-            }
+    // The poll's probe, on the poll thread with no driver lock held (decision 0016 rule 1): one measurement, which the
+    // module publishes. A call with no usable reply throws (a failed exchange for the module's latch); a refused
+    // connection is a lost link at once. A link a command lost is not called again: the cycle ends the poll.
+    std::optional<Frame> probe() {
+        if (state_.link_lost()) return std::nullopt;
+        try {
+            return sample(supported_copy());
+        } catch (const RemoteConnectRefused& e) {
+            note_probe_error();
+            lose_link(e.what());
+            throw;
+        } catch (const std::exception&) {
+            note_probe_error();
+            throw;
         }
     }
 
-    // Publishes a frame and clears a standing fault; true when it cleared one.
-    bool note_reply(util::StateSnapshot<Frame>::Token token, Frame frame) {
+    // Kept for the Connect, which answers a first frame that never came with the probe's own error.
+    void note_probe_error() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load()) return false;  // lost or disconnected while measuring: serve nothing
-        snapshot_.publish(token, std::move(frame));
-        return link_health_.on_reply();
+        probe_error_ = std::current_exception();
     }
 
     // Decision 0009 point 2(b): the bound is three poll periods (#1753 maintainer decision, 2026-11-16), never
-    // shorter than util::kLinkStalenessBound: with the 2 s default the three-poll latch is followed by 30 s.
-    std::chrono::nanoseconds loss_bound() const {
-        return std::max<std::chrono::nanoseconds>(util::kLinkStalenessBound, 3 * config_.poll_period);
+    // shorter than util::kLinkStalenessBound. A fault standing that long, or a frame no poll refreshed for it, is a
+    // lost link (the module's verdict).
+    static std::chrono::nanoseconds loss_bound(std::chrono::seconds period) {
+        return std::max<std::chrono::nanoseconds>(util::kLinkStalenessBound, 3 * period);
     }
 
-    // Decision 0009 rules 1 to 3: a poll with no usable reply (a timeout, a dropped connection, an HTTP error, a
-    // body that is not an Alpaca reply) is one failed exchange; the third in a row latches the fault, stamped on the
-    // task clock, and a fault standing past loss_bound() is a lost link. True when this failure lost it.
-    bool note_poll_failure(const std::string& reason) {
-        const auto now = clock_.now();
-        std::optional<std::string> latched;
-        int failures = 0;
-        bool lost = false;
-        std::string fault;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            latched = link_health_.note_failure(reason, kFailuresToLatch, now);
-            failures = link_health_.consecutive_failures();
-            fault = link_health_.fault();
-            if (link_health_.fault_stale(now, loss_bound())) {
-                lose_link_locked(fault);
-                lost = true;
-            }
-        }
-        if (lost) {
-            const auto bound_s = std::chrono::duration_cast<std::chrono::seconds>(loss_bound()).count();
-            ALPACA_LOG_ERROR(kComponent, "Upstream " + upstream_label_ + " lost: no answer for " +
-                                             std::to_string(bound_s) + " s after the fault latched (" + fault +
-                                             "); Connected is false until the client connects again");
-        } else if (latched) {
-            ALPACA_LOG_ERROR(kComponent, "Upstream " + upstream_label_ + " faulted: " + *latched);
-        } else {
-            ALPACA_LOG_WARN(kComponent, "Upstream poll failed (" + std::to_string(failures) + " in a row): " + reason);
-        }
-        return lost;
+    // The module's loss, on the poll thread with no driver lock held (decision 0009 rule 3): Connected false and the
+    // reason kept for get_link_fault() (rule 5); there is no transport to close, each call has its own.
+    void on_lost() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load()) return;  // a refusal already took it down
+        loss_text_ = loss_reason_locked();
+        connected_.store(false);
     }
 
     // Decision 0009 point 2(a), decision 0023: a refused connection says nothing listens there, a lost link at once.
+    // Called from the probe or a command body, both of the connection the last reset() opened (a Connect joins both
+    // first); while the Connect runs, connected_ is false and the refusal only fails it.
     void lose_link(const std::string& reason) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) return;
-            lose_link_locked(reason);
+            if (!get_connected()) return;
+            connected_.store(false);
+            loss_text_ = reason;
         }
+        state_.lose_link();
         ALPACA_LOG_ERROR(kComponent, "Upstream " + upstream_label_ + " lost: " + reason +
                                          "; Connected is false until the client connects again");
-    }
-
-    // Decision 0009 rule 3: Connected false (every member then throws NotConnected and DeviceState is empty), the
-    // frame dropped; there is no transport to close, each call has its own. The reason stays for get_link_fault()
-    // (rule 5). No LinkLostStamp: nothing here moves on a relink (no #521 consumer).
-    void lose_link_locked(const std::string& reason) {
-        connected_.store(false);
-        loss_text_ = reason;
-        snapshot_.reset();
     }
 
     const int device_number_;
@@ -768,8 +721,9 @@ private:
     RemoteAlpacaClient client_;
     const std::string upstream_label_;  // "<host>:<port> device <n>"
 
+    // Decision 0009 rule 3: false on a loss, so every member throws NotConnected and DeviceState is empty. No
+    // LinkLostStamp: nothing here moves on a relink (no #521 consumer).
     std::atomic<bool> connected_{false};
-    std::atomic<bool> poll_paused_{false};
     std::function<void()> command_hook_;       // test seam: set_command_hook_for_testing()
     std::function<void()> caller_hook_;        // test seam: set_caller_hook_for_testing()
     std::function<void()> command_done_hook_;  // test seam: set_command_done_hook_for_testing()
@@ -780,9 +734,8 @@ private:
     // The state lock, a leaf of the driver's own locks (decision 0016): the snapshot mutex nests under it. Never held
     // across an upstream call.
     mutable std::mutex mutex_;
-    util::StateSnapshot<Frame> snapshot_;
-    util::PolledLinkHealth link_health_;  // decision 0009: the poll's fault latch, stamped on clock_
-    std::string loss_text_;               // why the link was lost; empty while it is not
+    std::string loss_text_;           // why the link was lost; empty while it is not
+    std::exception_ptr probe_error_;  // the last failed probe's error, for the Connect
     std::string name_;
     std::string description_;
     std::array<bool, kSensorCount> supported_{};
@@ -791,9 +744,11 @@ private:
 
     // Guards set_connected() against a concurrent set_connected() only (#528).
     std::mutex transition_mutex_;
-    // Last, so the slots are destroyed (and their bodies joined) before anything the bodies touch.
+    // Last, so the slots are destroyed (and their bodies joined) before anything the bodies touch: the frame, its
+    // poll and the link's fault and loss latches (decision 0010 rule 7, #2496), then the command slot, whose bodies
+    // publish to the frame.
     util::OperationGeneration poll_generation_;
-    util::AsyncOperation poll_op_;
+    util::PolledState<Frame> state_;
     util::OperationGeneration command_generation_;
     util::AsyncOperation command_op_;
 };

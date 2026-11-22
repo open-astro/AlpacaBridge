@@ -1,0 +1,3 @@
+### Fixed
+
+- **remotealpaca ObservingConditions loses a silent upstream three poll periods after its last answer** (issue #2496): `util::PolledState::Config` gains `loss_bound` (default `util::kLinkStalenessBound`; `max_age` must undercut it), and the remotealpaca ObservingConditions driver now serves its frame through `PolledState` with `loss_bound = max(util::kLinkStalenessBound, 3 x poll period)`, instead of its own snapshot, poll slot and link-health latch. An upstream that stops answering is now lost when no poll has refreshed the frame for that bound (it was the bound again after the three-poll latch), and a good `Refresh` no longer clears a latched fault before the next good poll.
