@@ -1895,10 +1895,20 @@ public:
         util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", /*fast_parked=*/true});
-        // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
-        // status is still the GOTO's: the pulse itself makes the firmware report slewing.
-        if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
+        // Issue #2063: a GOTO nobody polled is still flagged here, and so is a Park or FindHome (#2504). Ask the
+        // mount before the pulse starts, while its status is still the motion's: the pulse itself makes the
+        // firmware report slewing.
+        const auto own_motion_running = [&] {
+            return (slew_in_progress_ && !goto_seen_stopped_) || driver_motion_ != DriverMotion::None;
+        };
+        if (own_motion_running() && !slew_hold_.active(clock_.now())) {
             refresh_status_cache_locked(/*force=*/true);
+            ensure_not_parked_fast_locked("PulseGuide");  // a Park that landed unpolled: the gate read the old cache
+        }
+        // Issue #2504: a pulse would change the GOTO, Park or FindHome the driver started.
+        if (own_motion_running()) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
         }
 
         const Wire protocol = wire();
