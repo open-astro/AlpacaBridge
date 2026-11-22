@@ -33,6 +33,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -168,9 +169,18 @@ struct UntrustedConnect {
         REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(eventually([&] { return passes.load() == 1; }));
+        refuse_motion_bound_watchdog();
     }
     void set_host(std::chrono::system_clock::time_point utc) {
         host_s.store(std::chrono::duration_cast<std::chrono::seconds>(utc.time_since_epoch()).count());
+    }
+    // The motion bound watchdog (#2396 AB-8, AB-9: the MoveAxis dead-man and the async GOTO bound) waits on the same
+    // task clock, so wait_for_waiters(1) would count it in place of the re-sync body. connect() refuses that slot for
+    // every rig case (a refused start is logged and leaves the router's client-silence watchdog as the bound).
+    void refuse_motion_bound_watchdog() {
+        ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
     }
     // Sends the event and lets the re-sync body past its start delay.
     void host_clock_changed(alpacacore::util::HostClockEvent event) {
@@ -906,6 +916,10 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     CHECK(mount.count(":SLA") == 0);
     CHECK(mount.count(":SUT") == 0);
 
+    // The MoveAxis dead-man (#2396 AB-9) would stop the axis long before the 15 min motion bound; refused here.
+    ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
     driver->move_axis(0, driver->get_axis_rate_range(0).first);
     driver->on_host_clock_changed(kStepped);
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));

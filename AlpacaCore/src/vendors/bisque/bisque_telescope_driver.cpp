@@ -52,6 +52,16 @@ static_assert(kSnapshotMaxAge >= 2 * kStatusPollPeriod, "two poll periods, or a 
 static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
 constexpr int kPositionLinkFailureThreshold = 3;
 
+// #2410 (#2396 AB-8, AB-9, AB-4): bounds on motion the driver started, checked by every status poll tick. An async
+// slew still in flight kMaxAsyncSlewDuration after its SlewToRaDec, or a MoveAxis not renewed within
+// kMaxMoveAxisDuration, is stopped and Slewing raises the failure. A stop that fails is tried again
+// kFailedStopRetry later, not on every tick. AbortSlew sends Abort() up to kAbortRounds times until IsSlewComplete
+// reads true.
+constexpr auto kMaxAsyncSlewDuration = std::chrono::seconds(300);
+constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
+constexpr auto kFailedStopRetry = std::chrono::seconds(10);
+constexpr int kAbortRounds = 3;
+
 // One polled frame of operational state. Small and copyable: the snapshot copies it under its mutex. A field the
 // last read could not fill keeps its previous value; an explicit unavailable UTC mode clears its anchor.
 struct PolledFrame {
@@ -217,7 +227,10 @@ public:
         }
         if (connected == effectively_connected) {
             if (!connected && connected_) {
-                // A disconnect of a lost link: the transport is closed already; drop the rest of the session.
+                // A disconnect of a lost link: the transport is closed already; drop the rest of the session. A
+                // motion the lost link left running is stopped by the next connect (#2410).
+                note_relink_stop_if_moving_locked();
+                ++session_;
                 published_connected_ = false;
                 connected_ = false;
                 link_lost_ = false;
@@ -237,6 +250,8 @@ public:
         if (connected && connected_) {
             // Relink after a lost link: retire the dead session, then connect as a fresh one. Only the client's
             // Connected=true gets here; the driver never reopens on its own (decision 0009 point 4).
+            note_relink_stop_if_moving_locked();
+            ++session_;
             published_connected_ = false;
             connected_ = false;
             link_lost_ = false;
@@ -270,6 +285,7 @@ public:
                 protocol.disconnect();
                 throw AlpacaException("TheSkyX handshake failed — is the mount connected in TheSkyX?");
             }
+            send_relink_stop_if_pending(lock);
             // Check initial park/tracking state.
             bool parked_now = false;
             try {
@@ -286,6 +302,8 @@ public:
 
             lock.lock();
             connected_ = true;
+            ++session_;
+            begin_motion_command_locked();  // a stored motion failure does not outlive its session
             target_ra_set_ = false;
             target_dec_set_ = false;
             parked_ = parked_now;
@@ -311,6 +329,8 @@ public:
             lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
             start_status_poller();
         } else {
+            const bool axis_moving = manual_axis_slewing_[0] || manual_axis_slewing_[1];
+            ++session_;
             ++pulse_request_;
             pulse_generation_.bump();
             published_connected_ = false;
@@ -328,6 +348,17 @@ public:
             manual_axis_slewing_[1] = false;
             pulse_guiding_ = false;
             lock.unlock();
+            // #2410: a MoveAxis has no end of its own, so a disconnect stops it before the socket closes. A stop that
+            // fails is sent by the next connect. A GOTO is left to TheSkyX, which ends it on its target.
+            if (axis_moving) {
+                try {
+                    protocol.stop_open_loop_motion();
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("Bisque", std::string("Disconnect: stopping MoveAxis failed: ") + e.what());
+                    std::lock_guard<std::mutex> relock(mutex_);
+                    relink_move_stop_pending_ = true;
+                }
+            }
             // State is cleared first; the close then takes the wrapper's lock with mutex_ free, so an exchange in
             // flight finishes before the socket closes and no getter waits for it.
             try {
@@ -680,6 +711,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_link_locked();
             check_not_parked("FindHome");
+            begin_motion_command_locked();
         }
         auto& protocol = BisqueProtocolWrapper::instance();
         // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
@@ -714,6 +746,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
+                begin_motion_command_locked();
                 parking_ = true;
                 at_home_ = false;  // a park moves the mount off home (#2461)
                 guard.epoch = ++park_epoch_;
@@ -894,14 +927,14 @@ public:
         check_link_locked();
         check_not_parked("SlewToCoordinates");
 
-        auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
+        begin_motion_command_locked();
 
         lock.unlock();
-        protocol.slew_to_ra_dec(ra, dec);
+        send_slew(lock, ra, dec, "SlewToCoordinates");
         lock.lock();
         note_slew_started_locked();
         const uint64_t epoch = slew_epoch_;
@@ -924,14 +957,14 @@ public:
         check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
 
-        auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
+        begin_motion_command_locked();
 
         lock.unlock();
-        protocol.slew_to_ra_dec(ra, dec);
+        send_slew(lock, ra, dec, "SlewToCoordinatesAsync");
         lock.lock();
         note_slew_started_locked();
     }
@@ -1032,6 +1065,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_link_locked();
             check_not_parked("MoveAxis");
+            begin_motion_command_locked();
         }
 
         auto& protocol = BisqueProtocolWrapper::instance();
@@ -1060,6 +1094,7 @@ public:
         protocol.start_open_loop_motion(direction, speed_index);
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
+        manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;  // each nonzero MoveAxis renews it
         at_home_ = false;  // see note_slew_started_locked()
         drop_poll_in_flight_locked();
     }
@@ -1082,6 +1117,11 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         // Only a lost link refuses: a latched fault still lets the stop try, as OnStep and SynScan do (#2102).
         check_connected();
+        // #2410: what was moving, so a stop that fails or is not verified keeps reporting it (fail closed).
+        const bool slew_was_active = slewing_cached_;
+        const bool axes_were_active[2] = {manual_axis_slewing_[0], manual_axis_slewing_[1]};
+        const uint64_t session = session_;
+        begin_motion_command_locked();
         ++slew_epoch_;
         parking_ = false;  // a park poll still running no longer blocks slews
         // Bumping the request id retires a running guide body: under mutex_ it
@@ -1102,15 +1142,43 @@ public:
         // replies, and getters must not stall behind that wait. The abort is
         // sent only after the guide reply, never on the busy socket.
         lock.unlock();
+        auto& protocol = BisqueProtocolWrapper::instance();
         std::exception_ptr error;
         try {
-            BisqueProtocolWrapper::instance().abort();
+            protocol.abort();
+            if (axes_were_active[0] || axes_were_active[1]) {
+                protocol.stop_open_loop_motion();
+            }
         } catch (...) {
             error = std::current_exception();
         }
+        run_stop_sent_hook();
         if (error) {
+            lock.lock();
+            // A disconnect or connect since: the state is the new session's (decision 0016 rule 6).
+            if (session == session_ && (slew_was_active || axes_were_active[0] || axes_were_active[1])) {
+                // The mount may still be moving: keep reporting it, and raise the failure from Slewing.
+                restore_motion_after_failed_stop_locked(slew_was_active, axes_were_active);
+                motion_error_ = "AbortSlew failed: " + exception_text(error);
+            }
             std::rethrow_exception(error);
         }
+        if (!slew_was_active) {
+            return;
+        }
+        // #2396 AB-4: the stop is verified. Abort() is sent again while IsSlewComplete still reads false, at most
+        // kAbortRounds in all; a failed read or send ends the rounds (fail closed, and the link may be gone).
+        const std::string failure = verify_abort(1);
+        if (failure.empty()) {
+            return;
+        }
+        lock.lock();
+        if (session != session_) {
+            throw AlpacaException("AbortSlew: " + failure, AlpacaError::DriverException);
+        }
+        restore_motion_after_failed_stop_locked(slew_was_active, axes_were_active);
+        motion_error_ = "AbortSlew: " + failure;
+        throw AlpacaException(motion_error_, AlpacaError::DriverException);
     }
 
     void slew_to_alt_az(double /*altitude*/, double /*azimuth*/) override {
@@ -1148,6 +1216,11 @@ public:
     void set_slew_complete_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(test_hook_mutex_);
         slew_complete_hook_ = std::move(hook);
+    }
+
+    void set_stop_sent_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        stop_sent_hook_ = std::move(hook);
     }
 
 private:
@@ -1267,6 +1340,7 @@ private:
         slewing_cached_ = true;
         slew_poll_error_.clear();
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        slew_deadline_ = clock_.now() + kMaxAsyncSlewDuration;
         drop_poll_in_flight_locked();
     }
 
@@ -1394,6 +1468,7 @@ private:
         if (ctx != nullptr && status_poll_paused_for_testing_.load()) {
             return true;
         }
+        enforce_motion_bounds();
         bool ask_slew = false;
         util::StateSnapshot<PolledFrame>::Token token;
         {
@@ -1529,6 +1604,10 @@ private:
     }
 
     bool get_slewing_locked() const {
+        // #2410: a motion the driver had to stop or could not stop raises until the next motion command or a connect.
+        if (!motion_error_.empty()) {
+            throw AlpacaException(motion_error_, AlpacaError::DriverException);
+        }
         // Within the slew-force window, report as slewing without querying.
         if (slewing_cached_ && clock_.now() < slew_force_until_) {
             return true;
@@ -1630,7 +1709,7 @@ private:
         while (true) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
-                throw AlpacaException("Slew timed out after 120 seconds");
+                stop_timed_out_sync_slew(lock, epoch);
             }
             int failure_code = AlpacaError::DriverException;
             std::string failure_what;
@@ -1659,6 +1738,11 @@ private:
                 publish_measurement();
                 run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
                 lock.lock();
+                // A failure stored meanwhile (an AbortSlew whose stop failed) is checked before "complete": the
+                // slew may have ended short of its target, not on it (#2410).
+                if (!motion_error_.empty()) {
+                    throw AlpacaException(motion_error_, AlpacaError::DriverException);
+                }
                 if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
                     slewing_cached_ = false;
                 }
@@ -1683,11 +1767,288 @@ private:
         }
     }
 
+    // ── Motion safety (#2410, the #2396 pattern) ─────────────────────────────────────────────────────────────
+
+    static std::string exception_text(const std::exception_ptr& error) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& e) {
+            return e.what();
+        } catch (...) {
+            return "unknown error";
+        }
+    }
+
+    // Every motion command and every connect clears a stored motion failure (Slewing raises it until then).
+    void begin_motion_command_locked() { motion_error_.clear(); }
+
+    // A session that ends on a lost link while the driver had a slew or a MoveAxis running leaves the matching stop
+    // for the next connect to send first: Abort() for a slew, DoCommand(10) for a MoveAxis. Under mutex_.
+    void note_relink_stop_if_moving_locked() {
+        if (slewing_cached_) {
+            relink_abort_pending_ = true;
+        }
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            relink_move_stop_pending_ = true;
+        }
+    }
+
+    // Call with `lock` (mutex_) released, right after the handshake: the stop goes out before any other command.
+    // A stop that fails fails the connect, and the record stays for the next one.
+    void send_relink_stop_if_pending(std::unique_lock<std::mutex>& lock) {
+        lock.lock();
+        const bool abort_pending = relink_abort_pending_;
+        const bool move_stop_pending = relink_move_stop_pending_;
+        lock.unlock();
+        if (!abort_pending && !move_stop_pending) {
+            return;
+        }
+        auto& protocol = BisqueProtocolWrapper::instance();
+        try {
+            if (abort_pending) {
+                protocol.abort();
+            }
+            if (move_stop_pending) {
+                protocol.stop_open_loop_motion();
+            }
+        } catch (const std::exception& e) {
+            protocol.disconnect();
+            throw AlpacaException(
+                std::string("The mount was moving when the link to TheSkyX was lost, and the stop sent on connect "
+                            "failed: ") +
+                    e.what(),
+                AlpacaError::DriverException);
+        }
+        lock.lock();
+        relink_abort_pending_ = false;
+        relink_move_stop_pending_ = false;
+        lock.unlock();
+        ALPACA_LOG_INFO("Bisque", "Connect: stopped the motion a lost link left running");
+    }
+
+    // Puts back what AbortSlew cleared when its stop failed or was not verified. Under mutex_.
+    void restore_motion_after_failed_stop_locked(bool slew_active, const bool (&axes_active)[2]) {
+        if (slew_active) {
+            slewing_cached_ = true;
+        }
+        for (int axis = 0; axis < 2; ++axis) {
+            if (axes_active[axis]) {
+                manual_axis_slewing_[axis] = true;
+            }
+        }
+    }
+
+    // Called with initiator_mutex_ held and mutex_ free, once `sent` Abort() calls went out: reads IsSlewComplete
+    // and sends Abort() again while it reads false, kAbortRounds in all. "" once it reads true. A failed read or
+    // send ends the rounds.
+    std::string verify_abort(int sent) {
+        auto& protocol = BisqueProtocolWrapper::instance();
+        for (;;) {
+            try {
+                if (protocol.is_slew_complete()) {
+                    return "";
+                }
+            } catch (const std::exception& e) {
+                return std::string("the stop could not be verified: ") + e.what();
+            }
+            if (sent >= kAbortRounds) {
+                return "the mount still reports a slew after " + std::to_string(sent) + " stops";
+            }
+            try {
+                protocol.abort();
+                ++sent;
+            } catch (const std::exception& e) {
+                return std::string("Abort failed: ") + e.what();
+            }
+        }
+    }
+
+    // Abort() and its verification; "" once the stop is verified. Same locking as verify_abort(). Every caller
+    // re-checks session_ after it, since a disconnect and reconnect can land during the exchange.
+    std::string send_verified_abort() {
+        std::string failure;
+        try {
+            BisqueProtocolWrapper::instance().abort();
+            failure = verify_abort(1);
+        } catch (const std::exception& e) {
+            failure = std::string("Abort failed: ") + e.what();
+        }
+        run_stop_sent_hook();  // test seam: a disconnect and reconnect land during the stop
+        return failure;
+    }
+
+    // SlewToRaDec with initiator_mutex_ held and `lock` (mutex_) released. A TheSkyX error reply means the slew did
+    // not start and is thrown as it is. No reply, or a send that failed, is not "not slewing": TheSkyX may have
+    // taken the command, so the driver stops the mount and the slew fails (#2410).
+    void send_slew(std::unique_lock<std::mutex>& lock, double ra, double dec, const char* who) {
+        try {
+            BisqueProtocolWrapper::instance().slew_to_ra_dec(ra, dec);
+        } catch (const AlpacaException& e) {
+            if (is_theskyx_refusal(e) || e.error_code() == AlpacaError::NotConnected) {
+                throw;  // nothing was sent, or TheSkyX refused it
+            }
+            fail_unconfirmed_slew(lock, who, e.what());
+        } catch (const std::exception& e) {
+            fail_unconfirmed_slew(lock, who, e.what());
+        }
+    }
+
+    [[noreturn]] void fail_unconfirmed_slew(std::unique_lock<std::mutex>& lock, const char* who,
+                                            const std::string& why) {
+        lock.lock();
+        note_slew_started_locked();  // TheSkyX may be slewing: Slewing must not read false meanwhile
+        const uint64_t session = session_;
+        lock.unlock();
+        const std::string stop_failure = send_verified_abort();
+        lock.lock();
+        const std::string unconfirmed = std::string(who) + ": TheSkyX did not confirm the slew (" + why + ")";
+        if (session != session_) {
+            // A disconnect or connect since: the state is the new session's (decision 0016 rule 6).
+            throw AlpacaException(unconfirmed, AlpacaError::DriverException);
+        }
+        if (stop_failure.empty()) {
+            slewing_cached_ = false;
+            motion_error_ = unconfirmed + "; the driver stopped the mount";
+            ALPACA_LOG_WARN("Bisque", motion_error_);
+        } else {
+            motion_error_ = unconfirmed + ", and stopping the mount failed: " + stop_failure;
+            ALPACA_LOG_ERROR("Bisque", motion_error_);
+        }
+        drop_poll_in_flight_locked();
+        throw AlpacaException(motion_error_, AlpacaError::DriverException);
+    }
+
+    // The synchronous wait's 120 s deadline. Called with `lock` (mutex_) held; stops the slew this wait owns and
+    // throws. A slew start or an abort since (`epoch`) owns the mount now and is left alone.
+    [[noreturn]] void stop_timed_out_sync_slew(std::unique_lock<std::mutex>& lock, uint64_t epoch) {
+        static const std::string kTimedOut = "Slew timed out after 120 seconds";
+        lock.unlock();
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // order: initiator_mutex_, the wrapper, mutex_
+        lock.lock();
+        if (epoch != slew_epoch_ || !connected_) {
+            throw AlpacaException(kTimedOut);
+        }
+        const uint64_t session = session_;
+        lock.unlock();
+        const std::string stop_failure = send_verified_abort();
+        lock.lock();
+        if (session != session_) {
+            throw AlpacaException(kTimedOut);  // the state is the new session's (decision 0016 rule 6)
+        }
+        if (stop_failure.empty()) {
+            slewing_cached_ = false;
+            motion_error_ = kTimedOut + "; the driver stopped the mount";
+            ALPACA_LOG_WARN("Bisque", motion_error_);
+        } else {
+            motion_error_ = kTimedOut + ", and stopping the mount failed: " + stop_failure;
+            ALPACA_LOG_ERROR("Bisque", motion_error_);
+        }
+        drop_poll_in_flight_locked();
+        throw AlpacaException(motion_error_, AlpacaError::DriverException);
+    }
+
+    // Each status poll tick, before its sample: stops an async slew past kMaxAsyncSlewDuration and a MoveAxis past
+    // kMaxMoveAxisDuration since its last nonzero rate. The tick runs whether or not a client polls. It takes
+    // initiator_mutex_ only if it is free (a motion command on the wire re-arms what it moves; the next tick
+    // looks again), so the poll never waits behind one. A stop that fails keeps the motion flags (a lost link then
+    // leaves the stop to the next connect) and is tried again kFailedStopRetry later; it never re-sends a start.
+    // A client causes both bounds by not stopping its own motion, so a stop that worked logs at INFO (decision
+    // 0007 rule 9); a failed one logs WARN.
+    void enforce_motion_bounds() {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
+        if (!ilock.owns_lock()) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!connected_ || link_lost_) {
+            return;
+        }
+        const auto now = clock_.now();
+        const uint64_t session = session_;
+        // A synchronous wait owns its slew and has its own 120 s deadline.
+        const bool slew_over = slewing_cached_ && slew_waiters_ == 0 && now >= slew_deadline_;
+        const bool axis_over[2] = {manual_axis_slewing_[0] && now >= manual_axis_deadline_[0],
+                                   manual_axis_slewing_[1] && now >= manual_axis_deadline_[1]};
+        if (!slew_over && !axis_over[0] && !axis_over[1]) {
+            return;
+        }
+        lock.unlock();
+        if (slew_over) {
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxAsyncSlewDuration).count();
+            const std::string what = "The slew did not end within " + std::to_string(seconds) + " s";
+            const std::string failure = send_verified_abort();
+            lock.lock();
+            if (!connected_ || link_lost_ || session != session_) {
+                return;  // a lost link leaves the stop to the next connect; a new session owns its own state
+            }
+            if (failure.empty()) {
+                slewing_cached_ = false;
+                motion_error_ = what + "; the driver stopped it";
+                ALPACA_LOG_INFO("Bisque", motion_error_);
+            } else {
+                slew_deadline_ = now + kFailedStopRetry;
+                motion_error_ = what + ", and stopping it failed: " + failure;
+                ALPACA_LOG_WARN("Bisque", motion_error_);
+            }
+            drop_poll_in_flight_locked();
+            lock.unlock();
+        }
+        if (axis_over[0] || axis_over[1]) {
+            std::string failure;
+            try {
+                BisqueProtocolWrapper::instance().stop_open_loop_motion();
+            } catch (const std::exception& e) {
+                failure = e.what();
+            }
+            run_stop_sent_hook();
+            lock.lock();
+            if (!connected_ || link_lost_ || session != session_) {
+                return;
+            }
+            for (int axis = 0; axis < 2; ++axis) {
+                if (!axis_over[axis]) {
+                    continue;
+                }
+                if (!failure.empty()) {
+                    manual_axis_deadline_[axis] = now + kFailedStopRetry;
+                }
+            }
+            if (failure.empty()) {
+                // DoCommand(10) stops open loop motion on both axes, so neither still moves.
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
+            }
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
+            const std::string axes = axis_over[0] && axis_over[1] ? "axes 0 and 1" : axis_over[0] ? "axis 0" : "axis 1";
+            const std::string what =
+                "MoveAxis on " + axes + " ran " + std::to_string(seconds) + " s, the longest allowed";
+            if (failure.empty()) {
+                motion_error_ = what + "; the driver stopped both axes";  // DoCommand(10) stops both
+                ALPACA_LOG_INFO("Bisque", motion_error_);
+            } else {
+                motion_error_ = what + ", and stopping it failed: " + failure;
+                ALPACA_LOG_WARN("Bisque", motion_error_);
+            }
+            drop_poll_in_flight_locked();
+        }
+    }
+
     void run_slew_complete_hook() {
         std::function<void()> hook;
         {
             std::lock_guard<std::mutex> lock(test_hook_mutex_);
             hook = slew_complete_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    void run_stop_sent_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = stop_sent_hook_;
         }
         if (hook) {
             hook();
@@ -1737,6 +2098,7 @@ private:
     std::atomic<bool> status_poll_paused_for_testing_{false};
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
+    std::function<void()> stop_sent_hook_;      // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -1752,6 +2114,16 @@ private:
     uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
+    // #2410, under mutex_: when an async slew or a MoveAxis is stopped (enforce_motion_bounds()), the failure
+    // Slewing raises until the next motion command or a connect, and the stop a lost link leaves for the next
+    // connect. The relink records survive a disconnect and a connect that fails.
+    util::TaskClock::clock::time_point slew_deadline_ = util::TaskClock::clock::time_point::max();
+    util::TaskClock::clock::time_point manual_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
+                                                                   util::TaskClock::clock::time_point::max()};
+    std::string motion_error_;
+    uint64_t session_ = 0;  // bumped by every connect and disconnect: a stop's late write checks it
+    bool relink_abort_pending_ = false;
+    bool relink_move_stop_pending_ = false;
     mutable bool pulse_guiding_ = false;
     std::string pulse_guide_error_;
     uint64_t pulse_request_ = 0;
@@ -1794,6 +2166,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_slew_complete_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_stop_sent_hook_for_testing(std::move(hook));
     }
 }
 
