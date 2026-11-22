@@ -1575,6 +1575,143 @@ TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[iopt
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// #2257: an out-of-range guide rate is refused with InvalidValue, never clamped, and nothing reaches the mount.
+TEST_CASE("iOptron Telescope Driver - an out-of-range guide rate is refused, not clamped",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    const auto before = driver->get_guide_rate();
+    const int writes = mount.count(":RG");
+    require_alpaca_error([&]() { driver->set_guide_rate({2.0 * kSidereal, 0.5 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.5 * kSidereal, 0.05 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount.count(":RG") == writes);
+    CHECK(driver->get_guide_rate().ra == before.ra);
+    CHECK(driver->get_guide_rate().dec == before.dec);
+
+    // Rounding just past a bound is accepted and sent inside it (the wrapper refuses past the bound).
+    REQUIRE_NOTHROW(driver->set_guide_rate_right_ascension((0.90 + 5e-10) * kSidereal));
+    CHECK(mount.count(":RG") == writes + 1);
+    driver->set_connected(false);
+}
+
+// Issue #2434: GuideRate is the mount's own rate, read with :AG# once on the connect path, never in the getter
+// (decision 0016), and not the 0.5x the driver used to assume.
+TEST_CASE("iOptron Telescope Driver - GuideRate reads the mount's rate once at connect",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("8040#");  // 0.80x RA, 0.40x Dec, set on the hand controller
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.80 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.40 * kSidereal));
+    CHECK(mount.count(":AG#") == 1);  // the reads above sent nothing
+    driver->set_connected(false);
+}
+
+// Issue #2434: a failed :AG# read at connect leaves the rate unknown; GuideRate raises rather than invent 0.5x, and
+// the connect still succeeds.
+TEST_CASE("iOptron Telescope Driver - a failed guide rate read at connect leaves GuideRate unknown",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("");  // the unparseable "0#"
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    require_alpaca_error([&]() { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::DriverException);
+    // A per-axis setter keeps the other axis's rate, so it reads :AG# again; a read that fails again raises, and
+    // nothing is sent.
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(0.5 * 360.0 / 86164.0905); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(mount.count(":AG#") == 2);
+    CHECK(mount.count(":RG") == 0);
+    driver->set_connected(false);
+}
+
+// Issue #2434: Alpaca reaches the guide rate only through the per-axis setters, so a :AG# read lost at connect must
+// not leave GuideRate unwritable for the session: the setter, a command, reads :AG# again and keeps the other axis.
+TEST_CASE("iOptron Telescope Driver - a per-axis guide rate write re-reads the rate a failed connect read lost",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_guide_rate_reply("");  // the connect read fails
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_guide_rate_reply("8040#");  // the next read answers
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    REQUIRE_NOTHROW(driver->set_guide_rate_declination(0.30 * kSidereal));
+    CHECK(mount.count(":AG#") == 2);
+    CHECK(mount.count(":RG8030#") == 1);  // RA kept at the mount's 0.80x
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.80 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.30 * kSidereal));
+    driver->set_connected(false);
+}
+
+// Issue #2434: :RG# carries hundredths of the sidereal rate, so a write reads back the rounded rate that was sent.
+TEST_CASE("iOptron Telescope Driver - a guide rate write reads back the rate that was sent",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    driver->set_guide_rate({0.444 * kSidereal, 0.666 * kSidereal});
+    CHECK(mount.count(":RG4467#") == 1);
+    CHECK(driver->get_guide_rate().ra == Catch::Approx(0.44 * kSidereal));
+    CHECK(driver->get_guide_rate().dec == Catch::Approx(0.67 * kSidereal));
+    driver->set_connected(false);
+}
+
+// Issue #2396 (AB-9): a MoveAxis left running when the link was lost is stopped by the reconnect, whose first
+// command is :Q#, never forgotten. The TCP fake loses the link through a fault that stands past the staleness bound.
+TEST_CASE("iOptron Link - a reconnect over a lost link stops the motion that was running",
+          "[ioptron][telescope][unit][fake][link-lost][goto-safety]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).first);
+    REQUIRE(mount.count(":mw#") + mount.count(":me#") == 1);
+    // Three failed exchanges latch the fault (#728); the first is the status read the moving axis left stale.
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        (void)sync_failure(*driver);
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    mount.set_fail_reads(false);
+    const auto sent = mount.commands().size();
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto log = mount.commands();
+    REQUIRE(log.size() > sent);
+    CHECK(log[sent] == ":Q#");
+    driver->set_connected(false);
+}
+
 // #627: the NaN path of iOptron's site latitude and longitude setters, over a
 // connected driver. The disconnected range case is in Target Range Validation.
 TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",

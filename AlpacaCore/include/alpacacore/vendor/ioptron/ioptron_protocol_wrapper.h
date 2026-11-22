@@ -13,6 +13,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -121,6 +122,14 @@ struct Position {
 struct AltAz {
     double altitude_degrees = 0.0;  // Altitude in degrees
     double azimuth_degrees = 0.0;  // Azimuth in degrees
+};
+
+/// The reply to a :MS1# GOTO (issue #2396). A missing or unknown reply is not acceptance.
+enum class GotoReply : std::uint8_t {
+    Accepted,    ///< "1" (a run of '1's: stale blind-command acks ahead of it)
+    Refused,     ///< "0": below the altitude limit or outside the mechanical limits
+    NoReply,     ///< nothing before the reply timeout
+    Unexpected,  ///< any other bytes
 };
 
 /**
@@ -278,25 +287,18 @@ public:
      * @param dec_degrees Declination in degrees
      */
     void set_target_dec(double dec_degrees);
-    
+
     /**
      * @brief Slew to target RA/Dec (normal position).
      *
-     * Sends :MS1# command.
+     * Sends :MS1# command. There is no counterweight-up (:MS2#) form: a refused GOTO is an error, never re-aimed
+     * (issue #2395).
      *
-     * @return true if command accepted, false if target below altitude limit
+     * @return GotoReply::Accepted on "1", Refused on "0" (below the altitude limit or past a mechanical limit),
+     *         NoReply on no reply at all, Unexpected on anything else. Only Accepted is acceptance (issue #2396).
      */
-    bool slew_to_ra_dec();
-    
-    /**
-     * @brief Slew to target RA/Dec (counterweight up position).
-     *
-     * Sends :MS2# command. Equatorial mounts only.
-     *
-     * @return true if command accepted, false if target below altitude limit
-     */
-    bool slew_to_ra_dec_cw_up();
-    
+    GotoReply slew_to_ra_dec();
+
     /**
      * @brief Stop all slewing.
      *

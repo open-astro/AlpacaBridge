@@ -1959,50 +1959,25 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
     send_command(cmd, false);
 }
 
-bool iOptronProtocolWrapper::slew_to_ra_dec() {
+GotoReply iOptronProtocolWrapper::slew_to_ra_dec() {
     flush_input();
-    try {
-        std::string response = send_command(":MS1", false);
-        if (response == "0") {
-            return false;
-        }
-        if (!response.empty() && response != "1") {
-            ALPACA_LOG_WARN("iOptron", "Unexpected :MS1 response: " + response);
-        }
-        return true;
-    } catch (const AlpacaException& e) {
-        const std::string message = e.what();
-        if (pimpl_->is_network_connection() &&
-            message.find("Timeout waiting for mount response") != std::string::npos) {
-            // TODO: Confirm HAE29C WiFi behavior for :MS1 responses.
-            ALPACA_LOG_WARN("iOptron", "No :MS1 response over network; assuming slew accepted");
-            return true;
-        }
-        throw;
+    // The reply is one byte with no '#', so the read ends on the idle gap and a timeout returns what arrived (no
+    // throw). Issue #2396: a missing or unknown reply is not acceptance, on Wi-Fi as on USB; the driver confirms it
+    // or stops the mount. A refusal is never re-sent as the counterweight-up :MS2# (issue #2395).
+    const std::string response = send_command(":MS1", false);
+    if (response == "0") {
+        return GotoReply::Refused;
     }
-}
-
-bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
-    flush_input();
-    try {
-        std::string response = send_command(":MS2", false);
-        if (response == "0") {
-            return false;
-        }
-        if (!response.empty() && response != "1") {
-            ALPACA_LOG_WARN("iOptron", "Unexpected :MS2 response: " + response);
-        }
-        return true;
-    } catch (const AlpacaException& e) {
-        const std::string message = e.what();
-        if (pimpl_->is_network_connection() &&
-            message.find("Timeout waiting for mount response") != std::string::npos) {
-            // TODO: Confirm HAE29C WiFi behavior for :MS2 responses.
-            ALPACA_LOG_WARN("iOptron", "No :MS2 response over network; assuming slew accepted");
-            return true;
-        }
-        throw;
+    if (response.empty()) {
+        ALPACA_LOG_WARN("iOptron", "No reply to :MS1# before the timeout");
+        return GotoReply::NoReply;
     }
+    // A run of '1's is the reply after stale blind-command acks (the "1111" the serial flush guards against).
+    if (response.find_first_not_of('1') == std::string::npos) {
+        return GotoReply::Accepted;
+    }
+    ALPACA_LOG_WARN("iOptron", "Unexpected :MS1# reply: " + response);
+    return GotoReply::Unexpected;
 }
 
 void iOptronProtocolWrapper::stop_slewing() {

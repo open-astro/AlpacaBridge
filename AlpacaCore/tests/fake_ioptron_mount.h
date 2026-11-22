@@ -13,7 +13,7 @@
 #pragma once
 
 // Scripted iOptron v3-protocol responder for FakeMountServer: enough of
-// :MountInfo / :GLS / :GEP / :GAC / :SRA / :Sd / :MS1 / :Z* to drive the telescope
+// :MountInfo / :GLS / :GEP / :GAC / :SRA / :Sd / :MS1 / :AG / :RG / :Z* to drive the telescope
 // driver through connect -> GOTO -> settle and observe the GOTO final-
 // approach RA trim (goto_refine_active()). The mount "lands" every GOTO at
 // the commanded target plus a configurable RA error, exactly the HAE29C /
@@ -58,6 +58,35 @@ public:
     /// firmware does for a target below the altitude limit) instead of "1".
     void set_reject_goto(bool reject) { reject_goto_.store(reject); }
 
+    /// Issue #2395: ":MS1#" (normal position) answers "0", but ":MS2#" (counterweight up) is accepted and moves the
+    /// fake to the target, so a driver that re-aims a refused GOTO shows up as motion, not only as a ledger entry.
+    void set_reject_normal_goto(bool reject) { reject_normal_goto_.store(reject); }
+
+    /// Issue #2396: answer ":MS1#" with @p reply ("" is no reply at all) in place of "1". With @p moves the GOTO
+    /// still runs (status 2 and the landing, as an accepted one); without it nothing moves. Cleared by
+    /// clear_goto_reply().
+    void set_goto_reply(std::string reply, bool moves) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_reply_ = std::move(reply);
+        goto_reply_moves_ = moves;
+        goto_reply_set_ = true;
+    }
+    void clear_goto_reply() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_reply_set_ = false;
+    }
+
+    /// Issue #2395: the next @p n position, Alt/Az or status reads (":GEP", ":GAC", ":GLS") get the unparseable "0#",
+    /// then the reads answer again.
+    void fail_next_reads(int n) { fail_next_reads_.store(n); }
+
+    /// Issue #2434: the ":AG#" guide-rate read answers "nnnn#", RA then Dec in hundredths of sidereal; ":RG" writes
+    /// it. Default "5050#" (0.50x both). An empty @p reply answers the unparseable "0#".
+    void set_guide_rate_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        guide_rate_reply_ = std::move(reply);
+    }
+
     /// open-astro#728: answer the position, Alt/Az and status reads (":GEP", ":GAC", ":GLS") with a short "0#" the
     /// driver cannot parse, so every such read fails until this is cleared. Commands are still acknowledged.
     void set_fail_reads(bool fail) { fail_reads_.store(fail); }
@@ -93,6 +122,10 @@ public:
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
         dec_units_.store(std::llround(dec_degrees * 3600.0 * 100.0));
     }
+
+    /// Where the fake points now (what ":GEP" answers).
+    double ra_hours() const { return static_cast<double>(ra_units_.load()) / (15.0 * 3600.0 * 100.0); }
+    double dec_degrees() const { return static_cast<double>(dec_units_.load()) / (3600.0 * 100.0); }
 
     /// Answers ":GAC" with this Alt/Az (0.01 arcsec units) from now on; unset, the read gets the unparseable "0#".
     void set_alt_az(double altitude_degrees, double azimuth_degrees) {
@@ -201,6 +234,19 @@ private:
         if (fail_reads_.load() && (cmd == ":GEP#" || cmd == ":GAC#" || cmd == ":GLS#")) {
             return "0#";
         }
+        if ((cmd == ":GEP#" || cmd == ":GAC#" || cmd == ":GLS#") && fail_next_reads_.load() > 0) {
+            fail_next_reads_.fetch_sub(1);
+            return "0#";
+        }
+        if (cmd == ":AG#") {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return guide_rate_reply_.empty() ? std::string("0#") : guide_rate_reply_;
+        }
+        if (cmd.rfind(":RG", 0) == 0 && cmd.size() == 8) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            guide_rate_reply_ = cmd.substr(3, 4) + "#";
+            return "1";  // the generic set ack below, as before
+        }
         if (cmd == ":GLS#") {
             // sign + 16 digits (site: longitude, then latitude + 90 degrees), then 6 status digits: GPS,
             // system status (1 = tracking, 2 = slewing), rate, speed, time source, hemisphere.
@@ -248,14 +294,22 @@ private:
             return "1";
         }
         if (cmd == ":MS1#" || cmd == ":MS2#") {
-            if (reject_goto_.load()) {
+            if (reject_goto_.load() || (cmd == ":MS1#" && reject_normal_goto_.load())) {
                 return "0";  // rejected: nothing moves
+            }
+            std::string reply = "1";
+            if (cmd == ":MS1#") {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (goto_reply_set_) {
+                    reply = goto_reply_;
+                    if (!goto_reply_moves_) return reply;  // nothing moves
+                }
             }
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
             if (goto_tracks_off_.load()) system_status_.store(2);
-            return "1";
+            return reply;
         }
         if (cmd == ":MSH#") {
             // Issue #2420, HAE29C firmware: the zero sensor search is acked with a bare '1' and no '#', so a driver
@@ -326,6 +380,12 @@ private:
     std::atomic<long long> alt_units_{0};
     std::atomic<long long> az_units_{0};
     std::atomic<bool> reject_goto_{false};
+    std::atomic<bool> reject_normal_goto_{false};
+    std::string goto_reply_;
+    bool goto_reply_moves_ = false;
+    bool goto_reply_set_ = false;
+    std::atomic<int> fail_next_reads_{0};
+    std::string guide_rate_reply_ = "5050#";
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
     std::atomic<bool> pulse_reports_guiding_{false};

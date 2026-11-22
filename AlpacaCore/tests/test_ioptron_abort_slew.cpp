@@ -11,7 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // open-astro#768, iOptron: AbortSlew must fence the async slew slot.
-// Once it returns, no :MS1#/:MS2# may reach the mount and the stop has been
+// Once it returns, no :MS1# may reach the mount and the stop has been
 // sent, even when the cached status says the mount is not slewing.
 
 #ifndef _WIN32
@@ -247,6 +247,47 @@ TEST_CASE("iOptron AbortSlew - an aborted Alt/Az slew after an equatorial GOTO s
     CHECK(mount.count(":ST0#") == off_before);
     clock.advance(std::chrono::seconds(3));
     CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// Issue #2395 (AB-3): the GOTO dispatch invalidates the status cache, so the AbortSlew right after it reads the mount
+// for its parked check. That read failing on a flaky link must not keep the stop off the wire: :Q# goes out first.
+TEST_CASE("iOptron AbortSlew - the stop goes out when the status read for the parked check fails",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(6.0, 45.0);
+    REQUIRE(wait_for_command(mount, ":MS1#", 1));
+    mount.fail_next_reads(1);
+    const int stops_before = mount.count(":Q#");
+    CHECK_NOTHROW(driver->abort_slew());
+    CHECK(mount.count(":Q#") == stops_before + 1);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Issue #2395 (AB-3): InvalidWhileParked still comes from a status read that succeeded and says parked (ConformU
+// expects it), after the stop went out.
+TEST_CASE("iOptron AbortSlew - a parked mount still raises InvalidWhileParked from a good read",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(6);  // parked
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_at_park());
+
+    const int stops_before = mount.count(":Q#");
+    alpacacore::test::require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(mount.count(":Q#") == stops_before + 1);
+    CHECK(mount.count(":ST1#") == 0);
     driver->set_connected(false);
 }
 
