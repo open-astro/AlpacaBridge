@@ -53,5 +53,9 @@ bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,
 /// before the wait applies Slewing false; no driver lock is held. An empty hook removes it.
 void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` once a driver stop has been sent (the synchronous deadline, an unconfirmed slew, a motion bound, or
+/// AbortSlew's first stop), before the driver takes its state lock again; only the initiator lock is held. An empty
+/// hook removes it.
+void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::bisque
