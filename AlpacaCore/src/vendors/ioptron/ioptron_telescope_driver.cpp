@@ -709,7 +709,10 @@ public:
         if (util::is_findhome_sensor_search_action(action_name)) {
             // From the model code read at connect, no device I/O: FindHome is the :MSH# zero sensor search only on
             // the HAE29C (zero_search_active(), #2420); every other model's :MH# slews to the stored home.
-            if (!get_connected()) throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+            // The same connection test as the list and CanAction, so the three never disagree mid-transition.
+            if (!connected_.load() || link_lost()) {
+                throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+            }
             StateLock lock(lock_gate_, StateLock::Mode::State);
             const bool sensor_search = zero_search_active();
             return util::format_findhome_sensor_search(
@@ -731,7 +734,7 @@ public:
     }
 
     bool can_action(std::string_view action_name) const override {
-        if (util::is_findhome_sensor_search_action(action_name)) return get_connected();
+        if (util::is_findhome_sensor_search_action(action_name)) return connected_.load() && !link_lost();
         return connected_.load() && !link_lost() && util::is_gps_status_action(action_name);
     }
     

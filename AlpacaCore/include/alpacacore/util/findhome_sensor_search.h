@@ -46,7 +46,8 @@ inline bool is_findhome_sensor_search_action(std::string_view action_name) {
  * sensor_search is true only when the driver's FindHome is a search on the mount's own home or zero sensors, so a
  * completed FindHome puts the mount at its true home whatever position it believed before. A client may trust
  * AtHome after a FindHome it sent only when this is true. model is the mount model code the answer depends on, or
- * "" when the driver does not know or the answer does not depend on it.
+ * "" when the driver does not know or the answer does not depend on it. method is not escaped: it must be one of the
+ * kFindHome* words above.
  */
 inline std::string format_findhome_sensor_search(bool sensor_search, std::string_view method, std::string_view model) {
     // The model comes from the mount; escape what JSON requires so a stray byte cannot break the reply.

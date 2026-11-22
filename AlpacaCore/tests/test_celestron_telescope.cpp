@@ -35,6 +35,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -843,7 +844,7 @@ struct SnapshotMount {
     std::atomic<int> p_count{0};          // pier-side queries received
     std::atomic<int> s_count{0};          // sync and time commands received
     std::atomic<bool> gps_absent{false};
-    std::atomic<bool> home_switches{false};  // the RA and Dec home switch devices (AUX 0x30, 0x31) answer the probe
+    std::atomic<bool> home_switches{false};  // the RA and Dec home switch devices (AUX 0x30, 0x31) are on the bus
     std::atomic<int> model_id{24};           // the 'm' reply: CGX-L  //
                                              // no GPS module on the AUX bus: its version probe goes unanswered
     std::atomic<bool> gps_linked{false};  // GPS_LINKED (0x37) answer
@@ -942,8 +943,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
                 }
             }
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
-            if (op == 0xFE && (device == 0x30 || device == 0x31) && st.home_switches.load()) {
-                return std::string("\x01\x00#", 3);  // home switch devices (CGX, CGX-L, CGE Pro)
+            if (op == 0xFE && (device == 0x30 || device == 0x31)) {
+                // Home switch devices (CGX, CGX-L, CGE Pro): a version when present, else a reply too short to
+                // carry one, which the probe reads as no device.
+                return st.home_switches.load() ? std::string("\x01\x00#", 3) : std::string("#");
             }
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x13) return st.slewing.load() ? std::string("\x00#", 2) : std::string("\xFF#");  // MC_SLEW_DONE
@@ -2747,8 +2750,9 @@ TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model
           "[celestron][telescope][snapshot][findhome-sensor]") {
     FakeTaskClock clock;
     auto st = std::make_shared<SnapshotMount>();
-    // The fake answers every other AUX probe, so its switch devices always read present; model 20 is an AVX.
-    const auto [model, switches] = GENERATE(std::make_pair(24, true), std::make_pair(20, false));
+    // Model 24 is a CGX-L and 20 an AVX: true needs both a home-switch model and its switches on the bus.
+    const auto [model, switches, expected] =
+        GENERATE(std::make_tuple(24, true, true), std::make_tuple(24, false, false), std::make_tuple(20, true, false));
     st->model_id = model;
     st->home_switches = switches;
     alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
@@ -2760,7 +2764,7 @@ TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model
     CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
     CHECK(driver->can_action("findhomeissensorsearch"));
     const std::string reply = driver->action("findhomeissensorsearch", "");
-    if (switches) {
+    if (expected) {
         CHECK(reply.rfind("{\"sensor_search\":true,\"method\":\"home_switch_search\",\"model\":\"", 0) == 0);
     } else {
         CHECK(reply.rfind("{\"sensor_search\":false,\"method\":\"no_home_sensor\",\"model\":\"", 0) == 0);
