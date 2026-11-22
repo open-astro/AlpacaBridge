@@ -411,6 +411,7 @@ TEST_CASE("ZWO host clock - a re-sync gives up after the shared motion bound", "
     int looks = 1;
     for (std::chrono::nanoseconds spent{0}; spent < short_of_bound;) {
         const std::chrono::nanoseconds step = std::min<std::chrono::nanoseconds>(5s, short_of_bound - spent);
+        rig.driver->move_axis(0, 1.0);  // renewed, so the 60 s MoveAxis dead-man (#2408) leaves the jog running
         rig.clock.advance(step);
         spent += step;
         ++looks;
