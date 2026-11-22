@@ -1939,6 +1939,50 @@ TEST_CASE("ZWO goto-safety - a Park or FindHome after a jog is not stopped by th
     }
 }
 
+TEST_CASE("ZWO goto-safety - the MoveAxis dead-man sends :Q only when the other axis is idle",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const bool both = GENERATE(false, true);
+    CAPTURE(both);
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    if (both) REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    run_polls(rig, std::chrono::seconds(40));
+    if (both) REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));  // axis 1 renewed: only axis 0 reaches its bound
+    const int q_before = count_exact(rig.mount, ":Q");
+    run_polls(rig, std::chrono::seconds(24));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1; }, 5000));
+    if (both) {
+        CHECK(count_exact(rig.mount, ":Q") == q_before);  // ":Q" would also stop the jog on axis 1
+        CHECK(rig.mount.count(":Qn") == 0);
+        CHECK(rig.mount.jogging());
+    } else {
+        CHECK(count_exact(rig.mount, ":Q") == q_before + 1);
+    }
+    rig.driver->abort_slew();
+}
+
+TEST_CASE("ZWO goto-safety - site and time writes are accepted again once a GOTO or a FindHome has come to rest",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const bool home = GENERATE(false, true);
+    CAPTURE(home);
+    if (home) {
+        REQUIRE_NOTHROW(rig.driver->find_home());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+        REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+        REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+        rig.await_poll_resumed();
+    }
+    run_polls(rig, std::chrono::seconds(8));  // the 5 s move and the forced window end, then a stopped sample
+    REQUIRE(read_slewing(*rig.driver) == SlewingRead::False);
+    REQUIRE_NOTHROW(rig.driver->set_site_latitude(10.0));
+    REQUIRE_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
+    CHECK(std::abs(rig.driver->get_site_latitude() - 10.0) < 1e-9);
+}
+
 TEST_CASE("ZWO goto-safety - AbortSlew sends :Q again while the mount still moves, up to three",
           "[zwo][telescope][async][goto-safety]") {
     Rig rig;
