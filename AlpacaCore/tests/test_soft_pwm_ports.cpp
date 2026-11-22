@@ -213,7 +213,7 @@ TEST_CASE("SoftPwmPorts - edges are absolute deadlines, a late wake does not shi
     wait_for_waits(rig, base + 2);
     rig.clock.advance(13ms);  // and 5 ms after the next period's high edge was due (20 ms)
     wait_for_waits(rig, base + 3);
-    rig.clock.advance(5ms);   // the low edge is due at 20 ms + 10 ms
+    rig.clock.advance(5ms);  // the low edge is due at 20 ms + 10 ms
     wait_for_waits(rig, base + 4);
     const auto writes = rig.backend.writes_to(0);
     REQUIRE(writes.size() == 4);
