@@ -588,7 +588,9 @@ TEST_CASE("SynScan host clock - a client UTCDate write after the host clock chan
     Rig rig(true);
     rig.connect();
     REQUIRE(rig.handset.count('H') == 1);
-    rig.driver->move_axis(0, 0.5);  // holds the re-sync after it was decided
+    // Holds the re-sync after it was decided. A pulse, not a MoveAxis: a client UTCDate write is refused while a
+    // MoveAxis runs (#2412), and a pulse guide is motion to the re-sync only.
+    rig.driver->pulse_guide(0, 30000);
 
     rig.driver->on_host_clock_changed(HostClockEvent{HostClockEvent::Kind::Stepped, milliseconds(3000)});
     const auto body = log.wait_for_motion_waiter(kBound);
@@ -598,7 +600,7 @@ TEST_CASE("SynScan host clock - a client UTCDate write after the host clock chan
     const auto client = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
     rig.driver->set_utc_date(client);  // never waits for the re-sync's motion wait
     REQUIRE(rig.handset.count('H') == 2);
-    rig.driver->move_axis(0, 0.0);
+    rig.driver->abort_slew();  // ends the pulse
     rig.clock.advance(std::chrono::seconds(1));
     REQUIRE(rig.done.wait(1, kBound) == std::optional<bool>(false));
     CHECK(rig.handset.count('H') == 2);

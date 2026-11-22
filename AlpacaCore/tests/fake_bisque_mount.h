@@ -18,8 +18,10 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace alpacacore::test {
 
@@ -62,6 +64,13 @@ namespace alpacacore::test {
  * `on_position_read`, when set, runs on the server thread before every GetRaDec is answered, while the driver holds
  * its wire lock for the exchange; a case that blocks in it holds the tick that asked. Set it while no exchange is in
  * flight and leave it alone until the reads it holds are released.
+ *
+ * Motion safety (#2410): Abort() ends a slew in flight unless `ignore_aborts` > 0 (each Abort then drops the count
+ * by one and the slew goes on); `fail_abort` answers Abort() with a TheSkyX error. `drop_slew_reply` takes a
+ * SlewToRaDec and starts the slew but sends no reply; `reject_slew` answers it with a TheSkyX error and starts
+ * nothing. DoCommand(9) (MoveAxis start) and DoCommand(10)
+ * (its stop) are counted; `fail_move_stop` answers the stop with a TheSkyX error. `ledger()` lists the motion and
+ * park commands in the order they came, as "Abort", "SlewToRaDec", "MoveStart", "MoveStop" and "IsParked".
  *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
@@ -112,6 +121,19 @@ public:
     std::atomic<bool> land_on_target{false};
     /// Added to the reported RA by every DirectGuide pulse, as a guide pulse moves the mount.
     std::atomic<double> guide_ra_step_hours{0.0};
+    std::atomic<int> abort_commands{0};
+    std::atomic<int> ignore_aborts{0};
+    std::atomic<bool> fail_abort{false};
+    std::atomic<bool> drop_slew_reply{false};
+    std::atomic<bool> reject_slew{false};
+    std::atomic<int> move_starts{0};
+    std::atomic<int> move_stops{0};
+    std::atomic<bool> fail_move_stop{false};
+
+    std::vector<std::string> ledger() const {
+        std::lock_guard<std::mutex> lock(ledger_mutex_);
+        return ledger_;
+    }
     std::atomic<int> guide_commands{0};
     std::atomic<int> guide_ms{0};
     std::atomic<int> find_home_commands{0};
@@ -124,6 +146,11 @@ public:
 private:
     static bool has(const std::string& command, const char* text) { return command.find(text) != std::string::npos; }
 
+    void note(const char* entry) {
+        std::lock_guard<std::mutex> lock(ledger_mutex_);
+        ledger_.emplace_back(entry);
+    }
+
     bool home_running() const {
         return std::chrono::steady_clock::now() - home_started_ < std::chrono::milliseconds(find_home_ms.load());
     }
@@ -133,6 +160,27 @@ private:
         if (has(command, "ConnectAndDoNotUnpark")) return reject_connection ? "0#" : "1#";
         if (mute) return "";
         if (latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms.load()));
+        if (has(command, ".Abort()")) {
+            ++abort_commands;
+            note("Abort");
+            if (fail_abort) return "|No error. Error = 1.Abort refused#";
+            if (ignore_aborts.load() > 0) {
+                --ignore_aborts;
+            } else {
+                slewing = false;
+            }
+            return "|No error. Error = 0.OK#";
+        }
+        if (has(command, "DoCommand(9,")) {
+            ++move_starts;
+            note("MoveStart");
+            return "|No error. Error = 0.OK#";
+        }
+        if (has(command, "DoCommand(10,")) {
+            ++move_stops;
+            note("MoveStop");
+            return fail_move_stop ? "|No error. Error = 1.stop refused#" : "|No error. Error = 0.OK#";
+        }
         if (has(command, "sky6StarChart.DocumentProperty(5)") && has(command, "new Date().getTime()")) {
             ++utc_reads;
             return "|No error. Error = 0." +
@@ -177,6 +225,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsParked")) {
+            note("IsParked");
             if (is_parked_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(is_parked_ms.load()));
             if (parking_ && fail_park_polls.load() > 0) {
                 --fail_park_polls;
@@ -203,6 +252,8 @@ private:
         }
         if (has(command, "SlewToRaDec")) {
             ++slew_commands;
+            note("SlewToRaDec");
+            if (reject_slew) return "|No error. Error = 1.Slew refused#";
             if (on_slew_command) on_slew_command();
             if (fail_slew_commands.load() > 0) {
                 --fail_slew_commands;
@@ -212,6 +263,7 @@ private:
                         &target_dec_);
             slew_polls = 0;
             slewing = true;
+            if (drop_slew_reply) return "";
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
@@ -251,6 +303,8 @@ private:
     }
 
     std::atomic<bool> parking_{false};
+    mutable std::mutex ledger_mutex_;
+    std::vector<std::string> ledger_;                       // under ledger_mutex_
     std::chrono::steady_clock::time_point home_started_{};  // handler thread only, with homing_
     bool homing_ = false;
     double target_ra_ = 0.0;  // written and read on the server's handler thread only

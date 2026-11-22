@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -533,13 +534,17 @@ public:
      */
     virtual void set_guide_rate(const GuideRate& rate) = 0;
 
-    // Coupled-axis mounts can validate and write one property without a getter pre-read.
+    // Coupled-axis mounts can validate and write one property without a getter pre-read. The default reads the pair,
+    // changes one axis and writes the pair back under guide_rate_axis_mutex_, so two writes to different axes never
+    // put each other's axis back (#2465).
     virtual void set_guide_rate_right_ascension(double value) {
+        const std::lock_guard<std::mutex> lock(guide_rate_axis_mutex_);
         auto rate = get_guide_rate();
         rate.ra = value;
         set_guide_rate(rate);
     }
     virtual void set_guide_rate_declination(double value) {
+        const std::lock_guard<std::mutex> lock(guide_rate_axis_mutex_);
         auto rate = get_guide_rate();
         rate.dec = value;
         set_guide_rate(rate);
@@ -849,6 +854,9 @@ private:
     // watchdog interval is never mistaken for
     // silence while the client is actively waiting on it.
     std::atomic<int> in_flight_requests_{0};
+    // Held across the default per-axis GuideRate setters' get_guide_rate() and set_guide_rate() (#2465). Outermost:
+    // taken before any driver lock those calls take, and by nothing else, so it adds no lock-order cycle.
+    std::mutex guide_rate_axis_mutex_;
 };
 
 } // namespace alpacacore
