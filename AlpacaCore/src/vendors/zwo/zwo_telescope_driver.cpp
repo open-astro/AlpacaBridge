@@ -1585,7 +1585,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
@@ -1611,7 +1611,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 

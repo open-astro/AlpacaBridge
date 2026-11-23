@@ -1,0 +1,3 @@
+### Fixed
+
+- **A focuser that arrives during a poll no longer reports IsMoving false with a mid-travel Position** (Celestron focus motor and Gemini focuser, issue #2580). The state poll read the position first and the moving flag second, so a motor that stopped between the two reads gave one frame that said stopped at a position short of the target, and a client that read Position once IsMoving went false saw the wrong value (introduced in the 6.0 cycle: the Celestron order dates from v6.0.0-beta.1). Both polls now read the moving flag first and the position second. Covered by new cases in `test_celestron_focuser.cpp` and `test_gemini_focuser_snapshot.cpp`.

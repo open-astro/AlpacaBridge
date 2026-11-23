@@ -433,9 +433,11 @@ private:
         StateFrame frame;
         // A disconnect waits for one exchange, not three: once it has started, the partial frame is
         // returned (published, then dropped by the state_.reset() after the join).
-        frame.position = protocol_.get_position();
-        if (poll_cancelled_.load()) return frame;
+        // IsMoving before position (#2580): a frame that says stopped then carries a position read after the
+        // arrival, never one from mid-travel.
         frame.moving = protocol_.is_moving();
+        if (poll_cancelled_.load()) return frame;
+        frame.position = protocol_.get_position();
         if (poll_cancelled_.load()) return frame;
         const auto now = clock_.now();
         if (!temperature_retry_at_ || now >= *temperature_retry_at_) {

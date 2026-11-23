@@ -162,8 +162,9 @@ std::vector<AuxBeacon> listen_for_aux_beacons(std::chrono::milliseconds window, 
                 continue;
             }
             const std::string ip(address.data());
-            if (found.size() >= kMaxAdapters ||
-                std::any_of(found.begin(), found.end(), [&](const AuxBeacon& b) { return b.ip == ip; })) {
+            if (std::any_of(found.begin(), found.end(), [&](const AuxBeacon& b) { return b.ip == ip; })) continue;
+            if (found.size() >= kMaxAdapters) {
+                ++ignored;  // a new adapter past the cap: tallied, not listed (#2542)
                 continue;
             }
             ALPACA_LOG_DEBUG(kLog, "SkyPortal beacon from " + ip + ": " + printable(payload));

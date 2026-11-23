@@ -969,10 +969,10 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
+        // decision 0009 rule 1: a refused write keeps the value and its set flag
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -988,10 +988,10 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
+        // decision 0009 rule 1: a refused write keeps the value and its set flag
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
