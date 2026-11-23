@@ -1,0 +1,2 @@
+### Changed
+- **INDI OnStep reference baseline advanced** (tooling), issue #2624: INDI's `lx200_OnStep` change (`dcc8d662` to `827e4cdf`) bounds the slew-rate index it takes from the `:GU#` guide-rate digit, moves its custom tracking rates onto the OnStepX `:SXTR`/`:SXTD` rate offsets, and re-applies its Custom track mode on Track On. The AlpacaBridge OnStep driver already sends the same offset commands with the same units, signs, reply check and +/-1800 limit, never indexes by the guide-rate digit, and has no deferred track mode to re-apply, so no driver change.
