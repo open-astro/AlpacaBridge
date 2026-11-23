@@ -50,6 +50,7 @@
 #include "conformu_focuser_factories.h"
 #include "conformu_rotator_factories.h"
 #include "conformu_switch_factories.h"
+#include "conformu_telescope_factories.h"
 #ifdef FAKE_CONFORMU_SKYWATCHER
 #include "conformu_skywatcher_factory.h"
 #endif
@@ -113,6 +114,12 @@ const std::vector<ConformuHost> kHosts = {
      [](int device_number) -> std::unique_ptr<alpacacore::AlpacaDriver> {
          return alpacacore::test::make_fake_skywatcher_serial_telescope(device_number, skywatcher_serial_board());
      }},
+#endif
+#ifdef FAKE_CONFORMU_IOPTRON
+    {"ioptron", "telescope", "fake_ioptron_mount.h", alpacacore::DeviceType::Telescope, "ioptron-fake",
+     "iOptron mount (fake, test only)", "ALPACACORE_ENABLE_IOPTRON",
+     "FakeIoptronMount (simulated HAE16 EQ over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::ioptron_mount().ok(); }, driver_of(cu::make_ioptron_telescope)},
 #endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h", alpacacore::DeviceType::Focuser, "zwo-fake",

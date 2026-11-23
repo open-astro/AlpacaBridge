@@ -64,6 +64,9 @@ on:
       - "AlpacaCore/tests/fake_zwo_eaf_sdk.h"
       - "AlpacaCore/tests/fake_mount_server.h"
       - "AlpacaCore/tests/onstep_controller_model.h"
+      - "AlpacaCore/tests/conformu_telescope_factories.h"
+      - "AlpacaCore/tests/fake_ioptron_mount.h"
+      - "AlpacaCore/tests/fake_mount_motion_model.h"
       - "AlpacaCore/tests/fake_ioptron_ieaf.h"
       - "AlpacaCore/tests/fake_ioptron_ifr.h"
       - "AlpacaCore/tests/fake_qhy_qfocuser.h"
@@ -194,6 +197,8 @@ jobs:
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
+                          "AlpacaCore/tests/conformu_telescope_factories.h": "ioptron",
+                          "AlpacaCore/tests/fake_mount_motion_model.h": "ioptron",
                           "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
                           "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher",
                           "AlpacaCore/tests/locked_iguider_v4l2.h": "ioptron",

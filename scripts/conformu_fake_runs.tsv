@@ -15,7 +15,7 @@ onstep	telescope	fake_mount_server.h	pending	6	-	needs an OnStep simulator: the 
 onstep	focuser	fake_mount_server.h	run	3	AlpacaCore/conformu/OnStep/Fake/Fake-focuser-fake_mount_server-Linux-arm64.txt	-
 onstep	rotator	fake_mount_server.h	run	6	AlpacaCore/conformu/OnStep/Fake/Fake-rotator-fake_mount_server-Linux-arm64.txt	-
 onstep	switch	fake_mount_server.h	run	6	AlpacaCore/conformu/OnStep/Fake/Fake-switch-fake_mount_server-Linux-arm64.txt	-
-ioptron	telescope	fake_ioptron_mount.h	pending	6	-	needs an iOptron simulator: FakeIoptronMount is a scripted responder that lands each GOTO at its target and acks everything else, and :GLS never reports parked
+ioptron	telescope	fake_ioptron_mount.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-telescope-fake_ioptron_mount-Linux-arm64.txt	-
 ioptron	focuser	fake_ioptron_ieaf.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ieaf-Linux-arm64.txt	-
 ifr	focuser	fake_ioptron_ifr.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ifr-Linux-arm64.txt	-
 ifr	rotator	fake_ioptron_ifr.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-rotator-fake_ioptron_ifr-Linux-arm64.txt	-
