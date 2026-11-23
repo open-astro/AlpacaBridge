@@ -174,4 +174,77 @@ TEST_CASE("Celestron motion owner - a blocking slew whose pier read fails leaves
     REQUIRE(wait_until([&] { return rig.st->guide_command_count(0) == 2; }, 5000));  // its next chunk still goes out
 }
 
+// PIN: a pulse chunk goes out only while its pulse still owns the axis. Mutation that breaks it: pulse_owns_locked()
+// returning connected_ alone (celestron_telescope_driver.cpp), so the chain sends its stale chunk into the newer
+// command's motion. The chunk hook lands the newer command on the chain's thread after the wait for the first chunk
+// and before the second chunk takes mutex_: a newer PulseGuide on the same axis, a moving MoveAxis on it, or a slew.
+TEST_CASE("Celestron motion owner - a pulse chunk is not sent once a newer command owns its axis (#2467)",
+          "[celestron][telescope][pulseguiding][motion-owner]") {
+    const int leg = GENERATE(0, 1, 2);
+    CAPTURE(leg);
+    // Declared before the rig: the chain thread and the hook use them until the rig's disconnect joins it.
+    std::atomic<int> hook_calls{0};
+    std::atomic<int> newer_code{-2};
+    std::atomic<bool> chain_done{false};
+    NexstarRig rig;
+    REQUIRE(rig.driver->get_can_pulse_guide());
+    // Non-zero rate frames (variable or fixed rate, either sign) sent to the RA motor: a moving MoveAxis on axis 0.
+    const auto ra_rate_moves = [&rig] {
+        std::lock_guard<std::mutex> lock(rig.st->command_mutex);
+        int n = 0;
+        for (const auto& c : rig.st->commands) {
+            if (c.size() < 6 || c[0] != 'P' || static_cast<unsigned char>(c[2]) != 0x10) continue;
+            const auto op = static_cast<unsigned char>(c[3]);
+            if ((op == 6 || op == 7 || op == 36 || op == 37) && (c[4] != '\0' || c[5] != '\0')) ++n;
+        }
+        return n;
+    };
+    cel::set_pulse_spawn_for_testing(*rig.driver, [&chain_done](std::function<void()> body) {
+        return std::thread([body = std::move(body), &chain_done] {
+            body();
+            chain_done.store(true);  // the chain made its chunk decision and returned
+        });
+    });
+    cel::set_pulse_chunk_hook_for_testing(*rig.driver, [&] {
+        if (hook_calls.fetch_add(1) != 0) return;
+        newer_code.store(alpacacore::test::worker_code_of([&] {
+            if (leg == 0) {
+                rig.driver->pulse_guide(3, 1000);  // one chunk: no chain of its own, so no start() on this slot
+            } else if (leg == 1) {
+                rig.driver->move_axis(0, 0.5);
+            } else {
+                rig.driver->slew_to_coordinates_async(5.5, 20.0);
+            }
+        }));
+    });
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    const std::size_t idle = rig.clock.waiter_count();
+    const int moves_before = ra_rate_moves();
+    rig.driver->pulse_guide(3, 5000);  // RA, 500 cs: a 255 cs first chunk and a 245 cs second one from the chain
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));
+    REQUIRE(rig.st->guide_command_count(0) == 1);
+    // Step the chain through its 2550 ms wait, and no further once the hook has run.
+    for (int i = 0; i < 20 && hook_calls.load() == 0; ++i) {
+        rig.clock.advance(std::chrono::milliseconds(250));
+        rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    REQUIRE(hook_calls.load() == 1);
+    // Real time: the chain thread runs the newer command's exchanges with the fake handset, then decides its chunk.
+    REQUIRE(wait_until([&] { return chain_done.load(); }, 5000));
+    CHECK(newer_code.load() == 0);
+    if (leg == 0) {
+        CHECK(rig.st->guide_command_count(0) == 2);  // the first chunk and the newer pulse; no stale second chunk
+    } else {
+        CHECK(rig.st->guide_command_count(0) == 1);  // the first chunk only
+    }
+    if (leg == 1) {
+        CHECK(ra_rate_moves() == moves_before + 1);  // the MoveAxis's own rate went out
+    }
+    if (leg == 2) {
+        // Real time: the slew body sends its GOTO on its own thread.
+        CHECK(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    }
+    CHECK(hook_calls.load() == 1);
+}
+
 #endif  // !_WIN32

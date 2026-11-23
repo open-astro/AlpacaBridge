@@ -67,6 +67,10 @@ void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::f
 /// Runs after a slewing read (the slew-complete wait, the park poll), before its result is applied, without any
 /// driver lock held; null clears it.
 void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs in a PulseGuide's chunk chain after the wait for the previous chunk and before the chunk takes mutex_ and the
+/// send gate, on the chain's thread with no driver lock held; a newer command that lands here must stop the chunk.
+/// Null clears it.
+void set_pulse_chunk_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs when the poll or the slew-complete wait has found a failure, before its stops are sent, without any driver
 /// lock held; null clears it.
 void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
