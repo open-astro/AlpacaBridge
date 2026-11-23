@@ -91,9 +91,7 @@ struct MovingHandset {
     }
 };
 
-double arcsec_ra(double hours) {
-    return hours * 15.0 * 3600.0;
-}
+double arcsec_ra(double hours) { return hours * 15.0 * 3600.0; }
 
 struct Rig {
     alpacacore::test::FakeTaskClock clock;
@@ -246,4 +244,3 @@ TEST_CASE("SynScan superseded pulse estimate - Tracking off over a pulse leaves 
 }
 
 #endif
-
