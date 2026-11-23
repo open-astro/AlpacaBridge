@@ -1747,7 +1747,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_, StateLock::Mode::State);  // no wire I/O: never waits behind a command (#1728 review)
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1765,7 +1765,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_, StateLock::Mode::State);  // see set_target_declination()
         target_ra_hours_ = ra;
         target_ra_set_ = true;

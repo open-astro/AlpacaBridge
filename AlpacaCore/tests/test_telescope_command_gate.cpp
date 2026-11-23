@@ -441,6 +441,64 @@ TEST_CASE("Telescope command gate - DestinationSideOfPier refuses in the order R
     CHECK(passing.calls == std::vector<std::string>{"connected", "fault"});
 }
 
+TEST_CASE("Telescope command gate - a target write refuses in the order value, connected, fault",
+          "[util][command-gate]") {
+    const TelescopeCommandLimits limits;
+    enum class Member { RightAscension, Declination };
+    struct Row {
+        Member member;
+        State state;
+        double value;
+        int expected;
+    };
+    const std::vector<Row> rows = {
+        {Member::RightAscension, State{}, 0.0, 0},
+        {Member::RightAscension, State{}, 23.99, 0},
+        {Member::RightAscension, State{}, 24.0, AlpacaError::InvalidValue},
+        {Member::RightAscension, State{}, -0.01, AlpacaError::InvalidValue},
+        {Member::RightAscension, State{}, kNaN, AlpacaError::InvalidValue},
+        {Member::RightAscension, everything_wrong(), 25.0, AlpacaError::InvalidValue},
+        {Member::RightAscension, everything_wrong(), 12.0, AlpacaError::NotConnected},
+        {Member::RightAscension, faulted(), 12.0, AlpacaError::DriverException},
+        {Member::RightAscension, parked(), 12.0, 0},  // it moves no axis
+        {Member::RightAscension, tracking_off(), 12.0, 0},
+        {Member::Declination, State{}, -90.0, 0},
+        {Member::Declination, State{}, 90.0, 0},
+        {Member::Declination, State{}, 90.01, AlpacaError::InvalidValue},
+        {Member::Declination, State{}, -90.01, AlpacaError::InvalidValue},
+        {Member::Declination, State{}, kInf, AlpacaError::InvalidValue},
+        {Member::Declination, everything_wrong(), 91.0, AlpacaError::InvalidValue},
+        {Member::Declination, everything_wrong(), 45.0, AlpacaError::NotConnected},
+        {Member::Declination, faulted(), 45.0, AlpacaError::DriverException},
+        {Member::Declination, parked(), 45.0, 0},
+        {Member::Declination, tracking_off(), 45.0, 0},
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        const bool ra = row.member == Member::RightAscension;
+        INFO((ra ? "TargetRightAscension " : "TargetDeclination ") << row.value);
+        CHECK(error_code_of([&] {
+                  if (ra) {
+                      alpacacore::util::check_target_right_ascension(limits, row.value, checks);
+                  } else {
+                      alpacacore::util::check_target_declination(limits, row.value, checks);
+                  }
+              }) == row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(checks.calls.empty());
+        }
+    }
+    // util::validate_ra() and util::validate_dec() words, with the property's name.
+    CHECK(text_of([&] { alpacacore::util::check_target_right_ascension_arguments(25.0); }) ==
+          "TargetRightAscension must be in range 0 to <24 hours");
+    CHECK(text_of([&] { alpacacore::util::check_target_declination_arguments(91.0); }) ==
+          "TargetDeclination must be in range -90 to 90 degrees");
+    RecordingChecks passing;
+    alpacacore::util::check_target_right_ascension(limits, 12.0, passing);
+    alpacacore::util::check_target_declination(limits, 45.0, passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "fault", "connected", "fault"});
+}
+
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {
     TelescopeCommandLimits limits;
     limits.pulse_guide_order = ParkedFaultOrder::NoFaultCheck;
