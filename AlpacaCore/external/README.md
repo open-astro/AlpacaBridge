@@ -50,6 +50,12 @@ The ZWO SDK is vendored as a minimal subset in `external/ZWO/ASI_Camera_SDK/`, s
 no manual download is required for standard builds. If you need to update the
 SDK version, replace only the allowlisted files and keep the set minimal.
 
+Every vendored binary has its sha256 in [`SHA256SUMS`](SHA256SUMS), and CI fails
+when a file and its line differ (issue #2633). After an SDK bump, check the new
+files against the vendor's download, then run
+`python3 scripts/check_vendor_binaries.py --write` and commit `SHA256SUMS` with
+the new files.
+
 ZWO CAA and EAF SDK subsets are vendored in `external/ZWO/CAA/` and `external/ZWO/EAF/`
 for the rotator and focuser drivers.
 

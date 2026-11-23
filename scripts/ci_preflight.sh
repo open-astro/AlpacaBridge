@@ -688,6 +688,15 @@ else
   record FAIL "contract sweep registration"
 fi
 
+# --- gate 2h: vendored binaries match AlpacaCore/external/SHA256SUMS -------
+
+section "Vendor binaries"
+if python3 scripts/check_vendor_binaries.py; then
+  record PASS "vendor binaries"
+else
+  record FAIL "vendor binaries"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 if full_only "build+test (vendors OFF)"; then
