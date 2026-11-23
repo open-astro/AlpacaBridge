@@ -700,6 +700,9 @@ public:
             check_connected();
             return;
         }
+        // The `T` write ends a running RA pulse's variable-rate move (the tracking command alone ends it), so the
+        // estimate keeps only what that pulse drove up to now (#2595).
+        trim_pulse_estimate_locked(0);
         set_tracking_mode_cached_locked(mode);
         tracking_mode_valid_ = true;
         ra_stop_unconfirmed_ = false;  // the write landed, so the mode is known again
@@ -1366,14 +1369,19 @@ public:
                 estimate_dec_degrees = equatorial.second;
             }
 
-            // Accumulate expected pulse delta in the private guide-position estimate.
+            // Accumulate expected pulse delta in the private guide-position estimate. `applied_delta` is what this
+            // pulse added (after the Dec clamp), kept so a superseded pulse can take back the part it never drove.
+            double applied_delta = 0.0;
             if (direction == 0 || direction == 1) {
                 double delta_deg = guide_rate_.dec * duration_sec;
                 if (direction == 1) delta_deg = -delta_deg;
+                const double previous_dec = estimate_dec_degrees;
                 estimate_dec_degrees = std::clamp(estimate_dec_degrees + delta_deg, -90.0, 90.0);
+                applied_delta = estimate_dec_degrees - previous_dec;
             } else {
                 double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
                 if (direction == 3) delta_hours = -delta_hours;
+                applied_delta = delta_hours;
                 estimate_ra_hours = std::fmod(estimate_ra_hours + delta_hours, 24.0);
                 if (estimate_ra_hours < 0.0) estimate_ra_hours += 24.0;
             }
@@ -1393,6 +1401,9 @@ public:
             pulse_guiding_active_[static_cast<std::size_t>(axis)] = true;
             pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
                 now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            pulse_guide_start_[static_cast<std::size_t>(axis)] = now;
+            pulse_guide_motion_end_[static_cast<std::size_t>(axis)] = now + std::chrono::milliseconds(duration);
+            pulse_guide_applied_delta_[static_cast<std::size_t>(axis)] = applied_delta;
             drop_poll_in_flight_locked();
         }
 
@@ -1451,11 +1462,40 @@ public:
         }
     }
 
+    // Takes back the part of an axis's pulse that the mount did not drive from the guide-position estimate: the pulse
+    // published its full duration at the start, and a command that ends the pulse early (a newer pulse, a Tracking
+    // write that ends the RA move) leaves the rest in front of the mount. Linear in time, as the estimate is.
+    // Idempotent per pulse: the applied delta is consumed. No wire I/O; the caller holds mutex_.
+    void trim_pulse_estimate_locked(std::size_t axis) {
+        const double applied = pulse_guide_applied_delta_[axis];
+        pulse_guide_applied_delta_[axis] = 0.0;
+        const auto now = clock_.now();
+        if (applied == 0.0 || !guide_position_valid_ || now >= pulse_guide_motion_end_[axis]) {
+            return;
+        }
+        const auto planned = pulse_guide_motion_end_[axis] - pulse_guide_start_[axis];
+        const double unrun_fraction =
+            std::chrono::duration<double>(pulse_guide_motion_end_[axis] - now) / std::chrono::duration<double>(planned);
+        const double unrun = applied * std::clamp(unrun_fraction, 0.0, 1.0);
+        if (axis == 0) {
+            guide_position_ra_hours_ = std::fmod(guide_position_ra_hours_ - unrun, 24.0);
+            if (guide_position_ra_hours_ < 0.0) guide_position_ra_hours_ += 24.0;
+        } else {
+            guide_position_dec_degrees_ = std::clamp(guide_position_dec_degrees_ - unrun, -90.0, 90.0);
+        }
+    }
+
     // Body of the per-axis pulse slot: waits out the pulse, then stops the axis.
     void run_pulse_stop_body(util::OperationContext& ctx, int axis, int duration) {
         {
             const auto axis_index = static_cast<std::size_t>(axis);
             if (!ctx.wait_for(std::chrono::milliseconds(duration))) {
+                {
+                    // The pulse ran for less than its duration: the estimate keeps only what the mount drove, so a
+                    // pulse that replaces this one does not build on the full-duration figure (#2595).
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    trim_pulse_estimate_locked(axis_index);
+                }
                 // Cancelled by replacement, AbortSlew, disconnect or
                 // destruction. Still make a best-effort attempt to stop the
                 // axis before exiting — the mount would otherwise keep slewing.
@@ -4598,6 +4638,11 @@ private:
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guiding_active_{};
     mutable std::array<util::TaskClock::clock::time_point, 2> pulse_guide_end_time_{};
+    // The running pulse's start, the end of its motion (without the completion delay) and the delta it added to the
+    // guide-position estimate (hours for RA, degrees for Dec); 0 once trimmed or when no pulse ran. Under mutex_.
+    std::array<util::TaskClock::clock::time_point, 2> pulse_guide_start_{};
+    std::array<util::TaskClock::clock::time_point, 2> pulse_guide_motion_end_{};
+    std::array<double, 2> pulse_guide_applied_delta_{};
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
