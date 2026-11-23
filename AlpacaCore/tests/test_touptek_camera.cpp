@@ -863,8 +863,8 @@ TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK TEC refuses a set point ou
 TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure time when real_time_exposure is set",
           "[touptek][camera][unit]") {
     // Falsified by: trigger() raising the frame event at once under real_time_exposure (the camera is Idle with
-    // an image ready before the exposure time has passed), or the timer ignoring stop() so the abort of an hour's
-    // exposure leaves the fake's destructor waiting an hour.
+    // an image ready before the exposure time has passed), or stop() not ending a running timer, so the aborted
+    // 1 s exposure's frame event lands in the 2 s exposure that follows and ends it after about 1 s.
     auto fake = fake_with_one_camera();
     fake.deliver_frame = true;
     fake.real_time_exposure = true;
@@ -878,10 +878,19 @@ TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure
     REQUIRE(spin_until([&] { return driver->get_image_ready(); }));
     CHECK(std::chrono::steady_clock::now() - started >= 550ms);
 
-    driver->start_exposure(3600.0, true);
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    // ConformU's abort-then-expose: the abort's stop() ends the 1 s timer, so the 2 s exposure is still running
+    // at 1.5 s.
+    const int triggers = fake.call_count("trigger");
+    const auto aborted_start = std::chrono::steady_clock::now();
+    driver->start_exposure(1.0, true);
+    REQUIRE(spin_until([&] { return fake.call_count("trigger") == triggers + 1; }));
     driver->abort_exposure();
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->start_exposure(2.0, true);
+    std::this_thread::sleep_until(aborted_start + 1500ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->abort_exposure();
     driver->set_connected(false);
 }
 

@@ -228,7 +228,8 @@ public:
         require_open(h);
     }
     // The frame event follows at once, from this thread, unless a hold keeps it
-    // back. deliver_frame decides whether the pull then finds a frame.
+    // back or real_time_exposure defers it to a timer thread for the exposure
+    // time. deliver_frame decides whether the pull then finds a frame.
     void trigger(HToupcam h, unsigned short) override {
         hit("trigger");
         require_open(h);
