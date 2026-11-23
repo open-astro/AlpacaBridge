@@ -2733,7 +2733,7 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         {
             // A refused sync must not cancel a pulse in flight (open-astro#630),
             // so gate BEFORE reaping (the copies below re-check after it).

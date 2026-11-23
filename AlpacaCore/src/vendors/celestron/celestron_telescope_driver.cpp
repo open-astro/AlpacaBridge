@@ -120,6 +120,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_stop_epsilon = 1e-6;
     limits.move_axis_order = util::ParkedFaultOrder::NoFaultCheck;
     limits.slew_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.sync_order = util::ParkedFaultOrder::NoFaultCheck;
     limits.texts.pulse_direction = "PulseGuide direction must be 0-3 and duration 0-25500 ms";
     limits.texts.pulse_duration = limits.texts.pulse_direction;
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
@@ -2499,13 +2500,12 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         // An initiator like the motion commands: its write and its publish stay one step to them (the sync used
         // to hold mutex_ across the write, which kept them out).
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SyncToCoordinates");
+        util::check_sync_state(kCommandLimits, GateChecks{*this, "SyncToCoordinates"});
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {

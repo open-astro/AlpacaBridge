@@ -74,6 +74,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
     limits.stop_checks_fault = false;
     limits.slew_order = util::ParkedFaultOrder::FaultFirst;
+    limits.sync_order = util::ParkedFaultOrder::FaultFirst;
     limits.guide_rate_ra_min = 0.0;
     limits.guide_rate_dec_min = 0.0;
     limits.texts.pulse_direction = "PulseGuide direction must be 0..3";
@@ -2282,7 +2283,7 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");
         check_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2310,14 +2311,13 @@ public:
             target_dec = target_dec_degrees_;
         }
 
-        util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
+        util::check_sync_arguments(target_ra, target_dec, "SyncToTarget");
         sync_to_pair(target_ra, target_dec, "SyncToTarget");
     }
 
     // Syncs to the given pair; callers validate it (and, for SyncToCoordinates, publish it) first.
     void sync_to_pair(double target_ra, double target_dec, const char* operation) {
-        check_connected();
-        ensure_not_parked(operation);
+        util::check_sync_state(kCommandLimits, GateChecks{*this, operation});
         // A pending setup/retry must not consume the target registers replaced by Sync.
         // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
         fence_goto();
