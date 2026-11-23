@@ -35,9 +35,9 @@ touptek	switch	fake_touptek_powerbox_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fak
 altair	camera	fake_touptek_sdk.h	pending	6	-	needs an exposure model: the Altair driver over FakeToupTekSDK, which delivers no frame unless a test turns deliver_frame on (ConformU: "The camera failed to deliver the exposure frame"); its default camera also refuses bin 3 under MaxBin 4 and its TEC takes any set point (-273.25 and 100 C accepted)
 svbony	camera	fake_svbony_sdk.h	pending	6	-	needs an exposure and guide model: FakeSVBSDK reports an exposure done at once (ConformU: ImageReady true before the exposure time elapsed), its pulse_guide returns at once where the SDK blocks for the pulse (IsPulseGuiding drops early), and it has no temperature controls (CCDTemperature and HeatSinkTemperature fail "Failed to get control value")
 gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camera-fake_gphoto_sdk-Linux-arm64.txt	-
-wandererastro	covercalibrator	fake_serial_streamer.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
-wandererastro	filterwheel	fake_serial_streamer.h	pending	6	-	needs an SFW simulator: FakeSerialStreamer repeats one fixed status frame and never applies a move command, so Position never reaches the target (ConformU: "Moving to position N" exceeded its 30 s timeout)
-wandererastro	switch	fake_serial_streamer.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
+wandererastro	covercalibrator	fake_serial_streamer.h	pending	6	-	needs a cover simulator: the row would serve one fixed status frame, so the cover angle never follows an open or close command and CoverState stays Opening or Closing; the row has no factory or host entry yet and no ConformU run was made
+wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
+wandererastro	switch	fake_serial_streamer.h	pending	6	-	needs a box simulator: the row would serve one fixed 23-field frame, so no output state or sensor value ever follows a command; the row has no factory or host entry yet and no ConformU run was made
 bisque	telescope	-	no-fake	6	-	no fake exists yet
 weewx	observingconditions	-	no-fake	6	-	no fake exists yet
 remotealpaca	observingconditions	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
