@@ -349,7 +349,7 @@ TEST_CASE(
 }
 
 // Falsified by: gemini_focuser_driver.cpp: probe() delete the cancel checks between the exchanges (a disconnect
-// during a poll waits for the ":01#" and ":06#" exchanges too, each up to one serial timeout).
+// during a poll waits for the ":00#" and ":06#" exchanges too, each up to one serial timeout).
 TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the exchange in flight only",
           "[gemini][focuser][snapshot][unit][fake]") {
     FakeGeminiFocuser fake;
@@ -357,9 +357,9 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
     REQUIRE(connect_and_park(*driver, clock, kBound));
 
-    // The next poll's first exchange (":00#") is held by the fake.
+    // The next poll's first exchange (":01#") is held by the fake.
     fake.gate_next_reply();
-    const int moving_reads = fake.count(":01#");
+    const int position_reads = fake.count(":00#");
     const int temperature_reads = fake.count(":06#");
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
@@ -376,13 +376,13 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     disconnect.join();
 
     REQUIRE(joining);
-    CHECK(fake.count(":01#") == moving_reads);
+    CHECK(fake.count(":00#") == position_reads);
     CHECK(fake.count(":06#") == temperature_reads);
     CHECK(driver->get_link_fault().empty());
 }
 
 // Falsified by: gemini_focuser_driver.cpp: ~GeminiFocuserDriver() delete the poll_cancelled_ store before
-// state_.stop_and_join() (removing a connected focuser during a poll waits for the ":01#" and ":06#" exchanges too).
+// state_.stop_and_join() (removing a connected focuser during a poll waits for the ":00#" and ":06#" exchanges too).
 TEST_CASE(
     "Gemini Focuser Snapshot - destroying a connected focuser during a poll waits for the exchange in flight only",
     "[gemini][focuser][snapshot][unit][fake]") {
@@ -392,7 +392,7 @@ TEST_CASE(
     REQUIRE(connect_and_park(*driver, clock, kBound));
 
     fake.gate_next_reply();
-    const int moving_reads = fake.count(":01#");
+    const int position_reads = fake.count(":00#");
     const int temperature_reads = fake.count(":06#");
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
@@ -409,7 +409,7 @@ TEST_CASE(
     destroy.join();
 
     REQUIRE(joining);
-    CHECK(fake.count(":01#") == moving_reads);
+    CHECK(fake.count(":00#") == position_reads);
     CHECK(fake.count(":06#") == temperature_reads);
 }
 
@@ -543,8 +543,8 @@ TEST_CASE("Gemini Focuser Link - a cable pulled during a poll ends the poll at o
     REQUIRE(rig.connect());
     const std::string old_pts = rig.fake().slave_path();
 
-    rig.fake().hold_next_reply(300ms);  // the next poll's ":00#" reply
-    std::thread pull = unplug_when_asked(rig.fake(), ":00#", rig.fake().count(":00#"));
+    rig.fake().hold_next_reply(300ms);  // the next poll's ":01#" reply
+    std::thread pull = unplug_when_asked(rig.fake(), ":01#", rig.fake().count(":01#"));
     rig.clock().advance(kTick);
     // The woken poll body runs its exchange in real time, then exits instead of parking for the next tick.
     REQUIRE(rig.clock().wait_for_woken_settled(kBound));
@@ -577,8 +577,8 @@ TEST_CASE("Gemini Focuser Link - a cable pulled during a poll's temperature read
 TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's first poll fails the Connect",
           "[gemini][focuser][unit][fake][link-lost]") {
     GeminiRig rig;
-    rig.fake().hold_reply_to(":00#", 300ms);  // the seed's first exchange sits on its reply while the cable goes
-    std::thread pull = unplug_when_asked(rig.fake(), ":00#", 0);
+    rig.fake().hold_reply_to(":01#", 300ms);  // the seed's first exchange sits on its reply while the cable goes
+    std::thread pull = unplug_when_asked(rig.fake(), ":01#", 0);
     require_alpaca_error([&] { rig.driver().set_connected(true); }, kNotConnected);
     pull.join();
     CHECK_FALSE(rig.driver().get_connected());

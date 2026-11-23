@@ -38,7 +38,7 @@ TEST_CASE("Gemini focuser - Connect to a port that goes silent after the handsha
                                                                        alpacacore::AlpacaError::DriverException);
                             }).count() /
                             1000;
-    REQUIRE(fake.count(":00#") >= 1);
+    REQUIRE(fake.count(":01#") >= 1);
     WARN("connect_ms=" << connect_ms);
     CHECK(connect_ms <= 5000);  // Platform 7 / ConformU Connecting budget
     CHECK_FALSE(driver->get_connected());
@@ -56,8 +56,8 @@ TEST_CASE("Gemini focuser - Disconnect during a silent connect-time probe waits 
         } catch (const std::exception&) {
         }
     });
-    for (int i = 0; i < 400 && fake.count(":00#") == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    REQUIRE(fake.count(":00#") >= 1);
+    for (int i = 0; i < 400 && fake.count(":01#") == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(fake.count(":01#") >= 1);
     const auto wait_ms = alpacacore::test::timed([&] { driver->set_connected(false); }).count() / 1000;
     connector.join();
     WARN("disconnect_wait_ms=" << wait_ms);
