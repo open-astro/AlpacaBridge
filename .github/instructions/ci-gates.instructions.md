@@ -139,7 +139,10 @@ author must do. Read the docstring before changing a gate.
   or `pending` with a slice and the reason it does not run) and a `no-fake` record per driver with no fake;
   docs-drift check 30 holds it to the roster both ways, so a PR that adds a roster row adds its record. A row runs
   only when its fake can pass ConformU on merit: a fake that does not model the device (a mount that never moves
-  or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
+  or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. A mount row's fake
+  answers its own wire commands from the shared `FakeMountMotionModel` (`AlpacaCore/tests/fake_mount_motion_model.h`:
+  GOTO travel time, tracking, pulses, MoveAxis, park, home, side of pier; #2614); the iOptron mount row is the first, in
+  `FakeIoptronMount`'s ConformU mode; the ZWO AM, Celestron, SynScan and OnStep mount rows stay `pending` until their fakes use it. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
   workflow's `paths:` list (the run rows' drivers and fakes, the server, the run rows' device interfaces, the HTTP
   layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
   whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the

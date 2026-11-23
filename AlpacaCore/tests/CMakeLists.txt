@@ -57,6 +57,7 @@ set(TEST_SOURCES
     test_utc_offset.cpp
     test_hold_window.cpp
     test_pointing_math.cpp
+    test_fake_mount_motion_model.cpp
     test_telescope_command_gate.cpp
     test_camera_frame_request.cpp
     test_sexagesimal.cpp
@@ -193,6 +194,8 @@ if(TARGET alpacacore_ioptron)
         test_ioptron_ifr_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # The fake mount's ConformU mode answers from the shared motion model (#2614).
+    list(APPEND TEST_SOURCES test_ioptron_fake_motion_mode.cpp)
     # Clock-sync body runs on an operation slot (issue #1368).
     list(APPEND TEST_SOURCES test_ioptron_clock_sync_slot.cpp)
     # Connected takes no lock the connect holds (issue #910).
