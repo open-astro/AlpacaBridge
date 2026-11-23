@@ -842,7 +842,7 @@ TEST_CASE("ZWO fake SDK - full-frame binned dimensions survive ROI alignment", "
     }
 }
 
-TEST_CASE("ZWO fake SDK - the ConformU camera takes every bin up to MaxBin and a full frame at each",
+TEST_CASE("FakeZWOSDK - the ConformU camera takes every bin up to MaxBin and a full frame at each",
           "[zwo][camera][unit]") {
     // Falsified by: conformu_camera() with the default 16-pixel sensor (a full frame at bin 4 is 4 wide, which the
     // width alignment refuses) or without bin 3 listed under MaxBin 4.
@@ -866,7 +866,7 @@ TEST_CASE("ZWO fake SDK - the ConformU camera takes every bin up to MaxBin and a
     }
 }
 
-TEST_CASE("ZWO fake SDK - a target temperature outside the SDK's range is refused as InvalidValue",
+TEST_CASE("FakeZWOSDK - a target temperature outside the SDK's range is refused as InvalidValue",
           "[zwo][camera][unit]") {
     // Falsified by: the TargetTemperature caps spanning -500 to 300 and the fake storing any value (-273.25 C and
     // 100 C accepted where the SDK refuses them), or a range that refuses the ends it lists (-40 C and +30 C).

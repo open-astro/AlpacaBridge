@@ -83,7 +83,7 @@ TEST_CASE("Altair Camera Driver - Defaults", "[altair][camera][unit]") {
 }
 
 TEST_CASE(
-    "Altair Camera Driver - The default fake camera takes every bin and refuses a set point outside the TEC range",
+    "Altair Camera Driver - The default FakeToupTekSDK camera takes every bin and refuses a TEC set point out of range",
     "[altair][camera][unit]") {
     // Falsified by: default_camera() listing bins 1, 2 and 4 under MaxBin 4 (bin 3 refused), or the fake TEC storing
     // any set point (-273.25 C and 100 C accepted where the SDK answers E_INVALIDARG): the Altair row shares both.

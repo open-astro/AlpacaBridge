@@ -818,7 +818,7 @@ TEST_CASE("ToupTek Camera Driver - Connected cooler members read and write the T
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek Camera Driver - The default fake camera accepts every bin up to its MaxBin",
+TEST_CASE("ToupTek Camera Driver - The default FakeToupTekSDK camera accepts every bin up to its MaxBin",
           "[touptek][camera][unit]") {
     // Falsified by: default_camera() listing bins 1, 2 and 4 under MaxBin 4, so bin 3 is refused (ConformU sets every
     // bin up to MaxBin).
@@ -837,7 +837,7 @@ TEST_CASE("ToupTek Camera Driver - The default fake camera accepts every bin up 
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek Camera Driver - The fake TEC refuses a set point outside its range as InvalidValue",
+TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK TEC refuses a set point outside its range as InvalidValue",
           "[touptek][camera][unit]") {
     // Falsified by: put_tec_target_deciC storing any value, so -273.25 C and 100 C are accepted where the SDK
     // answers E_INVALIDARG, or a range that refuses the ends it lists (-50 C and +30 C).
