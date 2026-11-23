@@ -162,6 +162,7 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope_snapshot.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_synscan_serial_ownership.cpp)
+    list(APPEND TEST_SOURCES test_synscan_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
