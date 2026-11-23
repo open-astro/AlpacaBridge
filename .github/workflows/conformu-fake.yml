@@ -188,7 +188,8 @@ jobs:
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
-                         "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek"}
+                         "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
+                         "altair": "Altair"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.

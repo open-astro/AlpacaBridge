@@ -30,6 +30,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -106,6 +107,12 @@ public:
         return sync_->wait_cv.wait_for(lock, timeout, [this] { return sync_->held_wait_entered && sync_->wait_hold; });
     }
     bool deliver_frame = false;
+    // True: a trigger's frame event follows the exposure time (put_exposure_us) in real time, from a timer
+    // thread, instead of at once, as the SDK's does; a stop() or the destructor ends the wait with no event.
+    // The ConformU factories set it: a frame that is ready at once leaves the camera no Exposing state for
+    // ConformU to see. False (the default) keeps the at-once event every other test relies on. A hold
+    // (hold_wait_image) still wins over it.
+    bool real_time_exposure = false;
     // False: the camera never raises the frame event (a lost trigger), so only an
     // abort, a disconnect or the watchdog ends the body's frame wait.
     bool frame_events = true;
@@ -169,7 +176,7 @@ public:
         info.pixel_size_um_x = 3.76F;
         info.pixel_size_um_y = 3.76F;
         info.is_color = false;
-        info.supported_bins = {1, 2, 4};
+        info.supported_bins = {1, 2, 3, 4};  // MaxBin 4 lists every bin up to it
         info.supports_cooler = true;
         info.supports_tec_onoff = true;
         info.supports_trigger_software = true;
@@ -213,13 +220,16 @@ public:
         release_wait_image();  // a held frame races the stop
         std::lock_guard<std::mutex> lock(sync_->wait_mutex);
         sync_->event_callback = nullptr;  // a stopped stream raises no more events
+        ++sync_->timer_generation;        // and a timer thread still waiting out an exposure ends
+        sync_->wait_cv.notify_all();
     }
     void put_trigger_mode(HToupcam h, int) override {
         hit("put_trigger_mode");
         require_open(h);
     }
     // The frame event follows at once, from this thread, unless a hold keeps it
-    // back. deliver_frame decides whether the pull then finds a frame.
+    // back or real_time_exposure defers it to a timer thread for the exposure
+    // time. deliver_frame decides whether the pull then finds a frame.
     void trigger(HToupcam h, unsigned short) override {
         hit("trigger");
         require_open(h);
@@ -233,6 +243,10 @@ public:
             }
             if (sync_->wait_hold) {
                 sync_->frame_pending = true;
+                return;
+            }
+            if (real_time_exposure) {
+                start_exposure_timer();
                 return;
             }
         }
@@ -403,9 +417,18 @@ public:
         require_open(h);
         return tec_on_;
     }
+    // The TEC set-point range in tenths of a degree C (what TOUPCAM_OPTION_TECTARGET_RANGE reports, -50 to +30 C
+    // here). A set point outside it is E_INVALIDARG, which the wrapper maps to InvalidValue.
+    // TODO: toupcam.h also reads a value at or below -2730 as "use the model's default"; not modelled here.
+    static constexpr int kTecTargetMinDeciC{-500};
+    static constexpr int kTecTargetMaxDeciC{300};
     void put_tec_target_deciC(HToupcam h, int v) override {
         hit("put_tec_target_deciC");
         require_open(h);
+        if (v < kTecTargetMinDeciC || v > kTecTargetMaxDeciC) {
+            throw alpacacore::AlpacaException("Toupcam_put_Option(TECTARGET): E_INVALIDARG",
+                                              alpacacore::AlpacaError::InvalidValue);
+        }
         tec_target_ = v;
     }
     int get_tec_target_deciC(HToupcam h) override {
@@ -644,19 +667,49 @@ private:
         bool frame_pending = false;  // a trigger's event the hold kept back
         void (*event_callback)(unsigned, void*) = nullptr;
         void* event_ctx = nullptr;
+        // real_time_exposure: one thread per trigger, each waiting for its deadline. A stop() or the
+        // destructor bumps the generation to end every wait that is still running; ~Sync joins them all.
+        std::vector<std::thread> timers;
+        unsigned timer_generation = 0;
+        ~Sync() {
+            {
+                std::lock_guard<std::mutex> lock(wait_mutex);
+                ++timer_generation;
+                wait_cv.notify_all();
+            }
+            for (std::thread& timer : timers) timer.join();
+        }
     };
     std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
 
     // Called with no fake lock held, as the SDK calls back from its own thread.
-    void raise_frame_event() {
+    void raise_frame_event() { raise_frame_event(*sync_, frame_events); }
+    static void raise_frame_event(Sync& sync, bool frame_events) {
         void (*callback)(unsigned, void*) = nullptr;
         void* ctx = nullptr;
         {
-            std::lock_guard<std::mutex> lock(sync_->wait_mutex);
-            callback = sync_->event_callback;
-            ctx = sync_->event_ctx;
+            std::lock_guard<std::mutex> lock(sync.wait_mutex);
+            callback = sync.event_callback;
+            ctx = sync.event_ctx;
         }
         if (callback != nullptr && frame_events) callback(vendor::touptek::kToupEventImage, ctx);
+    }
+
+    // Called with wait_mutex held. The thread sees only the Sync (the fake may move) and what it copied.
+    void start_exposure_timer() {
+        Sync* sync = sync_.get();
+        const bool events = frame_events;
+        const unsigned generation = sync->timer_generation;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(exposure_us_);
+        sync->timers.emplace_back([sync, events, generation, deadline] {
+            {
+                std::unique_lock<std::mutex> lock(sync->wait_mutex);
+                if (sync->wait_cv.wait_until(lock, deadline, [&] { return sync->timer_generation != generation; })) {
+                    return;  // a stop() or the destructor ended the exposure
+                }
+            }
+            raise_frame_event(*sync, events);
+        });
     }
 
     void hit(const char* fn) {

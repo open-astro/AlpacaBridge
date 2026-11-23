@@ -765,6 +765,7 @@ TEST_CASE("ToupTek Camera Driver - Connected binning and start position keep the
     // Falsified by: set_bin_x accepting a bin outside supported_bins (3, 0), get_bin_y not following the bin,
     // set_start_x/set_start_y accepting a negative value, or a rejected write changing the stored start.
     auto fake = fake_with_one_camera();
+    fake.cameras[0].supported_bins = {1, 2, 4};  // a camera that skips bin 3 (the default camera lists it)
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
 
@@ -814,6 +815,82 @@ TEST_CASE("ToupTek Camera Driver - Connected cooler members read and write the T
     CHECK(near(driver->get_set_ccd_temperature(), -10.4));
     CHECK(near(driver->get_heat_sink_temperature(), 21.0));
 
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - The default FakeToupTekSDK camera accepts every bin up to its MaxBin",
+          "[touptek][camera][unit]") {
+    // Falsified by: default_camera() listing bins 1, 2 and 4 under MaxBin 4, so bin 3 is refused (ConformU sets every
+    // bin up to MaxBin).
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    REQUIRE(driver->get_max_bin_x() == 4);
+    for (int bin = 1; bin <= driver->get_max_bin_x(); ++bin) {
+        INFO("bin " << bin);
+        driver->set_bin_x(bin);
+        CHECK(driver->get_bin_x() == bin);
+    }
+    require_alpaca_error([&] { driver->set_bin_x(5); }, alpacacore::AlpacaError::InvalidValue);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK TEC refuses a set point outside its range as InvalidValue",
+          "[touptek][camera][unit]") {
+    // Falsified by: put_tec_target_deciC storing any value, so -273.25 C and 100 C are accepted where the SDK
+    // answers E_INVALIDARG, or a range that refuses the ends it lists (-50 C and +30 C).
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    driver->set_set_ccd_temperature(-10.0);
+    for (const double setpoint : {-273.25, -50.1, 30.1, 100.0}) {
+        INFO("set point " << setpoint);
+        require_alpaca_error([&] { driver->set_set_ccd_temperature(setpoint); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(near(driver->get_set_ccd_temperature(), -10.0));  // a refused write leaves the target alone
+    }
+    for (const double setpoint : {-50.0, 30.0}) {
+        INFO("set point " << setpoint);
+        driver->set_set_ccd_temperature(setpoint);
+        CHECK(near(driver->get_set_ccd_temperature(), setpoint));
+    }
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure time when real_time_exposure is set",
+          "[touptek][camera][unit]") {
+    // Falsified by: trigger() raising the frame event at once under real_time_exposure (the camera is Idle with
+    // an image ready before the exposure time has passed), or stop() not ending a running timer, so the aborted
+    // 1 s exposure's frame event lands in the 2 s exposure that follows and ends it after about 1 s.
+    auto fake = fake_with_one_camera();
+    fake.deliver_frame = true;
+    fake.real_time_exposure = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    const auto started = std::chrono::steady_clock::now();
+    driver->start_exposure(0.6, true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
+    REQUIRE(spin_until([&] { return driver->get_image_ready(); }));
+    CHECK(std::chrono::steady_clock::now() - started >= 550ms);
+
+    // ConformU's abort-then-expose: the abort's stop() ends the 1 s timer, so the 2 s exposure is still running
+    // at 1.5 s.
+    const int triggers = fake.call_count("trigger");
+    const auto aborted_start = std::chrono::steady_clock::now();
+    driver->start_exposure(1.0, true);
+    REQUIRE(spin_until([&] { return fake.call_count("trigger") == triggers + 1; }));
+    driver->abort_exposure();
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->start_exposure(2.0, true);
+    std::this_thread::sleep_until(aborted_start + 1500ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->abort_exposure();
     driver->set_connected(false);
 }
 

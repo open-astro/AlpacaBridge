@@ -42,7 +42,8 @@ namespace alpacacore::test {
 // link is NotConnected before the fake is touched. The raw_* bodies below are the unchecked fake; the public methods of
 // the same name without the prefix run them under the table. get_data_after_exposure() runs unserialised, so a held
 // download never blocks the table. The attached units are camera.camera_id with `serial`, or the id -> serial map of
-// set_units() and replug(); every unit answers with the one `camera` state.
+// set_units() and replug(); every unit answers with the one `camera` state. KNOWN PARITY GAPS: a TargetTemperature
+// write outside the control's range is refused, where the SDK clamps it and returns success (ASICamera2.h:443).
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
@@ -130,6 +131,22 @@ public:
         info.is_usb3 = true;
         return info;
     }
+
+    // The camera the ConformU fake server serves (conformu_camera_factories.h): bins 1 to 4 listed under MaxBin 4 and a
+    // sensor whose binned size is a multiple of eight wide and even high at each of them, so every bin and the full
+    // frame at it is a frame the driver accepts (the default camera's 16 pixels leave 4 at bin 4, which the width
+    // alignment refuses). default_camera() keeps its 16 x 8 sensor: the unit cases pin its pixel patterns.
+    static CameraInfo conformu_camera() {
+        CameraInfo info = default_camera();
+        info.max_width = 192;
+        info.max_height = 96;
+        info.supported_bins = {1, 2, 3, 4};
+        return info;
+    }
+
+    // The TargetTemperature control's range in degrees C, the cooled ASI range (the control is in whole degrees).
+    static constexpr long kTargetTemperatureMin{-40};
+    static constexpr long kTargetTemperatureMax{30};
 
     void hold_download() {
         std::lock_guard lock(download_mutex_);
@@ -310,7 +327,8 @@ public:
             {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
             {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
             {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
-            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
+            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", kTargetTemperatureMin,
+             kTargetTemperatureMax, 0, false, true},
             {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
             {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
         if (!report_cooler_controls) {
@@ -364,6 +382,12 @@ public:
             bandwidth_auto_ = is_auto;
             const auto exposure = controls_.find(ControlType::Exposure);
             exposure_at_bandwidth_writes_.push_back(exposure == controls_.end() ? 0 : exposure->second);
+        }
+        // The SDK clamps a set point outside the control's range and returns success (ASICamera2.h:443); the fake
+        // refuses it as the harsher answer (decision 0015 rule 4), so a driver that skips its own caps check fails.
+        if (type == ControlType::TargetTemperature &&
+            (value < kTargetTemperatureMin || value > kTargetTemperatureMax)) {
+            throw AlpacaException("fake: TargetTemperature outside the control's range", AlpacaError::InvalidValue);
         }
         controls_[type] = value;
     }

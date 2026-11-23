@@ -74,6 +74,7 @@ inline FakeZWOSDK& zwo_camera_sdk() {
     // the driver discards and retakes (#2414).
     static FakeZWOSDK sdk;
     [[maybe_unused]] static const bool timed = [] {
+        sdk.camera = FakeZWOSDK::conformu_camera();
         sdk.exposure_clock = &util::default_task_clock();
         return true;
     }();
@@ -129,7 +130,12 @@ inline std::unique_ptr<CameraDriver> make_playerone_camera(int device_number) {
 struct ToupTekCameraHost {
     FakeToupTekSDK fake;
     LockedToupTekSDK sdk{fake};
-    ToupTekCameraHost() { fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One")); }
+    ToupTekCameraHost() {
+        fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+        fake.deliver_frame = true;  // an exposure ends in a frame, as on a camera (the unit default is none)
+        // The frame follows the exposure time, so ConformU sees Exposing (the unit default: at once).
+        fake.real_time_exposure = true;
+    }
 };
 #endif
 #ifdef FAKE_CONFORMU_TOUPTEK
