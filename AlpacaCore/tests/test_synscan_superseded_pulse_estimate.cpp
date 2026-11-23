@@ -8,6 +8,7 @@
 // with an additional permission allowing combination with proprietary
 // device-vendor SDKs. See the LICENSE file in this repository for the full
 // license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // A pulse that a later command supersedes drove the mount for only part of its duration. PulseGuide publishes the
 // full-duration displacement as the RightAscension/Declination estimate and holds it for the pulse, the completion
