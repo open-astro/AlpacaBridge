@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **NexStar test threads fail their case instead of ending the test run** (Celestron NexStar tests, issue #2585): in `test_celestron_async_slew_failure.cpp`, three cases ran a driver call on a `std::thread` of their own (the blocking slew in "Celestron sync - a blocking slew reaps a prior async slew task", the superseding pulse in the reaper case, and the status-poll tick in the FindHome hold-window case). An exception from that call left the thread and `std::terminate` ended the whole test binary. Each thread now catches what the call threw, and the case fails after `join()` with the message, so the run goes on to the next case.
