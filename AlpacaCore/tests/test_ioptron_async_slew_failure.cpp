@@ -82,6 +82,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
+using alpacacore::test::age_past_connect_grace;
 using alpacacore::test::require_alpaca_error;
 
 class WorkerGate {
@@ -275,7 +276,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
 
     mount.set_reject_goto(false);
     mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
-    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+    age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
     gate.arm();
     REQUIRE_NOTHROW(driver->slew_to_alt_az_async(30.0, 90.0));
     const bool worker_paused = gate.wait_until_entered();
@@ -581,7 +582,7 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         if (initiator.alt_az) {
             mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
-            clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+            age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
         }
 
         IoptronLogCapture logs;

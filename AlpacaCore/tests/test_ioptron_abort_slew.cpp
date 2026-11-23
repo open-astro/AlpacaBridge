@@ -34,6 +34,8 @@
 
 namespace {
 
+using alpacacore::test::age_past_connect_grace;
+
 alpacacore::vendor::ioptron::ConnectionInfo endpoint(int port) {
     alpacacore::vendor::ioptron::ConnectionInfo conn;
     conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
@@ -149,7 +151,7 @@ TEST_CASE("iOptron AbortSlew - an aborted equatorial GOTO finishes with Tracking
 
     driver->slew_to_coordinates_async(6.0, 45.0);
     REQUIRE(wait_for_command(mount, ":MS1#", 1));
-    clock.advance(std::chrono::seconds(31));  // past the read-back window and the status TTL
+    age_past_connect_grace(clock);            // past the read-back window and the status TTL
     REQUIRE_FALSE(driver->get_tracking());    // the firmware reports the GOTO as not tracking
 
     driver->abort_slew();
@@ -233,7 +235,7 @@ TEST_CASE("iOptron AbortSlew - an aborted Alt/Az slew after an equatorial GOTO s
     // An equatorial GOTO that lands (the default fake lands at once) and is seen landing.
     driver->slew_to_coordinates_async(6.0, 45.0);
     REQUIRE(wait_for_command(mount, ":MS1#", 1));
-    clock.advance(std::chrono::seconds(31));  // past the slew hold and the status TTL
+    age_past_connect_grace(clock);  // past the slew hold and the status TTL
     REQUIRE_FALSE(driver->get_slewing());
 
     driver->set_tracking(false);
