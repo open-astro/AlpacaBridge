@@ -542,7 +542,7 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - Device metadata", "[celestron][
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
-    CHECK(driver->get_unique_id() == "Celestron_CGX_USB_3");  // the fallback; the router assigns the stored ID
+    CHECK(driver->get_unique_id() == "Celestron_CGX_3");  // the fallback; the router assigns the stored ID
     CHECK_FALSE(driver->get_device_firmware().has_value());
 }
 

@@ -604,7 +604,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Defaults", "[celestron][cgx][tel
     CHECK(driver->get_name() == "Celestron CGX/CGX-L");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
-    CHECK(driver->get_unique_id() == "Celestron_CGX_USB_0");
+    CHECK(driver->get_unique_id() == "Celestron_CGX_0");
     CHECK_FALSE(driver->get_can_slew());
     CHECK(driver->get_can_slew_async());
     CHECK(driver->get_can_pulse_guide());
@@ -1230,7 +1230,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Device metadata", "[celestron][c
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
-    CHECK(driver->get_unique_id() == "Celestron_CGX_USB_3");
+    CHECK(driver->get_unique_id() == "Celestron_CGX_3");
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - factory rejects invalid configured ranges",

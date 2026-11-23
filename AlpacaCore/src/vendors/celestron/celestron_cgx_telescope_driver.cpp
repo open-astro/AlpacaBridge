@@ -189,7 +189,7 @@ public:
         return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L";
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
-    std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "Celestron_CGX_" + std::to_string(device_number_); }
     std::string get_description() const override {
         if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
         return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: " +

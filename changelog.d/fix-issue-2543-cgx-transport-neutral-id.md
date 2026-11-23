@@ -1,0 +1,2 @@
+### Fixed
+- **CGX fallback UniqueID no longer says USB over WiFi** (Celestron CGX telescope, issue #2543): the fallback a unit-test-built driver answers is now `Celestron_CGX_<n>` for both transports, not `Celestron_CGX_USB_<n>`. The router still assigns the stored ID (decision 0018), so a configured device's UniqueID does not change. The Celestron instructions' shared-class sentence now names both transports and how each handles a bad checksum.
