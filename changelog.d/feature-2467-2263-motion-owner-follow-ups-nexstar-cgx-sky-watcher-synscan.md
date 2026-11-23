@@ -1,3 +1,0 @@
-### Changed
-
-- **Motion-owner follow-up tests**, NexStar, CGX, Sky-Watcher and SynScan drivers, issue #2467. Adds tests that pin the #2263 motion-claim table: SynScan accepting a PulseGuide during a MoveAxis on the other axis (`test_synscan_motion_owner.cpp`), CGX's own refusal text for an ambiguous pulse and a stale RA pulse failure not blocking Dec (`test_celestron_cgx_motion_owner.cpp`), NexStar keeping a running pulse when a blocking slew's pier read fails (`test_celestron_nexstar_motion_owner.cpp`), and Sky-Watcher logging a superseded pulse dispatch at INFO (`test_skywatcher_motion_owner.cpp`). Tests only; the driver fixes follow.
