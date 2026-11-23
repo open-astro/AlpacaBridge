@@ -174,4 +174,57 @@ TEST_CASE("SynScan PulseGuide - still refused during a MoveAxis on its own axis 
     }
 }
 
+// #2467: pulse_guide() supersedes the older pulse on its axis itself (supersede_pulse_locked()), before it releases its
+// wire turn, not through the slot's start(). The hook runs in the gap between the two: the older pulse's wait runs out
+// there and its body gets the turn. Superseded, it sends nothing; otherwise its end stops the replacement's rate.
+TEST_CASE("SynScan PulseGuide - a replacement pulse supersedes the older one before its timer starts (#2467)",
+          "[synscan][telescope][pulseguiding][motion-owner]") {
+    struct Case {
+        const char* name;
+        int direction;
+        int device;
+    };
+    for (const Case c : {Case{"Dec", 0, 17}, Case{"RA", 3, 16}}) {
+        INFO(c.name);
+        PulseBesideJogRig rig;
+        alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*rig.driver, true);
+        auto ended = std::make_shared<std::promise<void>>();
+        auto started = std::make_shared<std::promise<std::thread::id>>();
+        auto first = std::make_shared<std::atomic<bool>>(false);
+        alpacacore::vendor::synscan::set_pulse_spawn_for_testing(
+            *rig.driver, [ended, started, first](std::function<void()> body) {
+                if (first->exchange(true)) {
+                    return std::thread(std::move(body));
+                }
+                std::thread thread([body = std::move(body), ended] {
+                    body();
+                    ended->set_value();
+                });
+                started->set_value(thread.get_id());
+                return thread;
+            });
+        const auto old_ended = ended->get_future().share();
+        rig.driver->pulse_guide(c.direction, 2000);
+        auto old_body = started->get_future();
+        REQUIRE(old_body.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        REQUIRE(rig.clock.wait_for_waiter_thread(old_body.get(), std::chrono::milliseconds(5000)));
+
+        // In the gap, step past the older pulse's end and wait (real time) for its body to return.
+        std::size_t after_rate = 0;
+        bool old_returned = false;
+        alpacacore::vendor::synscan::set_pulse_start_hook_for_testing(*rig.driver, [&](int) {
+            after_rate = rig.st->command_snapshot().size();
+            rig.clock.advance(std::chrono::milliseconds(2500));  // past the old pulse's 2 s, inside the new window
+            old_returned = old_ended.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        });
+        rig.driver->pulse_guide(c.direction, 2000);
+        alpacacore::vendor::synscan::set_pulse_start_hook_for_testing(*rig.driver, nullptr);
+        REQUIRE(old_returned);
+        CHECK(rig.commands_since(after_rate, [&](const std::string& command) {
+            return is_zero_rate_command(command, c.device) || command[0] == 'T';
+        }) == 0);
+        CHECK(rig.driver->get_is_pulse_guiding());
+    }
+}
+
 #endif  // !_WIN32
