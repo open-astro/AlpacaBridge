@@ -397,9 +397,13 @@ datagrams before each send so replies cannot get off-by-one.
   A goto that fails (a timed-out wait, a refused dispatch, a failed landing), async or
   synchronous, stops both axes before it drops Slewing (open-astro#2407), as a failed Park
   or FindHome does (`fail_async_phase_locked()`). It skips the stop when it was superseded
-  or when a newer command (MoveAxis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
-  because that command owns the axes. Tests: `SkyWatcher async - a goto that fails after RA started
-  stops the axes (#2407)` and its timeout and synchronous siblings.
+  or when a newer command (a MoveAxis that commands an axis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
+  because that command owns the axes. A Park or FindHome body checks no epoch: a MoveAxis is refused while
+  parking and takes no slot claim during a FindHome, so it never supersedes either body, and a FindHome's
+  failure still stops the axes, drops `homing_` and keeps its error (#2552). The rate-0 MoveAxis on an axis with no jog clears a stored failure but starts
+  no epoch, since it commands nothing. Tests: `SkyWatcher async - a goto that fails after RA started
+  stops the axes (#2407)` and its timeout and synchronous siblings, and the `(#2552)` cases in
+  `test_skywatcher_async_slew_failure.cpp`.
 - **The rest of #2407's motion-safety rules** (#2396 AB-4, AB-7, AB-9; all fake-only, no Sky-Watcher hardware):
   - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
     failure stop, cancelled-body stop, Unpark stop or cap stop that did not reach the board, an AbortSlew check that ran out
