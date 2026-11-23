@@ -2465,8 +2465,8 @@ TEST_CASE("OnStep AlignmentMode - a latched fault throws", "[onstep][telescope][
 
 // SyncToAltAz converts as SlewToAltAz does and syncs as SyncToCoordinates does. The ITelescopeV4 "may throw if
 // Tracking is True" is optional, and plate-solve syncs run while the mount tracks, so it is not refused.
-// Falsified by: copying check_alt_az_slew_locked()'s Tracking refusal into SyncToAltAz (the tracking case would
-// throw), or leaving CanSyncAltAz false.
+// Falsified by: calling util::check_alt_az_slew() in place of util::check_alt_az_sync() in sync_to_alt_az() (it adds
+// GateChecks::check_not_tracking(), so the tracking case would throw), or leaving CanSyncAltAz false.
 TEST_CASE("OnStep SyncToAltAz - syncs while tracking through :Sr, :Sd and :CM#", "[onstep][telescope][rates]") {
     Rig rig;
     connect_paused(rig);
@@ -2490,10 +2490,10 @@ TEST_CASE("OnStep SyncToAltAz - syncs while tracking through :Sr, :Sd and :CM#",
           alpacacore::AlpacaError::InvalidOperation);
 }
 
-// The order SlewToAltAz uses: the arguments (even disconnected), connected, parked, a latched fault, then the
-// GOTO check shared with SyncToCoordinates.
-// Falsified by: moving validate_alt_az() after check_connected() (the disconnected InvalidValue), or dropping the
-// GOTO check from sync_to_mount_locked().
+// The order SlewToAltAz uses: the arguments (even disconnected), connected, parked, a latched fault, the site, then
+// the GOTO check shared with SyncToCoordinates.
+// Falsified by: calling check_connected() before util::check_alt_az_sync() in sync_to_alt_az() (the disconnected
+// InvalidValue), or dropping the GOTO check from sync_to_mount_locked().
 TEST_CASE("OnStep SyncToAltAz - validation order matches SlewToAltAz", "[onstep][telescope][rates]") {
     Rig rig;
     CHECK(error_code_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);

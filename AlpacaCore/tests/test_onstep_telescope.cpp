@@ -779,8 +779,8 @@ TEST_CASE("OnStep Telescope Driver - non-finite slew and sync coordinates are re
     SECTION("SyncToCoordinates Declination") {
         require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, nan); }, alpacacore::AlpacaError::InvalidValue);
     }
-    // The alt/az entry points convert to RA/Dec through their own range check
-    // (compute_alt_az_target_locked), which NaN also passed.
+    // The alt/az entry points refuse NaN in the gate's range check
+    // (util::check_alt_az_arguments()), before the conversion to RA/Dec.
     SECTION("SlewToAltAzAsync Altitude") {
         require_alpaca_error([&]() { driver->slew_to_alt_az_async(nan, 90.0); }, alpacacore::AlpacaError::InvalidValue);
     }
