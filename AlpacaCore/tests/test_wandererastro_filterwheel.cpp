@@ -602,11 +602,14 @@ TEST_CASE("WandererAstro FilterWheel Driver - EBADF on the device's fd loses the
 }
 
 // FakeSerialStreamer SFW wheel mode: the opt-in sfw_travel argument applies a move command after the travel time.
+// The SFW ConformU factory uses the same travel (conformu_filterwheel_factories.h).
+constexpr auto kSfwTravel = std::chrono::milliseconds(600);
+
 TEST_CASE("FakeSerialStreamer - SFW mode moves the wheel after the travel time",
           "[wandererastro][filterwheel][unit][fake]") {
     alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(20), std::chrono::milliseconds(0),
-                                               std::chrono::milliseconds(600));
+                                               kSfwTravel);
     auto driver =
         alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
     driver->set_connected(true);
@@ -631,7 +634,9 @@ TEST_CASE("FakeSerialStreamer - the fixed frame ignores a move command by defaul
 
     driver->set_position(5);
     REQUIRE(wait_until_sfw([&] { return wheel.received("2006"); }, std::chrono::milliseconds(5000)));
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // Three travel times of streamed frames: if the move mode were on by default, at the factory's travel, the wheel
+    // would have landed by now.
+    std::this_thread::sleep_for(3 * kSfwTravel);
     CHECK(driver->get_position() == -1);  // the target is never reached: the stream still says slot 3
     CHECK_NOTHROW(driver->set_connected(false));
 }

@@ -19,6 +19,8 @@
 // SFW wheel mode (opt-in, sfw_travel > 0): a move command 2001..2008 changes the
 // frame's position token to that slot after the travel time, as the SFW does;
 // other commands are only recorded. Off by default: the frame never changes.
+// The mode is for SFW frames only: it finds the position as the third 'A'-delimited
+// field, so another frame layout would have the wrong field rewritten.
 // Failure modes for the issue #237 link-health tests:
 //   - set_muted(true): the stream stops, the fd stays healthy (hung MCU);
 //   - sever_link(): the pty master closes, so the driver's writes fail with
