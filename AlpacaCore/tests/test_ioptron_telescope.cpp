@@ -4056,7 +4056,7 @@ TEST_CASE("iOptron Telescope Driver - gps_status reports the GPS fix from :GLS#"
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status", "findhomeissensorsearch"});
     CHECK(driver->can_action("gps_status"));
     CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
     CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
@@ -4127,7 +4127,7 @@ TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait
     REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
 
     const auto start = std::chrono::steady_clock::now();
-    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status", "findhomeissensorsearch"});
     CHECK(driver->can_action("gps_status"));
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
 
@@ -4716,6 +4716,34 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     CHECK(contains(slewing_failure(*driver), "status could not be read at its 300 s bound"));
     CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+// Ara trusts AtHome after a FindHome it sent only when FindHome is a real sensor search. On the HAE29C EQ (0036) it
+// is the :MSH# zero sensor search (#2420); every other iOptron model's :MH# slews to the stored home.
+TEST_CASE("iOptron Telescope Driver - findhomeissensorsearch is true only on the HAE29C",
+          "[ioptron][telescope][unit][fake][findhome-sensor]") {
+    const auto [code, expected] = GENERATE(
+        std::make_pair(std::string("0036"),
+                       std::string("{\"sensor_search\":true,\"method\":\"zero_sensor_search\",\"model\":\"0036\"}")),
+        std::make_pair(std::string("0012"),
+                       std::string("{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"0012\"}")),
+        std::make_pair(std::string("0025"),
+                       std::string("{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"0025\"}")));
+    alpacacore::test::FakeIoptronMount mount(code, /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&]() { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("FindHomeIsSensorSearch"));  // action names are case-insensitive
+    CHECK(driver->action("FindHomeIsSensorSearch", "") == expected);
     driver->set_connected(false);
 }
 

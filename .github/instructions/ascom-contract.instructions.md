@@ -301,6 +301,30 @@ connected, and on Celestron only when the bus probe found the GPS module; `NotCo
 `util::format_gps_status` (`util/gps_status.h`); iOptron reads the `:GLS#` GPS digit and site, Celestron the AUX 0xB0
 GPS module (see the vendor files). OnStep does not offer it yet.
 
+### Telescope `findhomeissensorsearch` action (every telescope driver)
+
+`Action("findhomeissensorsearch")` returns the JSON string `{"sensor_search":<bool>,"method":"<word>","model":"<model>"}`
+so a client (Ara) can tell whether a completed FindHome puts the mount at its true home whatever position it believed
+before. `sensor_search` is true only when FindHome is a search on the mount's own home or zero sensors; a slew to a
+stored or power-on home is false, since a lost or wrong position lands it somewhere else. The action reads only state
+the connect cached, never the wire. It is listed in `SupportedActions` and `CanAction` is true only while connected;
+`NotConnected` otherwise. The format and the method words live in `util/findhome_sensor_search.h`; `model` is the
+mount model or code the answer depends on, else `""`. A client treats a missing action or a reply it cannot parse as
+false, and even when true trusts AtHome only after a FindHome it sent in this session that ended with no error.
+
+| Driver | `sensor_search` | `method` | Why |
+| --- | --- | --- | --- |
+| iOptron | true only for the HAE29C EQ (`0036`, `zero_search_active()`) | `zero_sensor_search` / `goto_stored_home` | The HAE29C runs the `:MSH#` zero sensor search (#2420); every other model's `:MH#` slews to the stored home. |
+| Celestron NexStar | true only for a home-switch model (CGE Pro 13, CGX 23, CGX-L 24) whose RA and Dec home switch devices (AUX 0x30, 0x31) also answered at connect | `home_switch_search` / `no_home_sensor` | FindHome is `MC_LEVEL_START` on both axes, which drives each to its switch. The model is required too because a hand controller may answer the probe for a device that is not there (an AVX, for example). |
+| Celestron CGX USB | true | `home_switch_search` | Connect refuses a CGX whose home switches do not answer. |
+| Sky-Watcher direct | true when both axes report the home index feature (bit 0x04, the Wave) | `home_index_search` / `goto_stored_home` | AutoHome hunts the index sensors; other boards' FindHome is the count-frame goto to the power-on index. |
+| Bisque / TheSkyX | false | `external_find_home` | TheSkyX's Find Home on a Paramount is likely a homing-sensor search, but the driver cannot tell which mount TheSkyX drives and no Paramount run has verified it. |
+| OnStep | false | `goto_stored_home` | `:hC#` slews to the stored home; optional OnStepX home sensors are a build option the driver cannot read. |
+| ZWO AM | false | `goto_stored_home` | `:hC#` slews to the stored home. |
+| SynScan | false | `not_supported` | The handset has no home command (CanFindHome false). |
+
+Tests: the `[findhome-sensor]` cases, one per driver.
+
 ### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
 
 A Switch that drives a camera's dew heater or fan (ZWO Dew Heater, ToupTek thermal,

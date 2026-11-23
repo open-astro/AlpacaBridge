@@ -26,6 +26,7 @@
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -1690,4 +1691,22 @@ TEST_CASE("SynScan Link - a Disconnect over a lost link keeps the relink stop fo
     driver.set_connected(true);
     REQUIRE(driver.get_connected());
     CHECK(relink_stops_first(rig.fake().handset->received()));
+}
+
+// The SynScan handset has no home command (CanFindHome is false).
+TEST_CASE("SynScan findhomeissensorsearch is false", "[synscan][telescope][findhome-sensor]") {
+    TcpRig rig;
+    REQUIRE(rig.fake().server.ok());
+    REQUIRE(rig.connect());
+    auto* const driver = &rig.driver();
+    REQUIRE(driver->get_connected());
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":false,\"method\":\"not_supported\",\"model\":\"\"}");
+    driver->set_connected(false);
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
 }

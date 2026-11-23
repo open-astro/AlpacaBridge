@@ -1133,3 +1133,4 @@ command channel. Nothing scans the network; the host is typed in.
   The HM-17 report is the OnStep ConformU validation.
   See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`
   and `SUPPORTED-DRIVERS.md`.
+- **`findhomeissensorsearch` action**: false (`goto_stored_home`); optional OnStepX home sensors are a build option the driver cannot read. Rule in [ascom-contract](ascom-contract.instructions.md#telescope-findhomeissensorsearch-action-every-telescope-driver).
