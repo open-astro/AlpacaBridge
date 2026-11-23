@@ -25,8 +25,8 @@
 #include <string>
 
 #include "catch2_compat.h"
-#include "concurrency_stress.h"  // settle_connected
 #include "fake_ioptron_mount.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -302,22 +302,23 @@ TEST_CASE("FakeIoptronMount ConformU mode: :CM# moves :GEP# to the pending targe
 
 TEST_CASE("FakeIoptronMount ConformU mode: the driver reads AtPark after Park over the model",
           "[ioptron][fake][mount-model][unit]") {
-    // A fast slew (720 degrees per second) keeps the case short; the clock is the real one.
-    FakeMountMotionModel::Config config = FakeIoptronMount::conformu_motion_config();
-    config.slew_deg_per_s = 720.0;
-    FakeIoptronMount mount("0012", std::move(config));
-    REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, seconds(10)));
+    // Decision 0005: the driver's 5 s Park hold runs on a FakeTaskClock and the model on its own hand clock; the
+    // case advances both, so it never sleeps. A fast slew (720 degrees per second) lands within that advance.
+    ModelledMount rig(720.0);
+    REQUIRE(rig.mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(rig.mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
 
     CHECK_FALSE(driver->get_at_park());
     driver->park();
-    const auto deadline = std::chrono::steady_clock::now() + seconds(15);
-    while (!driver->get_at_park() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    CHECK_FALSE(driver->get_at_park());  // inside the driver's Park hold
+    rig.advance(seconds(6));
+    clock.advance(seconds(6));  // past the hold and the status cache
     CHECK(driver->get_at_park());
-    CHECK(mount.motion()->parked());
+    CHECK(rig.mount.motion()->parked());
+    driver->set_connected(false);
 }
 
 #endif  // !_WIN32
