@@ -346,6 +346,39 @@ def self_test():
     expect(any("rule 2" in x for x in f), "a verdict with no separator before its reason does not count")
     f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a."))
     expect(any("rule 2" in x for x in f), "a verdict and period with no reason does not count")
+    # The skeleton's VERDICT word kept in front of the verdict, as the agent wrote it (#2592):
+    # the PR #2559 lines (run 45067237324) and the PR #2590 lines (run 45104172592).
+    pr2559 = ("## Defects\n\n- a parked case polls with a real-time sleep_for\n\n## Decision records\n"
+              "- 0003-docs-drift-gates.md rule 3: VERDICT: pass — the new comments in "
+              "`AlpacaCore/tests/test_contract_sweep.cpp:1507-1510` and `:1911-1912` cite no decision record, "
+              "and every file they name exists.\n"
+              "- 0005-task-clock.md rule 1: VERDICT: n/a — no driver file changed\n"
+              "- 0005-task-clock.md rule 2: VERDICT: defect — `AlpacaCore/tests/test_contract_sweep.cpp:1527-1529`: "
+              "the ZWO and OnStep drivers are adopted, and the parked case now waits for their park timers with a "
+              "real-time `sleep_for` poll.\n\n" + ISSUES_SIGN_OFF + "\n")
+    f = checklist_findings(scope, pr2559)
+    expect(f == [], "a VERDICT: token before a dash-separated verdict still counts (#2592, PR #2559): %r" % f)
+    f = checklist_findings(scope, full.replace(
+        "rule 3: pass: no gate text changed",
+        "rule 3: VERDICT: n/a: the rule covers repo paths named in instruction files, memory records, or "
+        "first-party code comments \"that cite a record\""))
+    expect(f == [], "a VERDICT: token before a colon-separated verdict still counts (#2592, PR #2590): %r" % f)
+    f = checklist_findings(scope, full.replace(
+        "rule 3: pass: no gate text changed",
+        "rule 3: VERDICT: pass. The new comments at `AlpacaHTTP/tests/test_software_update.cpp:48-49` and "
+        "`scripts/ci_preflight.sh:1018` cite only issue #2581"))
+    expect(f == [], "a VERDICT: token before a period-separated verdict still counts (#2592, PR #2590): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 1: n/a:", "rule 1: verdict : n/a:"))
+    expect(f == [], "the VERDICT: token is matched case-insensitively (#2592): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: VERDICT:"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token with no verdict does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: VERDICT: pass"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token and a verdict with no reason does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO", "rule 2: VERDICT: the ZWO"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token followed by a reason and no verdict does not count")
+    out = fold_checklist(pr2559)
+    expect("<summary>3 rules: 1 defect, 1 pass, 1 n/a</summary>" in out,
+           "the fold step counts VERDICT:-token lines by their verdict (#2592): %r" % out)
     f = checklist_findings(scope, full.replace("rule 2: n/a", "rule 2: defect"))
     expect(any("as a defect" in x for x in f), "a defect under an Approved sign-off is reported")
     issues = full.replace("rule 2: n/a", "rule 2: defect").replace(ok, ISSUES_SIGN_OFF)
