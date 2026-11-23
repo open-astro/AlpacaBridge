@@ -110,8 +110,8 @@ struct Rig {
         conn.host = "127.0.0.1";
         conn.tcp_port = server.port();
         conn.response_timeout_ms = 5000;
-        driver = sc::create_synscan_telescope_with_site(0, conn, sc::SynScanVersion::V4, -33.5, 151.0, std::nullopt,
-                                                        false, sc::SynScanAlignmentSetting::Auto, clock);
+        driver = sc::create_synscan_telescope_with_site(0, conn, sc::SynScanVersion::V4, -33.856784, 151.215297,
+                                                        std::nullopt, false, sc::SynScanAlignmentSetting::Auto, clock);
         REQUIRE(alpacacore::test::connect_and_park(*driver, clock, kBound));
         REQUIRE(driver->get_connected());
         sc::set_status_poll_paused_for_testing(*driver, true);
