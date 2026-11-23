@@ -82,6 +82,32 @@ TEST_CASE("Altair Camera Driver - Defaults", "[altair][camera][unit]") {
     CHECK(driver->get_has_shutter() == false);
 }
 
+TEST_CASE(
+    "Altair Camera Driver - The default fake camera takes every bin and refuses a set point outside the TEC range",
+    "[altair][camera][unit]") {
+    // Falsified by: default_camera() listing bins 1, 2 and 4 under MaxBin 4 (bin 3 refused), or the fake TEC storing
+    // any set point (-273.25 C and 100 C accepted where the SDK answers E_INVALIDARG): the Altair row shares both.
+    FakeToupTekSDK fake;
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("altair-0", "Altair One"));
+    auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    REQUIRE(driver->get_max_bin_x() == 4);
+    for (int bin = 1; bin <= driver->get_max_bin_x(); ++bin) {
+        INFO("bin " << bin);
+        driver->set_bin_x(bin);
+        CHECK(driver->get_bin_x() == bin);
+    }
+    for (const double setpoint : {-273.25, 100.0}) {
+        INFO("set point " << setpoint);
+        require_alpaca_error([&] { driver->set_set_ccd_temperature(setpoint); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_set_ccd_temperature(-10.0);
+    CHECK(driver->get_set_ccd_temperature() == Catch::Approx(-10.0));
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("Altair Camera Driver - Device metadata", "[altair][camera][unit]") {
     FakeToupTekSDK fake;
     auto driver = alpacacore::vendor::altair::create_altair_camera(3, 1, fake);

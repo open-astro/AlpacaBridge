@@ -842,6 +842,55 @@ TEST_CASE("ZWO fake SDK - full-frame binned dimensions survive ROI alignment", "
     }
 }
 
+TEST_CASE("ZWO fake SDK - the ConformU camera takes every bin up to MaxBin and a full frame at each",
+          "[zwo][camera][unit]") {
+    // Falsified by: conformu_camera() with the default 16-pixel sensor (a full frame at bin 4 is 4 wide, which the
+    // width alignment refuses) or without bin 3 listed under MaxBin 4.
+    FakeZWOSDK sdk;
+    sdk.camera = FakeZWOSDK::conformu_camera();
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+
+    REQUIRE(camera->get_max_bin_x() == 4);
+    for (int bin = 1; bin <= camera->get_max_bin_x(); ++bin) {
+        INFO("bin " << bin);
+        camera->set_bin_x(bin);
+        camera->set_bin_y(bin);
+        camera->set_num_x(camera->get_camera_x_size() / bin);
+        camera->set_num_y(camera->get_camera_y_size() / bin);
+        CHECK(error_code_of([&] { camera->start_exposure(0.001, true); }) == 0);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera));
+        const auto image = camera->get_image_array();
+        CHECK(image.width == camera->get_camera_x_size() / bin);
+        CHECK(image.height == camera->get_camera_y_size() / bin);
+    }
+}
+
+TEST_CASE("ZWO fake SDK - a target temperature outside the SDK's range is refused as InvalidValue",
+          "[zwo][camera][unit]") {
+    // Falsified by: the TargetTemperature caps spanning -500 to 300 and the fake storing any value (-273.25 C and
+    // 100 C accepted where the SDK refuses them), or a range that refuses the ends it lists (-40 C and +30 C).
+    FakeZWOSDK sdk;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+
+    camera->set_set_ccd_temperature(-10.0);
+    for (const double setpoint : {-273.25, -40.5, 30.5, 100.0}) {
+        INFO("set point " << setpoint);
+        CHECK(error_code_of([&] { camera->set_set_ccd_temperature(setpoint); }) == AlpacaError::InvalidValue);
+        CHECK(camera->get_set_ccd_temperature() == -10.0);
+    }
+    for (const double setpoint : {-40.0, 30.0}) {
+        INFO("set point " << setpoint);
+        camera->set_set_ccd_temperature(setpoint);
+        CHECK(camera->get_set_ccd_temperature() == setpoint);
+    }
+    // The SDK itself refuses what the driver's own range check would also stop.
+    CHECK(error_code_of([&] {
+              sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::TargetTemperature, 100, false);
+          }) == AlpacaError::InvalidValue);
+}
+
 // Rule 10 (issue #1981): an SDK error while setting the exposure register or triggering the exposure no longer raises
 // from StartExposure; it ends the exposure and ImageReady raises it. The new start discarded the earlier image; the
 // earlier LastExposure* stay.

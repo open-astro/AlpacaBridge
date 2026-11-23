@@ -169,7 +169,7 @@ public:
         info.pixel_size_um_x = 3.76F;
         info.pixel_size_um_y = 3.76F;
         info.is_color = false;
-        info.supported_bins = {1, 2, 4};
+        info.supported_bins = {1, 2, 3, 4};  // MaxBin 4 lists every bin up to it
         info.supports_cooler = true;
         info.supports_tec_onoff = true;
         info.supports_trigger_software = true;
@@ -403,9 +403,18 @@ public:
         require_open(h);
         return tec_on_;
     }
+    // The TEC set-point range in tenths of a degree C (what TOUPCAM_OPTION_TECTARGET_RANGE reports, -50 to +30 C
+    // here). A set point outside it is E_INVALIDARG, which the wrapper maps to InvalidValue.
+    // TODO: toupcam.h also reads a value at or below -2730 as "use the model's default"; not modelled here.
+    static constexpr int kTecTargetMinDeciC{-500};
+    static constexpr int kTecTargetMaxDeciC{300};
     void put_tec_target_deciC(HToupcam h, int v) override {
         hit("put_tec_target_deciC");
         require_open(h);
+        if (v < kTecTargetMinDeciC || v > kTecTargetMaxDeciC) {
+            throw alpacacore::AlpacaException("Toupcam_put_Option(TECTARGET): E_INVALIDARG",
+                                              alpacacore::AlpacaError::InvalidValue);
+        }
         tec_target_ = v;
     }
     int get_tec_target_deciC(HToupcam h) override {

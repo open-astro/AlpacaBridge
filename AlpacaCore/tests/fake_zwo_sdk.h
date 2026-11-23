@@ -131,6 +131,22 @@ public:
         return info;
     }
 
+    // The camera the ConformU fake server serves (conformu_camera_factories.h): bins 1 to 4 listed under MaxBin 4 and a
+    // sensor whose binned size is a multiple of eight wide and even high at each of them, so every bin and the full
+    // frame at it is a frame the driver accepts (the default camera's 16 pixels leave 4 at bin 4, which the width
+    // alignment refuses). default_camera() keeps its 16 x 8 sensor: the unit cases pin its pixel patterns.
+    static CameraInfo conformu_camera() {
+        CameraInfo info = default_camera();
+        info.max_width = 192;
+        info.max_height = 96;
+        info.supported_bins = {1, 2, 3, 4};
+        return info;
+    }
+
+    // The TargetTemperature control's range in degrees C, the cooled ASI range (the control is in whole degrees).
+    static constexpr long kTargetTemperatureMin{-40};
+    static constexpr long kTargetTemperatureMax{30};
+
     void hold_download() {
         std::lock_guard lock(download_mutex_);
         download_held_ = true;
@@ -310,7 +326,8 @@ public:
             {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
             {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
             {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
-            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
+            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", kTargetTemperatureMin,
+             kTargetTemperatureMax, 0, false, true},
             {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
             {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
         if (!report_cooler_controls) {
@@ -364,6 +381,11 @@ public:
             bandwidth_auto_ = is_auto;
             const auto exposure = controls_.find(ControlType::Exposure);
             exposure_at_bandwidth_writes_.push_back(exposure == controls_.end() ? 0 : exposure->second);
+        }
+        // The SDK refuses a set point outside the control's range (ASI_ERROR_INVALID_VALUE) rather than clamp it.
+        if (type == ControlType::TargetTemperature &&
+            (value < kTargetTemperatureMin || value > kTargetTemperatureMax)) {
+            throw AlpacaException("ASI_ERROR_INVALID_VALUE", AlpacaError::InvalidValue);
         }
         controls_[type] = value;
     }
