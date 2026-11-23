@@ -95,8 +95,8 @@ struct SinkGuard {
 // #2467: the per-axis stop-waits that nothing pinned. Each parks on a Dec or RA axis that reads running, and a
 // MoveAxis on the OTHER axis lands in the window: it claims one axis, so the wait is not superseded and finishes.
 // Tracking=false waits RA, then the running Dec offset.
-// Falsified by: skywatcher_telescope_driver.cpp set_tracking(false) throwing "Tracking change superseded" for a
-// one-axis claim, i.e. claim_lost_locked() answering true for a claim on the other axis.
+// Falsified by: skywatcher_telescope_driver.cpp set_tracking(false) dropping its Dec stop_axis_and_wait_locked(): the
+// Dec offset is never stopped.
 TEST_CASE("SkyWatcher motion owner - an RA MoveAxis during Tracking=false's Dec offset stop-wait does not supersede it",
           "[skywatcher][motion-owner]") {
     FakeTaskClock clock;
