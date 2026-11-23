@@ -113,6 +113,7 @@ TEST_CASE("HostClockWriteGate - the latch trusts the host clock with no kernel s
 }
 
 TEST_CASE("HostClockWriteGate - an owed write is taken once, and dropped by a connect", "[hostclock][gate]") {
+    alpacacore::test::HostClockTrustGuard untrusted(false);
     HostClockWriteGate gate("Gate");
     CHECK_FALSE(gate.owed());
     CHECK_FALSE(gate.take_owed());

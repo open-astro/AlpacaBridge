@@ -4934,3 +4934,29 @@ TEST_CASE("iOptron goto-safety - PulseGuide on the jogging axis is refused and t
         driver->set_connected(false);
     }
 }
+
+// Issue #2504, the settle trim boundary (HAE16, 0012, lands 12" off so a trim is due): a pulse while the GOTO has
+// not been seen stopped is refused; once PulseGuide's own status read sees the mount stopped, the client's pulse is
+// accepted and takes over from the trim that has not gone out (#2063).
+// Falsified by: ioptron_telescope_driver.cpp pulse_guide() refusing on slew_in_progress_ alone (the stop seen leg).
+TEST_CASE("iOptron goto-safety - PulseGuide refused before a trimmed GOTO is seen stopped, accepted after (#2504)",
+          "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    const int pulses = mount.count(":Z");
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.count(":Z") == pulses);
+
+    // The fake landed 12" off and reads stopped; nobody polled Slewing, so no trim has gone out.
+    clock.advance(std::chrono::seconds(6));
+    driver->pulse_guide(3, 3000);
+    CHECK(mount.count(":Z") == pulses + 1);
+    CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}

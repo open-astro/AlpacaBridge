@@ -1166,6 +1166,9 @@ public:
         };
         // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        // Built before the gate, so a refusal, a stop or any throw after the flag is set leaves it clear; MoveAxis
+        // calls run one at a time under initiator_mutex_, so no other call's flag is cleared.
+        const JogPendingGuard pending{*this, axis};
         {
             std::lock_guard<std::mutex> lock(mutex_);
             util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
@@ -1180,7 +1183,6 @@ public:
                 jog_pending_[axis] = true;
             }
         }
-        const JogPendingGuard pending{*this, axis};  // a stop set nothing: MoveAxis calls run one at a time
 
         auto& protocol = BisqueProtocolWrapper::instance();
 

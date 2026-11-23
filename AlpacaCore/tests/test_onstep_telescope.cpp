@@ -2773,8 +2773,8 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew and a MoveAxis stop on its axis e
 // PulseGuide is refused with InvalidOperation while the driver's own slew, park or home runs: before anything is sent,
 // with nothing stopped. Each leg covers the window the driver alone knows (the slew grace, the write-through of a
 // park or home the mount took, a Park still to be sent after its stops) and the one the mount's status shows (a GOTO,
-// 'I' parking, 'h' homing). Once the motion ends the pulse is accepted; a park ends parked, where InvalidWhileParked
-// answers, as before.
+// 'I' parking, also with no GOTO, 'h' homing). Once the motion ends the pulse is accepted; a park ends parked, where
+// InvalidWhileParked answers, as before.
 TEST_CASE(
     "OnStep Telescope Driver - PulseGuide while a GOTO, Park or FindHome runs is refused and sends nothing (#2504)",
     "[onstep][telescope][unit][goto-safety]") {
@@ -2825,6 +2825,9 @@ TEST_CASE(
         REQUIRE_NOTHROW(driver->park());  // a still mount: :hP# goes out at once and the mount takes it
         refused(0);                       // the park's write-through
         poll();                           // the mount shows 'I' and the GOTO
+        refused(2);
+        change([](ParkHomeFake& m) { m.goto_active = false; });
+        poll();  // 'I' alone, no GOTO: only the parking letter refuses now
         refused(2);
         change([](ParkHomeFake& m) {
             m.parking = false;

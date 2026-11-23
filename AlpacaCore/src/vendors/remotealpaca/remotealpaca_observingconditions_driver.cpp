@@ -487,6 +487,9 @@ private:
         state_.stop_and_join();  // a lost link's poll has returned or is returning; join it so a fresh one starts
         // A command body from before (an AveragePeriod write-through) must not land on this Connect's frame.
         command_op_.cancel_all_and_join();
+        // A loss a getter latched while the poll waited its tick never ran on_lost(): without this, reset() would clear
+        // the latch and the link read connected before this Connect has a frame.
+        connected_.store(false);
         state_.reset();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -744,9 +747,9 @@ private:
 
     // Guards set_connected() against a concurrent set_connected() only (#528).
     std::mutex transition_mutex_;
-    // Last, so the slots are destroyed (and their bodies joined) before anything the bodies touch: the frame, its
-    // poll and the link's fault and loss latches (decision 0010 rule 7, #2496), then the command slot, whose bodies
-    // publish to the frame.
+    // Last, so their bodies are joined before the members the bodies touch die. state_ (decision 0010 rule 7, #2496)
+    // holds the frame, the poll and the link's fault and loss latches. The command slot comes after it, so the
+    // command bodies, which publish to the frame, are joined before state_ dies.
     util::OperationGeneration poll_generation_;
     util::PolledState<Frame> state_;
     util::OperationGeneration command_generation_;
