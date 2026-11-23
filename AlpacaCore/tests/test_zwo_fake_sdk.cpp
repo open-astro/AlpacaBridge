@@ -869,7 +869,7 @@ TEST_CASE("FakeZWOSDK - the ConformU camera takes every bin up to MaxBin and a f
 TEST_CASE("FakeZWOSDK - a target temperature outside the SDK's range is refused as InvalidValue",
           "[zwo][camera][unit]") {
     // Falsified by: the TargetTemperature caps spanning -500 to 300 and the fake storing any value (-273.25 C and
-    // 100 C accepted where the SDK refuses them), or a range that refuses the ends it lists (-40 C and +30 C).
+    // 100 C accepted), or a range that refuses the ends it lists (-40 C and +30 C).
     FakeZWOSDK sdk;
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     connect_camera(*camera);
@@ -885,7 +885,8 @@ TEST_CASE("FakeZWOSDK - a target temperature outside the SDK's range is refused 
         camera->set_set_ccd_temperature(setpoint);
         CHECK(camera->get_set_ccd_temperature() == setpoint);
     }
-    // The SDK itself refuses what the driver's own range check would also stop.
+    // The fake refuses an out-of-range write where the SDK clamps it (ASICamera2.h:443, decision 0015 rule 4): the
+    // driver's own caps check is what stops a set point on a real camera, never the SDK.
     CHECK(error_code_of([&] {
               sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::TargetTemperature, 100, false);
           }) == AlpacaError::InvalidValue);

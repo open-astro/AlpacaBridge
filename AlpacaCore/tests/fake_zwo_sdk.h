@@ -42,7 +42,8 @@ namespace alpacacore::test {
 // link is NotConnected before the fake is touched. The raw_* bodies below are the unchecked fake; the public methods of
 // the same name without the prefix run them under the table. get_data_after_exposure() runs unserialised, so a held
 // download never blocks the table. The attached units are camera.camera_id with `serial`, or the id -> serial map of
-// set_units() and replug(); every unit answers with the one `camera` state.
+// set_units() and replug(); every unit answers with the one `camera` state. KNOWN PARITY GAPS: a TargetTemperature
+// write outside the control's range is refused, where the SDK clamps it and returns success (ASICamera2.h:443).
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
@@ -382,10 +383,11 @@ public:
             const auto exposure = controls_.find(ControlType::Exposure);
             exposure_at_bandwidth_writes_.push_back(exposure == controls_.end() ? 0 : exposure->second);
         }
-        // The SDK refuses a set point outside the control's range (ASI_ERROR_INVALID_VALUE) rather than clamp it.
+        // The SDK clamps a set point outside the control's range and returns success (ASICamera2.h:443); the fake
+        // refuses it as the harsher answer (decision 0015 rule 4), so a driver that skips its own caps check fails.
         if (type == ControlType::TargetTemperature &&
             (value < kTargetTemperatureMin || value > kTargetTemperatureMax)) {
-            throw AlpacaException("ASI_ERROR_INVALID_VALUE", AlpacaError::InvalidValue);
+            throw AlpacaException("fake: TargetTemperature outside the control's range", AlpacaError::InvalidValue);
         }
         controls_[type] = value;
     }
