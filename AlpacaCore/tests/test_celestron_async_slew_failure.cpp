@@ -1314,6 +1314,7 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
           "[celestron][telescope][async][pulseguiding]") {
     std::atomic<bool> at_window{false};
     std::atomic<int> fired{0};
+    std::atomic<std::thread::id> pulse_thread{};  // the first pulse body's thread; outlives the driver
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset();
     alpacacore::test::FakeMountServer server(st->responder());
@@ -1323,12 +1324,17 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    // The status poll (util::PolledState) parks on the clock as soon as Connect starts it, and nothing advances the
-    // clock before the reaper has run, so once it is parked the pulse task below is the first thread at the hook
-    // (#2598).
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(5000)));
-    REQUIRE(clock.waiter_count() == 1);
+    // The status poll (util::PolledState) also waits on this clock, so the hook holds only the first pulse body's
+    // thread, taken from the pulse spawn seam (#2598).
+    alpacacore::vendor::celestron::set_pulse_spawn_for_testing(*driver, [&](std::function<void()> body) {
+        return std::thread([&pulse_thread, body = std::move(body)] {
+            std::thread::id none{};
+            pulse_thread.compare_exchange_strong(none, std::this_thread::get_id());
+            body();
+        });
+    });
     clock.set_before_block([&](const std::function<bool()>& pred) {
+        if (std::this_thread::get_id() != pulse_thread.load()) return;
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
             // The slot runs the predicate and the block under its one mutex,
