@@ -115,6 +115,9 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.pulse_guide_max_ms = kPulseGuideMaxMs;
     limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
     limits.move_axis_axes = 2;
+    // Bisque's stop is |rate| < 1e-9, strictly under. The gate's test is <=, so the epsilon is the largest double under
+    // 1e-9 (std::nextafter(1e-9, 0.0), not constexpr before C++23): 1e-9 itself stays a move (#2582).
+    limits.move_axis_stop_epsilon = 0x1.12e0be826d694p-30;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
     limits.slew_order = util::ParkedFaultOrder::FaultFirst;
     limits.guide_rate_ra_min = 0.0;
@@ -128,6 +131,9 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.tracking_rate = "Only sidereal tracking rate is currently supported";
     return limits;
 }();
+// The hand-written epsilon stays just under 1e-9, so 1e-9 is a move and anything smaller a stop (#2582).
+static_assert(kCommandLimits.move_axis_stop_epsilon < 1e-9 && kCommandLimits.move_axis_stop_epsilon > 0.9999e-9,
+              "the Bisque MoveAxis stop epsilon is the largest double under 1e-9");
 
 // Find the closest slewspeed index for a given rate in degrees/sec.
 int rate_to_speed_index(double rate_deg_per_sec) {
@@ -151,7 +157,7 @@ int rate_to_speed_index(double rate_deg_per_sec) {
 namespace detail {
 
 void validate_move_axis_rate(double rate) {
-    // A NaN rate fails the |rate| < 1e-9 stop test and would reach rate_to_speed_index().
+    // A NaN rate fails the gate's stop test and would reach rate_to_speed_index().
     util::check_move_axis_arguments(kCommandLimits, /*axis=*/0, rate);
 }
 
@@ -1152,7 +1158,8 @@ public:
             throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         util::check_move_axis_arguments(kCommandLimits, axis, rate);
-        const bool stop = std::abs(rate) < 1e-9;
+        // The gate's stop test, decided before the locks; the state half runs under mutex_ below.
+        const bool stop = util::is_move_axis_stop(kCommandLimits, rate);
 
         // #2503: a jog's start is pending from its gate to every exit, a throw included. Its flag is set only once
         // TheSkyX answers, and PulseGuide does not take initiator_mutex_, so the pulse refusal reads both.
