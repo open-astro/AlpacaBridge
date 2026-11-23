@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/link_health.h>
@@ -816,6 +817,31 @@ public:
         }
     }
 
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
+
+    std::string action(std::string_view action_name, std::string_view action_parameters) override {
+        (void)action_parameters;
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // From the feature inquiry at connect, no device I/O: a board that reports the home index sensor on
+            // both axes (Wave) runs AutoHome, which hunts the sensor and re-anchors the count frame. Every other
+            // board's FindHome is the count-frame goto to the power-on index, true only if powered on at home.
+            if (!get_connected())
+                throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            const bool sensor_search = has_home_indexer_;
+            return util::format_findhome_sensor_search(
+                sensor_search, sensor_search ? util::kFindHomeIndexSearch : util::kFindHomeGotoStoredHome, "");
+        }
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
+
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
+    }
+
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
         StateLock lock(lock_gate_);
@@ -963,9 +989,8 @@ public:
     // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
     // glitches) — both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
-        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
-            throw AlpacaException("DeclinationRate must be finite", AlpacaError::InvalidValue);
-        }
+        // #2287: the argument check runs first; NaN was stored and applied
+        util::check_rate_offset_arguments(kCommandLimits, util::RateOffsetAxis::Declination, rate);
         {
             // Idempotence check BEFORE reaping: a same-value rewrite must not
             // tear down a running duty worker it would never restart.
@@ -1179,9 +1204,8 @@ public:
     // (RA = LST - HA), so the offset is SUBTRACTED; a large offset reverses
     // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
-        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
-            throw AlpacaException("RightAscensionRate must be finite", AlpacaError::InvalidValue);
-        }
+        // #2287: the argument check runs first; NaN was stored and applied
+        util::check_rate_offset_arguments(kCommandLimits, util::RateOffsetAxis::RightAscension, rate);
         StateLock lock(lock_gate_);
         check_writable_locked();
         require_site_locked();  // the RA drive direction reads the hemisphere

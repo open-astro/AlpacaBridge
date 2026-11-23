@@ -30,6 +30,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -43,6 +44,27 @@ using alpacahttp::util::InstallerState;
 using alpacahttp::util::SoftwareUpdateBackend;
 using alpacahttp::util::SoftwareUpdateError;
 using alpacahttp::util::SoftwareUpdateManager;
+
+// A fresh directory per run (mkdtemp), removed when the case's scope ends, so two runs on one machine never share
+// one (#2581). An EXPECT failure aborts and runs no destructor: that run's directory stays, under its own name.
+class TempDir {
+public:
+    explicit TempDir(const char* stem) {
+        std::string tmpl = (std::filesystem::temp_directory_path() / (std::string(stem) + "-XXXXXX")).string();
+        EXPECT(::mkdtemp(tmpl.data()) != nullptr);
+        path_ = tmpl;
+    }
+    ~TempDir() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
 
 // Scripted backend: canned index (or a throw), a recorded start, a settable
 // installer state.
@@ -1009,8 +1031,8 @@ int main() {
         // the Stable expectations; removing the trap from the helper also fails it (the beta drop-in stays behind,
         // the backup file stays, and no `killed by` line is written).
         namespace fs = std::filesystem;
-        const fs::path dir = fs::temp_directory_path() / "alpacabridge-channel-trap-test";
-        fs::remove_all(dir);
+        const TempDir temp("alpacabridge-channel-trap");
+        const fs::path& dir = temp.path();
         fs::create_directories(dir / "bin");
         const std::string text = read_file((repo_root / "debian" / "alpacabridge-set-update-channel").string());
         const auto replace_line = [&](std::string body, const std::string& prefix, const std::string& value) {
@@ -1089,7 +1111,6 @@ int main() {
         EXPECT(backend.read_channel() == UpdateChannel::Stable);
         EXPECT(!fs::exists(dropin));
         EXPECT(leftovers() == 0);
-        fs::remove_all(dir);
     }
 
     {
@@ -1283,9 +1304,8 @@ int main() {
 
     {
         // case: the system backend reads the channel from the drop-in marker file
-        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "alpacabridge-channel-marker-test";
-        std::filesystem::remove_all(dir);
-        std::filesystem::create_directories(dir);
+        const TempDir temp("alpacabridge-channel-marker");
+        const std::filesystem::path& dir = temp.path();
         const std::string marker = (dir / "alpacabridge-beta.sources").string();
         alpacahttp::util::SystemSoftwareUpdateBackend backend("alpacabridge-update.service", (dir / "u.log").string(),
                                                               marker, (dir / "c.log").string());
@@ -1294,7 +1314,6 @@ int main() {
         EXPECT(backend.read_channel() == UpdateChannel::Beta);
         std::filesystem::remove(marker);
         EXPECT(backend.read_channel() == UpdateChannel::Stable);
-        std::filesystem::remove_all(dir);
     }
 
     std::cout << "All software update tests passed!\n";

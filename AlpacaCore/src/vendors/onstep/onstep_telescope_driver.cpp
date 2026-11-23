@@ -18,6 +18,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/host_clock_write_gate.h>
@@ -120,6 +121,13 @@ constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 constexpr int kCeNone = 0;
 // The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
 constexpr int kMaxPulseGuideMs = 9999;
+// Rate offsets (OnStepX :SXTR/:SXTD/:GXTR/:GXTD, Mount.command.cpp af1d26bf) are in arcseconds per sidereal second.
+// ASCOM RightAscensionRate is seconds of RA per sidereal second (x 15) and DeclinationRate arcseconds per SI second
+// (x kSiSecondsPerSiderealSecond). The firmware clamps silently at +/-1800, so a larger request is refused.
+constexpr double kRaArcsecPerRaSecond = 15.0;
+constexpr double kSiSecondsPerSiderealSecond = 0.9972695663;
+constexpr double kRateOffsetLimitArcsecPerSiderealSecond = 1800.0;
+
 // OnStep's limits, orders and argument texts for the telescope command gate (#2258). PulseGuide checks the fault
 // before the parked state; MoveAxis and the slews check it after. The :Mg[nsew]#### duration field is 4 digits, so a
 // longer pulse is refused instead of pulsing for less than asked (#1478). MoveAxis moves axes 0 and 1; a rate at or
@@ -137,6 +145,16 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.stop_checks_fault = false;
     limits.tracking_rate_max = 3;
     limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), 2 (solar) or 3 (King)";
+    limits.rate_offset_ra_scale = kRaArcsecPerRaSecond;
+    limits.rate_offset_dec_scale = kSiSecondsPerSiderealSecond;
+    limits.rate_offset_max = kRateOffsetLimitArcsecPerSiderealSecond;
+    static_assert(kRateOffsetLimitArcsecPerSiderealSecond == 1800.0, "the rate-offset texts name the limit");
+    limits.texts.right_ascension_rate_not_finite = limits.texts.right_ascension_rate_range =
+        "RightAscensionRate must be within +/-1800 arcseconds per sidereal second at the mount (the firmware clamps "
+        "beyond it)";
+    limits.texts.declination_rate_not_finite = limits.texts.declination_rate_range =
+        "DeclinationRate must be within +/-1800 arcseconds per sidereal second at the mount (the firmware clamps "
+        "beyond it)";
     return limits;
 }();
 constexpr int kCeSlewInMotion = 22;
@@ -237,13 +255,6 @@ bool firmware_answers_product_description(const std::string& version) {
 constexpr double kInformationalGuideRateDegPerSec = (15.0411 / 3600.0) * 0.5;
 // The sidereal rate in arcseconds per SI second, the unit of :GX90#'s multiple.
 constexpr double kSiderealArcsecPerSecond = 15.0410686;
-
-// Rate offsets (OnStepX :SXTR/:SXTD/:GXTR/:GXTD, Mount.command.cpp af1d26bf) are in arcseconds per sidereal second.
-// ASCOM RightAscensionRate is seconds of RA per sidereal second (x 15) and DeclinationRate arcseconds per SI second
-// (x kSiSecondsPerSiderealSecond). The firmware clamps silently at +/-1800, so a larger request is refused.
-constexpr double kRaArcsecPerRaSecond = 15.0;
-constexpr double kSiSecondsPerSiderealSecond = 0.9972695663;
-constexpr double kRateOffsetLimitArcsecPerSiderealSecond = 1800.0;
 
 // #2241: while a rate offset runs, RightAscension and Declination (and so DeviceState) serve the commanded model, the
 // anchor plus the offsets times the sidereal seconds since it, instead of the frame, which is up to a poll period old
@@ -1172,6 +1183,27 @@ public:
         }
     }
 
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
+
+    std::string action(std::string_view action_name, std::string_view action_parameters) override {
+        (void)action_parameters;
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // FindHome sends :hC#, a slew to the home position the controller stores. OnStepX can be built with
+            // home sensors, but the driver cannot read that build option, so it reports false.
+            if (!get_connected()) throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
+            const bool sensor_search = false;
+            return util::format_findhome_sensor_search(sensor_search, util::kFindHomeGotoStoredHome, "");
+        }
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
+
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
+    }
+
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
         StateLock lock(lock_gate_);
@@ -1433,13 +1465,9 @@ public:
     // the firmware (OnStep 4.x has no offset command), a latched fault, then TrackingRate not sidereal
     // (InvalidOperation, ITelescopeV4). A refusal throws with the :GE# reason (#1379).
     void set_rate_offset(const char* who, double rate, double to_firmware, bool ra) {
+        util::check_rate_offset_arguments(
+            kCommandLimits, ra ? util::RateOffsetAxis::RightAscension : util::RateOffsetAxis::Declination, rate);
         const double offset = rate * to_firmware;
-        if (!std::isfinite(offset) || std::fabs(offset) > kRateOffsetLimitArcsecPerSiderealSecond) {
-            throw AlpacaException(std::string(who) + " must be within +/-" +
-                                      std::to_string(static_cast<int>(kRateOffsetLimitArcsecPerSiderealSecond)) +
-                                      " arcseconds per sidereal second at the mount (the firmware clamps beyond it)",
-                                  AlpacaError::InvalidValue);
-        }
         StateLock lock(lock_gate_);
         check_connected();
         if (!onstepx_) {

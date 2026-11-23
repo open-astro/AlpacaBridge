@@ -2098,4 +2098,18 @@ TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a GOTO or a Mo
     }
 }
 
+// The ZWO AM's FindHome is :hC#, a slew to the home position the mount stores.
+TEST_CASE("ZWO findhomeissensorsearch is false", "[zwo][telescope][findhome-sensor]") {
+    Rig rig;
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->action("findhomeissensorsearch", ""); },
+                                           alpacacore::AlpacaError::NotConnected);
+    rig.connect();
+    auto& driver = rig.driver;
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"\"}");
+}
+
 #endif  // _WIN32

@@ -24,7 +24,9 @@
 // already running. A command owns only the axes it moves (CONTEXT.md, "Cancelled vs superseded"):
 //
 //   - a slew, Park or FindHome (MotionCommand::Slew) claims both axes and supersedes everything on them;
-//   - a PulseGuide claims its own axis and supersedes a pulse or MoveAxis there; the other axis keeps running;
+//   - a PulseGuide claims its own axis and supersedes a pulse or MoveAxis there; the other axis keeps running.
+//     Every mount driver refuses a PulseGuide on the axis a non-zero MoveAxis drives before it claims (#2503), so
+//     no driver reaches the MoveAxis case;
 //   - a PulseGuide while a slew, park or home runs is refused with InvalidOperation and claims nothing;
 //   - a non-zero MoveAxis claims its own axis: it supersedes a pulse there, keeps one on the other axis, and
 //     supersedes a slew, park or home, which own both axes;

@@ -16,7 +16,12 @@
 // fire-and-forget commands (the WandererAstro cover / filter wheel / box
 // family). The test supplies the frame bytes; the fake repeats them at a fixed
 // interval and records every '\n'-terminated command line it receives. Two
-// failure modes for the issue #237 link-health tests:
+// SFW wheel mode (opt-in, sfw_travel > 0): a move command 2001..2008 changes the
+// frame's position token to that slot after the travel time, as the SFW does;
+// other commands are only recorded. Off by default: the frame never changes.
+// The mode is for SFW frames only: it finds the position as the third 'A'-delimited
+// field, so another frame layout would have the wrong field rewritten.
+// Failure modes for the issue #237 link-health tests:
 //   - set_muted(true): the stream stops, the fd stays healthy (hung MCU);
 //   - sever_link(): the pty master closes, so the driver's writes fail with
 //     EIO and its reads return 0 at once from then on (USB re-enumeration /
@@ -46,9 +51,12 @@ public:
     /// started, and nothing is consumed (later frames stream as normal). A connect that waits for the first streamed
     /// frame stays open until then. It is a constructor argument because the worker starts streaming inside the
     /// constructor: a setter called afterwards races the first frames. Used by the contract sweep.
+    /// @p sfw_travel > 0 turns on the SFW wheel mode (file header); a constructor argument for the same reason.
     FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval,
-                       std::chrono::milliseconds first_frame_hold = std::chrono::milliseconds(0))
+                       std::chrono::milliseconds first_frame_hold = std::chrono::milliseconds(0),
+                       std::chrono::milliseconds sfw_travel = std::chrono::milliseconds(0))
         : pty_("FakeSerialStreamer"),
+          sfw_travel_ms_(static_cast<int>(sfw_travel.count())),
           first_frame_hold_ms_(static_cast<int>(first_frame_hold.count())),
           interval_ms_(static_cast<int>(interval.count())),
           frame_(std::move(frame)) {
@@ -128,6 +136,7 @@ private:
                             std::lock_guard<std::mutex> lock(mutex_);
                             commands_.push_back(pending);
                         }
+                        note_move_command(pending);
                         pending.clear();
                     } else {
                         pending += ch;
@@ -155,8 +164,32 @@ private:
                 pty_write_bounded(pty_.master_fd(), frame, stop_);
                 frames_sent_.fetch_add(1);
             }
+            apply_arrived_move(now);
             passes_.fetch_add(1);
         }
+    }
+
+    // Worker thread only. A move command 2000+slot (slot 1-8) starts the travel; a newer one replaces it.
+    void note_move_command(const std::string& command) {
+        if (sfw_travel_ms_ <= 0 || command.size() != 4 || command.compare(0, 3, "200") != 0) return;
+        const int slot = command[3] - '0';
+        if (slot < 1 || slot > 8) return;
+        move_slot_ = slot;
+        move_due_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(sfw_travel_ms_);
+    }
+
+    // Worker thread only: once the travel time has passed, the frame's position token (third 'A'-delimited
+    // field: <model>A<firmware>A<position>A...) becomes the commanded slot.
+    void apply_arrived_move(std::chrono::steady_clock::time_point now) {
+        if (move_slot_ == 0 || now < move_due_) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto first = frame_.find('A');
+        const auto second = first == std::string::npos ? first : frame_.find('A', first + 1);
+        const auto third = second == std::string::npos ? second : frame_.find('A', second + 1);
+        if (third != std::string::npos) {
+            frame_.replace(second + 1, third - second - 1, std::to_string(move_slot_));
+        }
+        move_slot_ = 0;
     }
 
     // First member: constructed before the worker, destroyed after it has
@@ -167,6 +200,9 @@ private:
     std::atomic<bool> muted_{false};
     std::atomic<long long> frames_sent_{0};
     std::atomic<long long> passes_{0};
+    const int sfw_travel_ms_;
+    int move_slot_ = 0;                               // worker thread only; 0 = no move under way
+    std::chrono::steady_clock::time_point move_due_;  // worker thread only
     const int first_frame_hold_ms_;
     bool hold_entered_ = false;  // worker thread only
     int interval_ms_;

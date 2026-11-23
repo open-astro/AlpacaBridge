@@ -2568,6 +2568,22 @@ TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session end
     rig.mount.ignore_aborts = 0;
 }
 
+// TheSkyX runs its own Find Home. A Paramount's is a homing-sensor search, but the driver cannot tell which mount
+// TheSkyX drives, so it reports false.
+TEST_CASE("Bisque Telescope Driver - findhomeissensorsearch is false", "[bisque][telescope][unit][findhome-sensor]") {
+    ConnectedFakeBisque rig;
+    auto& driver = rig.driver;
+    const auto actions = driver->get_supported_actions();
+    CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
+    CHECK(driver->can_action("findhomeissensorsearch"));
+    CHECK(driver->action("findhomeissensorsearch", "") ==
+          "{\"sensor_search\":false,\"method\":\"external_find_home\",\"model\":\"\"}");
+    driver->set_connected(false);
+    CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
+    require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
+                         alpacacore::AlpacaError::NotConnected);
+}
+
 // open-astro#2062: AbortSlew, Unpark and a disconnect retire a running Park poll. When the mount reports parked
 // after the cancel, the retired poll must not set AtPark: a client that cancelled the park would see a parked mount
 // that refuses slews.
@@ -2825,7 +2841,6 @@ TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindH
     ClockedBisque rig;
     const int leg = GENERATE(0, 1, 2, 3);  // MoveAxis, Park, AbortSlew, MoveAxis stop
     CAPTURE(leg);
-    // The second command must reach its claim inside this real-time window; it takes no wire turn before it.
     rig.mount.find_home_ms = 1000000;  // the home ends when the second command claims the axes
     auto homed = std::async(std::launch::async, [&] { rig.driver->find_home(); });
     REQUIRE(wait_real([&] { return rig.mount.find_home_commands.load() == 1; }));
@@ -2840,6 +2855,14 @@ TEST_CASE("Bisque motion owner - a MoveAxis, a Park or an AbortSlew during FindH
             rig.driver->move_axis(0, 0.0);
         }
     });
+    // Each command claims or cancels under the driver lock before its first wire command, and FindHome's poll waits on
+    // the task clock, so that command reaching the fake means the claim landed. The clock moves only after it: a
+    // loaded host can no longer let FindHome reach its 60 s timeout first (#2607).
+    const std::atomic<int>& second_sent = leg == 0   ? rig.mount.move_starts
+                                          : leg == 1 ? rig.mount.park_commands
+                                          : leg == 2 ? rig.mount.abort_commands
+                                                     : rig.mount.move_stops;
+    REQUIRE(wait_real([&] { return second_sent.load() >= 1; }, std::chrono::seconds(30)));
     REQUIRE(advance_until(rig.clock, [&] { return ready(homed); }));  // FindHome polls on the task clock
     CHECK_NOTHROW(homed.get());
     CHECK(advance_until(rig.clock, [&] { return ready(second); }));
