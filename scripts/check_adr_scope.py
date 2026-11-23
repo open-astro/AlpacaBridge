@@ -25,7 +25,7 @@ Two modes:
            review-comment.md. Every listed rule needs a checklist line
            `- <record file> rule <n>: pass|defect|n/a: <reason>` (a period, an en
            dash or an em dash in place of the colon after the verdict also
-           counts), a rule may not get two verdicts, and a defect line needs the "Issues found"
+           counts, and so does the skeleton's `VERDICT:` left before the verdict), a rule may not get two verdicts, and a defect line needs the "Issues found"
            sign-off as the last line (bold, italics or a closing period or
            exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
@@ -62,7 +62,8 @@ SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
 # Consumers: the workflow step "Fold the decision-record checklist" in .github/workflows/claude-review.yml
 # imports fold_checklist (and through it CHECKLIST_RE, sign_off and the sign-off constants); rename them there too.
 # After the verdict: a colon, a period (PR #2315), or an en or em dash the agent writes anyway (#2460).
-CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*[:.\u2013\u2014]\s*\S", re.I)
+# An optional "VERDICT:" before the verdict is the --skeleton placeholder word left in place (PR #2590).
+CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(?:VERDICT\s*:\s*)?(pass|defect|n/a)\s*[:.\u2013\u2014]\s*\S", re.I)
 ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
 APPROVED_SIGN_OFF = "\u2705 Approved"
 
@@ -340,6 +341,11 @@ def self_test():
     expect(f == [], "a period after the verdict in place of the colon still counts (PR #2315): %r" % f)
     f = checklist_findings(scope, full.replace("rule 3: pass:", "rule 3: pass \u2014").replace("rule 1: n/a:", "rule 1: n/a \u2013"))
     expect(f == [], "an em or en dash after the verdict in place of the colon still counts (#2460): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 3: pass:", "rule 3: VERDICT: pass.")
+                           .replace("rule 1: n/a:", "rule 1: VERDICT: n/a \u2014"))
+    expect(f == [], "a line that keeps the skeleton's 'VERDICT:' before the verdict still counts (PR #2590): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: VERDICT: reason"))
+    expect(any("rule 2" in x for x in f), "the unfilled skeleton line does not count")
     f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a \u2014"))
     expect(any("rule 2" in x for x in f), "a verdict and dash with no reason does not count")
     f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO", "rule 2: n/a the ZWO"))
