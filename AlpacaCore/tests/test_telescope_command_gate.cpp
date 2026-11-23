@@ -40,6 +40,7 @@ struct State {
     bool faulted = false;
     bool tracking = true;
     bool sidereal = true;  // TrackingRate is driveSidereal
+    bool site_known = true;
 };
 
 // A driver's state checks, recorded.
@@ -66,6 +67,14 @@ struct RecordingChecks {
     void check_sidereal_rate() {
         calls.emplace_back("sidereal");
         if (!state.sidereal) throw AlpacaException("not sidereal", AlpacaError::InvalidOperation);
+    }
+    void check_site() {
+        calls.emplace_back("site");
+        if (!state.site_known) throw AlpacaException("no site", AlpacaError::ValueNotSet);
+    }
+    void check_not_tracking() {
+        calls.emplace_back("not tracking");
+        if (state.tracking) throw AlpacaException("tracking on", AlpacaError::InvalidOperation);
     }
 };
 
@@ -573,6 +582,141 @@ TEST_CASE("Telescope command gate - a rate-offset write refuses in the order val
     CHECK(text_of([&] {
               alpacacore::util::check_rate_offset_arguments(defaults, RateOffsetAxis::Declination, kInf);
           }) == "DeclinationRate must be finite");
+}
+
+TEST_CASE(
+    "Telescope command gate - an Alt/Az slew refuses in the order Alt/Az, connected, parked, fault, site, Tracking",
+    "[util][command-gate]") {
+    TelescopeCommandLimits limits;
+    State still;  // Tracking off: an Alt/Az slew needs it off
+    still.tracking = false;
+    State no_site = still;
+    no_site.site_known = false;
+    State parked_no_site = no_site;
+    parked_no_site.parked = true;
+    State faulted_no_site = no_site;
+    faulted_no_site.faulted = true;
+    State no_site_tracking = no_site;
+    no_site_tracking.tracking = true;
+    State all_wrong = everything_wrong();
+    all_wrong.tracking = true;
+    all_wrong.site_known = false;
+    struct Row {
+        State state;
+        double altitude;
+        double azimuth;
+        int expected;
+        const char* text;  // the driver's text, when expected is InvalidValue
+    };
+    const std::vector<Row> rows = {
+        {still, 45.0, 180.0, 0, {}},
+        {still, -90.0, 0.0, 0, {}},
+        {still, 90.0, 360.0, 0, {}},  // azimuth 360 passes by default
+        {still, 90.01, 0.0, AlpacaError::InvalidValue, "Altitude out of range"},
+        {still, -90.01, 0.0, AlpacaError::InvalidValue, "Altitude out of range"},
+        {still, kNaN, 0.0, AlpacaError::InvalidValue, "Altitude out of range"},
+        {still, 45.0, -0.01, AlpacaError::InvalidValue, "Azimuth out of range"},
+        {still, 45.0, 360.01, AlpacaError::InvalidValue, "Azimuth out of range"},
+        {still, 45.0, kInf, AlpacaError::InvalidValue, "Azimuth out of range"},
+        {still, 91.0, 400.0, AlpacaError::InvalidValue, "Altitude out of range"},  // altitude first
+        {all_wrong, 91.0, 0.0, AlpacaError::InvalidValue, "Altitude out of range"},
+        {all_wrong, 45.0, 0.0, AlpacaError::NotConnected, {}},
+        {parked_no_site, 45.0, 0.0, AlpacaError::InvalidWhileParked, {}},
+        {faulted_no_site, 45.0, 0.0, AlpacaError::DriverException, {}},
+        {no_site_tracking, 45.0, 0.0, AlpacaError::ValueNotSet, {}},
+        {State{}, 45.0, 0.0, AlpacaError::InvalidOperation, {}},  // Tracking on
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        INFO("altitude " << row.altitude << " azimuth " << row.azimuth);
+        CHECK(error_code_of([&] {
+                  alpacacore::util::check_alt_az_slew(limits, row.altitude, row.azimuth, "SlewToAltAz", checks);
+              }) == row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(text_of([&] {
+                      alpacacore::util::check_alt_az_arguments(limits, row.altitude, row.azimuth, "SlewToAltAz");
+                  }) == row.text);
+            CHECK(checks.calls.empty());
+        }
+    }
+    RecordingChecks passing{still, {}};
+    alpacacore::util::check_alt_az_slew(limits, 45.0, 180.0, "SlewToAltAz", passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "parked", "fault", "site", "not tracking"});
+
+    // The fault first, as for the other families.
+    limits.alt_az_order = ParkedFaultOrder::FaultFirst;
+    RecordingChecks fault_first{still, {}};
+    alpacacore::util::check_alt_az_slew(limits, 45.0, 180.0, "SlewToAltAz", fault_first);
+    CHECK(fault_first.calls == std::vector<std::string>{"connected", "fault", "parked", "site", "not tracking"});
+    RecordingChecks parked_and_faulted_slew{parked_and_faulted(), {}};
+    CHECK(error_code_of([&] {
+              alpacacore::util::check_alt_az_slew(limits, 45.0, 180.0, "SlewToAltAz", parked_and_faulted_slew);
+          }) == AlpacaError::DriverException);
+}
+
+TEST_CASE("Telescope command gate - an Alt/Az check can read the site first, refuse azimuth 360 and name the member",
+          "[util][command-gate]") {
+    TelescopeCommandLimits limits;
+    limits.alt_az_site_first = true;
+    limits.alt_az_azimuth_360 = false;
+    limits.texts.altitude_range = "altitude bad";
+    limits.texts.azimuth_range = "azimuth bad";
+    limits.texts.alt_az_texts_name_member = true;
+    CHECK(text_of([&] { alpacacore::util::check_alt_az_arguments(limits, 91.0, 0.0, "SlewToAltAz"); }) ==
+          "SlewToAltAz altitude bad");
+    CHECK(text_of([&] { alpacacore::util::check_alt_az_arguments(limits, 45.0, 360.0, "SlewToAltAzAsync"); }) ==
+          "SlewToAltAzAsync azimuth bad");
+    CHECK_NOTHROW(alpacacore::util::check_alt_az_arguments(limits, 45.0, 359.99, "SlewToAltAz"));
+
+    State still;
+    still.tracking = false;
+    RecordingChecks passing{still, {}};
+    alpacacore::util::check_alt_az_slew(limits, 45.0, 0.0, "SlewToAltAz", passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "site", "parked", "fault", "not tracking"});
+    // The site now wins over a parked mount.
+    State parked_no_site = still;
+    parked_no_site.parked = true;
+    parked_no_site.site_known = false;
+    RecordingChecks site_first{parked_no_site, {}};
+    CHECK(error_code_of([&] { alpacacore::util::check_alt_az_slew(limits, 45.0, 0.0, "SlewToAltAz", site_first); }) ==
+          AlpacaError::ValueNotSet);
+}
+
+TEST_CASE("Telescope command gate - SyncToAltAz refuses in the order Alt/Az, connected, parked, fault, site",
+          "[util][command-gate]") {
+    TelescopeCommandLimits limits;
+    State no_site;
+    no_site.site_known = false;
+    State parked_no_site = no_site;
+    parked_no_site.parked = true;
+    State faulted_no_site = no_site;
+    faulted_no_site.faulted = true;
+    State all_wrong = everything_wrong();
+    all_wrong.site_known = false;
+    struct Row {
+        State state;
+        double altitude;
+        int expected;
+    };
+    const std::vector<Row> rows = {
+        {State{}, 45.0, 0},         // a sync runs on a tracking mount
+        {tracking_off(), 45.0, 0},  // and on a still one
+        {all_wrong, 91.0, AlpacaError::InvalidValue},
+        {all_wrong, 45.0, AlpacaError::NotConnected},
+        {parked_no_site, 45.0, AlpacaError::InvalidWhileParked},
+        {faulted_no_site, 45.0, AlpacaError::DriverException},
+        {no_site, 45.0, AlpacaError::ValueNotSet},
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        INFO("altitude " << row.altitude);
+        CHECK(error_code_of([&] {
+                  alpacacore::util::check_alt_az_sync(limits, row.altitude, 180.0, "SyncToAltAz", checks);
+              }) == row.expected);
+    }
+    RecordingChecks passing;
+    alpacacore::util::check_alt_az_sync(limits, 45.0, 180.0, "SyncToAltAz", passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "parked", "fault", "site"});
 }
 
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {

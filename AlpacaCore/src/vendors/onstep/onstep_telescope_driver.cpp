@@ -2428,7 +2428,8 @@ public:
         double dec = 0.0;
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAz");
+        util::check_alt_az_slew(kCommandLimits, altitude, azimuth, "SlewToAltAz", GateChecks{*this, "SlewToAltAz"});
+        alt_az_to_ra_dec_locked(altitude, azimuth, ra, dec);
         start_slew_locked(ra, dec, "SlewToAltAz", targets);
         wait_for_slew_complete_locked(lock);
     }
@@ -2438,7 +2439,9 @@ public:
         double dec = 0.0;
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAzAsync");
+        util::check_alt_az_slew(kCommandLimits, altitude, azimuth, "SlewToAltAzAsync",
+                                GateChecks{*this, "SlewToAltAzAsync"});
+        alt_az_to_ra_dec_locked(altitude, azimuth, ra, dec);
         start_slew_locked(ra, dec, "SlewToAltAzAsync", targets);
     }
 
@@ -2449,7 +2452,8 @@ public:
         double dec = 0.0;
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        resolve_alt_az_locked(altitude, azimuth, ra, dec, "SyncToAltAz");
+        util::check_alt_az_sync(kCommandLimits, altitude, azimuth, "SyncToAltAz", GateChecks{*this, "SyncToAltAz"});
+        alt_az_to_ra_dec_locked(altitude, azimuth, ra, dec);
         sync_to_mount_locked(ra, dec, "SyncToAltAz", targets);
     }
 
@@ -3681,30 +3685,22 @@ private:
                                       AlpacaError::InvalidOperation);
             }
         }
-    };
-
-    // (#1377). Same order as the equatorial slews' util::check_equatorial_slew_state(): arguments, connected,
-    // parked, fault, then Tracking read as the getter reads it, before anything is sent.
-    void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
-                                  const char* who) const {
-        resolve_alt_az_locked(altitude, azimuth, ra_out, dec_out, who);
-        if (tracking_as_served_locked()) {
-            throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
-                                  AlpacaError::InvalidOperation);
+        // The Alt/Az members (the gate runs it after the fault, named before the site read, #1414): the site read is
+        // retried first (at most every kSiteInfoRetryDelay); a site still unknown refuses instead of converting at
+        // latitude and longitude 0 (#1893).
+        void check_site() const {
+            driver.ensure_site_info_cached_locked();
+            driver.throw_if_site_unknown_locked(who);
         }
-    }
-
-    // The checks both Alt/Az slews and SyncToAltAz start with, in this order: the arguments (even while
-    // disconnected, #1478), connected, parked, a latched fault (named, before the site read, #1414), then the
-    // RA/Dec the Alt/Az means.
-    void resolve_alt_az_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
-                               const char* who) const {
-        validate_alt_az(altitude, azimuth);
-        check_connected();
-        check_not_parked_locked(who);
-        refuse_while_faulted_locked(who);
-        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out, who);
-    }
+        // An Alt/Az slew is refused while Tracking is true, read as the getter reads it, before anything is sent
+        // (#1377).
+        void check_not_tracking() const {
+            if (driver.tracking_as_served_locked()) {
+                throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+    };
 
     // A GOTO sent while one runs makes OnStepX stop the running one and refuse the
     // new one (Goto.cpp request(): CE_SLEW_IN_SLEW -> abort(), :MS# reply 5), so the
@@ -4044,22 +4040,8 @@ private:
         }
     }
 
-    static void validate_alt_az(double altitude, double azimuth) {
-        if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
-            throw AlpacaException("Altitude out of range", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0) {
-            throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
-        }
-    }
-
-    // The site read is retried first (at most every kSiteInfoRetryDelay); a site still unknown refuses the slew
-    // instead of converting at latitude and longitude 0 (#1893).
-    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
-                                      const char* who) const {
-        validate_alt_az(altitude, azimuth);
-        ensure_site_info_cached_locked();
-        throw_if_site_unknown_locked(who);
+    // The RA/Dec an Alt/Az means, at the known site (the gate's site check ran first).
+    void alt_az_to_ra_dec_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
     }
