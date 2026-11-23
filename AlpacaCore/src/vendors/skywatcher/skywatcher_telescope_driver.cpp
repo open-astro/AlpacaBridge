@@ -1476,7 +1476,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_dec_degrees_ = dec;
@@ -1494,7 +1494,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_ra_hours_ = ra;

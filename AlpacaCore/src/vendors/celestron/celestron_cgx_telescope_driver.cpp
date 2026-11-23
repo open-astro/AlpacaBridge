@@ -1732,7 +1732,7 @@ double CelestronCgxTelescopeDriver::get_target_declination() const {
     return target_dec_degrees_;
 }
 void CelestronCgxTelescopeDriver::set_target_declination(double dec) {
-    util::validate_dec(dec, "TargetDeclination");
+    util::check_target_declination_arguments(dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {
@@ -1753,7 +1753,7 @@ double CelestronCgxTelescopeDriver::get_target_right_ascension() const {
     return target_ra_hours_;
 }
 void CelestronCgxTelescopeDriver::set_target_right_ascension(double ra) {
-    util::validate_ra(ra, "TargetRightAscension");
+    util::check_target_right_ascension_arguments(ra);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {
