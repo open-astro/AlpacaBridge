@@ -799,7 +799,7 @@ command channel. Nothing scans the network; the host is typed in.
 - **An Alt/Az slew is refused while Tracking is true** (#1377, ITelescopeV4 `SlewToAltAz`): both
   forms throw `InvalidOperation` ("<member> is not allowed while Tracking is true") after the
   Alt/Az validation and the parked check, before anything is sent, under their own names
-  (`check_alt_az_slew_locked()`). With Tracking off the driver converts to RA/Dec and runs the same
+  (`util::check_alt_az_slew()`, the command gate). With Tracking off the driver converts to RA/Dec and runs the same
   GOTO as an equatorial slew; it does not use OnStepX's `:MA#`.
 - **`Connected` is read lock-free** (#910): `set_connected(true)` holds `transition_mutex_` and the
   operation lock for the whole connect (port open, handshake, site and time sync, the first frame, an
