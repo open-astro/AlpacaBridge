@@ -2932,7 +2932,10 @@ private:
     void start_slew_body(std::function<void(util::OperationContext&)> body, bool displaced,
                          Rollback&& rollback_locked) {
         try {
-            slew_.start(std::move(body));
+            slew_.start([this, body = std::move(body)](util::OperationContext& ctx) {
+                body(ctx);
+                run_slew_body_exit_hook_for_testing();
+            });
         } catch (...) {
             std::unique_lock<std::mutex> lock(mutex_);
             rollback_locked();
@@ -3110,6 +3113,21 @@ public:
     void set_closing_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(turn_hook_mutex_);
         closing_hook_ = std::move(hook);
+    }
+    // Called on the slew slot's thread as each slew or Park body returns, before the slot counts it as returned, with
+    // no driver lock held: a case holds a cancelled body there to act while it is still winding down (#2586). An empty
+    // function (the default) does nothing.
+    void set_slew_body_exit_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+        slew_body_exit_hook_ = std::move(hook);
+    }
+    void run_slew_body_exit_hook_for_testing() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+            hook = slew_body_exit_hook_;
+        }
+        if (hook) hook();
     }
     void run_closing_hook_for_testing() {
         std::function<void()> hook;
@@ -4859,6 +4877,7 @@ private:
     std::mutex turn_hook_mutex_;
     std::function<void()> turn_wait_hook_;  // test seam, see set_wire_turn_wait_hook_for_testing()
     std::function<void()> closing_hook_;    // test seam, see set_closing_hook_for_testing()
+    std::function<void()> slew_body_exit_hook_;  // test seam, see set_slew_body_exit_hook_for_testing()
     uint64_t turn_next_ = 0;     // next ticket to hand out
     uint64_t turn_serving_ = 0;  // ticket whose sender may send now
     double park_ra_hours_ = 0.0;
@@ -4993,6 +5012,12 @@ int clock_resync_starts_for_testing(const TelescopeDriver& driver) {
 void set_connect_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_connect_start_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slew_body_exit_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_slew_body_exit_hook_for_testing(std::move(hook));
     }
 }
 
