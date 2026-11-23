@@ -399,6 +399,11 @@ datagrams before each send so replies cannot get off-by-one.
   it when the next body starts or on disconnect) or the landing refinement
   re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
   stops the axes if it may have dispatched; a superseded one never touches them.
+  AbortSlew owns the end of a Park or FindHome it cancels (#2604, the #2586 decision): it cancels under the
+  operation lock, and after its own stops it drops `parking_` and `homing_` with the goto flags, so Slewing
+  reads false and SiteLongitude is accepted as soon as it returns. The woken body takes the lock back after
+  that, finds its flag down (`abandon_slew_body_locked()`) and sends nothing more; a landing settle wait reads
+  nothing after a cancel. An AbortSlew whose stop throws leaves the flag up, and the body still stops the axes.
   A goto that fails (a timed-out wait, a refused dispatch, a failed landing), async or
   synchronous, stops both axes before it drops Slewing (open-astro#2407), as a failed Park
   or FindHome does (`fail_async_phase_locked()`). It skips the stop when it was superseded

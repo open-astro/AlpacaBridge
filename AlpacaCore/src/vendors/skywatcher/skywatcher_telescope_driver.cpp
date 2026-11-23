@@ -3108,12 +3108,15 @@ public:
 
     void abort_slew() override {
         stop_pulse_ops();
+        StateLock lock(lock_gate_);
         // Cancel an in-flight async slew/refinement (the slot joins the body
         // when the next one starts or on disconnect; cancel() wakes its waits
         // and the refine loop exits promptly -- without this, the refinement
-        // re-slews after the abort's stop).
+        // re-slews after the abort's stop). Under the operation lock
+        // (open-astro#2604): a body woken by the cancel takes that lock back
+        // only after this call has stopped the axes and ended its Park or
+        // FindHome, so it finds nothing left to do and sends nothing.
         slew_.cancel();
-        StateLock lock(lock_gate_);
         check_stop_allowed_locked();  // open-astro#2068: the stop is sent on a faulted link
         check_not_fully_parked_locked("AbortSlew");
         // open-astro#1341: a MoveAxis(axis, 0) stop body still polling would
@@ -3168,6 +3171,13 @@ public:
         cmd_axis_rate_deg_s_[1] = 0.0;
         goto_in_progress_ = false;
         restoring_tracking_ = false;
+        // open-astro#2604: AbortSlew owns the end of a Park or FindHome it
+        // cancelled, as it does a goto's: Slewing reads false and SiteLongitude
+        // is accepted once it returns. The cancelled body finds its flag down
+        // and leaves the axes alone (abandon_slew_body_locked()): a canceller
+        // that clears the flag must have stopped the axes itself, as here.
+        parking_ = false;
+        homing_ = false;
         set_slewing_cached_false_locked();
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
@@ -3530,6 +3540,8 @@ private:
         slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        // abandon_slew_body_locked() skips a cancelled body's stop once its flag is down, so a canceller that
+        // clears these must have stopped the axes itself (open-astro#2604). This runs after the slot is joined.
         parking_ = false;
         homing_ = false;
         goto_in_progress_ = false;
@@ -6139,15 +6151,19 @@ private:
         const Wire protocol = wire();
         const auto deadline = clock_.now() + kLandingSettleTimeout;
         try {
+            // A stopped body reads nothing more: the canceller owns the axes (open-astro#2604).
+            if (body_stopped()) {
+                return;
+            }
             uint32_t last = protocol.inquire_position(channel);
             while (clock_.now() < deadline) {
-                if (body_stopped()) {
-                    return;
-                }
                 lock.unlock();
                 body_sleep(kLandingSettle);
                 lock.lock();
                 check_connected();
+                if (body_stopped()) {
+                    return;
+                }
                 const AxisStatus status = protocol.inquire_status(channel);
                 const uint32_t now = protocol.inquire_position(channel);
                 if (!status.running && now == last) {
@@ -6698,6 +6714,9 @@ private:
     void body_sleep(std::chrono::nanoseconds d) const {
         if (body_ctx_) {
             body_ctx_->wait_for(d);
+            if (body_ctx_->stop_reason() != util::StopReason::None) {
+                run_stopped_body_wake_hook();
+            }
         } else {
             clock_.sleep_for(d);
         }
@@ -6725,6 +6744,9 @@ private:
         claim = motion_owner_.claim(util::MotionCommand::Slew);
         supersede_pulse_locked(0);
         supersede_pulse_locked(1);
+        // The replaced body is Superseded and leaves the axes to this
+        // operation; abandon_slew_body_locked() skips a stop once the flag
+        // is down, so only a canceller that stopped the axes may clear it.
         parking_ = false;
         homing_ = false;
         // The replaced goto's 8 s Slewing window is not the new operation's
@@ -6870,9 +6892,11 @@ private:
     }
 
     // A Park or FindHome body that failed or was stopped: end its phase flag
-    // unless a newer operation owns it, and stop the axes if cancelled.
+    // unless a newer operation owns it, and stop the axes if cancelled. A
+    // flag already down means AbortSlew stopped the axes and ended the
+    // operation (open-astro#2604): nothing is left to send.
     void abandon_slew_body_locked(util::OperationContext& ctx, bool& phase_flag) {
-        if (!owns_slew_state_locked(ctx)) {
+        if (!owns_slew_state_locked(ctx) || !phase_flag) {
             return;
         }
         phase_flag = false;
@@ -7053,6 +7077,23 @@ public:
     void set_duty_before_exit_stop_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         duty_before_exit_stop_hook_ = std::move(hook);
+    }
+
+    void set_stopped_body_wake_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(stopped_body_wake_hook_mutex_);
+        stopped_body_wake_hook_ = std::move(hook);
+    }
+
+    // Test seam: runs in body_sleep() when a stopped body's sleep returns, with no driver lock held (open-astro#2604).
+    void run_stopped_body_wake_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(stopped_body_wake_hook_mutex_);
+            hook = stopped_body_wake_hook_;
+        }
+        if (hook) {
+            hook();
+        }
     }
 
 private:
@@ -7402,6 +7443,8 @@ private:
     std::function<void()> rate_verify_before_start_hook_;
     std::function<void()> disconnect_before_close_hook_;
     std::function<void()> duty_before_exit_stop_hook_;
+    mutable std::mutex stopped_body_wake_hook_mutex_;
+    std::function<void()> stopped_body_wake_hook_;  // test seam, see set_stopped_body_wake_hook_for_testing()
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -7645,6 +7688,12 @@ std::pair<double, double> optics_for_testing(const TelescopeDriver& driver) {
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_duty_before_exit_stop_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_stopped_body_wake_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_stopped_body_wake_hook_for_testing(std::move(hook));
     }
 }
 

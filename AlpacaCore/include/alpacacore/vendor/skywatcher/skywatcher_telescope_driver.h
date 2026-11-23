@@ -199,6 +199,12 @@ void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::
 /// it, and release anything the hook blocks on before the driver is destroyed.
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam: `hook` runs on a slot body's thread when a sleep of a body told to stop (cancelled or superseded)
+/// returns, with no driver lock held and before the body takes one back, so a case can act while a cancelled Park
+/// or FindHome body is still winding down (open-astro#2604). Pass an empty function to clear it, and release
+/// anything the hook blocks on before the driver is destroyed.
+void set_stopped_body_wake_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
