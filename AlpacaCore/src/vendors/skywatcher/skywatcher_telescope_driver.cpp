@@ -6696,6 +6696,9 @@ private:
     void body_sleep(std::chrono::nanoseconds d) const {
         if (body_ctx_) {
             body_ctx_->wait_for(d);
+            if (body_ctx_->stop_reason() != util::StopReason::None) {
+                run_stopped_body_wake_hook();
+            }
         } else {
             clock_.sleep_for(d);
         }
@@ -7053,6 +7056,23 @@ public:
         duty_before_exit_stop_hook_ = std::move(hook);
     }
 
+    void set_stopped_body_wake_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(stopped_body_wake_hook_mutex_);
+        stopped_body_wake_hook_ = std::move(hook);
+    }
+
+    // Test seam: runs in body_sleep() when a stopped body's sleep returns, with no driver lock held (open-astro#2604).
+    void run_stopped_body_wake_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(stopped_body_wake_hook_mutex_);
+            hook = stopped_body_wake_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
@@ -7400,6 +7420,8 @@ private:
     std::function<void()> rate_verify_before_start_hook_;
     std::function<void()> disconnect_before_close_hook_;
     std::function<void()> duty_before_exit_stop_hook_;
+    mutable std::mutex stopped_body_wake_hook_mutex_;
+    std::function<void()> stopped_body_wake_hook_;  // test seam, see set_stopped_body_wake_hook_for_testing()
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -7643,6 +7665,12 @@ std::pair<double, double> optics_for_testing(const TelescopeDriver& driver) {
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_duty_before_exit_stop_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_stopped_body_wake_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_stopped_body_wake_hook_for_testing(std::move(hook));
     }
 }
 

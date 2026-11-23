@@ -25,14 +25,18 @@
 #include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <memory>
 #include <string>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 
@@ -773,6 +777,99 @@ TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor
     CHECK_FALSE(mount.axis_running(1));
     CHECK_FALSE(mount.axis_running(2));
     REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
+namespace {
+
+// open-astro#2604: which Park or FindHome a case starts. The count-frame FindHome is a goto to the power-on index;
+// a board with home indexers (the Wave) runs AutoHome instead.
+enum class HomingLeg : std::uint8_t { Park, CountFrameHome, AutoHome };
+
+const char* leg_name(HomingLeg leg) {
+    switch (leg) {
+        case HomingLeg::Park:
+            return "Park";
+        case HomingLeg::CountFrameHome:
+            return "FindHome (count frame)";
+        case HomingLeg::AutoHome:
+            return "FindHome (AutoHome)";
+    }
+    return "?";
+}
+
+}  // namespace
+
+// open-astro#2604 (the #2586 decision): AbortSlew cancels a Park or FindHome body and does not join it. Once AbortSlew
+// has returned, it owns the end of that operation: Slewing reads false, SiteLongitude is accepted, and the cancelled
+// body sends nothing more to the board while it winds down. The wake seam holds the cancelled body as its sleep
+// returns, before it takes a driver lock, so the reads and the write land inside that window every run.
+TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cancelled body winds down (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    const HomingLeg leg = GENERATE(HomingLeg::Park, HomingLeg::CountFrameHome, HomingLeg::AutoHome);
+    INFO(leg_name(leg));
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(leg == HomingLeg::CountFrameHome ? alpacacore::test::FakeMountProfile::eqm35_pro()
+                                                               : alpacacore::test::FakeMountProfile::wave_100i(),
+                              clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);  // away from home and park, so the operation moves RA
+    sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame answers for the flags
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    if (leg == HomingLeg::Park) {
+        REQUIRE_NOTHROW(driver->park());
+    } else {
+        REQUIRE_NOTHROW(driver->find_home());
+    }
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());  // the cancelled body woke and is held before it takes a driver lock
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_NOTHROW(driver->set_site_longitude(10.0));
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(body_ended->load());  // all of the above ran while the body was still winding down
+
+    const std::size_t motion_before = mount.motion_log().size();
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.motion_log().size() == motion_before);  // the body's tail sent no stop and no motion
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
+// open-astro#2604: the other side of the case above. A Park that runs, with no AbortSlew, still refuses SiteLongitude
+// (open-astro#2407: it sets the sidereal time the park slew aims by), and AbortSlew lets it through again.
+TEST_CASE("SkyWatcher async - SiteLongitude is refused while a Park runs", "[skywatcher][async][park][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    alpacacore::test::require_alpaca_error([&] { driver->set_site_longitude(10.0); },
+                                           alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_site_longitude() == Catch::Approx(-104.9903));
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK_NOTHROW(driver->set_site_longitude(10.0));
     driver->set_connected(false);
 }
 
