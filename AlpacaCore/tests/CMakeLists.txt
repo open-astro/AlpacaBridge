@@ -183,6 +183,7 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_skywatcher_telescope_deferred_connect.cpp)
+    list(APPEND TEST_SOURCES test_skywatcher_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
