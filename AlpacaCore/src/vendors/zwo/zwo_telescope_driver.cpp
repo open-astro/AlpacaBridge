@@ -87,6 +87,9 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), or 2 (solar)";
     return limits;
 }();
+// The hand-written epsilon stays just under 1e-9, so 1e-9 is a move and anything smaller a stop (#2415).
+static_assert(kCommandLimits.move_axis_stop_epsilon < 1e-9 && kCommandLimits.move_axis_stop_epsilon > 0.9999e-9,
+              "the ZWO MoveAxis stop epsilon is the largest double under 1e-9");
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
 constexpr double kMaxSiteElevationMeters = 10000.0;
@@ -1176,7 +1179,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         double longitude = 0.0;
         bool has_longitude = false;
         std::chrono::system_clock::time_point sidereal_at;
@@ -1188,7 +1191,7 @@ public:
             }
             sidereal_at = sidereal_instant_locked();
         }
-        check_connected();
+        util::check_destination_side_of_pier_state(kCommandLimits, GateChecks{*this, "DestinationSideOfPier"});
         if (!has_longitude) {
             return get_side_of_pier();
         }
@@ -1602,7 +1605,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
@@ -1628,7 +1631,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 

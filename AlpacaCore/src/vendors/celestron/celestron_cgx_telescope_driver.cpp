@@ -66,6 +66,10 @@ constexpr std::uint32_t kDecHomeEncoder = kCgxEncoderStepsPerRevolution / 2;
 constexpr double kSlewArrivalToleranceDegrees = 3.0 / 3600.0;
 constexpr double kMaxSlewCorrectionDegrees = 1.0;
 constexpr int kMaxSlewCorrections = 3;
+// The most a correction is aimed ahead of the sky (#2541). The lead is the previous correction's aim-to-tracking time,
+// travel included, so a long correction would aim the next, short one far past its target. A short correction over
+// WiFi read its arrival 140-270 ms after the aim (rig 2026-11-21), so this leaves those leads unchanged.
+constexpr std::chrono::milliseconds kMaxCorrectionLead{300};
 constexpr std::chrono::milliseconds kUtcStepTolerance{1000};
 constexpr std::chrono::seconds kHostDisciplineResampleInterval{30};
 // The state poll (decision 0010): 250 ms start to start, three failed polls latch the fault, and a frame older
@@ -87,6 +91,9 @@ constexpr std::chrono::seconds kHomeSearchBound{60};
 // and no home needs a full turn, so an axis past 270 deg is a runaway. A re-home is sent only while the axis is at
 // 90 deg or less, leaving it the half turn any home can need: the #2213 miss had gone at most 83 deg at 60 s, while
 // the Oct-28 shape (a fast wrong-way search that never finds the switch) had gone about 190 deg.
+// The guard's first sample is its first supervise_home_search() call, after a LEVEL_DONE poll, so the few hundred ms of
+// travel between MC_LEVEL_START and it are not counted (#2541). That is noise against 270 deg; a bound tight enough
+// for it to matter must take the first sample at MC_LEVEL_START.
 constexpr double kHomeTravelBoundDegrees = 270.0;
 constexpr double kHomeRehomeTravelLimitDegrees = kHomeTravelBoundDegrees - 180.0;
 // Added to every stop verification budget over TCP (slice 3): one WiFi status poll of both axes with a recovered
@@ -190,7 +197,7 @@ public:
         return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L";
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
-    std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "Celestron_CGX_" + std::to_string(device_number_); }
     std::string get_description() const override {
         if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
         return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: " +
@@ -1451,7 +1458,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+    util::check_destination_side_of_pier_arguments(ra, dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     require_site_locked();
@@ -1513,7 +1520,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
     // The mount stands untracked from the moment a correction is aimed until it tracks, and the sky moves on: over WiFi
     // (~21 ms an exchange) the check read came 140-270 ms, 2-4", after the aim (rig 2026-11-21). So each leg starts
     // tracking as it lands, before the check reads it, and each correction is aimed at the sky that far ahead: its
-    // lead is the time from aiming the previous correction to its tracking start (the first has none to measure).
+    // lead is the time from aiming the previous correction to its tracking start (the first has none to measure),
+    // capped at kMaxCorrectionLead.
     int corrections = 0;
     std::optional<util::TaskClock::clock::time_point> aimed_at;
     util::TaskClock::clock::duration lead{};
@@ -1525,7 +1533,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
         if (!run_motion_stage(context, claim, [&] {
                 std::unique_lock<std::mutex> lock(mutex_);
                 set_tracking_locked(true, lock);
-                if (aimed_at) lead = clock_.now() - *aimed_at;
+                if (aimed_at)
+                    lead = std::min<util::TaskClock::clock::duration>(clock_.now() - *aimed_at, kMaxCorrectionLead);
                 const CgxSkyPosition actual = read_sky_position(lock);
                 const double ra_error_degrees =
                     std::abs(std::remainder(actual.right_ascension_hours - right_ascension_hours, 24.0)) * 15.0;
@@ -1746,7 +1755,7 @@ double CelestronCgxTelescopeDriver::get_target_declination() const {
     return target_dec_degrees_;
 }
 void CelestronCgxTelescopeDriver::set_target_declination(double dec) {
-    util::validate_dec(dec, "TargetDeclination");
+    util::check_target_declination_arguments(dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {
@@ -1767,7 +1776,7 @@ double CelestronCgxTelescopeDriver::get_target_right_ascension() const {
     return target_ra_hours_;
 }
 void CelestronCgxTelescopeDriver::set_target_right_ascension(double ra) {
-    util::validate_ra(ra, "TargetRightAscension");
+    util::check_target_right_ascension_arguments(ra);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {

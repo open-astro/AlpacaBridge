@@ -24,8 +24,9 @@
 // The telescope command gate (#2258): the checks a mount runs before a command, in one order for every mount
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
-// Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes), and
-// TrackingRate (#2418). Sync, the Alt/Az slews, the rate offsets, the targets and DestinationSideOfPier join next.
+// Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes),
+// TrackingRate, DestinationSideOfPier and the target setters (#2418). Sync, the Alt/Az slews and the rate offsets
+// join next.
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
 // only: the ranges and the InvalidValue texts are fields of the limits (each driver keeps its own words), so a driver
@@ -244,6 +245,52 @@ template <typename Checks>
 void check_tracking_rate(const TelescopeCommandLimits& limits, int rate, Checks&& checks) {
     check_tracking_rate_arguments(limits, rate);
     check_tracking_rate_state(limits, checks);
+}
+
+// DestinationSideOfPier: RA and Dec, then connected and the link fault. It answers from the site and the clock and
+// moves no axis, so it has no parked or Tracking check.
+
+inline void check_destination_side_of_pier_arguments(double ra_hours, double dec_degrees) {
+    validate_ra_dec(ra_hours, dec_degrees, "DestinationSideOfPier");
+}
+
+template <typename Checks>
+void check_destination_side_of_pier_state(const TelescopeCommandLimits& /*limits*/, Checks&& checks) {
+    checks.check_connected();
+    checks.check_no_fault();
+}
+
+template <typename Checks>
+void check_destination_side_of_pier(const TelescopeCommandLimits& limits, double ra_hours, double dec_degrees,
+                                    Checks&& checks) {
+    check_destination_side_of_pier_arguments(ra_hours, dec_degrees);
+    check_destination_side_of_pier_state(limits, checks);
+}
+
+// The target setters (TargetRightAscension, TargetDeclination): the value, then connected and the link fault. A
+// target write stores a coordinate for a later *ToTarget call and moves no axis, so it has no parked or Tracking
+// check (a driver that refuses a parked write checks that itself, after the gate).
+
+inline void check_target_right_ascension_arguments(double ra_hours) { validate_ra(ra_hours, "TargetRightAscension"); }
+
+inline void check_target_declination_arguments(double dec_degrees) { validate_dec(dec_degrees, "TargetDeclination"); }
+
+template <typename Checks>
+void check_target_state(const TelescopeCommandLimits& /*limits*/, Checks&& checks) {
+    checks.check_connected();
+    checks.check_no_fault();
+}
+
+template <typename Checks>
+void check_target_right_ascension(const TelescopeCommandLimits& limits, double ra_hours, Checks&& checks) {
+    check_target_right_ascension_arguments(ra_hours);
+    check_target_state(limits, checks);
+}
+
+template <typename Checks>
+void check_target_declination(const TelescopeCommandLimits& limits, double dec_degrees, Checks&& checks) {
+    check_target_declination_arguments(dec_degrees);
+    check_target_state(limits, checks);
 }
 
 }  // namespace alpacacore::util

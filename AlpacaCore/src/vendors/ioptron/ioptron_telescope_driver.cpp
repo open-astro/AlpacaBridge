@@ -1220,7 +1220,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         return serve_cached_or_refill([&] { return site_info_valid_; },
                                       [&] {
                                           if (!site_info_valid_) {
@@ -1598,6 +1598,7 @@ public:
                                                            std::to_string(kMaxSlewRefines) + " (" +
                                                            std::to_string(duration_ms) +
                                                            " ms, final-approach firmware quirk)");
+                            // The wire call, not pulse_guide(): the #2504 refusal must not block the GOTO's own trim.
                             send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
                                                        [&] { protocol.pulse_guide(direction, duration_ms); });
                             goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
@@ -1708,9 +1709,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1728,9 +1729,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1941,6 +1942,7 @@ public:
         // read must answer normally again. Clear unconditionally (a
         // soft-failed goto never set is_slewing).
         invalidate_slew_error_locked();
+        end_fast_cache_grace_locked();
         // open-astro#768: the stop is sent even when the cached status says the
         // mount is not slewing; that cache can lag a GOTO the mount accepted.
         const Wire protocol = wire();
@@ -2814,11 +2816,17 @@ private:
         // generation mismatch, preventing a ghost slew/trim after newer motion.
         // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
+        end_fast_cache_grace_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
     }
+
+    // Issue #2562: the post-connect grace serves the connect's reads to the getter burst after Connect. A motion the
+    // driver starts (every initiator supersedes, and AbortSlew) ends it: the caches then follow the mount on their
+    // TTLs, so AtPark, AtHome, Slewing and the position no longer serve a value written or read before the motion.
+    void end_fast_cache_grace_locked() const { fast_cache_until_ = std::chrono::steady_clock::time_point{}; }
 
     void clear_slew_hold_locked() const { slew_hold_.clear(); }
 
@@ -3622,6 +3630,7 @@ private:
                 return;
             }
             const int sample_duration = std::clamp(duration_ms, 500, 2000);
+            // The wire call, not pulse_guide(): the #2503/#2504 refusals must not block the driver's own sample.
             protocol.pulse_guide(0, sample_duration);
             clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
             Position end = protocol.get_position();

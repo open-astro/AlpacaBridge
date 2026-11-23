@@ -801,17 +801,36 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
     st->invalid_slew_status.store(true);
     alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
+    // Names the Park body's thread, so each step waits for the body's own wait, not the status poll's: the poll is
+    // always parked on the clock, so a waiter count is met while the body is still sending its GOTO (#2561).
+    std::atomic<std::thread::id> park_thread{};
+    const auto park_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    alpacacore::vendor::synscan::set_slew_spawn_for_testing(
+        *driver, [&park_thread, park_ended](std::function<void()> body) {
+            std::thread thread([park_ended, body = std::move(body)] {
+                body();
+                park_ended->store(true);
+            });
+            park_thread.store(thread.get_id());
+            return thread;
+        });
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The status poll runs here, once per second of fake time, so its three bad replies latch the fault before the
+    // Park's 8 s hold ends. A live poll can be inside one exchange while the steps run, and then latches nothing.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
 
     REQUIRE_NOTHROW(driver->park());
     bool surfaced = false;
     for (int i = 0; i < 48 && !surfaced; ++i) {
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        REQUIRE((park_ended->load() || clock.wait_for_waiter_thread(park_thread.load(), std::chrono::seconds(5))));
         clock.advance(std::chrono::milliseconds(250));
-        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        if (i % 4 == 3) {
+            alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
+        }
         try {
             (void)driver->get_slewing();
         } catch (const alpacacore::AlpacaException& ex) {

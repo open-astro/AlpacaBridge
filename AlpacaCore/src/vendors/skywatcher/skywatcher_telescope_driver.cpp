@@ -1281,7 +1281,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
@@ -1502,7 +1502,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_dec_degrees_ = dec;
@@ -1520,7 +1520,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_);
         check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_ra_hours_ = ra;
@@ -1618,7 +1618,6 @@ public:
             }
         }
         bool displaced = false;
-        uint64_t home_error_epoch = 0;
         util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
@@ -1643,11 +1642,10 @@ public:
             // that calls FindHome after a failed GOTO must not be told the
             // OLD goto failed while it's homing.
             clear_last_slew_error_locked();
-            home_error_epoch = slew_error_epoch_;
         }
 
         start_slew_body(
-            [this, home_error_epoch, claim](util::OperationContext& ctx) {
+            [this, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
                 StateLock lock(lock_gate_);
                 SlewClaimScope claim_scope(*this, lock, claim);
@@ -1697,15 +1695,13 @@ public:
                     if (ctx.stop_reason() != util::StopReason::None) {
                         abandon_slew_body_locked(ctx, homing_);
                     } else {
-                        fail_async_phase_locked(ctx, homing_, home_error_epoch,
-                                                std::string("FindHome failed: ") + ex.what());
+                        fail_async_phase_locked(ctx, homing_, std::string("FindHome failed: ") + ex.what());
                     }
                 } catch (...) {
                     if (ctx.stop_reason() != util::StopReason::None) {
                         abandon_slew_body_locked(ctx, homing_);
                     } else {
-                        fail_async_phase_locked(ctx, homing_, home_error_epoch,
-                                                "FindHome failed with unknown exception");
+                        fail_async_phase_locked(ctx, homing_, "FindHome failed with unknown exception");
                     }
                 }
             },
@@ -1739,7 +1735,6 @@ public:
         double target_ra_axis = 0.0;
         double target_dec_axis = 0.0;
         bool displaced = false;
-        uint64_t park_error_epoch = 0;
         util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
@@ -1768,11 +1763,10 @@ public:
             // that calls Park after a failed GOTO must not be told the OLD
             // goto failed while it's parking.
             clear_last_slew_error_locked();
-            park_error_epoch = slew_error_epoch_;
         }
 
         start_slew_body(
-            [this, target_ra_axis, target_dec_axis, park_error_epoch, claim](util::OperationContext& ctx) {
+            [this, target_ra_axis, target_dec_axis, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
                 StateLock lock(lock_gate_);
                 SlewClaimScope claim_scope(*this, lock, claim);
@@ -1800,14 +1794,13 @@ public:
                     if (ctx.stop_reason() != util::StopReason::None) {
                         abandon_slew_body_locked(ctx, parking_);
                     } else {
-                        fail_async_phase_locked(ctx, parking_, park_error_epoch,
-                                                std::string("Park failed: ") + ex.what());
+                        fail_async_phase_locked(ctx, parking_, std::string("Park failed: ") + ex.what());
                     }
                 } catch (...) {
                     if (ctx.stop_reason() != util::StopReason::None) {
                         abandon_slew_body_locked(ctx, parking_);
                     } else {
-                        fail_async_phase_locked(ctx, parking_, park_error_epoch, "Park failed with unknown exception");
+                        fail_async_phase_locked(ctx, parking_, "Park failed with unknown exception");
                     }
                 }
             },
@@ -2885,7 +2878,9 @@ public:
             require_site_locked();  // MoveAxis is sky-referenced (#297)
             if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
                 invalidate_position_cache_locked(false);
-                clear_last_slew_error_locked();
+                // open-astro#575: a stored failure is cleared. open-astro#2552: no new epoch, since this commands
+                // nothing and supersedes nothing: a goto, Park or FindHome in flight still owns its failure.
+                last_slew_error_.clear();
                 return;  // the no-op described under the lock below
             }
         }
@@ -6821,15 +6816,17 @@ private:
         }
     }
 
-    void fail_async_phase_locked(util::OperationContext& ctx, bool& phase_flag, std::uint64_t error_epoch,
-                                 const std::string& message) {
-        if (!owns_slew_state_locked(ctx) || ctx.stop_reason() != util::StopReason::None ||
-            error_epoch != slew_error_epoch_) {
+    // A Park or FindHome body that failed. A MoveAxis is refused while parking and takes no slot claim during a
+    // FindHome, so it never supersedes the body and owns neither its axes nor its failure (open-astro#2552): only
+    // a supersession or a cancellation does, and that path is abandon_slew_body_locked(). No epoch check, then: a
+    // MoveAxis during a FindHome used to make this return before homing_ dropped, and Slewing stayed true with
+    // nothing moving.
+    void fail_async_phase_locked(util::OperationContext& ctx, bool& phase_flag, const std::string& message) {
+        if (!owns_slew_state_locked(ctx) || ctx.stop_reason() != util::StopReason::None) {
             return;
         }
         const std::string stop_error = stop_axes_after_operation_failure_locked();
-        if (!owns_slew_state_locked(ctx) || ctx.stop_reason() != util::StopReason::None ||
-            error_epoch != slew_error_epoch_) {
+        if (!owns_slew_state_locked(ctx) || ctx.stop_reason() != util::StopReason::None) {
             return;
         }
         phase_flag = false;

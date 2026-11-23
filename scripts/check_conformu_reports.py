@@ -77,6 +77,63 @@ def check_fake_marker(path, text):
             "test double, not hardware" % (path, FAKE_MARKER)]
 
 
+# On a pull request a telescope row runs ConformU without its extended rate-offset and pulse-guide tests (issue
+# #2568): scripts/run_fake_conformu.sh with FAKE_CONFORMU_PROFILE=pr puts PR_PROFILE_MARKER on the report's first
+# line. ConformU logs each omitted test as a configuration alert, so such a run never prints a success line and
+# exits non-zero; check_pr_profile_run() is its pass rule. A PR-profile report is not a full test, so check_text()
+# refuses one: a committed telescope report comes from a full run (the nightly run or a dispatched one).
+PR_PROFILE_MARKER = "PR profile:"
+# ConformU 4.6.0-rc.1 TelescopeTester: LogConfigurationAlert() text for the two settings the PR profile turns off.
+PR_PROFILE_ALERTS = (
+    "Extended rate offset tests were omitted due to Conform configuration.",
+    "Extended pulse guide tests were omitted due to Conform configuration.",
+)
+
+
+def check_committed_profile(path, text):
+    if PR_PROFILE_MARKER in text.split("\n", 1)[0]:
+        return ["%s: a PR-profile report (%r on its first line) is not a full ConformU test; commit the report "
+                "of a full run (the nightly run or a dispatched one)" % (path, PR_PROFILE_MARKER)]
+    return []
+
+
+def check_pr_profile_run(report_path, results_path):
+    """Pass rule of a PR-profile run: the report says so, no timing finding, and ConformU's results file has
+    no error, issue or timing issue and exactly the PR_PROFILE_ALERTS configuration alerts. A run that ignored
+    the settings file (a version mismatch resets it to defaults) has no alerts and fails here."""
+    try:
+        with open(report_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as e:
+        return ["%s: could not read file (%s)" % (report_path, e)]
+    failures = check_fake_marker(report_path, text)
+    if PR_PROFILE_MARKER not in text.split("\n", 1)[0]:
+        failures.append("%s: a PR-profile run's report must name %r on its first line"
+                        % (report_path, PR_PROFILE_MARKER))
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if TIMING_OUTSIDE_RE.search(line) or TIMING_LONGER_RE.search(line):
+            failures.append("%s:%d: %s" % (report_path, lineno, line.strip()))
+    try:
+        with open(results_path, "r", encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        return failures + ["%s: could not read the ConformU results file (%s)" % (results_path, e)]
+    if not isinstance(data, dict):
+        return failures + ["%s: top-level JSON is not an object" % results_path]
+    for field in ("ErrorCount", "IssueCount", "TimingIssuesCount"):
+        value = data.get(field)
+        if type(value) is not int or value != 0:
+            failures.append("%s: %s=%r (must be 0)" % (results_path, field, value))
+    alerts = data.get("ConfigurationAlerts")
+    values = None
+    if isinstance(alerts, list) and all(isinstance(a, dict) for a in alerts):
+        values = sorted(str(a.get("Value")) for a in alerts)
+    if values != sorted(PR_PROFILE_ALERTS):
+        failures.append("%s: the configuration alerts must be exactly %r, got %r"
+                        % (results_path, list(PR_PROFILE_ALERTS), alerts))
+    return failures
+
+
 def changed_conformu_files(base_ref):
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
@@ -153,7 +210,7 @@ def check_text(path):
     except OSError as e:
         return ["%s: could not read file (%s)" % (path, e)]
 
-    failures = check_fake_marker(path, text) if is_fake_report(path) else []
+    failures = (check_fake_marker(path, text) + check_committed_profile(path, text)) if is_fake_report(path) else []
     for lineno, line in enumerate(text.splitlines(), start=1):
         if TIMING_OUTSIDE_RE.search(line):
             failures.append("%s:%d: %s" % (path, lineno, line.strip()))
@@ -348,6 +405,47 @@ def self_test():
                                      '{"ErrorCount": 0, "IssueCount": 0, "TimingIssuesCount": 0}'))
         check("check_json FAILS a Fake* JSON report",
               len(found) == 1 and "must be a .txt" in found[0])
+        # The PR profile (issue #2568): a committed report must come from a full run, and a PR-profile run
+        # passes only on exactly the two omitted-test alerts.
+        pr_head = "%s fake mount, not hardware. %s extended tests off\n" % (FAKE_MARKER, PR_PROFILE_MARKER)
+        found = check_text(text_file("Fake/Fake-pr.txt", pr_head + SUCCESS_PATTERNS[0] + "\n"))
+        check("check_text FAILS a committed PR-profile Fake* report",
+              len(found) == 1 and "not a full ConformU test" in found[0])
+        pr_report = text_file("Fake/Fake-pr-run.txt",
+                              pr_head + "Your device had 0 issues, 0 errors and 2 configuration alerts\n")
+
+        def results(alerts, **counts):
+            data = {"ErrorCount": 0, "IssueCount": 0, "TimingIssuesCount": 0,
+                    "ConfigurationAlerts": [{"Key": "Conform configuration", "Value": v} for v in alerts]}
+            data.update(counts)
+            return json_file("results.json", json.dumps(data))
+
+        check("check_pr_profile_run passes the two omitted-test alerts and nothing else",
+              check_pr_profile_run(pr_report, results(list(PR_PROFILE_ALERTS))) == [])
+        found = check_pr_profile_run(pr_report, results([]))
+        check("check_pr_profile_run FAILS a run with no alerts (ConformU ignored the settings file)",
+              len(found) == 1 and "configuration alerts must be exactly" in found[0])
+        found = check_pr_profile_run(pr_report, results(list(PR_PROFILE_ALERTS)[:1]))
+        check("check_pr_profile_run FAILS a run missing one omitted-test alert",
+              len(found) == 1 and "configuration alerts must be exactly" in found[0])
+        found = check_pr_profile_run(pr_report, results(list(PR_PROFILE_ALERTS) + ["Side of pier tests omitted"]))
+        check("check_pr_profile_run FAILS a run with an extra alert",
+              len(found) == 1 and "configuration alerts must be exactly" in found[0])
+        for field in ["ErrorCount", "IssueCount", "TimingIssuesCount"]:
+            found = check_pr_profile_run(pr_report, results(list(PR_PROFILE_ALERTS), **{field: 1}))
+            check("check_pr_profile_run FAILS on %s=1" % field,
+                  len(found) == 1 and "%s=1 (must be 0)" % field in found[0])
+        timed = text_file("Fake/Fake-pr-timed.txt", pr_head + "OUTSIDE FAST RESPONSE TIME TARGET\n")
+        found = check_pr_profile_run(timed, results(list(PR_PROFILE_ALERTS)))
+        check("check_pr_profile_run FAILS on a response-time finding",
+              len(found) == 1 and "OUTSIDE FAST" in found[0])
+        found = check_pr_profile_run(text_file("Fake/Fake-full.txt", "%s fake\n" % FAKE_MARKER),
+                                     results(list(PR_PROFILE_ALERTS)))
+        check("check_pr_profile_run FAILS a report that does not name the PR profile",
+              len(found) == 1 and "must name" in found[0])
+        found = check_pr_profile_run(pr_report, os.path.join(tmp, "absent.json"))
+        check("check_pr_profile_run FAILS without a results file",
+              len(found) == 1 and "could not read the ConformU results file" in found[0])
         found = check_text(os.path.join(tmp, "absent.txt"))
         check("check_text FAILS on a missing file",
               len(found) == 1 and "could not read file" in found[0])

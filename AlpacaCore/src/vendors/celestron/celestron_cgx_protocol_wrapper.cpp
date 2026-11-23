@@ -581,6 +581,7 @@ AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const st
     // query and its first re-send both lost), so a read-only query or a rate write gets two re-sends.
     const bool retryable = tcp && resendable(wire);
     int resends = 0;
+    auto last_sent = sent;
     while (true) {
         const auto resend_at = sent + kTcpRetryAfter * (resends + 1);
         const bool may_resend = retryable && resends < kTcpMaxResends && resend_at < deadline;
@@ -596,6 +597,7 @@ AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const st
                                 " command=" + std::to_string(wire.command) + "; re-sent (" + std::to_string(resends) +
                                 " of " + std::to_string(kTcpMaxResends) + ")");
             write_frame_locked(bytes, deadline);
+            last_sent = std::chrono::steady_clock::now();
             continue;
         }
         const AuxFrame response = decode_aux_frame(frame);
@@ -603,12 +605,40 @@ AuxFrame CelestronCgxProtocol::await_reply_locked(const AuxFrame& wire, const st
         // The reply swaps our addresses: a request echo (AMW006) and traffic for other devices never match.
         if (response.source == wire.destination && response.destination == wire.source &&
             response.command == wire.command) {
-            if (resends > 0) ++recovered_retries_;  // one per lost reply recovered, a counter, not a fault (decision 5)
             healthy_.store(true);
+            if (resends > 0) {
+                ++recovered_retries_;  // one per lost reply recovered, a counter, not a fault (decision 5)
+                drain_stragglers_locked(wire, resends, last_sent, deadline);
+            }
             return response;
         }
         // AUX carries no transaction id. Discard traffic for another address or
         // command while preserving the one deadline for this exchange.
+    }
+}
+
+// TCP only, after a reply to a re-sent `wire`: the other copies' replies may still be on their way, and one that
+// landed after the next identical request went out would be taken for its reply (AUX has no transaction id, #2540).
+// The drain before each send cannot drop it. Reads until `copies` more replies to `wire` have come, or 300 ms after
+// the last copy went out (`last_sent`; a reply later than that is a lost one, as the re-send itself assumes), or the
+// exchange's deadline, whichever is first.
+void CelestronCgxProtocol::drain_stragglers_locked(const AuxFrame& wire, int copies,
+                                                   std::chrono::steady_clock::time_point last_sent,
+                                                   std::chrono::steady_clock::time_point deadline) {
+    const auto until = std::min(last_sent + kTcpRetryAfter, deadline);
+    while (copies > 0) {
+        AuxFrame response;
+        try {
+            response = decode_aux_frame(read_frame_locked(until));
+        } catch (const AuxTimeout&) {
+            return;
+        } catch (const std::invalid_argument&) {
+            continue;  // undecodable: dropped, as the drain before a send drops it
+        }
+        if (take_report_locked(response, deadline)) continue;
+        if (response.source == wire.destination && response.destination == wire.source &&
+            response.command == wire.command)
+            --copies;
     }
 }
 
@@ -634,7 +664,9 @@ bool CelestronCgxProtocol::took_effect_locked(const AuxFrame& wire, std::optiona
             return !done(0x12, "MC_LEVEL_DONE");
         case 0x02:
         case 0x17: {
-            // Closer to the target than before is proof; done at the target covers a GOTO with nowhere to go.
+            // Closer to the target than before is proof; done at the target covers a GOTO with nowhere to go. Only
+            // with the axis untracked: tracking toward the target reads closer with no GOTO (sidereal is ~58 counts per
+            // 300 ms). The driver turns tracking off before every GOTO it sends (#2541).
             const bool finished = done(0x13, "MC_SLEW_DONE");
             const auto target = u24(wire.payload);
             const auto remaining = count_distance(position(), target);
@@ -646,7 +678,8 @@ bool CelestronCgxProtocol::took_effect_locked(const AuxFrame& wire, std::optiona
         case 0x26:
             return decode_guide_active(true, query_locked(status_query(wire, 0x27), deadline));
         case 0x24: {
-            // Still is what a stop is for: done, and two positions a round trip apart agree (an idle axis counts).
+            // Still is what a stop is for: done, and two positions a round trip apart agree (an idle axis counts). An
+            // axis still tracking (~4 counts a WiFi round trip) reads not confirmed and gets the send-only stop.
             const auto first = position();
             const bool finished = done(0x13, "MC_SLEW_DONE");
             return finished && count_distance(position(), first) <= kConfirmCounts;

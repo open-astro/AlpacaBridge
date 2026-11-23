@@ -73,7 +73,7 @@ public:
         Split,          ///< send the reply in two TCP segments 30 ms apart
         Close,          ///< close the connection (FIN) instead of answering
         Reset,          ///< reset the connection (RST) instead of answering
-        Late,           ///< answer 250 ms late
+        Late,           ///< answer late: 250 ms, or set_late_delay()
     };
 
     FakeCelestronAuxTcpAdapter() {
@@ -194,6 +194,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         backlog_ = std::move(bytes);
         backlog_delay_ = delay;
+    }
+    /// How late a Fault::Late reply comes (default 250 ms).
+    void set_late_delay(std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        late_delay_ = delay;
     }
     /// While muted, every request is swallowed (Fault::Drop): taken, never executed, never answered.
     void set_muted(bool muted) {
@@ -379,7 +384,12 @@ private:
         }
         if (fault == Fault::Late) {
             send_bytes(fd, out);
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::chrono::milliseconds delay{};
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                delay = late_delay_;
+            }
+            std::this_thread::sleep_for(delay);
             send_bytes(fd, reply);
             return true;
         }
@@ -558,6 +568,7 @@ private:
     bool muted_ = false;
     std::vector<std::uint8_t> backlog_;
     std::chrono::milliseconds backlog_delay_{0};
+    std::chrono::milliseconds late_delay_{250};
     std::map<std::tuple<std::uint8_t, std::uint8_t, int>, Fault> faults_;
     std::map<std::tuple<std::uint8_t, std::uint8_t, int>, std::vector<std::uint8_t>> before_reply_;
     std::vector<std::uint8_t> pending_;

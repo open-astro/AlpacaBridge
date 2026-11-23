@@ -9774,6 +9774,46 @@ int main() {
         EXPECT(!next.is_discarded() && next.value("ErrorNumber", -1) == 0);
     }
 
+    {
+        // case: networkadapters refuses an unknown vendor with InvalidValue while a search runs (#2542)
+        // The vendor is checked before the one-search flag, so the request never touches the running search.
+        alpacahttp::Router router;
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool entered = false;
+        bool released = false;
+        router.catalog().add_network_adapter_finder("zzz", [&] {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            entered = true;
+            gate_cv.notify_all();
+            // Bounded: a broken release fails the case instead of hanging it.
+            gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
+            return std::vector<alpacacore::catalog::FoundNetworkAdapter>{{"1.2.3.4", "", ""}};
+        });
+        auto search = std::async(std::launch::async, [&] {
+            return route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz");
+        });
+        {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
+        }
+        const auto unknown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=nope").body(), nullptr, false);
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            released = true;
+            gate_cv.notify_all();
+        }
+        EXPECT(!unknown.is_discarded() && unknown.value("ErrorNumber", 0) == 0x401);
+        EXPECT(unknown.value("ErrorMessage", "").find("No network adapter search for vendor 'nope'") !=
+               std::string::npos);
+        const auto first = nlohmann::json::parse(search.get().body(), nullptr, false);
+        EXPECT(!first.is_discarded() && first.value("ErrorNumber", -1) == 0);
+        const auto next = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/networkadapters?vendor=zzz").body(), nullptr, false);
+        EXPECT(!next.is_discarded() && next.value("ErrorNumber", -1) == 0);
+    }
+
     // GET /management/v1/attacheddevices (#2312): every detected serial, HID and
     // camera device with the catalog entries it could be, over a fake tree.
     {

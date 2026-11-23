@@ -49,6 +49,7 @@
 #include "conformu_filterwheel_factories.h"
 #include "conformu_focuser_factories.h"
 #include "conformu_rotator_factories.h"
+#include "conformu_switch_factories.h"
 #ifdef FAKE_CONFORMU_SKYWATCHER
 #include "conformu_skywatcher_factory.h"
 #endif
@@ -202,6 +203,30 @@ const std::vector<ConformuHost> kHosts = {
      "Gemini Flat Panel Pro (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
      "FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal)",
      [] { return !cu::gemini_flatpanel().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_pro)},
+#endif
+#ifdef FAKE_CONFORMU_ONSTEP
+    {"onstep", "switch", "fake_mount_server.h", alpacacore::DeviceType::Switch, "onstep-fake",
+     "OnStepX auxiliary features (fake controller, test only)", "ALPACACORE_ENABLE_ONSTEP",
+     "the OnStepX controller model of onstep_controller_model.h (auxiliary features, over loopback TCP)",
+     [] { return cu::onstep_controller_host().server.ok(); }, driver_of(cu::make_onstep_switch)},
+#endif
+#if defined(FAKE_CONFORMU_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
+    {"ioptron", "switch", "fake_ioptron_gpio.h", alpacacore::DeviceType::Switch, "ioptron-fake",
+     "iOptron iMate PowerBox (fake GPIO, test only)", "ALPACACORE_ENABLE_IOPTRON",
+     "FakeIoptronGpio (simulated iMate GPIO lines, in process)", [] { return true; },
+     driver_of(cu::make_ioptron_switch)},
+#endif
+#ifdef FAKE_CONFORMU_GEMINI
+    {"gemini", "switch", "fake_gemini_pdh.h", alpacacore::DeviceType::Switch, "gemini-fake",
+     "Gemini Power & Data Hub (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiPdh (simulated Power & Data Hubs Advanced 3 over a pseudo-terminal)",
+     [] { return !cu::gemini_pdh().slave_path().empty(); }, driver_of(cu::make_gemini_pdh_switch)},
+#endif
+#if defined(FAKE_CONFORMU_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+    {"touptek", "switch", "fake_touptek_powerbox_sdk.h", alpacacore::DeviceType::Switch, "touptek-fake",
+     "ToupTek StellaVita power box (fake, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeTouptekPowerboxSDK (simulated StellaVita GPIO ports, in process)", [] { return true; },
+     driver_of(cu::make_touptek_switch)},
 #endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",

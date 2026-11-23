@@ -411,6 +411,36 @@ TEST_CASE(
     CHECK(oc.get_device_state().empty());
 }
 
+// Falsified by: remotealpaca_observingconditions_driver.cpp connect_upstream() delete the connected_.store(false) after
+// the joins.
+TEST_CASE(
+    "Remote Alpaca ObservingConditions Driver - a loss a getter latched reads disconnected through the next Connect",
+    "[remotealpaca][observingconditions][unit]") {
+    Rig rig;
+    rig.connect();
+    auto& oc = *rig.driver;
+    // The frame ages to the bound with no poll in between; the getter's read sets the module's loss latch, and the
+    // poll, parked on its tick, has not run on_lost().
+    remote::set_poll_paused_for_testing(oc, true);
+    rig.poll(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)oc.get_temperature(); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(oc.get_connected());
+
+    // The Connect holds on the upstream's own connect, after it has joined the poll and reset the module.
+    remote::set_poll_paused_for_testing(oc, false);
+    rig.upstream.set("connecting", "true");
+    const auto waits = rig.clock.wait_count();
+    std::thread connect([&] { oc.set_connected(true); });
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, kRendezvous));
+    CHECK_FALSE(oc.get_connected());  // no frame of this Connect yet
+    require_alpaca_error([&] { (void)oc.get_temperature(); }, AlpacaError::NotConnected);
+    rig.upstream.set("connecting", "false");
+    rig.clock.advance(std::chrono::milliseconds(100));
+    connect.join();
+    CHECK(oc.get_connected());
+    CHECK(oc.get_temperature() == 19.0);
+}
+
 TEST_CASE(
     "Remote Alpaca ObservingConditions Driver - only the client's Connect relinks; the fault text is kept until then",
     "[remotealpaca][observingconditions][unit]") {

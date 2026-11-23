@@ -28,7 +28,7 @@
 #include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
@@ -67,12 +67,13 @@ constexpr double kHoursToDegrees = 15.0;
 // ran). An arrival test, not a pointing-accuracy test: it also covers sidereal drift over the settle time. The same
 // 600 arcsec as the SynScan landing limit.
 constexpr double kParkArrivalToleranceArcsec = 600.0;
-// Decision 0010, Celestron adoption. A poll body samples the mount every kStatusPollPeriod (start to start; ticks
+// Decision 0010, Celestron adoption. util::PolledState polls the mount every kStatusPollPeriod (start to start; ticks
 // missed behind a slow link are skipped, never made up): the slewing flag and the equatorial pair on every tick, the
 // slower-moving fields (alt/az, pier side, tracking mode) on every kSlowPollEvery-th. A full frame is up to five
 // handset round trips, so the cadence stays slow enough to leave the line to the control path. Alt/az, pier side and
-// tracking mode move only with a motion the driver commands (and the control path publishes a full frame when that
-// motion ends) or with a keypad press.
+// tracking mode move only with a motion the driver commands (and the control path writes a full frame through when
+// that motion ends) or with a keypad press. The module holds the fault latch (kLinkFailureThreshold failed ticks) and
+// the link-loss rule of decision 0009 (util::kLinkStalenessBound of fault, or of a frame no tick refreshed).
 // kSnapshotMaxAge is the FRESHNESS bound: a frame older than it reads `stale` and is still served. It is not the
 // bound at which a getter refuses: that is the link-loss policy of decision 0009 (util::kLinkStalenessBound).
 constexpr auto kStatusPollPeriod = std::chrono::milliseconds(1000);
@@ -81,7 +82,7 @@ constexpr auto kSnapshotMaxAge = std::chrono::milliseconds(3000);
 static_assert(kSnapshotMaxAge >= 2 * kStatusPollPeriod, "two poll periods, or a healthy link reads stale");
 static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
 
-// One polled frame of operational state (decision 0010). Small and copyable: the snapshot copies it under its mutex.
+// One polled frame of operational state (decision 0010). Small and copyable: the module copies it under its mutex.
 struct PolledFrame {
     double ra_hours = 0.0;
     double dec_degrees = 0.0;
@@ -97,7 +98,7 @@ struct PolledFrame {
 };
 constexpr int kLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
-// The poll's own retry of an unread site. A failed read ends the tick without a sample (one exchange timeout at
+// The poll's own retry of an unread site. A failed read fails the tick without a sample (one exchange timeout at
 // most), and a full tick comes every 4 s, so a 2 s retry would skip the sample of every full tick on a link whose
 // location never reads; 30 s leaves one tick in about eight.
 constexpr auto kSitePollRetryDelay = std::chrono::seconds(30);
@@ -305,8 +306,7 @@ public:
             std::string lost = CelestronProtocolWrapper::instance().link_fault();
             if (!lost.empty()) return lost;
         }
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        return link_fault_text_;
+        return polled_.fault();
     }
 
     ALPACA_ASYNC_CONNECT_FORWARDERS()
@@ -388,7 +388,6 @@ public:
             clear_session_state();
             throw;
         }
-        start_status_poller();
     }
 
     // "gps_status": whether the mount's GPS module holds a link, with the module's own latitude and longitude
@@ -513,13 +512,13 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        throw_if_link_faulted();
         // AtHome is affected only by FindHome failures. A failed goto or Park
         // still surfaces through Slewing without making this independent flag
-        // unreadable.
+        // unreadable. The FindHome failure names the failed operation, so it precedes the link fault.
         if (!last_home_error_.empty()) {
             throw AlpacaException(last_home_error_);
         }
+        throw_if_link_faulted();
         // The status poll checks a FindHome for completion; the getter serves its result.
         return at_home_;
     }
@@ -612,18 +611,18 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
-            clock_.now() < position_override_until_ && !get_slewing_locked()) {
+        if (!link_faulted() && target_ra_set_ && target_dec_set_ && clock_.now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
         const auto now = clock_.now();
         double dec_value;
-        if (!position_link_health_.faulted() && pg_hold_[1].active(now)) {
+        if (!link_faulted() && pg_hold_[1].active(now)) {
             dec_value = pg_hold_dec_degrees_;
         } else {
             dec_value = served_equatorial_locked().second;
         }
-        if (!position_link_health_.faulted() && pg_correction_[1].active(now)) {
+        if (!link_faulted() && pg_correction_[1].active(now)) {
             dec_value = pg_dec_baseline_degrees_ + pg_dec_expected_delta_degrees_;
             pg_correction_[1].clear();
         }
@@ -738,18 +737,18 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
-            clock_.now() < position_override_until_ && !get_slewing_locked()) {
+        if (!link_faulted() && target_ra_set_ && target_dec_set_ && clock_.now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return target_ra_hours_;
         }
         const auto now = clock_.now();
         double ra_value;
-        if (!position_link_health_.faulted() && pg_hold_[0].active(now)) {
+        if (!link_faulted() && pg_hold_[0].active(now)) {
             ra_value = pg_hold_ra_hours_;
         } else {
             ra_value = served_equatorial_locked().first;
         }
-        if (!position_link_health_.faulted() && pg_correction_[0].active(now)) {
+        if (!link_faulted() && pg_correction_[0].active(now)) {
             ra_value = std::fmod(pg_ra_baseline_hours_ + pg_ra_expected_delta_hours_, 24.0);
             if (ra_value < 0.0) ra_value += 24.0;
             pg_correction_[0].clear();
@@ -791,10 +790,9 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();
+        util::check_destination_side_of_pier_state(kCommandLimits, GateChecks{*this, "DestinationSideOfPier"});
         if (!site_info_valid_) {
             return -1;
         }
@@ -937,7 +935,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -954,7 +952,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1194,7 +1192,7 @@ private:
         }
         const auto now = clock_.now();
         if (slew_hold_.active(now) || pulse_hold_[0].active(now) || pulse_hold_[1].active(now)) return true;
-        const auto held = snapshot_.read();
+        const auto held = polled_.read();
         return held && held->value.slewing_known && held->value.slewing;
     }
 
@@ -2509,7 +2507,7 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
         // The mount now reports the synced position: write it through, and drop the poll in flight.
-        snapshot_.write([ra, dec](PolledFrame& frame) {
+        polled_.write([ra, dec](PolledFrame& frame) {
             frame.ra_hours = ra;
             frame.dec_degrees = dec;
             frame.equatorial_known = true;
@@ -2796,10 +2794,7 @@ private:
         skip_next_ra_learn_ = false;
         flip_in_progress_ = false;
         clear_motion_errors_locked();
-        position_link_health_.reset();
-        publish_link_fault_locked();
-        snapshot_.reset();
-        link_lost_ = false;
+        polled_.reset();
     }
 
     // The connect, under transition_mutex_ with mutex_ free. Every exchange runs under the wrapper's lock alone;
@@ -2845,7 +2840,6 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            link_lost_ = false;
             mount_firmware_version_ = "";
             mount_model_id_ = -1;
             mount_model_name_ = "";
@@ -2858,15 +2852,13 @@ private:
             at_home_ = false;
             homing_ = false;
             clear_pulse_guiding_locked();
-            snapshot_.reset();
+            polled_.reset();
             set_slewing_locked(false);
             slew_hold_.clear();
             position_override_until_ = util::TaskClock::clock::time_point::min();
             utc_offset_.clear();
             mount_clock_unreadable_ = false;
             client_disagreement_warned_ = false;
-            position_link_health_.reset();
-            publish_link_fault_locked();
             last_site_info_attempt_ = util::TaskClock::clock::time_point::min();
             clear_motion_errors_locked();
             last_slew_error_ = relink_stop_failure;  // Slewing raises a failed reconnect stop
@@ -3001,10 +2993,9 @@ private:
             }
             plan = sample_plan_locked(true);
         }
-        // Seed the snapshot so the first property reads are served from memory, status flags included, and
+        // Seed the frame so the first property reads are served from memory, status flags included, and
         // read the clock once, so no getter reaches the mount (ConformU holds the first reads to its
         // fast-response target).
-        const auto token = snapshot_.begin_poll();
         const PolledFrame seed = seed_frame(plan);
         std::optional<MountClock> mount_clock;
         if (!time_write) {
@@ -3017,8 +3008,16 @@ private:
             ALPACA_LOG_WARN("Celestron", "site read at connect failed; the site stays unread");
         }
         fail_if_link_released();
+        // The module's first probe publishes the seed, and its poll starts: with no driver lock held (AsyncOperation
+        // rule 10), before connected_ is set, so a getter that sees Connected also sees the first frame.
+        seed_ = seed;
+        seeding_ = true;
+        const bool started = polled_.start();
+        seeding_ = false;
+        if (!started) {
+            throw AlpacaException("Celestron status poll did not start", AlpacaError::DriverException);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshot_.publish(token, seed);
         if (!time_write) {
             publish_mount_clock_locked(mount_clock);
         }
@@ -3039,9 +3038,9 @@ private:
         }
     }
 
-    // Decision 0009: lost when a fault stood past the staleness bound (link_lost_, set by the poll), or at once on
-    // positive evidence: the wrapper saw the serial port gone and released it. Lock-free.
-    bool link_lost() const { return link_lost_.load() || !CelestronProtocolWrapper::instance().link_alive(); }
+    // Decision 0009: lost when the module latched the loss (a fault stood past the staleness bound, or the probe saw
+    // the port gone), or at once on positive evidence: the wrapper saw the serial port gone and released it. Lock-free.
+    bool link_lost() const { return polled_.link_lost() || !CelestronProtocolWrapper::instance().link_alive(); }
 
     // NotConnected before a NotImplemented answer (ASCOM contract precedence).
     void ensure_connected() const {
@@ -3354,18 +3353,14 @@ private:
     // The frame a getter serves, or the refusal that applies: a lost link (NotConnected), a latched fault
     // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
     // A frame past kSnapshotMaxAge is served as it is: stale is not lost.
-    util::StateSnapshot<PolledFrame>::Reading served_frame_locked() const {
+    util::PolledState<PolledFrame>::Reading served_frame_locked() const {
         check_connected();
-        if (position_link_health_.faulted()) {
-            throw_position_link_fault_locked();
-        }
-        auto reading = snapshot_.read();
-        if (!reading) {
+        if (!polled_.read()) {
             throw AlpacaException(
                 "Celestron mount state is not available yet: the first status poll has not been answered",
                 AlpacaError::DriverException);
         }
-        return *reading;
+        return polled_.served();
     }
 
     // {RA hours, Dec degrees}
@@ -3406,14 +3401,14 @@ private:
             return frame.value.tracking_mode;
         }
         const int mode = without_lock(lock, [] { return CelestronProtocolWrapper::instance().get_tracking_mode(); });
-        snapshot_.write([mode](PolledFrame& held) { held.tracking_mode = mode; });
+        polled_.write([mode](PolledFrame& held) { held.tracking_mode = mode; });
         return mode;
     }
 
     // The age of the state DeviceState serves: how long ago the poll measured it, on the task clock. Takes only the
     // snapshot's own mutex.
     std::optional<std::chrono::nanoseconds> device_state_age() const override {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         if (!reading) {
             return std::nullopt;
         }
@@ -3423,19 +3418,19 @@ private:
     // A write that changed what the mount's position means (a slew start, a pulse, a sync): drops the poll in
     // flight so its older sample cannot overwrite what the control path knows. The next poll publishes.
     void drop_poll_in_flight_locked() const {
-        snapshot_.write([](PolledFrame&) {});
+        polled_.write([](PolledFrame&) {});
     }
 
     // The tracking mode the control path just commanded, written through so the next read sees it before the
     // next poll runs.
     void set_tracking_mode_cached_locked(int mode) const {
-        snapshot_.write([mode](PolledFrame& frame) { frame.tracking_mode = mode; });
+        polled_.write([mode](PolledFrame& frame) { frame.tracking_mode = mode; });
     }
 
     // The slewing value the control path just decided (a slew started or ended, an abort), written through.
     void set_slewing_locked(bool slewing) const {
         set_slewing_flag_locked(slewing);
-        snapshot_.write([slewing](PolledFrame& frame) {
+        polled_.write([slewing](PolledFrame& frame) {
             frame.slewing = slewing;
             frame.slewing_known = true;
         });
@@ -3445,7 +3440,7 @@ private:
     // drops the poll tick in flight, so a same-value write on each re-read would drop nearly every tick of a GOTO
     // and freeze the position.
     void note_slewing_read_locked(bool slewing) const {
-        const auto held = snapshot_.read();
+        const auto held = polled_.read();
         if (held && held->value.slewing_known && held->value.slewing == slewing) {
             set_slewing_flag_locked(slewing);
             return;
@@ -3465,22 +3460,18 @@ private:
     }
 
     // One read of the mount for the control path at the end of a motion (slew landed, park complete, home done), taken
-    // with mutex_ free. The snapshot token is taken before the read, so a write that lands meanwhile drops the frame.
+    // with mutex_ free.
     struct Measurement {
-        util::StateSnapshot<PolledFrame>::Token token{};
         std::optional<Sample> sample;
-        std::string error;  // what the read threw, when `sample` is empty
     };
 
     // No driver state touched: `plan` is read under mutex_ by the caller.
     Measurement take_measurement(SamplePlan plan) const {
         plan.read_slewing = false;
         Measurement measurement;
-        measurement.token = snapshot_.begin_poll();
         try {
             measurement.sample = sample_raw(plan);
-        } catch (const std::exception& e) {
-            measurement.error = e.what();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an empty sample is what the caller sees
         }
         return measurement;
     }
@@ -3490,33 +3481,34 @@ private:
         return without_lock(lock, [&] { return take_measurement(plan); });
     }
 
-    // Publishes a measurement under mutex_: reads the mount now and publishes a full frame, so Slewing false is
-    // never served beside a mid-motion position. The caller flips Slewing and its other flags in the same locked
-    // step. A failed read leaves the position unknown, which the getters refuse until the next poll answers.
+    // Writes a measurement through under mutex_: the control path read the mount now and writes a full frame, so
+    // Slewing false is never served beside a mid-motion position. The caller flips Slewing and its other flags in the
+    // same locked step. A failed read leaves the position unknown, which the getters refuse until the next poll
+    // answers.
     void publish_measurement_locked(const Measurement& measurement) const {
         if (!measurement.sample) {
-            snapshot_.write([](PolledFrame& frame) {
+            polled_.write([](PolledFrame& frame) {
                 frame.equatorial_known = false;
                 frame.altaz_known = false;
             });
-            note_position_failure_locked(std::runtime_error(measurement.error));
+            // Fixed text: the exchange error can carry handset reply bytes (CWE-117). The poll judges the link.
+            ALPACA_LOG_WARN("Celestron",
+                            "Position read failed at the end of a motion; position unknown until the next poll");
             return;
         }
-        const auto previous = snapshot_.read();
-        snapshot_.publish(measurement.token,
-                          decode_sample(*measurement.sample, previous ? previous->value : PolledFrame{}));
-        drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
-        note_position_reply_locked();
+        // A write, not a publish: a control-path read is not a poll's measurement, so the frame keeps its age, and
+        // the write drops a poll that sampled before this read (decision 0010 rule 3).
+        polled_.write([&sample = *measurement.sample](PolledFrame& held) { held = decode_sample(sample, held); });
     }
 
     void publish_measurement(std::unique_lock<std::mutex>& lock) const {
         publish_measurement_locked(measure_full(lock));
     }
 
-    // The first frame, read at the end of a connect with mutex_ free, so the getters have an answer the moment Connect
-    // returns. Best effort: a mount that does not answer the slewing query still gives its position, and one that
-    // answers nothing leaves a frame with nothing known; the poll fills it in.
-    // The seed's failures do not feed position_link_health_: the status poll that follows judges the link.
+    // The first frame, read at the end of a connect with mutex_ free and published as the module's first probe, so the
+    // getters have an answer the moment Connect returns. Best effort: a mount that does not answer the slewing query
+    // still gives its position, and one that answers nothing leaves a frame with nothing known; the poll fills it in.
+    // The seed's failures feed no fault latch: the status poll that follows judges the link.
     PolledFrame seed_frame(SamplePlan plan) const {
         PolledFrame frame;
         for (int attempt = 0; attempt < 2; ++attempt) {
@@ -3538,32 +3530,13 @@ private:
         plan.read_slewing = false;
         try {
             const auto sample = without_lock(lock, [&] { return sample_raw(plan); });
-            note_position_reply_locked();
             return {sample.ra_hours, sample.dec_degrees};
-        } catch (const std::exception& e) {
-            note_position_failure_locked(e);
-            if (position_link_health_.faulted()) {
+        } catch (const std::exception&) {
+            if (link_faulted()) {
                 throw_position_link_fault_locked();
             }
             throw;
         }
-    }
-
-    // Decision 0009 point 2(b): a fault that has stood past the bound is a LOST link. Connected reads false, the
-    // getters and setters throw NotConnected, DeviceState is empty, the transport is closed; only the client's
-    // Connected=true relinks. Caller holds mutex_ and closes the transport itself once it has released it. True when
-    // the link was just declared lost.
-    bool declare_link_lost_if_stale_locked() {
-        if (!position_link_health_.fault_stale(clock_.now())) {
-            return false;
-        }
-        ALPACA_LOG_ERROR(
-            "Celestron",
-            "Link to the mount lost after " +
-                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
-                " s without a reply; reconnect to resume (" + position_link_health_.fault() + ")");
-        link_lost_ = true;
-        return true;
     }
 
     // True when the unread site (a connect that could not reach it) is due another attempt of the poll
@@ -3578,21 +3551,53 @@ private:
         return true;
     }
 
-    // One poll tick. The site read and the sample exchanges run WITHOUT mutex_, so a getter never waits behind a
-    // slow link and the snapshot mutex is never held across I/O; the frame is decoded and published under mutex_.
-    // So do a FindHome in flight's completion check and the stops of its third failure (decision 0016 rule 1).
-    // Returns false when the connection is gone or lost and the poll body should end. `ctx` is null for the test seam's
-    // direct tick, which also ignores the pause.
-    bool poll_status_once(util::OperationContext* ctx, int tick) {
-        const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
-        // Held for the whole tick of the poll body, so pausing it can wait out a tick already in flight.
-        std::unique_lock<std::mutex> tick_lock(status_poll_tick_mutex_, std::defer_lock);
-        if (ctx != nullptr) {
-            tick_lock.lock();
+    // One poll tick for util::PolledState, on the poll thread with no driver lock held. The site read and the sample
+    // exchanges run WITHOUT mutex_, so a getter never waits behind a slow link and the module's mutexes are never held
+    // across I/O; the frame is decoded here and the module publishes it. So do a FindHome in flight's completion check
+    // and the stops of its third failure (decision 0016 rule 1). A throw is a failed tick (the module's fault latch and
+    // loss verdict): the sample's, and a site-read timeout's (the tick ends there, one timeout at most, and the link
+    // did not answer). nullopt: nothing to publish, because the session ended under the tick. A FindHome completion
+    // check that got no answer or a bad reply throws too: it is the FindHome's own failure (its counter) and a
+    // failed probe (the module's).
+    std::optional<PolledFrame> probe() {
+        if (seeding_.load()) {
+            return seed_;
         }
-        if (ctx != nullptr && status_poll_paused_for_testing_.load()) {
+        run_status_poll_before_tick_hook();  // test seam: no lock held, the pause check below follows it
+        // Held for the whole tick, so pausing the poll can wait out a tick already in flight.
+        std::lock_guard<std::mutex> tick_lock(status_poll_tick_mutex_);
+        // The module checks its own pause flag before probe() runs, so a pause set after that check would still let
+        // this tick through. Test seam: a paused driver ticks only for poll_status_now_for_testing's thread. Nothing
+        // measured counts as a good probe, which a paused poll body tolerates.
+        if (poll_paused_.load() && direct_tick_thread_.load() != std::this_thread::get_id()) {
+            return std::nullopt;
+        }
+        try {
+            return probe_tick();
+        } catch (...) {
+            // Positive evidence (decision 0009 rule 2a): the wrapper saw the serial port gone, in this tick or in an
+            // earlier exchange. The loss latches at once, so the poll ends after this tick.
+            if (!CelestronProtocolWrapper::instance().link_alive()) {
+                polled_.lose_link();
+            }
+            throw;
+        }
+    }
+
+    // True when the session ended under the tick (nothing to measure). A port the wrapper released throws instead, so
+    // probe()'s catch latches the loss in this tick, not on the next one.
+    bool session_gone_locked() const {
+        if (!connected_) {
             return true;
         }
+        if (link_lost()) {
+            throw AlpacaException("Celestron mount link lost during the poll", AlpacaError::NotConnected);
+        }
+        return false;
+    }
+
+    std::optional<PolledFrame> probe_tick() {
+        const int tick = probe_tick_++;
         SamplePlan plan;
         bool read_site = false;
         bool check_home = false;
@@ -3600,10 +3605,8 @@ private:
         SamplePlan home_plan;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            // The raw link_lost_ here and at the pre-sample check: a later link_lost() check in this tick ends the poll
-            // after a wrapper loss, and the calls between fail at once on the closed wrapper with no device I/O.
-            if (!connected_ || link_lost_.load() || stopped()) {
-                return false;
+            if (session_gone_locked()) {
+                return std::nullopt;
             }
             check_home = homing_;
             home_claim = slew_claim_;  // the FindHome's own while homing_
@@ -3615,19 +3618,19 @@ private:
             // A FindHome in flight is completed here, not by a getter. The exchanges (the completion check, the
             // position read when it is done, and the stops of a third failure) run with mutex_ free; the result is
             // published under it only if the same FindHome is still on.
-            const HomeProbe probe = probe_homing_complete();
+            const HomeProbe home = probe_homing_complete();
             std::optional<Measurement> landed;
-            if (probe.done) {
+            if (home.done) {
                 landed = take_measurement(home_plan);
             }
             std::string failure;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || link_lost() || stopped()) {
-                    return false;
+                if (session_gone_locked()) {
+                    return std::nullopt;
                 }
                 if (homing_ && !lost_locked(home_claim)) {
-                    failure = apply_home_probe_locked(probe, landed);
+                    failure = apply_home_probe_locked(home, landed);
                     if (!failure.empty()) {
                         begin_home_failure_locked(failure);
                     }
@@ -3637,16 +3640,20 @@ private:
                 // The three stop exchanges go out only while no newer initiator owns the mount.
                 send_failure_stop(home_claim, failure, true);
             }
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (home_status_poll_failures_ != 0) {
-                return true;  // it timed out: no second timeout in this tick (Disconnect waits for the tick)
+            if (home.error) {
+                // A check that got no answer or a bad reply is a failed probe (decision 0010 rule 7: nullopt means
+                // the device answered): the FindHome's counter above has judged it, and the module counts it too.
+                // No second timeout in this tick (Disconnect waits for the tick) and no sample.
+                // A claim superseded meanwhile makes this throw harmless: the frame is the mount's, the stops were
+                // skipped.
+                throw AlpacaException("Celestron FindHome completion check failed (no answer or a bad reply)",
+                                      AlpacaError::DriverException);
             }
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            // Raw link_lost_ on purpose, see the first check of this tick.
-            if (!connected_ || link_lost_.load() || stopped()) {
-                return false;
+            if (session_gone_locked()) {
+                return std::nullopt;
             }
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
             // The control path owns the Slewing value while it moves the mount itself.
@@ -3659,14 +3666,15 @@ private:
             std::optional<LocationInfo> site;
             try {
                 site = CelestronProtocolWrapper::instance().get_location();
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSitePollRetryDelay
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the null site below fails the tick
             }
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost() || stopped()) {
-                return false;
+            if (session_gone_locked()) {
+                return std::nullopt;
             }
             if (!site) {
-                return true;  // it timed out: no second timeout in this tick; the next tick samples
+                // It timed out: no second timeout in this tick, retried after kSitePollRetryDelay.
+                throw AlpacaException("Celestron site read failed", AlpacaError::DriverException);
             }
             // A client's SiteLatitude/SiteLongitude write that landed during the read wins over the older value.
             if (!site_info_valid_) {
@@ -3675,34 +3683,14 @@ private:
                 site_info_valid_ = true;
             }
         }
-        const auto token = snapshot_.begin_poll();
-        Sample sample;
-        try {
-            sample = sample_raw(plan);
-        } catch (const std::exception& e) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || link_lost() || stopped()) {
-                    return false;  // a pulled cable ends the poll in this tick, not by the staleness bound
-                }
-                note_position_failure_locked(e);
-                if (!declare_link_lost_if_stale_locked()) {
-                    return true;
-                }
-            }
-            // The link is lost: close the transport with mutex_ free (it waits for an exchange in flight).
-            CelestronProtocolWrapper::instance().disconnect();
-            return false;
-        }
+        const Sample sample = sample_raw(plan);
         run_status_poll_after_sample_hook();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || link_lost() || stopped()) {
-            return false;  // a hangup a slow field swallowed in the sample is still a lost link: nothing is published
+        if (session_gone_locked()) {  // a hangup a slow field swallowed in the sample is still a lost link
+            return std::nullopt;
         }
-        const auto previous = snapshot_.read();
-        snapshot_.publish(token, decode_sample(sample, previous ? previous->value : PolledFrame{}));
-        note_position_reply_locked();  // a dropped frame (a write landed since the sample) was still a reply
-        return true;
+        const auto previous = polled_.read();
+        return decode_sample(sample, previous ? previous->value : PolledFrame{});
     }
 
     void run_slewing_read_hook() const {
@@ -3761,6 +3749,17 @@ private:
         }
     }
 
+    void run_status_poll_before_tick_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_before_tick_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poll_after_plan_hook() {
         std::function<void()> hook;
         {
@@ -3772,43 +3771,29 @@ private:
         }
     }
 
-    void run_status_poller(util::OperationContext& ctx) {
-        for (int tick = 0;; ++tick) {
-            const auto started = clock_.now();
-            if (!poll_status_once(&ctx, tick)) {
-                return;
-            }
-            // Start to start: wait for the next tick, skipping any a slow poll ran over (no catch-up).
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatusPollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatusPollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
-    // Call without mutex_ held: the poll body takes mutex_.
-    void stop_status_poller() { status_poll_.cancel_all_and_join(); }
-
-    // Call without mutex_ held (AsyncOperation rule 10), after a connect.
-    void start_status_poller() {
-        try {
-            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
-        } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("Celestron", std::string("Status poll did not start: ") + e.what());
-        }
-    }
+    // Call without mutex_ held: the probe takes mutex_.
+    void stop_status_poller() { polled_.stop_and_join(); }
 
 public:
-    // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
-    // without a tick started before the pause adding to them. The pause survives a relink: set_connected(true) does
-    // not clear it, so a case that reconnects unpauses before it expects the body to tick.
+    // Returns once no poll-body tick is in flight, and a tick that starts after it measures nothing (probe() reads
+    // poll_paused_ under the tick mutex), so a case that pauses the poll then counts mount transactions without a
+    // tick started before the pause adding to them. The pause survives a relink: set_connected(true) does not clear
+    // it, so a case that reconnects unpauses before it expects the body to tick.
     void set_status_poll_paused_for_testing(bool paused) {
-        status_poll_paused_for_testing_ = paused;
+        poll_paused_.store(paused);
+        polled_.pause_for_testing(paused);
         std::lock_guard<std::mutex> drain(status_poll_tick_mutex_);
     }
 
-    bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
+    // One full tick on the calling thread, paused or not, with the loss close that follows it. False when the link is
+    // lost.
+    bool poll_status_now_for_testing() {
+        probe_tick_ = 0;
+        direct_tick_thread_.store(std::this_thread::get_id());
+        polled_.poll_now_for_testing();
+        direct_tick_thread_.store(std::thread::id());
+        return !link_lost();
+    }
 
     void set_slewing_read_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
@@ -3835,48 +3820,28 @@ public:
         status_poll_after_sample_hook_ = std::move(hook);
     }
 
+    void set_status_poll_before_tick_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_before_tick_hook_ = std::move(hook);
+    }
+
     void set_status_poll_after_plan_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         status_poll_after_plan_hook_ = std::move(hook);
     }
 
 private:
-    void note_position_reply_locked() const {
-        if (position_link_health_.on_reply()) {
-            ALPACA_LOG_INFO("Celestron", "Position link recovered; mount readback is available again");
-        }
-        publish_link_fault_locked();
-    }
-
-    // Copies the latched fault text to the narrow-mutex copy get_link_fault() reads.
-    // Call under mutex_ after every change to position_link_health_.
-    void publish_link_fault_locked() const {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        link_fault_text_ = position_link_health_.fault();
-    }
-
-    void note_position_failure_locked(const std::exception& e) const {
-        if (auto fault = position_link_health_.note_failure(e.what(), kLinkFailureThreshold, clock_.now())) {
-            ALPACA_LOG_ERROR("Celestron", "Position link faulted: " + *fault);
-        } else {
-            ALPACA_LOG_WARN("Celestron", "Position read failed (" +
-                                             std::to_string(position_link_health_.consecutive_failures()) +
-                                             " consecutive failures): " + e.what());
-        }
-        publish_link_fault_locked();
-    }
+    bool link_faulted() const { return !polled_.fault().empty(); }
 
     [[noreturn]] void throw_position_link_fault_locked() const {
-        throw AlpacaException("Celestron mount communications compromised: " + position_link_health_.fault(),
+        throw AlpacaException("Celestron mount communications compromised: " + polled_.fault(),
                               AlpacaError::DriverException);
     }
 
     // Rate getters must not queue behind the coarse state lock's device exchanges.
     void throw_if_link_faulted() const {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        if (!link_fault_text_.empty()) {
-            throw AlpacaException("Celestron mount communications compromised: " + link_fault_text_,
-                                  AlpacaError::DriverException);
+        if (link_faulted()) {
+            throw_position_link_fault_locked();
         }
     }
 
@@ -4418,7 +4383,7 @@ private:
         // read that throws sends nothing, so a stored failure (a failed AbortSlew stop) stays what Slewing raises. The
         // poll failure counters stay reset, as they are at every claim. A GOTO send that throws is handled at the send
         // below. The Park body's failure path (fail_park) then ends its own state as before.
-        const auto prev_frame = snapshot_.read();
+        const auto prev_frame = polled_.read();
         const bool prev_slewing_cached = slewing_cached_;
         const util::HoldWindow prev_hold = slew_hold_;
         const auto prev_override = position_override_until_;
@@ -4430,7 +4395,7 @@ private:
             }
             set_slewing_flag_locked(prev_slewing_cached);
             if (prev_frame) {
-                snapshot_.write([&prev_frame](PolledFrame& frame) {
+                polled_.write([&prev_frame](PolledFrame& frame) {
                     frame.slewing = prev_frame->value.slewing;
                     frame.slewing_known = prev_frame->value.slewing_known;
                 });
@@ -4586,9 +4551,6 @@ private:
     double target_dec_degrees_;
     std::atomic<double> aperture_diameter_m_;
     std::atomic<double> focal_length_m_;
-    mutable util::PolledLinkHealth position_link_health_;
-    mutable std::mutex link_fault_mutex_;
-    mutable std::string link_fault_text_;
 
     mutable double site_latitude_cached_;
     mutable double site_longitude_cached_;
@@ -4726,7 +4688,7 @@ private:
     mutable std::mutex initiator_mutex_;
     // Serialises the connect, the disconnect and the setters that write the mount (tracking, guide rate, site, UTC)
     // end to end: wire write, then publish. No getter takes it. Lock order (decision 0016): transition_mutex_,
-    // initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf), then the AsyncOperation slot and StateSnapshot
+    // initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf), then the AsyncOperation slot and PolledState
     // mutexes. Never taken under mutex_ or by a slew or pulse body.
     std::mutex transition_mutex_;
     // Declared last, initialised last; must outlive the driver (decision 0005).
@@ -4740,19 +4702,14 @@ private:
     util::OperationGeneration pulse_generation_[2];
     util::AsyncOperation pulse_ops_[2] = {{"Celestron pulse guide (RA)", pulse_generation_[0], clock_},
                                           {"Celestron pulse guide (Dec)", pulse_generation_[1], clock_}};
-    // Decision 0010: the polled frame, read by the getters and DeviceState, and the poll body that fills it. The
-    // snapshot is declared before the slot, so the slot (whose body publishes into it) is destroyed first.
-    mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
     util::OperationGeneration poll_generation_;
-    util::AsyncOperation status_poll_{"Celestron status poll", poll_generation_, clock_};
-    // Decision 0009 rule 2b: set under mutex_ by the poll body, cleared by a connect. Rule 2a (a pulled cable) is the
-    // wrapper's link_alive(); link_lost() reads both.
-    std::atomic<bool> link_lost_{false};
-    std::atomic<bool> status_poll_paused_for_testing_{false};
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> status_poll_after_plan_hook_;  // guarded by status_poll_hook_mutex_
+    std::function<void()> status_poll_before_tick_hook_;  // guarded by status_poll_hook_mutex_
+    std::atomic<bool> poll_paused_{false};                // test seam: see probe()
+    std::atomic<std::thread::id> direct_tick_thread_{};   // the thread inside poll_status_now_for_testing, if any
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
@@ -4770,6 +4727,26 @@ private:
     // start(), so a re-sync starts only in a settled connected session and none starts behind a disconnect's join.
     // Lock order: transition_mutex_, this, initiator_mutex_. No body takes it.
     std::mutex clock_resync_gate_mutex_;
+    // The connect's first probe: it returns `seed_` and publishes it (the seed carries nothing known when the mount
+    // did not answer). Set by the connect thread alone, around polled_.start().
+    PolledFrame seed_;
+    std::atomic<bool> seeding_{false};
+    std::atomic<int> probe_tick_{0};  // probe count since construction; a multiple of kSlowPollEvery is a full sample
+    // Decision 0010: the polled frame the getters and DeviceState read, with the poll that fills it, the fault latch
+    // and the link-loss rule (decision 0009). Loss closes the transport on the poll thread (no autonomous reconnect).
+    // Declared after every member the probe touches, so its poll joins before they die, and before the re-sync slot,
+    // whose body reads its loss latch.
+    mutable util::PolledState<PolledFrame> polled_{
+        clock_,
+        poll_generation_,
+        {kStatusPollPeriod, kLinkFailureThreshold, kSnapshotMaxAge, "Celestron mount"},
+        [this] { return probe(); },
+        [] {
+            try {
+                CelestronProtocolWrapper::instance().disconnect();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the link is lost already
+            }
+        }};
     // A change seen while set_connected() held the gate (owed), and the connect's untrusted-clock warning (#2480).
     util::HostClockWriteGate host_clock_gate_{"Celestron"};
     // Declared last, so it is destroyed (and joins) first: its body touches the members above.
@@ -4822,6 +4799,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_status_poll_before_tick_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_before_tick_hook_for_testing(std::move(hook));
     }
 }
 

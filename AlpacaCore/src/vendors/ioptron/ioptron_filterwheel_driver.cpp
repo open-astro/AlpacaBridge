@@ -238,9 +238,11 @@ public:
         if (position < 0) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Under mutex_ (issue #2553): a Disconnect clears the slot count and connected_ together under this
+            // lock, so a move racing one is NotConnected here, never a missing slot count.
+            ensure_connected();
             const std::optional<int> slot_count = slots_.slot_count();
             if (!slot_count) {
                 throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);

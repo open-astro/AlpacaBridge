@@ -1,0 +1,3 @@
+### Fixed
+
+- **iOptron: a Park, FindHome or GOTO right after Connect follows the mount** (iOptron telescope, issue #2562). For 30 s after a Connect the driver served its cached status and position as fresh, so a Park sent in that time read AtPark false and Slewing true until the 30 s ended, even when the mount already reported parked; a FindHome or GOTO kept its first status the same way. A motion the driver starts (every slew, Park, Unpark, FindHome and MoveAxis, and AbortSlew) now ends that grace, and the caches follow the mount on their 1 s refresh. The contract sweep's parked case now runs on the iOptron row.

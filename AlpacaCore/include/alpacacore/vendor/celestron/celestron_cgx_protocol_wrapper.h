@@ -103,6 +103,8 @@ private:
     AuxFrame await_reply_locked(const AuxFrame& wire, const std::vector<std::uint8_t>& bytes,
                                 std::chrono::steady_clock::time_point sent,
                                 std::chrono::steady_clock::time_point deadline);
+    void drain_stragglers_locked(const AuxFrame& wire, int copies, std::chrono::steady_clock::time_point last_sent,
+                                 std::chrono::steady_clock::time_point deadline);
     AuxFrame query_locked(const AuxFrame& query, std::chrono::steady_clock::time_point deadline);
     bool took_effect_locked(const AuxFrame& wire, std::optional<std::uint32_t> before,
                             std::chrono::steady_clock::time_point deadline);

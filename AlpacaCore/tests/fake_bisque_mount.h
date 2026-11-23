@@ -56,7 +56,8 @@ namespace alpacacore::test {
  * `fail_find_home` > 0 a FindHome answers a TheSkyX error (the count drops by one).
  *
  * `on_move_start`, when set, runs on the server thread before a DoCommand(9) (MoveAxis start) is answered, while
- * MoveAxis waits for the reply; set it before the MoveAxis.
+ * MoveAxis waits for the reply; set it before the MoveAxis. It runs mid-answer, with the driver holding its wire lock,
+ * so a hook must not do wire I/O: a driver call that sends anything would wait for that lock and deadlock.
  *
  * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
  *
@@ -91,7 +92,7 @@ public:
     std::atomic<int> fail_slew_commands{0};
     std::function<void()> on_slew_command;
     std::function<void()> on_position_read;
-    std::function<void()> on_move_start;
+    std::function<void()> on_move_start;  // server thread, mid-answer: no wire I/O in it (see above)
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};

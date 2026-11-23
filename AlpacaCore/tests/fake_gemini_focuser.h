@@ -43,6 +43,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -134,6 +135,12 @@ public:
     /// ":24#" answers a frame the temperature compensation parser rejects ("Qx#"), the other queries stay good.
     void set_garbage_temp_comp(bool on) { garbage_temp_comp_.store(on); }
     void set_moving(bool moving) { moving_.store(moving); }
+    /// One shot, then spent: the focuser arrives at @p position just after the next ":00#" reply is composed, so that
+    /// reply carries the position from before the arrival and every later ":01#" reports it stopped.
+    void arrive_after_position_reply(int position) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        arrive_at_ = position;
+    }
     void set_temperature(double celsius) { temperature_.store(celsius); }
     void set_position(int position) { position_.store(position); }
     /// What ":08#" reports from now on, as a focuser reconfigured behind the driver's back would.
@@ -228,6 +235,12 @@ private:
             reply = "Zx#";
         } else if (cmd == ":00#") {
             reply = "P" + std::to_string(position_.load()) + "#";
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (arrive_at_) {
+                position_.store(*arrive_at_);
+                moving_.store(false);
+                arrive_at_.reset();
+            }
         } else if (cmd == ":01#") {
             reply = moving_.load() ? "I1#" : "I0#";
         } else if (cmd == ":06#") {
@@ -301,6 +314,7 @@ private:
     std::vector<std::string> commands_;
     std::string hold_cmd_;  // hold_reply_to(), guarded by mutex_
     int hold_cmd_ms_ = 0;
+    std::optional<int> arrive_at_;  // arrive_after_position_reply(), guarded by mutex_
 
     std::atomic<bool> silent_state_{false};
     std::atomic<bool> garbage_state_{false};

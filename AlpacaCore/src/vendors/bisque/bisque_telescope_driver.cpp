@@ -612,7 +612,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        detail::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         double lst_hours = util::local_sidereal_hours(remote_utc_locked(), site_longitude_);
         double hour_angle = util::shortest_ra_delta_hours(lst_hours, ra);
@@ -708,9 +708,9 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_link_locked();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -725,9 +725,9 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_link_locked();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -1187,6 +1187,9 @@ public:
         };
         // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        // Built before the gate, so a refusal, a stop or any throw after the flag is set leaves it clear; MoveAxis
+        // calls run one at a time under initiator_mutex_, so no other call's flag is cleared.
+        const JogPendingGuard pending{*this, axis};
         {
             std::lock_guard<std::mutex> lock(mutex_);
             util::check_move_axis_state(kCommandLimits, stop, GateChecks{*this, "MoveAxis"});
@@ -1201,7 +1204,6 @@ public:
                 jog_pending_[axis] = true;
             }
         }
-        const JogPendingGuard pending{*this, axis};  // a stop set nothing: MoveAxis calls run one at a time
 
         auto& protocol = BisqueProtocolWrapper::instance();
 
@@ -1335,8 +1337,10 @@ public:
     }
 
     // Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling
-    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either.
+    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either. The pause holds
+    // across a reconnect (#2560): the poll thread a later connect starts waits its ticks but probes nothing.
     void set_status_poll_paused_for_testing(bool paused) {
+        polled_.pause_for_testing(paused);
         if (paused) {
             polled_.stop_and_join();
         } else {
