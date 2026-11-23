@@ -1,228 +1,228 @@
 FAKE REPORT: ConformU against FakeIoptronGpio (simulated iMate GPIO lines, in process), not hardware. Not hardware validation.
-12:00:40.153 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Tue 27 October 2026 03:08:39          
-12:00:40.153                                              
-12:00:40.153 Operating system is Debian GNU/Linux 13 (trixie), Processor is Intel/AMD 64bit, Application is 64bit.          
-12:00:40.153                                              
-12:00:40.154 Alpaca device:  (127.0.0.1:11111 Switch/0)          
-12:00:40.154                                              
-12:00:40.154 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11111, Alpaca device number: 0
-12:00:40.163 CreateDevice                        INFO     Alpaca device created OK
-12:00:40.163 CreateDevice                        INFO     Successfully created driver
-12:00:41.214 CreateDevice                        OK       Found a valid interface version: 3
-12:00:41.214 CreateDevice                        OK       Driver instance created successfully
-12:00:41.214                                              
-12:00:41.214 Connect to device                            
-12:00:41.289 Connected                           OK       Connected to device successfully using Connected = True
-12:00:41.841 Connected                           OK       Disconnected from device successfully using Connected = False
-12:00:41.843 Connect                             OK       Connected to device successfully using Connect()
-12:00:41.843                                              
-12:00:41.844 Common Driver Methods                        
-12:00:41.844 InterfaceVersion                    OK       3
-12:00:41.844 Connected                           OK       True
-12:00:41.846 Description                         OK       iOptron iMate PowerBox DC power switch (/dev/gpiochip1)
-12:00:41.846 DriverInfo                          OK       AlpacaCore iOptron iMate PowerBox Switch
-12:00:41.847 DriverVersion                       OK       5.0.2
-12:00:41.847 Name                                OK       iOptron iMate PowerBox
-12:00:41.847                                              
-12:00:41.849 SupportedActions                    OK       Driver returned an empty action list
-12:00:41.849 Action                              INFO     Conform cannot test the Action method
-12:00:41.849                                              
-12:00:41.852 DeviceState                         OK       Received 10 operational state properties.
-12:00:41.852 DeviceState                         INFO     MaxSwitch: 3
-12:00:41.852 DeviceState                         OK         GetSwitch0 = True
-12:00:41.852 DeviceState                         OK         GetSwitchValue0 = 1
-12:00:41.856 DeviceState                         OK         StateChangeComplete0 = True
-12:00:41.856 DeviceState                         OK         GetSwitch1 = True
-12:00:41.856 DeviceState                         OK         GetSwitchValue1 = 1
-12:00:41.856 DeviceState                         OK         StateChangeComplete1 = True
-12:00:41.856 DeviceState                         OK         GetSwitch2 = True
-12:00:41.856 DeviceState                         OK         GetSwitchValue2 = 1
-12:00:41.856 DeviceState                         OK         StateChangeComplete2 = True
-12:00:41.856 DeviceState                         OK         TimeStamp = 11/22/2026 11:00:41 PM
-12:00:41.858 DeviceState                         OK       Found all expected operational properties
-12:00:41.858                                              
-12:00:41.858 Properties                                   
-12:00:41.860 MaxSwitch                           OK       3
-12:00:41.860                                              
-12:00:41.860 Methods                                      
-12:00:41.871 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanWrite
-12:00:41.871 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanWrite
-12:00:41.872 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitch
-12:00:41.873 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitch
-12:00:41.873 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchDescription
-12:00:41.874 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchDescription
-12:00:41.874 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchName
-12:00:41.875 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchName
-12:00:41.875 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchValue
-12:00:41.876 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchValue
-12:00:41.876 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MaxSwitchValue
-12:00:41.877 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MaxSwitchValue
-12:00:41.877 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MinSwitchValue
-12:00:41.877 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MinSwitchValue
-12:00:41.878 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitch
-12:00:41.879 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitch
-12:00:41.879 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitchValue
-12:00:41.880 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitchValue
-12:00:41.880 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SwitchStep
-12:00:41.880 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SwitchStep
-12:00:41.881 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanAsync
-12:00:41.881 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanAsync
-12:00:41.882 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CancelAsync
-12:00:41.882 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CancelAsync
-12:00:41.882 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsync
-12:00:41.883 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsync
-12:00:41.884 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsyncValue
-12:00:41.884 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsyncValue
-12:00:41.884 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: StateChangeComplete
-12:00:41.885 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: StateChangeComplete
-12:00:41.929 GetSwitchName                       OK       Found switch 0
-12:00:41.929 GetSwitchName                       OK         Name: DC3 (always on)
-12:00:41.929 GetSwitchDescription                OK         Description: iMate always-on DC pass-through (read-only)
-12:00:41.930 MinSwitchValue                      OK         Minimum: 0
-12:00:41.931 MaxSwitchValue                      OK         Maximum: 1
-12:00:41.931 SwitchStep                          OK         Step size: 1
-12:00:41.931 SwitchStep                          OK         Step size is greater than zero
-12:00:41.931 SwitchStep                          OK         Step size is less than the range of possible values
-12:00:41.931 SwitchStep                          OK         The switch range is an integer multiple of the step size.
-12:00:41.932 CanWrite                            OK         CanWrite: False
-12:00:41.932 CanAsync                            OK         CanAsync: False
-12:00:42.434 GetSwitch                           OK         True
-12:00:42.937 GetSwitchValue                      OK         1
-12:00:42.941 SetSwitchName                       OK         Successfully set switch 0 name to its current value: DC3 (always on).
-12:00:42.942 SetSwitch                           OK         CanWrite is False and a NotImplementedException was thrown
-12:00:42.942 SetSwitchValue                      OK         CanWrite is False and a NotImplementedException was thrown
-12:00:42.942 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
-12:00:42.942                                              
-12:00:42.943 GetSwitchName                       OK       Found switch 1
-12:00:42.943 GetSwitchName                       OK         Name: DC1
-12:00:42.943 GetSwitchDescription                OK         Description: iMate DC power port on GPIO 118 (on/off)
-12:00:42.944 MinSwitchValue                      OK         Minimum: 0
-12:00:42.945 MaxSwitchValue                      OK         Maximum: 1
-12:00:42.945 SwitchStep                          OK         Step size: 1
-12:00:42.945 SwitchStep                          OK         Step size is greater than zero
-12:00:42.945 SwitchStep                          OK         Step size is less than the range of possible values
-12:00:42.945 SwitchStep                          OK         The switch range is an integer multiple of the step size.
-12:00:42.946 CanWrite                            OK         CanWrite: True
-12:00:42.946 CanAsync                            OK         CanAsync: False
-12:00:43.448 GetSwitch                           OK         True
-12:00:43.950 GetSwitchValue                      OK         1
-12:00:43.950 SetSwitchName                       OK         Successfully set switch 1 name to its current value: DC1.
-12:00:46.962 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
-12:00:47.965 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
-12:00:50.981 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
-12:00:51.986 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
-12:00:58.105 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
-12:00:59.108 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
-12:00:59.109 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
-12:01:02.126 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
-12:01:03.128 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
-12:01:03.129 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 11
-12:01:03.129 SetSwitchValue                      INFO       Testing with steps that are 0% offset from integer SwitchStep values
-12:01:06.650 SetSwitchValue Offset:   0%         OK         Set and read match: 0
-12:01:10.171 SetSwitchValue Offset:   0%         OK         Set and read match: 1
-12:01:10.171 SetSwitchValue                      INFO       Testing with steps that are 25% offset from integer SwitchStep values
-12:01:13.690 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
-12:01:13.690 SetSwitchValue                      INFO       Testing with steps that are 50% offset from integer SwitchStep values
-12:01:17.203 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
-12:01:17.203 SetSwitchValue                      INFO       Testing with steps that are 75% offset from integer SwitchStep values
-12:01:20.721 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
-12:01:20.734 SetSwitchValue                      OK         Switch has been reset to its original state
-12:01:23.736 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
-12:01:23.736                                              
-12:01:23.737 GetSwitchName                       OK       Found switch 2
-12:01:23.737 GetSwitchName                       OK         Name: DC2
-12:01:23.738 GetSwitchDescription                OK         Description: iMate DC power port on GPIO 114 (on/off)
-12:01:23.738 MinSwitchValue                      OK         Minimum: 0
-12:01:23.739 MaxSwitchValue                      OK         Maximum: 1
-12:01:23.739 SwitchStep                          OK         Step size: 1
-12:01:23.739 SwitchStep                          OK         Step size is greater than zero
-12:01:23.739 SwitchStep                          OK         Step size is less than the range of possible values
-12:01:23.739 SwitchStep                          OK         The switch range is an integer multiple of the step size.
-12:01:23.740 CanWrite                            OK         CanWrite: True
-12:01:23.740 CanAsync                            OK         CanAsync: False
-12:01:24.241 GetSwitch                           OK         True
-12:01:24.743 GetSwitchValue                      OK         1
-12:01:24.743 SetSwitchName                       OK         Successfully set switch 2 name to its current value: DC2.
-12:01:27.756 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
-12:01:28.758 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
-12:01:31.781 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
-12:01:32.786 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
-12:01:38.810 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
-12:01:39.813 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
-12:01:39.814 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
-12:01:42.828 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
-12:01:43.831 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
-12:01:43.832 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 11
-12:01:43.832 SetSwitchValue                      INFO       Testing with steps that are 0% offset from integer SwitchStep values
-12:01:47.346 SetSwitchValue Offset:   0%         OK         Set and read match: 0
-12:01:50.862 SetSwitchValue Offset:   0%         OK         Set and read match: 1
-12:01:50.862 SetSwitchValue                      INFO       Testing with steps that are 25% offset from integer SwitchStep values
-12:01:54.410 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
-12:01:54.410 SetSwitchValue                      INFO       Testing with steps that are 50% offset from integer SwitchStep values
-12:01:57.929 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
-12:01:57.929 SetSwitchValue                      INFO       Testing with steps that are 75% offset from integer SwitchStep values
-12:02:01.444 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
-12:02:01.459 SetSwitchValue                      OK         Switch has been reset to its original state
-12:02:04.461 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
-12:02:04.461                                              
-12:02:04.493                                              
-12:02:04.493 Disconnect from device                       
-12:02:04.495 Disconnect                          OK       Disconnected from device successfully using Disconnect()
-12:02:04.495                                              
-12:02:04.495 Conformance test has finished                
-12:02:04.495                                              
-12:02:04.495 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
-12:02:04.495                                     
-12:02:04.495 Timing Summary                               See Help for further information.
-12:02:04.495 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
-12:02:04.495 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
-12:02:04.495 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
-12:02:04.495 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
-12:02:04.495                                              
-12:02:04.495 Connect                                      At 12:00:41.842 Connect                   0.000 seconds. ✓ (STANDARD)
-12:02:04.495 InterfaceVersion                             At 12:00:41.844 InterfaceVersion          0.000 seconds. ✓ (FAST)
-12:02:04.495 Connected                                    At 12:00:41.844 Connected                 0.000 seconds. ✓ (FAST)
-12:02:04.495 Description                                  At 12:00:41.846 Description               0.001 seconds. ✓ (FAST)
-12:02:04.495 DriverInfo                                   At 12:00:41.846 DriverInfo                0.000 seconds. ✓ (FAST)
-12:02:04.495 DriverVersion                                At 12:00:41.847 DriverVersion             0.000 seconds. ✓ (FAST)
-12:02:04.495 Name                                         At 12:00:41.847 Name                      0.000 seconds. ✓ (FAST)
-12:02:04.495 SupportedActions                             At 12:00:41.849 SupportedActions          0.002 seconds. ✓ (FAST)
-12:02:04.495 DeviceState                                  At 12:00:41.852 DeviceState               0.003 seconds. ✓ (FAST)
-12:02:04.495 MaxSwitch                                    At 12:00:41.860 MaxSwitch                 0.001 seconds. ✓ (FAST)
-12:02:04.495 SwitchName (0)                               At 12:00:41.929 SwitchName (0)            0.001 seconds. ✓ (FAST)
-12:02:04.495 GetSwitchDescription (0)                     At 12:00:41.929 GetSwitchDescription (0)  0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (0)                           At 12:00:41.930 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (0)                           At 12:00:41.931 MinSwitchValue (0)        0.000 seconds. ✓ (FAST)
-12:02:04.495 SwitchStep (0)                               At 12:00:41.931 SwitchStep (0)            0.000 seconds. ✓ (FAST)
-12:02:04.495 CanWrite (0)                                 At 12:00:41.932 CanWrite (0)              0.001 seconds. ✓ (FAST)
-12:02:04.495 CanAsync (0)                                 At 12:00:41.932 CanAsync (0)              0.000 seconds. ✓ (FAST)
-12:02:04.495 GetSwitch (0)                                At 12:00:41.932 GetSwitch (0)             0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (0)                           At 12:00:42.435 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
-12:02:04.495 SetSwitchName (0)                            At 12:00:42.941 SetSwitchName (0)         0.003 seconds. ✓ (STANDARD)
-12:02:04.495 SwitchName (1)                               At 12:00:42.943 SwitchName (1)            0.001 seconds. ✓ (FAST)
-12:02:04.495 GetSwitchDescription (1)                     At 12:00:42.943 GetSwitchDescription (1)  0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (1)                           At 12:00:42.944 MinSwitchValue (1)        0.001 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (1)                           At 12:00:42.945 MinSwitchValue (1)        0.000 seconds. ✓ (FAST)
-12:02:04.495 SwitchStep (1)                               At 12:00:42.945 SwitchStep (1)            0.000 seconds. ✓ (FAST)
-12:02:04.495 CanWrite (1)                                 At 12:00:42.946 CanWrite (1)              0.001 seconds. ✓ (FAST)
-12:02:04.495 CanAsync (1)                                 At 12:00:42.946 CanAsync (1)              0.000 seconds. ✓ (FAST)
-12:02:04.495 GetSwitch (1)                                At 12:00:42.947 GetSwitch (1)             0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (1)                           At 12:00:43.449 MinSwitchValue (1)        0.001 seconds. ✓ (FAST)
-12:02:04.495 SetSwitchName (1)                            At 12:00:43.950 SetSwitchName (1)         0.001 seconds. ✓ (STANDARD)
-12:02:04.495 SetSwitch (1)                                At 12:00:43.960 SetSwitch (1)             0.010 seconds. ✓ (STANDARD)
-12:02:04.495 SetSwitchValue (1)                           At 12:00:55.102 SetSwitchValue (1)        0.094 seconds. ✓ (STANDARD)
-12:02:04.495 SwitchName (2)                               At 12:01:23.737 SwitchName (2)            0.002 seconds. ✓ (FAST)
-12:02:04.495 GetSwitchDescription (2)                     At 12:01:23.738 GetSwitchDescription (2)  0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (2)                           At 12:01:23.738 MinSwitchValue (2)        0.001 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (2)                           At 12:01:23.739 MinSwitchValue (2)        0.000 seconds. ✓ (FAST)
-12:02:04.495 SwitchStep (2)                               At 12:01:23.739 SwitchStep (2)            0.000 seconds. ✓ (FAST)
-12:02:04.495 CanWrite (2)                                 At 12:01:23.740 CanWrite (2)              0.001 seconds. ✓ (FAST)
-12:02:04.495 CanAsync (2)                                 At 12:01:23.740 CanAsync (2)              0.000 seconds. ✓ (FAST)
-12:02:04.495 GetSwitch (2)                                At 12:01:23.740 GetSwitch (2)             0.000 seconds. ✓ (FAST)
-12:02:04.495 MinSwitchValue (2)                           At 12:01:24.242 MinSwitchValue (2)        0.000 seconds. ✓ (FAST)
-12:02:04.495 SetSwitchName (2)                            At 12:01:24.743 SetSwitchName (2)         0.001 seconds. ✓ (STANDARD)
-12:02:04.495 SetSwitch (2)                                At 12:01:24.754 SetSwitch (2)             0.010 seconds. ✓ (STANDARD)
-12:02:04.495 SetSwitchValue (2)                           At 12:01:35.808 SetSwitchValue (2)        0.010 seconds. ✓ (STANDARD)
-12:02:04.495 Disconnect                                   At 12:02:04.494 Disconnect                0.001 seconds. ✓ (STANDARD)
-12:02:04.495                                              
-12:02:04.495 Congratulations, all members returned within their target response times!!          
+03:24:20.955 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 14:09:42          
+03:24:20.955                                              
+03:24:20.955 Operating system is Ubuntu 24.04.5 LTS, Processor is ARM 64bit, Application is 64bit.          
+03:24:20.955                                              
+03:24:20.955 Alpaca device:  (127.0.0.1:11111 Switch/0)          
+03:24:20.955                                              
+03:24:20.956 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11111, Alpaca device number: 0
+03:24:20.962 CreateDevice                        INFO     Alpaca device created OK
+03:24:20.962 CreateDevice                        INFO     Successfully created driver
+03:24:22.026 CreateDevice                        OK       Found a valid interface version: 3
+03:24:22.026 CreateDevice                        OK       Driver instance created successfully
+03:24:22.026                                              
+03:24:22.026 Connect to device                            
+03:24:22.108 Connected                           OK       Connected to device successfully using Connected = True
+03:24:22.662 Connected                           OK       Disconnected from device successfully using Connected = False
+03:24:22.664 Connect                             OK       Connected to device successfully using Connect()
+03:24:22.664                                              
+03:24:22.665 Common Driver Methods                        
+03:24:22.665 InterfaceVersion                    OK       3
+03:24:22.666 Connected                           OK       True
+03:24:22.668 Description                         OK       iOptron iMate PowerBox DC power switch (/dev/gpiochip1)
+03:24:22.669 DriverInfo                          OK       AlpacaCore iOptron iMate PowerBox Switch
+03:24:22.670 DriverVersion                       OK       5.0.2
+03:24:22.670 Name                                OK       iOptron iMate PowerBox
+03:24:22.670                                              
+03:24:22.673 SupportedActions                    OK       Driver returned an empty action list
+03:24:22.673 Action                              INFO     Conform cannot test the Action method
+03:24:22.673                                              
+03:24:22.677 DeviceState                         OK       Received 10 operational state properties.
+03:24:22.677 DeviceState                         INFO     MaxSwitch: 3
+03:24:22.677 DeviceState                         OK         GetSwitch0 = True
+03:24:22.678 DeviceState                         OK         GetSwitchValue0 = 1
+03:24:22.678 DeviceState                         OK         StateChangeComplete0 = True
+03:24:22.678 DeviceState                         OK         GetSwitch1 = True
+03:24:22.678 DeviceState                         OK         GetSwitchValue1 = 1
+03:24:22.678 DeviceState                         OK         StateChangeComplete1 = True
+03:24:22.678 DeviceState                         OK         GetSwitch2 = True
+03:24:22.678 DeviceState                         OK         GetSwitchValue2 = 1
+03:24:22.678 DeviceState                         OK         StateChangeComplete2 = True
+03:24:22.678 DeviceState                         OK         TimeStamp = 11/23/2026 03:24:22
+03:24:22.680 DeviceState                         OK       Found all expected operational properties
+03:24:22.680                                              
+03:24:22.680 Properties                                   
+03:24:22.680 MaxSwitch                           OK       3
+03:24:22.681                                              
+03:24:22.681 Methods                                      
+03:24:22.690 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanWrite
+03:24:22.691 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanWrite
+03:24:22.692 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitch
+03:24:22.692 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitch
+03:24:22.693 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchDescription
+03:24:22.694 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchDescription
+03:24:22.695 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchName
+03:24:22.700 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchName
+03:24:22.701 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchValue
+03:24:22.701 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchValue
+03:24:22.702 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MaxSwitchValue
+03:24:22.703 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MaxSwitchValue
+03:24:22.704 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MinSwitchValue
+03:24:22.704 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MinSwitchValue
+03:24:22.705 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitch
+03:24:22.706 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitch
+03:24:22.707 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitchValue
+03:24:22.708 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitchValue
+03:24:22.708 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SwitchStep
+03:24:22.709 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SwitchStep
+03:24:22.710 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanAsync
+03:24:22.711 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanAsync
+03:24:22.711 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CancelAsync
+03:24:22.712 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CancelAsync
+03:24:22.713 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsync
+03:24:22.714 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsync
+03:24:22.715 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsyncValue
+03:24:22.715 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsyncValue
+03:24:22.716 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: StateChangeComplete
+03:24:22.717 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: StateChangeComplete
+03:24:22.789 GetSwitchName                       OK       Found switch 0
+03:24:22.789 GetSwitchName                       OK         Name: DC3 (always on)
+03:24:22.789 GetSwitchDescription                OK         Description: iMate always-on DC pass-through (read-only)
+03:24:22.792 MinSwitchValue                      OK         Minimum: 0
+03:24:22.793 MaxSwitchValue                      OK         Maximum: 1
+03:24:22.793 SwitchStep                          OK         Step size: 1
+03:24:22.793 SwitchStep                          OK         Step size is greater than zero
+03:24:22.793 SwitchStep                          OK         Step size is less than the range of possible values
+03:24:22.793 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+03:24:22.794 CanWrite                            OK         CanWrite: False
+03:24:22.795 CanAsync                            OK         CanAsync: False
+03:24:23.297 GetSwitch                           OK         True
+03:24:23.799 GetSwitchValue                      OK         1
+03:24:23.802 SetSwitchName                       OK         Successfully set switch 0 name to its current value: DC3 (always on).
+03:24:23.803 SetSwitch                           OK         CanWrite is False and a NotImplementedException was thrown
+03:24:23.803 SetSwitchValue                      OK         CanWrite is False and a NotImplementedException was thrown
+03:24:23.804 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
+03:24:23.804                                              
+03:24:23.805 GetSwitchName                       OK       Found switch 1
+03:24:23.805 GetSwitchName                       OK         Name: DC1
+03:24:23.805 GetSwitchDescription                OK         Description: iMate DC power port on GPIO 118 (on/off)
+03:24:23.806 MinSwitchValue                      OK         Minimum: 0
+03:24:23.806 MaxSwitchValue                      OK         Maximum: 1
+03:24:23.807 SwitchStep                          OK         Step size: 1
+03:24:23.807 SwitchStep                          OK         Step size is greater than zero
+03:24:23.807 SwitchStep                          OK         Step size is less than the range of possible values
+03:24:23.807 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+03:24:23.807 CanWrite                            OK         CanWrite: True
+03:24:23.808 CanAsync                            OK         CanAsync: False
+03:24:24.309 GetSwitch                           OK         True
+03:24:24.813 GetSwitchValue                      OK         1
+03:24:24.817 SetSwitchName                       OK         Successfully set switch 1 name to its current value: DC1.
+03:24:27.822 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
+03:24:28.826 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
+03:24:31.831 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
+03:24:32.834 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
+03:24:38.842 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
+03:24:39.845 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
+03:24:39.848 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
+03:24:42.855 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
+03:24:43.859 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
+03:24:43.860 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 11
+03:24:43.860 SetSwitchValue                      INFO       Testing with steps that are 0 % offset from integer SwitchStep values
+03:24:47.366 SetSwitchValue Offset:  0 %         OK         Set and read match: 0
+03:24:50.872 SetSwitchValue Offset:  0 %         OK         Set and read match: 1
+03:24:50.872 SetSwitchValue                      INFO       Testing with steps that are 25 % offset from integer SwitchStep values
+03:24:54.377 SetSwitchValue Offset: 25 %         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
+03:24:54.377 SetSwitchValue                      INFO       Testing with steps that are 50 % offset from integer SwitchStep values
+03:24:57.883 SetSwitchValue Offset: 50 %         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
+03:24:57.883 SetSwitchValue                      INFO       Testing with steps that are 75 % offset from integer SwitchStep values
+03:25:01.392 SetSwitchValue Offset: 75 %         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
+03:25:01.394 SetSwitchValue                      OK         Switch has been reset to its original state
+03:25:04.395 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
+03:25:04.395                                              
+03:25:04.398 GetSwitchName                       OK       Found switch 2
+03:25:04.398 GetSwitchName                       OK         Name: DC2
+03:25:04.399 GetSwitchDescription                OK         Description: iMate DC power port on GPIO 114 (on/off)
+03:25:04.399 MinSwitchValue                      OK         Minimum: 0
+03:25:04.399 MaxSwitchValue                      OK         Maximum: 1
+03:25:04.400 SwitchStep                          OK         Step size: 1
+03:25:04.400 SwitchStep                          OK         Step size is greater than zero
+03:25:04.400 SwitchStep                          OK         Step size is less than the range of possible values
+03:25:04.400 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+03:25:04.401 CanWrite                            OK         CanWrite: True
+03:25:04.401 CanAsync                            OK         CanAsync: False
+03:25:04.903 GetSwitch                           OK         True
+03:25:05.405 GetSwitchValue                      OK         1
+03:25:05.406 SetSwitchName                       OK         Successfully set switch 2 name to its current value: DC2.
+03:25:08.410 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
+03:25:09.413 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
+03:25:12.420 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
+03:25:13.423 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
+03:25:19.432 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
+03:25:20.434 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
+03:25:20.435 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
+03:25:23.439 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
+03:25:24.443 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
+03:25:24.445 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 11
+03:25:24.445 SetSwitchValue                      INFO       Testing with steps that are 0 % offset from integer SwitchStep values
+03:25:27.951 SetSwitchValue Offset:  0 %         OK         Set and read match: 0
+03:25:31.457 SetSwitchValue Offset:  0 %         OK         Set and read match: 1
+03:25:31.457 SetSwitchValue                      INFO       Testing with steps that are 25 % offset from integer SwitchStep values
+03:25:34.962 SetSwitchValue Offset: 25 %         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
+03:25:34.962 SetSwitchValue                      INFO       Testing with steps that are 50 % offset from integer SwitchStep values
+03:25:38.468 SetSwitchValue Offset: 50 %         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
+03:25:38.468 SetSwitchValue                      INFO       Testing with steps that are 75 % offset from integer SwitchStep values
+03:25:41.973 SetSwitchValue Offset: 75 %         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
+03:25:41.976 SetSwitchValue                      OK         Switch has been reset to its original state
+03:25:44.978 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
+03:25:44.978                                              
+03:25:45.032                                              
+03:25:45.032 Disconnect from device                       
+03:25:45.035 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+03:25:45.035                                              
+03:25:45.035 Conformance test has finished                
+03:25:45.035                                              
+03:25:45.035 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+03:25:45.035                                     
+03:25:45.035 Timing Summary                               See Help for further information.
+03:25:45.035 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+03:25:45.035 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+03:25:45.035 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+03:25:45.035 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+03:25:45.035                                              
+03:25:45.035 Connect                                      At 03:24:22.663 Connect                   0.001 seconds. ✓ (STANDARD)
+03:25:45.036 InterfaceVersion                             At 03:24:22.665 InterfaceVersion          0.000 seconds. ✓ (FAST)
+03:25:45.036 Connected                                    At 03:24:22.666 Connected                 0.001 seconds. ✓ (FAST)
+03:25:45.036 Description                                  At 03:24:22.668 Description               0.002 seconds. ✓ (FAST)
+03:25:45.036 DriverInfo                                   At 03:24:22.669 DriverInfo                0.001 seconds. ✓ (FAST)
+03:25:45.036 DriverVersion                                At 03:24:22.670 DriverVersion             0.000 seconds. ✓ (FAST)
+03:25:45.036 Name                                         At 03:24:22.670 Name                      0.001 seconds. ✓ (FAST)
+03:25:45.036 SupportedActions                             At 03:24:22.673 SupportedActions          0.002 seconds. ✓ (FAST)
+03:25:45.036 DeviceState                                  At 03:24:22.676 DeviceState               0.004 seconds. ✓ (FAST)
+03:25:45.036 MaxSwitch                                    At 03:24:22.680 MaxSwitch                 0.001 seconds. ✓ (FAST)
+03:25:45.036 SwitchName (0)                               At 03:24:22.789 SwitchName (0)            0.002 seconds. ✓ (FAST)
+03:25:45.036 GetSwitchDescription (0)                     At 03:24:22.789 GetSwitchDescription (0)  0.001 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (0)                           At 03:24:22.792 MinSwitchValue (0)        0.002 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (0)                           At 03:24:22.792 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
+03:25:45.036 SwitchStep (0)                               At 03:24:22.793 SwitchStep (0)            0.001 seconds. ✓ (FAST)
+03:25:45.036 CanWrite (0)                                 At 03:24:22.794 CanWrite (0)              0.001 seconds. ✓ (FAST)
+03:25:45.036 CanAsync (0)                                 At 03:24:22.795 CanAsync (0)              0.001 seconds. ✓ (FAST)
+03:25:45.036 GetSwitch (0)                                At 03:24:22.796 GetSwitch (0)             0.001 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (0)                           At 03:24:23.298 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
+03:25:45.036 SetSwitchName (0)                            At 03:24:23.802 SetSwitchName (0)         0.002 seconds. ✓ (STANDARD)
+03:25:45.036 SwitchName (1)                               At 03:24:23.805 SwitchName (1)            0.001 seconds. ✓ (FAST)
+03:25:45.036 GetSwitchDescription (1)                     At 03:24:23.805 GetSwitchDescription (1)  0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (1)                           At 03:24:23.806 MinSwitchValue (1)        0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (1)                           At 03:24:23.806 MinSwitchValue (1)        0.000 seconds. ✓ (FAST)
+03:25:45.036 SwitchStep (1)                               At 03:24:23.807 SwitchStep (1)            0.000 seconds. ✓ (FAST)
+03:25:45.036 CanWrite (1)                                 At 03:24:23.807 CanWrite (1)              0.000 seconds. ✓ (FAST)
+03:25:45.036 CanAsync (1)                                 At 03:24:23.808 CanAsync (1)              0.001 seconds. ✓ (FAST)
+03:25:45.036 GetSwitch (1)                                At 03:24:23.808 GetSwitch (1)             0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (1)                           At 03:24:24.311 MinSwitchValue (1)        0.001 seconds. ✓ (FAST)
+03:25:45.036 SetSwitchName (1)                            At 03:24:24.817 SetSwitchName (1)         0.004 seconds. ✓ (STANDARD)
+03:25:45.036 SetSwitch (1)                                At 03:24:24.819 SetSwitch (1)             0.002 seconds. ✓ (STANDARD)
+03:25:45.036 SetSwitchValue (1)                           At 03:24:35.840 SetSwitchValue (1)        0.003 seconds. ✓ (STANDARD)
+03:25:45.036 SwitchName (2)                               At 03:25:04.398 SwitchName (2)            0.003 seconds. ✓ (FAST)
+03:25:45.036 GetSwitchDescription (2)                     At 03:25:04.399 GetSwitchDescription (2)  0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (2)                           At 03:25:04.399 MinSwitchValue (2)        0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (2)                           At 03:25:04.399 MinSwitchValue (2)        0.000 seconds. ✓ (FAST)
+03:25:45.036 SwitchStep (2)                               At 03:25:04.400 SwitchStep (2)            0.000 seconds. ✓ (FAST)
+03:25:45.036 CanWrite (2)                                 At 03:25:04.401 CanWrite (2)              0.001 seconds. ✓ (FAST)
+03:25:45.036 CanAsync (2)                                 At 03:25:04.401 CanAsync (2)              0.001 seconds. ✓ (FAST)
+03:25:45.036 GetSwitch (2)                                At 03:25:04.402 GetSwitch (2)             0.000 seconds. ✓ (FAST)
+03:25:45.036 MinSwitchValue (2)                           At 03:25:04.904 MinSwitchValue (2)        0.001 seconds. ✓ (FAST)
+03:25:45.036 SetSwitchName (2)                            At 03:25:05.406 SetSwitchName (2)         0.001 seconds. ✓ (STANDARD)
+03:25:45.036 SetSwitch (2)                                At 03:25:05.408 SetSwitch (2)             0.002 seconds. ✓ (STANDARD)
+03:25:45.036 SetSwitchValue (2)                           At 03:25:16.430 SetSwitchValue (2)        0.002 seconds. ✓ (STANDARD)
+03:25:45.036 Disconnect                                   At 03:25:45.034 Disconnect                0.001 seconds. ✓ (STANDARD)
+03:25:45.036                                              
+03:25:45.036 Congratulations, all members returned within their target response times!!          
