@@ -99,6 +99,13 @@ public:
         travel_rate_ = counts_per_second;
     }
 
+    // One-shot: the GOTO completes just after the next 0x01 position reply is composed, so that reply carries the
+    // position from before the arrival and every later reply (0x13 included) sees the motor stopped at the target.
+    void complete_move_after_position_reply() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_after_position_ = true;
+    }
+
     // Finishes the motion a GOTO started: the encoder reaches the target.
     void complete_move() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -267,6 +274,11 @@ private:
         switch (request.command) {
             case 0x01:
                 put_be(out, raw_, 3);
+                if (complete_after_position_) {
+                    complete_after_position_ = false;
+                    if (target_) raw_ = *target_;
+                    target_.reset();
+                }
                 return out;
             case 0x02:
                 if (request.payload.size() != 3) return std::nullopt;
@@ -324,6 +336,7 @@ private:
     bool calibrating_ = false;
     bool calibration_complete_ = false;
     bool status_idle_held_ = false;
+    bool complete_after_position_ = false;
     std::vector<std::uint8_t> version_{7, 11, 0x0b, 0xb8};
     std::vector<alpacacore::vendor::celestron::AuxFrame> requests_;
     std::mutex gate_mutex_;
