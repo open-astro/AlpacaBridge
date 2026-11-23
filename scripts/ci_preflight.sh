@@ -209,8 +209,8 @@ ensure_pmd() {
 
 # Pinned zizmor release (keep in sync with .github/workflows/ci.yml). GitHub
 # release assets are immutable, so the hash is stable for a given version.
-ZIZMOR_VER="1.32.0"
-ZIZMOR_SHA256="cb152b207f815116d7fa1c1ee4614f61578803351395052908095e79adfd9fd0"
+ZIZMOR_VER="1.33.1"
+ZIZMOR_SHA256="aa487c792a7cbbe86e4f8dccd3b66de33b3b51813c090aaa0842d7ea08a3fc35"
 
 # ensure_zizmor: prints a usable zizmor binary path on stdout and returns 0, or
 # returns non-zero if unavailable. zizmor is not packaged in apt, so (mirroring

@@ -78,6 +78,8 @@ HELPER_SUBJECT_RE = re.compile(
 
 HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*falsified by\s*:?\s*(?:\*\*|__)?\s*:?\s*$",
                         re.IGNORECASE)
+# A lone `- None` bullet, optionally followed by text, says the PR adds or renames no case (issue #2626).
+NONE_RE = re.compile(r"^\s*[-*]\s+none\b(?:\s*[:.,;-].*)?\s*$", re.IGNORECASE)
 LINE_RE = re.compile(r'^\s*[-*]\s+"(?P<name>.+)":\s+(?P<path>\S+?):(?P<line>\d+)\s+(?P<change>\S.*)$')
 
 CASE_MARKER_RE = re.compile(r"^\s*//\s*case:\s*(?P<name>\S.*?)\s*$")
@@ -173,12 +175,16 @@ def parse_body(body):
     start = next((i for i, ln in enumerate(lines) if HEADING_RE.match(ln)), None)
     if start is None:
         return [], []
-    entries, errors = [], []
+    entries, errors, bullets, none = [], [], 0, False
     for ln in lines[start + 1:]:
         if not ln.strip():
             continue
         if re.match(r"^\s*#{1,6}\s", ln) or not re.match(r"^\s*[-*]\s", ln):
             break
+        bullets += 1
+        if NONE_RE.match(ln):
+            none = True
+            continue
         m = LINE_RE.match(ln)
         if not m:
             errors.append('malformed line (want `- "<case>": <path>:<line> <change>`): %r' % ln.strip())
@@ -187,6 +193,8 @@ def parse_body(body):
             errors.append("change has fewer than 3 words for %r" % m.group("name"))
             continue
         entries.append((m.group("name"), m.group("path"), m.group("change")))
+    if none and bullets > 1:
+        errors.append("a `- None` line must be the only line under Falsified by")
     return entries, errors
 
 
@@ -603,6 +611,18 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("rejected: change under 3 words", len(errs) == 1)
     entries, errs = parse_body("no section at all")
     check("no section", not entries and not errs)
+    # A single `- None` bullet (issue #2626): no cases, no error.
+    for line in ["- None", "- none", "* None: no case is added", "- None: no case is added or renamed"]:
+        entries, errs = parse_body("## Falsified by\n\n%s\n\n## Next\n" % line)
+        check("none bullet: " + line, not entries and not errs)
+    entries, errs = parse_body("## Falsified by\n\nNo case is added.\n")
+    check("prose line", not entries and not errs)
+    entries, errs = parse_body('## Falsified by\n- "x": path:1 a b c\n')
+    check("case line beside none rows", entries == [("x", "path", "a b c")] and not errs)
+    _e, errs = parse_body('## Falsified by\n- None\n- "x": %s:1 delete the check now\n' % prod)
+    check("rejected: none beside a case line", len(errs) == 1)
+    _e, errs = parse_body("## Falsified by\n- Nonexistent case\n")
+    check("rejected: a word starting with None", len(errs) == 1)
 
     # Evaluation.
     new = {"A": set(), "B": set()}

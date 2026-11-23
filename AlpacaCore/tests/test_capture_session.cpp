@@ -1472,6 +1472,30 @@ TEST_CASE("CaptureSession - a start with the reservation publishes Exposing and 
     CHECK(error_code_of([&] { (void)h.session->reserve(); }) == 0);
 }
 
+// Issue #2627: a body that published its frame may still be returning (its last log line, the slot's unwind) when
+// the client reads the frame and writes BinX then BinY. The first write drops the frame; the second must not be
+// refused as "during an exposure", because nothing is exposing and nothing failed.
+TEST_CASE("CaptureSession - a dropped frame does not lock the settings while its body is still returning",
+          "[util][capture-session][reserve]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto returning = h.gate();
+    h.session->start(1.0, [p, returning](CaptureControl& c) {
+        c.exposure_started();
+        p->accepted = c.image_ready(frame(4)) ? 1 : 0;
+        returning->wait();  // published, not yet returned
+    });
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    REQUIRE(h.session->busy());
+    CHECK_FALSE(h.session->settings_locked());
+    h.session->discard_image();  // the first geometry write
+    CHECK_FALSE(h.session->settings_locked());
+    CHECK(error_code_of([&] { h.session->ensure_settings_unlocked(); }) == 0);  // the second one
+    returning->open();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+    CHECK_FALSE(h.session->settings_locked());
+}
+
 TEST_CASE("CaptureSession - a refused start releases the reservation", "[util][capture-session][reserve]") {
     Harness h;
     auto p = std::make_shared<Probe>();

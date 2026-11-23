@@ -226,8 +226,9 @@ public:
     }
 
     /// True while the camera settings must not change: a start is reserved, an exposure is Exposing or
-    /// Downloading, or a cancelled or failed body is still returning and no frame is ready. Applies the watchdog,
-    /// as the state getters do.
+    /// Downloading, or a cancelled or failed body is still returning and no frame is ready. A body that published
+    /// its frame does not lock them while it returns, even once a geometry write has dropped that frame (issue
+    /// #2627). Applies the watchdog, as the state getters do.
     bool settings_locked() const {
         std::unique_lock<std::mutex> lock(mutex_);
         apply_watchdog(lock);
@@ -287,6 +288,7 @@ private:
         owner_ = token;
         stopping_ = false;
         signalled_ = false;
+        published_ = false;
         state_ = State::Exposing;
         image_.reset();
         failure_.reset();
@@ -343,6 +345,7 @@ public:
         state_ = State::Idle;
         image_.reset();
         owner_ = 0;
+        published_ = false;
         ++pending_;
         cv_.notify_all();  // wakes a body in wait_for_signal(), which the SDK stop does not
         lock.unlock();
@@ -361,6 +364,7 @@ public:
         open_ = false;
         state_ = State::Idle;
         owner_ = 0;
+        published_ = false;
         reserved_ = 0;  // a start holding it is refused with NotConnected (rule 9)
         abort_pending_ = false;
         ++pending_;
@@ -521,7 +525,8 @@ private:
 
     bool is_exposing_locked() const { return state_ == State::Exposing || state_ == State::Download; }
     bool settings_locked_locked() const {
-        return reserved_ != 0 || is_exposing_locked() || ((running_ > 0 || pending_ > 0) && state_ != State::Ready);
+        return reserved_ != 0 || is_exposing_locked() ||
+               ((running_ > 0 || pending_ > 0) && state_ != State::Ready && !published_);
     }
     friend class CaptureReservation;
     void release_reservation(std::uint64_t id) noexcept {
@@ -635,6 +640,7 @@ private:
     int disconnecting_ = 0;
     bool open_ = true;
     bool signalled_ = false;  // signal() since start(), not yet taken by wait_for_signal()
+    bool published_ = false;  // the last body published its frame (issue #2627); start, abort and disconnect clear it
     std::uint64_t reserved_ = 0;          // id of the held reservation (rule 9); 0 = none
     std::uint64_t last_reservation_ = 0;  // reserve() hands out ++last_reservation_
     bool abort_pending_ = false;          // an AbortExposure during the held reservation (record_abort())
@@ -730,6 +736,7 @@ inline bool CaptureControl::image_ready(std::shared_ptr<const ImageArray> image)
     session_.image_ = std::move(image);
     session_.state_ = CaptureSession::State::Ready;
     session_.owner_ = 0;
+    session_.published_ = true;
     session_.last_.commit(session_.duration_, session_.start_time_);
     return true;
 }
