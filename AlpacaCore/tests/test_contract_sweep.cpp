@@ -1308,9 +1308,9 @@ struct Tier2Host {
     // A telescope row whose fake accepts park() but never reports AtPark says why here, and the parked
     // InvalidValue case (#2257) then skips it.
     const char* at_park_unreachable = nullptr;
-    // The connectable driver built on the caller's task clock, for a row whose driver is `adopted` in decision 0005
-    // and whose Park waits on a driver timer. The parked case builds it on a FakeTaskClock and steps that clock until
-    // AtPark (0005 rule 2); empty means the case waits for AtPark in real time.
+    // The connectable driver built on the caller's task clock, for a row whose driver is `adopted` in decision 0005.
+    // The parked case builds it on a FakeTaskClock and steps that clock until AtPark, so a driver timer in the Park
+    // body is never waited out in real time (0005 rule 2); empty means the case waits for AtPark in real time.
     std::function<Hosted(alpacacore::util::TaskClock&)> connectable_on_clock = nullptr;
 };
 
@@ -1522,6 +1522,27 @@ Hosted connected_host(const Tier2Host& h) { return connected(h.connectable(false
 constexpr std::chrono::seconds kParkLandBound{15};
 constexpr std::chrono::milliseconds kParkClockStep{250};
 constexpr std::chrono::seconds kParkedProbeBound{5};
+// #2584: a disconnect on a FakeTaskClock may wait on that clock (the CGX reads its continuity checkpoint with 20 ms
+// sleeps inside a 500 ms clock budget, celestron_cgx_telescope_driver.cpp read_stopped_checkpoint()), so the parked
+// case steps the clock by this much until the disconnect returns.
+constexpr std::chrono::milliseconds kDisconnectClockStep{20};
+
+// Disconnects `driver`, stepping `clock` (when not null) until the disconnect returns.
+void disconnect_stepping(alpacacore::AlpacaDriver& driver, alpacacore::test::FakeTaskClock* clock) {
+    if (clock == nullptr) {
+        static_cast<void>(error_code_of([&] { driver.set_connected(false); }));
+        return;
+    }
+    auto task =
+        std::async(std::launch::async, [&driver] { return worker_code_of([&] { driver.set_connected(false); }); });
+    while (task.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+        if (clock->wait_for_waiters(1, std::chrono::milliseconds(1))) {
+            clock->advance(kDisconnectClockStep);
+            (void)clock->wait_for_woken_settled(std::chrono::seconds(2));
+        }
+    }
+    static_cast<void>(task.get());
+}
 
 // #2257: the same probes while connected and parked. The case parks the mount itself and waits for AtPark.
 [[maybe_unused]] void case_t2_invalid_value_parked(const Tier2Host& h) {
@@ -1535,6 +1556,13 @@ constexpr std::chrono::seconds kParkedProbeBound{5};
     // Declared before the Hosted, so the clock outlives the driver that holds it.
     const auto clock = h.connectable_on_clock ? std::make_shared<alpacacore::test::FakeTaskClock>() : nullptr;
     Hosted hosted = clock ? connected(h.connectable_on_clock(*clock)) : connected_host(h);
+    // Declared after the Hosted, so on every exit (a failed REQUIRE included) the driver disconnects with the clock
+    // stepped before it is destroyed.
+    struct Disconnect {
+        alpacacore::AlpacaDriver& driver;
+        alpacacore::test::FakeTaskClock* clock;
+        ~Disconnect() { disconnect_stepping(driver, clock); }
+    } disconnect{*hosted.driver, clock.get()};
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     REQUIRE(t.get_can_park());
     t.park();
@@ -1554,7 +1582,7 @@ constexpr std::chrono::seconds kParkedProbeBound{5};
         if (call.wait_for(kParkedProbeBound) != std::future_status::ready) {
             // A disconnect ends whatever the probe started, so the future's join below returns.
             FAIL_CHECK("the probe did not return within " << kParkedProbeBound.count() << " s");
-            static_cast<void>(error_code_of([&] { hosted.driver->set_connected(false); }));
+            disconnect_stepping(*hosted.driver, clock.get());
             static_cast<void>(call.get());
             return;
         }
@@ -2088,12 +2116,16 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
     namespace cel = alpacacore::vendor::celestron;
     auto fake = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     fake->set_auto_complete_motions(true);  // #2468: a home search lands at once, so a Park reaches AtPark
-    const auto make = [fake](int device_number) -> std::unique_ptr<AlpacaDriver> {
+    const auto make_on = [fake](int device_number,
+                                alpacacore::util::TaskClock& clock) -> std::unique_ptr<AlpacaDriver> {
         cel::CelestronCgxConnectionInfo info;
         info.port_path = fake->slave_path();
         info.site_latitude_degrees = 45.0;
         info.site_longitude_degrees = -75.0;
-        return cel::create_celestron_cgx_telescope(device_number, info);
+        return cel::create_celestron_cgx_telescope(device_number, info, clock);
+    };
+    const auto make = [make_on](int device_number) {
+        return make_on(device_number, alpacacore::util::default_task_clock());
     };
     Tier2Host host{
         "celestron_telescope_cgx",
@@ -2111,6 +2143,11 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
         "",
         "Firmware replies are immediate; Connecting may complete before its first poll (fake protocol timing)",
         err::InvalidOperation};
+    // #2584: the parked case runs on a FakeTaskClock, so a clock wait added to the Park body cannot fall back to
+    // real time.
+    host.connectable_on_clock = [fake, make_on](alpacacore::util::TaskClock& clock) -> Hosted {
+        return {fake, make_on(0, clock)};
+    };
     return host;
 }
 
@@ -2119,14 +2156,17 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
 Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
     namespace cel = alpacacore::vendor::celestron;
     using alpacacore::test::FakeCelestronAuxTcpAdapter;
-    const auto make = [](const FakeCelestronAuxTcpAdapter& adapter,
-                         int device_number) -> std::unique_ptr<AlpacaDriver> {
+    const auto make_on = [](const FakeCelestronAuxTcpAdapter& adapter, int device_number,
+                            alpacacore::util::TaskClock& clock) -> std::unique_ptr<AlpacaDriver> {
         cel::CelestronCgxConnectionInfo info;
         info.host = "127.0.0.1";
         info.tcp_port = adapter.port();
         info.site_latitude_degrees = 45.0;
         info.site_longitude_degrees = -75.0;
-        return cel::create_celestron_cgx_telescope(device_number, info);
+        return cel::create_celestron_cgx_telescope(device_number, info, clock);
+    };
+    const auto make = [make_on](const FakeCelestronAuxTcpAdapter& adapter, int device_number) {
+        return make_on(adapter, device_number, alpacacore::util::default_task_clock());
     };
     auto adapter = std::make_shared<FakeCelestronAuxTcpAdapter>();
     Tier2Host host{"celestron_telescope_cgx_tcp",
@@ -2147,6 +2187,10 @@ Tier2Host tier2_host_celestron_cgx_tcp_telescope() {
                    "The adapter answers at once; the connect's 200 ms backlog drain may end before the first poll "
                    "(fake_celestron_aux_tcp_adapter.h)",
                    err::InvalidOperation};
+    // #2584: as the USB row, the parked case runs on a FakeTaskClock.
+    host.connectable_on_clock = [adapter, make_on](alpacacore::util::TaskClock& clock) -> Hosted {
+        return {adapter, make_on(*adapter, 0, clock)};
+    };
     return host;
 }
 
@@ -2479,16 +2523,18 @@ Tier2Host tier2_host_onstep_switch() {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
 namespace sw = alpacacore::vendor::skywatcher;
 
-// Recipe of test_skywatcher_concurrency_stress.cpp: the UDP mount fake.
+// Recipe of test_skywatcher_concurrency_stress.cpp: the UDP mount fake. The parked case steps the driver's park
+// waits on a FakeTaskClock (connectable_on_clock, #2584).
 Tier2Host tier2_host_skywatcher_telescope() {
-    auto make = [](int port) -> std::unique_ptr<AlpacaDriver> {
+    auto make_on = [](int port, alpacacore::util::TaskClock& clock) -> std::unique_ptr<AlpacaDriver> {
         sw::ConnectionInfo info;
         info.type = sw::ConnectionType::Network;
         info.host = "127.0.0.1";
         info.udp_port = port;
         info.response_timeout_ms = 250;
-        return sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0);
+        return sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0, {}, {}, clock);
     };
+    auto make = [make_on](int port) { return make_on(port, alpacacore::util::default_task_clock()); };
     Tier2Host h{"skywatcher_telescope",
                 "skywatcher",
                 "telescope",
@@ -2505,19 +2551,25 @@ Tier2Host tier2_host_skywatcher_telescope() {
         return host_over(mount, [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make(m.port()); });
     };
     h.failing = [make]() { return host_over_held_port(SOCK_DGRAM, make); };
+    h.connectable_on_clock = [make_on](alpacacore::util::TaskClock& clock) {
+        return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
+                         [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make_on(m.port(), clock); });
+    };
     return h;
 }
 
-// Recipe of test_skywatcher_serial.cpp: the serial motor-board fake.
+// Recipe of test_skywatcher_serial.cpp: the serial motor-board fake. The parked case steps the driver's park waits
+// on a FakeTaskClock (connectable_on_clock, #2584).
 Tier2Host tier2_host_skywatcher_telescope_serial() {
-    auto make = [](const std::string& path) -> std::unique_ptr<AlpacaDriver> {
+    auto make_on = [](const std::string& path, alpacacore::util::TaskClock& clock) -> std::unique_ptr<AlpacaDriver> {
         sw::ConnectionInfo info;
         info.type = sw::ConnectionType::Serial;
         info.port_path = path;
         info.baud_rate = 9600;
         info.response_timeout_ms = 300;
-        return sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+        return sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0, {}, {}, clock);
     };
+    auto make = [make_on](const std::string& path) { return make_on(path, alpacacore::util::default_task_clock()); };
     Tier2Host h{"skywatcher_telescope_serial",
                 "skywatcher",
                 "telescope",
@@ -2541,6 +2593,11 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
         Hosted hosted;
         hosted.driver = make(kAbsentPort);
         return hosted;
+    };
+    h.connectable_on_clock = [make_on](alpacacore::util::TaskClock& clock) {
+        return host_over(
+            std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>(),
+            [&](const alpacacore::test::FakeSkyWatcherSerialBoard& b) { return make_on(b.slave_path(), clock); });
     };
     return h;
 }
