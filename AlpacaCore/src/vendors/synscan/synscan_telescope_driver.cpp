@@ -3913,14 +3913,10 @@ private:
 
     bool get_slewing_locked() const { return slewing_by_driver_state_locked() || served_frame_locked().value.slewing; }
 
-    // The PulseGuide slew gate: asks the handset for the end of the answer, not the polled frame. `lock` (mutex_) is
-    // held on entry and on return; the `L` runs with it released.
-    bool get_slewing_fresh(std::unique_lock<std::mutex>& lock) const {
-        return slewing_by_driver_state_locked() || poll_hardware_slewing_locked(lock);
-    }
-
     // What refuses a PulseGuide on `axis` (#2263, #2467): the slewing state, except a MoveAxis on the OTHER axis, which
     // the pulse runs beside (each axis has its own motor command). A MoveAxis on the pulse's own axis still refuses it.
+    // pulse_blocked_fresh() is the PulseGuide slew gate: it asks the handset, not the polled frame. `lock` (mutex_) is
+    // held on entry and on return; the `L` runs with it released.
     bool pulse_blocked_by_driver_state_locked(int axis) const {
         if (parking_ || refining_locked() || slew_hold_.active(clock_.now())) {
             return true;
