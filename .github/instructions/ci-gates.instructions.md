@@ -126,12 +126,9 @@ author must do. Read the docstring before changing a gate.
   every merge, so a nightly `.deb` that fails the check is never published.
 - **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
-  row of `scripts/conformu_fake_runs.tsv` (today the Sky-Watcher UDP mount over `FakeSkyWatcherMount` and its serial
-  motor board over `FakeSkyWatcherSerialBoard`, the ZWO EAF, OnStepX, iOptron iEAF, iFR and QHY Q-Focuser
-  focusers, the ZWO EFW, QHYCFW3 and Player One Phoenix filter wheels, and the iOptron iGuider and GPhoto
-  cameras over their fakes), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
-  libgphoto2 first for a vendor that needs it; a telescope row takes about 20 minutes on the arm64 runner, a
-  focuser, filter wheel or camera row under a minute). On a PR the `runs` job keeps only the rows the PR's
+  row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
+  libgphoto2 first for a vendor that needs it; a telescope row takes about 20 minutes on the arm64 runner, any
+  other row about a minute). On a PR the `runs` job keeps only the rows the PR's
   files reach: a shared file the `paths:` list names (the core, the HTTP layer, the server, the run list, the
   workflow) runs every row, a vendor's sources, fakes (`fake_<vendor>_*.h`) or reports run that vendor's rows, and a
   file the list does not name (a changelog fragment, docs, a test case) selects nothing; the nightly run runs them all. The
@@ -140,7 +137,7 @@ author must do. Read the docstring before changing a gate.
   docs-drift check 30 holds it to the roster both ways, so a PR that adds a roster row adds its record. A row runs
   only when its fake can pass ConformU on merit: a fake that does not model the device (a mount that never moves
   or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
-  workflow's `paths:` list (the run rows' drivers and fakes, the server, the telescope, focuser, filter wheel and camera interfaces, the HTTP
+  workflow's `paths:` list (the run rows' drivers and fakes, the server, the run rows' device interfaces, the HTTP
   layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
   whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the
   `fake_conformu_server` sources and the run script's imports. Its reports are fake evidence, filed under a `Fake*`
