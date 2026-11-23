@@ -664,7 +664,9 @@ bool CelestronCgxProtocol::took_effect_locked(const AuxFrame& wire, std::optiona
             return !done(0x12, "MC_LEVEL_DONE");
         case 0x02:
         case 0x17: {
-            // Closer to the target than before is proof; done at the target covers a GOTO with nowhere to go.
+            // Closer to the target than before is proof; done at the target covers a GOTO with nowhere to go. Only
+            // with the axis untracked: tracking toward the target reads closer with no GOTO (sidereal is ~58 counts per
+            // 300 ms). The driver turns tracking off before every GOTO it sends (#2541).
             const bool finished = done(0x13, "MC_SLEW_DONE");
             const auto target = u24(wire.payload);
             const auto remaining = count_distance(position(), target);
@@ -676,7 +678,8 @@ bool CelestronCgxProtocol::took_effect_locked(const AuxFrame& wire, std::optiona
         case 0x26:
             return decode_guide_active(true, query_locked(status_query(wire, 0x27), deadline));
         case 0x24: {
-            // Still is what a stop is for: done, and two positions a round trip apart agree (an idle axis counts).
+            // Still is what a stop is for: done, and two positions a round trip apart agree (an idle axis counts). An
+            // axis still tracking (~4 counts a WiFi round trip) reads not confirmed and gets the send-only stop.
             const auto first = position();
             const bool finished = done(0x13, "MC_SLEW_DONE");
             return finished && count_distance(position(), first) <= kConfirmCounts;
