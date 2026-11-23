@@ -121,8 +121,8 @@ struct OperationContext::Body {
  * The slot never runs a body, a log call or a user callback while holding its
  * mutex. start() and cancel_all_and_join() must be called WITHOUT the driver
  * mutex held, since a stale body may need it to return (the Sky-Watcher
- * slew body takes it to clean up); cancel(), running(), stale_count() and
- * last_failure() may be called with it held.
+ * slew body takes it to clean up); cancel(), running(), live(), stale_count()
+ * and last_failure() may be called with it held.
  *
  * Neither start() nor cancel_all_and_join() may be called from inside a body
  * of the same slot. cancel_all_and_join() from a body takes that body and
@@ -317,6 +317,15 @@ public:
     bool running() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return current_ && !current_->returned;
+    }
+
+    /// True while the current body has not returned and has not been told to
+    /// stop: its stop reason is None. A body that was cancelled or superseded
+    /// and is only winding down is running() but not live (#2586). May be
+    /// called with the driver mutex held (rule 10).
+    bool live() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return current_ && !current_->returned && stop_reason_locked(*current_) == StopReason::None;
     }
 
     /// Replaced bodies not yet joined. May be called with the driver mutex

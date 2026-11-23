@@ -2536,15 +2536,6 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
           "[synscan][telescope][goto-safety]") {
     const bool goto_motion = GENERATE(false, true);
     MoveAxisBoundRig rig;
-    // The GOTO body's end. AbortSlew cancels the body but does not join it, and the slot counts as running (so the
-    // writes are refused) until the body returns (#2561). Shared: the body thread never outlives what it sets.
-    const auto body_ended = std::make_shared<std::atomic<bool>>(false);
-    sc_bound::set_slew_spawn_for_testing(*rig.driver, [body_ended](std::function<void()> body) {
-        return std::thread([body_ended, body = std::move(body)] {
-            body();
-            body_ended->store(true);
-        });
-    });
     if (goto_motion) {
         rig.st->goto_never_ends.store(true);  // the GOTO body keeps waiting on it
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
@@ -2561,13 +2552,61 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
                          alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.st->requests.load() == requests);
 
+    // At once: the cancelled GOTO body may still be winding down, and it no longer refuses (#2586).
     REQUIRE_NOTHROW(rig.driver->abort_slew());
-    if (goto_motion) {
-        REQUIRE(wait_until([&] { return body_ended->load(); }, 5000));
-    }
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
     CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+}
+
+// #2586 (the maintainer ruled on 2026-11-22): AbortSlew cancels the GOTO or Park body and does not join it. Once
+// AbortSlew has returned, Slewing reads false and nothing moves, so the site, time and Sync writes are accepted while
+// that body is still winding down; the body sends nothing more. The exit seam holds the cancelled body just before the
+// slot counts it as returned, so the writes land inside that window every run.
+TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew while the cancelled body winds down",
+          "[synscan][telescope][goto-safety]") {
+    const bool park = GENERATE(false, true);
+    INFO((park ? "Park" : "GOTO"));
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    MoveAxisBoundRig rig;
+    rig.st->log_status_reads.store(false);
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sc_bound::set_slew_spawn_for_testing(*rig.driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    sc_bound::set_slew_body_exit_hook_for_testing(*rig.driver, [&held] { held.block(); });
+    rig.st->goto_never_ends.store(true);  // the body keeps waiting for the GOTO to end
+    if (park) {
+        REQUIRE_NOTHROW(rig.driver->park());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    }
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    REQUIRE(held.wait_entered());  // the cancelled body is held; the slot still counts it as running
+    CHECK_FALSE(rig.driver->get_slewing());
+    const std::size_t sent_before_writes = rig.st->command_snapshot().size();
+    CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
+    CHECK_NOTHROW(rig.driver->set_site_longitude(10.0));
+    CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+    CHECK_FALSE(body_ended->load());  // every write above ran while the body was still winding down
+
+    // The writes' own commands only (`W`, `H`, `s`): nothing from the body, and no motion command.
+    const auto after_writes = rig.st->command_snapshot();
+    for (std::size_t i = sent_before_writes; i < after_writes.size(); ++i) {
+        INFO("command " << after_writes[i]);
+        CHECK(std::string("WHs").find(after_writes[i][0]) != std::string::npos);
+    }
+    held.release();
+    REQUIRE(wait_until([&] { return body_ended->load(); }, 5000));
+    CHECK(rig.st->command_snapshot().size() == after_writes.size());  // its tail sent nothing either
+    CHECK(rig.st->goto_count.load() == 1);
+    sc_bound::set_slew_body_exit_hook_for_testing(*rig.driver, {});
 }
 
 TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and fails the MoveAxis",
