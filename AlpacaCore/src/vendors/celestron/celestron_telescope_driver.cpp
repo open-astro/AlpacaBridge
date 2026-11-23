@@ -3626,7 +3626,8 @@ private:
                 // A check that got no answer or a bad reply is a failed probe (decision 0010 rule 7: nullopt means
                 // the device answered): the FindHome's counter above has judged it, and the module counts it too.
                 // No second timeout in this tick (Disconnect waits for the tick) and no sample.
-                // A claim superseded meanwhile makes this throw harmless: the frame is the mount's, the stops were skipped.
+                // A claim superseded meanwhile makes this throw harmless: the frame is the mount's, the stops were
+                // skipped.
                 throw AlpacaException("Celestron FindHome completion check failed (no answer or a bad reply)",
                                       AlpacaError::DriverException);
             }
