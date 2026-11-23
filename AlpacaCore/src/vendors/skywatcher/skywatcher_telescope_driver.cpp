@@ -963,9 +963,8 @@ public:
     // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
     // glitches) — both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
-        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
-            throw AlpacaException("DeclinationRate must be finite", AlpacaError::InvalidValue);
-        }
+        // #2287: the argument check runs first; NaN was stored and applied
+        util::check_rate_offset_arguments(kCommandLimits, util::RateOffsetAxis::Declination, rate);
         {
             // Idempotence check BEFORE reaping: a same-value rewrite must not
             // tear down a running duty worker it would never restart.
@@ -1179,9 +1178,8 @@ public:
     // (RA = LST - HA), so the offset is SUBTRACTED; a large offset reverses
     // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
-        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
-            throw AlpacaException("RightAscensionRate must be finite", AlpacaError::InvalidValue);
-        }
+        // #2287: the argument check runs first; NaN was stored and applied
+        util::check_rate_offset_arguments(kCommandLimits, util::RateOffsetAxis::RightAscension, rate);
         StateLock lock(lock_gate_);
         check_writable_locked();
         require_site_locked();  // the RA drive direction reads the hemisphere
