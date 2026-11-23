@@ -1,0 +1,3 @@
+### Changed (docs)
+
+- **The CGX Dec reversal overshoot is recorded as a qualification limit** (docs, issue #2044): the Celestron instructions and the CGX motion evidence no longer call it unresolved. The first Dec guide pulse after a reversal reads +0.5 to +0.8" long, occasionally up to +1.9", from mechanical take-up (the controller's anti-backlash reads 0); ConformU's 1" PulseGuide Dec tolerance can fail now and then on it at 0.25x, and RA is not affected while tracking. The motion evidence gains the 2026-11-22 rig diagnosis. The driver does not compensate; use the guider's Dec backlash compensation (PHD2) or one-direction Dec guiding. Docs only, no behaviour change.
