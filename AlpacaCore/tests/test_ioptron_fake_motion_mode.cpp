@@ -205,6 +205,101 @@ TEST_CASE("FakeIoptronMount ConformU mode: a :Z pulse and the arrows move the ax
     CHECK((rig.ra_hours() - ra0) * 15.0 > 8.0 * 15.0 / 3600.0 * 10.0 * 0.9);
 }
 
+// Points the mount at hour angle @p ha_hours (positive: west of the meridian) at Dec -30 and lets the slew land.
+static void point_at_hour_angle(ModelledMount& rig, double ha_hours) {
+    rig.ask(":ST1#");
+    rig.set_target(std::fmod(rig.mount.motion()->lst_hours() - ha_hours + 24.0, 24.0), -30.0);
+    REQUIRE(rig.ask(":MS1#") == "1");
+    rig.advance(seconds(120));
+}
+
+TEST_CASE("FakeIoptronMount ConformU mode: a Dec pulse and a Dec arrow move the reading by pier side",
+          "[ioptron][fake][mount-model][unit]") {
+    // iOptron's labels: Dec+ (":ZE#", ":ms#") lowers the Declination reading on pier side 0 and raises it on side 1.
+    for (const double ha_hours : {2.0, -2.0}) {
+        ModelledMount rig;
+        point_at_hour_angle(rig, ha_hours);
+        const bool side_one = (rig.ask(":GEP#")[18] == '1');
+        REQUIRE(side_one == (ha_hours < 0.0));
+        const double plus = side_one ? 1.0 : -1.0;  // the sign of a Dec+ command's move on this side
+
+        double before = rig.dec_degrees();
+        rig.ask(":ZE02000#");
+        rig.advance(seconds(10));
+        CHECK(plus * (rig.dec_degrees() - before) ==
+              Catch::Approx(0.5 * FakeMountMotionModel::kSiderealDegPerSec * 2.0).epsilon(0).margin(1e-4));
+
+        before = rig.dec_degrees();
+        rig.ask(":ZC02000#");
+        rig.advance(seconds(10));
+        CHECK(plus * (rig.dec_degrees() - before) ==
+              Catch::Approx(-0.5 * FakeMountMotionModel::kSiderealDegPerSec * 2.0).epsilon(0).margin(1e-4));
+
+        before = rig.dec_degrees();
+        rig.ask(":ms#");
+        rig.advance(seconds(10));
+        rig.ask(":qD#");
+        CHECK(plus * (rig.dec_degrees() - before) == Catch::Approx(15.0 / 3600.0 * 10.0).epsilon(0).margin(1e-4));
+
+        before = rig.dec_degrees();
+        rig.ask(":mn#");
+        rig.advance(seconds(10));
+        rig.ask(":qD#");
+        CHECK(plus * (rig.dec_degrees() - before) == Catch::Approx(-15.0 / 3600.0 * 10.0).epsilon(0).margin(1e-4));
+    }
+}
+
+TEST_CASE("FakeIoptronMount ConformU mode: :MH# reads stopped at zero on arrival and leaves it once tracking starts",
+          "[ioptron][fake][mount-model][unit]") {
+    ModelledMount rig;
+    point_at_hour_angle(rig, 2.0);
+    REQUIRE(rig.status() == 1);
+    rig.ask(":MH#");
+    CHECK(rig.status() == 2);  // slewing to the zero position
+    rig.advance(seconds(120));
+    CHECK(rig.status() == 7);  // stopped at the zero position
+    rig.ask(":ST1#");
+    CHECK(rig.status() == 1);
+}
+
+TEST_CASE("FakeIoptronMount ConformU mode: :SLO and :SLA set the :GLS# site and :SUT then :GUT round-trips",
+          "[ioptron][fake][mount-model][unit]") {
+    ModelledMount rig;
+    REQUIRE(rig.ask(":SLO+00360000#") == "1");  // 1 degree east, in 0.01 arcsec
+    REQUIRE(rig.ask(":SLA-01800000#") == "1");  // 5 degrees south
+    const std::string gls = rig.ask(":GLS#");
+    CHECK(gls.substr(0, 9) == "+00360000");
+    CHECK(gls.substr(9, 8) == "30600000");               // latitude + 90 degrees: 85 degrees * 360000
+    CHECK(rig.mount.motion()->state().ra_hours >= 0.0);  // the model took the site without a jump
+
+    REQUIRE(rig.ask(":SUT0000086400000#") == "1");  // one day after J2000, in ms
+    CHECK(rig.ask(":GUT#").substr(5, 13) == "0000086400000");
+    rig.advance(seconds(5));
+    CHECK(rig.ask(":GUT#").substr(5, 13) == "0000086405000");
+}
+
+TEST_CASE("FakeIoptronMount ConformU mode: :CM# moves :GEP# to the pending target and :Q# freezes a slew",
+          "[ioptron][fake][mount-model][unit]") {
+    ModelledMount rig;
+    rig.ask(":ST1#");
+    const double lst = rig.mount.motion()->lst_hours();
+    rig.set_target(std::fmod(lst + 1.0, 24.0), -20.0);
+    REQUIRE(rig.ask(":CM#") == "1");
+    CHECK(rig.dec_degrees() == Catch::Approx(-20.0).epsilon(0).margin(1e-4));
+    CHECK(rig.ra_hours() == Catch::Approx(std::fmod(lst + 1.0, 24.0)).epsilon(0).margin(1e-4));
+
+    rig.set_target(std::fmod(lst - 1.0 + 24.0, 24.0), -40.0);
+    REQUIRE(rig.ask(":MS1#") == "1");
+    rig.advance(seconds(2));
+    REQUIRE(rig.status() == 2);
+    REQUIRE(rig.ask(":Q#") == "1");
+    const double frozen = rig.dec_degrees();
+    CHECK(rig.status() != 2);
+    CHECK(frozen != Catch::Approx(-40.0).margin(0.5));
+    rig.advance(seconds(60));
+    CHECK(rig.dec_degrees() == Catch::Approx(frozen).epsilon(0).margin(1e-5));
+}
+
 TEST_CASE("FakeIoptronMount ConformU mode: the driver reads AtPark after Park over the model",
           "[ioptron][fake][mount-model][unit]") {
     // A fast slew (720 degrees per second) keeps the case short; the clock is the real one.
