@@ -643,13 +643,15 @@ private:
     StateFrame sample_frame() {
         StateFrame frame;
         resync_if_needed();
-        const auto position = exchange(kGetPosition);
-        if (position.size() != 3) {
-            throw AlpacaException("position reply is not 24 bits", AlpacaError::DriverException);
-        }
+        // Slew-done before position (#2580): a frame that says stopped then carries a position read after the
+        // arrival, never one from mid-travel.
         const auto done = exchange(kSlewDone);
         if (done.size() != 1) {
             throw AlpacaException("slew-done reply is not one byte", AlpacaError::DriverException);
+        }
+        const auto position = exchange(kGetPosition);
+        if (position.size() != 3) {
+            throw AlpacaException("position reply is not 24 bits", AlpacaError::DriverException);
         }
         poll_calibration();
         CalibrationState state;

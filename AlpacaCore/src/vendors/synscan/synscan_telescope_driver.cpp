@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/host_clock_write_gate.h>
@@ -485,6 +486,26 @@ public:
             }
             throw;
         }
+    }
+
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
+
+    std::string action(std::string_view action_name, std::string_view action_parameters) override {
+        (void)action_parameters;
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // CanFindHome is false: the handset protocol has no home command.
+            if (!get_connected()) throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
+            const bool sensor_search = false;
+            return util::format_findhome_sensor_search(sensor_search, util::kFindHomeNotSupported, "");
+        }
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
+
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
     }
 
     // The raw pass-through commands check the connection under mutex_ and send with it released (the wrapper
@@ -969,10 +990,10 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
+        // decision 0009 rule 1: a refused write keeps the value and its set flag
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -988,10 +1009,10 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
+        // decision 0009 rule 1: a refused write keeps the value and its set flag
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }

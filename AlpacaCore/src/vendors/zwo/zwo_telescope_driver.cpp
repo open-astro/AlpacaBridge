@@ -16,6 +16,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/host_clock_write_gate.h>
@@ -827,6 +828,25 @@ public:
         }
     }
 
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
+
+    std::string action(std::string_view action_name, std::string_view) override {
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // FindHome sends :hC#, a slew to the home position the mount stores.
+            if (!get_connected()) throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
+            const bool sensor_search = false;
+            return util::format_findhome_sensor_search(sensor_search, util::kFindHomeGotoStoredHome, "");
+        }
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
+
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
+    }
+
     std::string command_blind(std::string_view command, bool) override {
         check_connected();
         protocol_.send_command_blind(std::string(command));
@@ -1585,7 +1605,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
@@ -1611,7 +1631,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         check_writable_state();
         std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 

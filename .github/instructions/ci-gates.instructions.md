@@ -127,8 +127,11 @@ author must do. Read the docstring before changing a gate.
 - **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
   row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
-  libgphoto2 first for a vendor that needs it; a telescope row takes about 20 minutes on the arm64 runner, any
-  other row about a minute). On a PR the `runs` job keeps only the rows the PR's
+  libgphoto2 first for a vendor that needs it; a full telescope row takes about 20 minutes on the arm64 runner, a switch row several (ConformU writes every
+  switch: 1.5 to 14 minutes on the arm64 runner: iOptron 1m25s, ToupTek 2m45s, OnStep 4m18s, and Gemini 14m22s for the hub's 24 switches), any other row about a minute). On a PR a telescope row runs the PR profile (`FAKE_CONFORMU_PROFILE=pr`, issue #2568):
+  ConformU's full-test settings without the extended rate-offset and pulse-guide tests, which pass only with exactly
+  those two configuration alerts (`check_pr_profile_run()`); its report names the profile on its first line and
+  `check_text()` refuses it in a commit, so a committed telescope report comes from the nightly or a dispatched run. On a PR the `runs` job keeps only the rows the PR's
   files reach: a shared file the `paths:` list names (the core, the HTTP layer, the server, the run list, the
   workflow) runs every row, a vendor's sources, fakes (`fake_<vendor>_*.h`) or reports run that vendor's rows, and a
   file the list does not name (a changelog fragment, docs, a test case) selects nothing; the nightly run runs them all. The

@@ -18,6 +18,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
@@ -729,13 +730,26 @@ public:
 
     std::vector<std::string> get_supported_actions() const override {
         // connected_ and the wrapper's loss latch are atomic: no mutex_, so a command_* exchange holding it cannot
-        // stall this getter.
+        // stall this getter. Both actions are listed while connected.
         if (!connected_.load() || link_lost()) return {};
-        return {std::string(kGpsStatusAction)};
+        return {std::string(kGpsStatusAction), std::string(util::kFindHomeSensorSearchAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;  // gps_status takes none
+        (void)action_parameters;  // neither action takes any
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // From the model code read at connect, no device I/O: FindHome is the :MSH# zero sensor search only on
+            // the HAE29C (zero_search_active(), #2420); every other model's :MH# slews to the stored home.
+            // The same connection test as the list and CanAction, so the three never disagree mid-transition.
+            if (!connected_.load() || link_lost()) {
+                throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+            }
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            const bool sensor_search = zero_search_active();
+            return util::format_findhome_sensor_search(
+                sensor_search, sensor_search ? util::kFindHomeZeroSensorSearch : util::kFindHomeGotoStoredHome,
+                mount_info_.model_code);
+        }
         if (!util::is_gps_status_action(action_name)) {
             throw AlpacaException("Action not supported: " + std::string(action_name),
                                   AlpacaError::ActionNotImplemented);
@@ -751,6 +765,7 @@ public:
     }
 
     bool can_action(std::string_view action_name) const override {
+        if (util::is_findhome_sensor_search_action(action_name)) return connected_.load() && !link_lost();
         return connected_.load() && !link_lost() && util::is_gps_status_action(action_name);
     }
     
@@ -1694,9 +1709,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1714,9 +1729,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;

@@ -18,6 +18,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/catalog/device_catalog.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_aux_beacon.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -28,7 +29,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -242,6 +246,55 @@ TEST_CASE("Celestron SkyPortal beacon - garbage datagrams are ignored", "[celest
 
     CHECK(ips_of(found) == std::vector<std::string>{"127.0.0.7"});
     CHECK(noise.sent() > 9);
+}
+
+// Issue #2542: past the 16-adapter cap a new adapter's beacons are skipped, and the summary line counts them as
+// ignored instead of dropping them from the tally.
+TEST_CASE("Celestron SkyPortal beacon - adapters past the cap of 16 are counted as ignored", "[celestron][beacon]") {
+    namespace logging = alpacacore::logging;
+    struct SummaryCapture {
+        std::mutex mutex;
+        std::vector<std::string> lines;
+        logging::LogSink previous_sink = logging::get_log_sink();
+        logging::LogLevel previous_level = logging::get_log_level();
+        SummaryCapture() {
+            logging::set_log_level(logging::LogLevel::Debug);
+            logging::set_log_sink([this](logging::LogLevel, std::string_view component, std::string_view message) {
+                if (component != "Celestron" || message.find("SkyPortal beacon listen on") == std::string_view::npos)
+                    return;
+                std::lock_guard<std::mutex> lock(mutex);
+                lines.emplace_back(message);
+            });
+        }
+        ~SummaryCapture() {
+            logging::set_log_sink(previous_sink);
+            logging::set_log_level(previous_level);
+        }
+        SummaryCapture(const SummaryCapture&) = delete;
+        SummaryCapture& operator=(const SummaryCapture&) = delete;
+    } capture;
+    const int port = free_port();
+    REQUIRE(port > 0);
+    std::vector<std::unique_ptr<BeaconSender>> adapters;
+    for (int host = 1; host <= 17; ++host) {
+        const std::string source = "127.0.1." + std::to_string(host);
+        adapters.push_back(std::make_unique<BeaconSender>(
+            source, port, std::vector<std::string>{beacon_from("1.2.3.4", "Celestron-0001")}));
+        REQUIRE(adapters.back()->ok());
+    }
+
+    const auto found = listen_for_aux_beacons(milliseconds(400), port);
+
+    CHECK(found.size() == 16);
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(capture.mutex);
+        lines = capture.lines;
+    }
+    REQUIRE(lines.size() == 1);
+    INFO("summary: " << lines[0]);
+    CHECK(lines[0].find("16 adapter(s), ") != std::string::npos);
+    CHECK(lines[0].find("16 adapter(s), 0 other") == std::string::npos);
 }
 
 TEST_CASE("Celestron SkyPortal beacon - another listener on the port is no obstacle", "[celestron][beacon]") {

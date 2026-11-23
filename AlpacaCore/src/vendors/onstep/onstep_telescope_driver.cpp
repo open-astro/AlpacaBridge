@@ -18,6 +18,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/findhome_sensor_search.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/host_clock_write_gate.h>
@@ -1172,6 +1173,27 @@ public:
         }
     }
 
+    std::vector<std::string> get_supported_actions() const override {
+        if (!get_connected()) return {};  // listed while connected, like every telescope action
+        return {std::string(util::kFindHomeSensorSearchAction)};
+    }
+
+    std::string action(std::string_view action_name, std::string_view action_parameters) override {
+        (void)action_parameters;
+        if (util::is_findhome_sensor_search_action(action_name)) {
+            // FindHome sends :hC#, a slew to the home position the controller stores. OnStepX can be built with
+            // home sensors, but the driver cannot read that build option, so it reports false.
+            if (!get_connected()) throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
+            const bool sensor_search = false;
+            return util::format_findhome_sensor_search(sensor_search, util::kFindHomeGotoStoredHome, "");
+        }
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
+
+    bool can_action(std::string_view action_name) const override {
+        return get_connected() && util::is_findhome_sensor_search_action(action_name);
+    }
+
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
         StateLock lock(lock_gate_);
@@ -1747,7 +1769,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_, StateLock::Mode::State);  // no wire I/O: never waits behind a command (#1728 review)
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1765,7 +1787,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_, StateLock::Mode::State);  // see set_target_declination()
         target_ra_hours_ = ra;
         target_ra_set_ = true;

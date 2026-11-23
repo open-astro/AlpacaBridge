@@ -67,6 +67,7 @@ constexpr Row kPolicy[] = {
     // A pulse claims its own axis and leaves the other alone.
     {MotionCommand::PulseGuide, 0, MotionCommand::PulseGuide, 0, Outcome::Superseded},
     {MotionCommand::PulseGuide, 1, MotionCommand::PulseGuide, 0, Outcome::Kept},
+    // The owner's outcome only: every mount driver refuses this pulse before it claims (#2503).
     {MotionCommand::MoveAxis, 0, MotionCommand::PulseGuide, 0, Outcome::Superseded},
     {MotionCommand::MoveAxis, 1, MotionCommand::PulseGuide, 0, Outcome::Kept},
     // A PulseGuide while a slew, park or home runs is refused and changes nothing.

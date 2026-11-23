@@ -514,6 +514,43 @@ TEST_CASE("Celestron CGX TCP driver - a lost GOTO_SLOW fails the GOTO and is nev
     rig.check_failed_and_stopped(ra_stops);
 }
 
+// #2541 item 1: a GOTO whose reply was lost is confirmed when the axis is closer to its target than just before it.
+// An axis tracking toward the target would read closer with no GOTO at all (sidereal is ~58 counts per 300 ms against
+// the 2-count threshold), so the lost GOTO must still read "not confirmed" with tracking on before the slew: the slew
+// turns tracking off before its first leg, and every correction before its GOTO_SLOW.
+TEST_CASE("Celestron CGX TCP driver - a GOTO lost while the mount tracked before the slew is not confirmed",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpArrivalRig rig;
+    // Tracking on again now that the fake tracks: the axis drifts at the sidereal rate until the slew stops it.
+    rig.driver->set_tracking(false);
+    rig.driver->set_tracking(true);
+    rig.adapter.script(kRa, 0x02, 1, Fault::Drop);  // lost on its way to the bus: it never moved the axis
+    const auto ra_reads = rig.adapter.count(kRa, 0x01);
+    // Hour angle +11 (Normal): from home, tracking carries the RA axis toward this target.
+    rig.target_ra = std::fmod(rig.driver->get_sidereal_time() - 11.0 + 24.0, 24.0);
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(rig.target_ra, 30.0); },
+                         AlpacaError::DriverException);
+    CHECK(rig.adapter.count(kRa, 0x02) == 1);        // never re-sent
+    CHECK(rig.adapter.count(kRa, 0x01) > ra_reads);  // the status was read to settle it
+    CHECK(rig.driver->get_description().find("lost replies recovered: 0") != std::string::npos);
+}
+
+// #2541 item 3: each correction after the first is aimed at the sky the previous correction's aim-to-tracking time
+// ahead. A long first correction (2 s of travel, 30" of sky) then aimed the short second one 2 s ahead, ~28" past the
+// target, and left the landing to the third and last correction. The lead is capped, so the second lands.
+TEST_CASE("Celestron CGX TCP driver - a long correction does not aim the next short one past the target",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpArrivalRig rig;
+    // The FAST GOTO and the first correction travel 2 s each, every later correction the rig's 150 ms.
+    rig.adapter.set_before_request([&rig] {
+        rig.advance(21ms);
+        rig.adapter.set_goto_duration(rig.adapter.count(kRa, 0x17) == 0 ? 2000ms : 150ms);
+    });
+    rig.slew();
+    rig.check_landed();
+    CHECK(rig.adapter.count(kRa, 0x17) == 2);
+}
+
 TEST_CASE("Celestron CGX WiFi Telescope Driver - Defaults", "[celestron][cgx][telescope][tcp][unit]") {
     alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, wifi_info(1), clock);
@@ -618,7 +655,8 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - value ranges and unsupported me
     require_alpaca_error([&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { rig.driver->set_right_ascension_rate(0.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { rig.driver->set_side_of_pier(1); }, AlpacaError::NotImplemented);
-    CHECK(rig.driver->get_supported_actions().empty());
+    // The only action is findhomeissensorsearch (#2550): the CGX home is the AUX home switch search.
+    CHECK(rig.driver->get_supported_actions() == std::vector<std::string>{"findhomeissensorsearch"});
     require_alpaca_error([&] { static_cast<void>(rig.driver->action("gps_status", "")); },
                          AlpacaError::ActionNotImplemented);
     // Nothing above reached the wire as motion.
