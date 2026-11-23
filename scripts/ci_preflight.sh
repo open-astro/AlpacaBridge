@@ -1015,8 +1015,10 @@ if [ "${RUN_SCAN_BUILD:-0}" = "1" ]; then
   else
     SCAN_DIR="AlpacaHTTP/build-scan"
     SCAN_OUT="${SCAN_DIR}/scan-report"
-    SCAN_LOG="/tmp/scan_build_out.log"
+    # In the run's own build tree, as the tsan stress log is, so two pre-flights on one machine never share it (#2581).
+    SCAN_LOG="${SCAN_DIR}/scan-build.log"
     rm -rf "${SCAN_DIR}"
+    mkdir -p "${SCAN_DIR}"
     # The configure MUST run under scan-build: it exports CC/CXX pointing at
     # the ccc/c++-analyzer interposers and cmake caches that compiler. An
     # unwrapped configure caches the real compiler and the build step then
