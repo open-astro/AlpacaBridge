@@ -1314,8 +1314,10 @@ public:
     }
 
     // Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling
-    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either.
+    // thread. A paused poll joins its thread, so it leaves no waiter on the task clock either. The pause holds
+    // across a reconnect (#2560): the poll thread a later connect starts waits its ticks but probes nothing.
     void set_status_poll_paused_for_testing(bool paused) {
+        polled_.pause_for_testing(paused);
         if (paused) {
             polled_.stop_and_join();
         } else {
