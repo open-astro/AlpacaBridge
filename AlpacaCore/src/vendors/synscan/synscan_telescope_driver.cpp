@@ -108,6 +108,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_stop_epsilon = 1e-6;
     limits.move_axis_order = util::ParkedFaultOrder::NoFaultCheck;
     limits.slew_order = util::ParkedFaultOrder::NoFaultCheck;
+    limits.sync_order = util::ParkedFaultOrder::NoFaultCheck;
     limits.guide_rate_ra_min = 0.0;
     limits.guide_rate_ra_max = kSiderealDegPerSec;
     limits.guide_rate_dec_min = 0.0;
@@ -1845,11 +1846,10 @@ public:
     // write. The `s` goes out in its wire turn with mutex_ released, so it follows any motion command a body has
     // already committed to send, and the checks run again at the turn.
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // InvalidValue precedes the connection check
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");  // InvalidValue precedes the connection check
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SyncToCoordinates");
+        util::check_sync_state(kCommandLimits, GateChecks{*this, "SyncToCoordinates"});
         // Once: initiator_mutex_ is held for the whole call, so no motion initiator can start before the `s`.
         refuse_while_moving_locked("SyncToCoordinates");
         auto& protocol = SynScanProtocolWrapper::instance();

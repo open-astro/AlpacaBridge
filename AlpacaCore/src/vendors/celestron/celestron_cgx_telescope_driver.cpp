@@ -1993,7 +1993,7 @@ void CelestronCgxTelescopeDriver::slew_to_target_async() {
     start_slew_operation(ra, dec);
 }
 void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
-    util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+    util::check_sync_arguments(ra, dec, "SyncToCoordinates");
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);

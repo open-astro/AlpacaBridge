@@ -737,3 +737,72 @@ TEST_CASE("Telescope command gate - a family with no fault check runs the parked
     CHECK(error_code_of([&] { alpacacore::util::check_equatorial_slew(limits, 5.0, 20.0, "Slew", parked_slew); }) ==
           AlpacaError::InvalidWhileParked);
 }
+
+TEST_CASE("Telescope command gate - a sync refuses in the order RA, Dec, connected, then parked and fault in order",
+          "[util][command-gate]") {
+    struct Row {
+        ParkedFaultOrder order;
+        State state;
+        double ra;
+        double dec;
+        int expected;
+    };
+    constexpr auto kParkedFirst = ParkedFaultOrder::ParkedFirst;
+    constexpr auto kFaultFirst = ParkedFaultOrder::FaultFirst;
+    constexpr auto kNoFault = ParkedFaultOrder::NoFaultCheck;
+    const std::vector<Row> rows = {
+        {kParkedFirst, State{}, 0.0, -90.0, 0},
+        {kParkedFirst, State{}, 23.99, 90.0, 0},
+        {kParkedFirst, State{}, 24.0, 0.0, AlpacaError::InvalidValue},
+        {kParkedFirst, State{}, -0.01, 0.0, AlpacaError::InvalidValue},
+        {kParkedFirst, State{}, kNaN, 0.0, AlpacaError::InvalidValue},
+        {kParkedFirst, State{}, 0.0, 90.01, AlpacaError::InvalidValue},
+        {kParkedFirst, State{}, 0.0, -kInf, AlpacaError::InvalidValue},
+        {kFaultFirst, everything_wrong(), 25.0, 91.0, AlpacaError::InvalidValue},
+        {kParkedFirst, everything_wrong(), 12.0, 45.0, AlpacaError::NotConnected},
+        {kNoFault, disconnected(), 12.0, 45.0, AlpacaError::NotConnected},
+        {kParkedFirst, parked(), 12.0, 45.0, AlpacaError::InvalidWhileParked},
+        {kParkedFirst, faulted(), 12.0, 45.0, AlpacaError::DriverException},
+        {kFaultFirst, faulted(), 12.0, 45.0, AlpacaError::DriverException},
+        {kNoFault, faulted(), 12.0, 45.0, 0},  // the driver checks no latched fault here
+        {kNoFault, parked(), 12.0, 45.0, AlpacaError::InvalidWhileParked},
+        {kParkedFirst, parked_and_faulted(), 12.0, 45.0, AlpacaError::InvalidWhileParked},
+        {kFaultFirst, parked_and_faulted(), 12.0, 45.0, AlpacaError::DriverException},
+        {kNoFault, parked_and_faulted(), 12.0, 45.0, AlpacaError::InvalidWhileParked},
+        {kParkedFirst, tracking_off(), 12.0, 45.0, 0},  // a sync does not need Tracking
+        {kFaultFirst, tracking_off(), 12.0, 45.0, 0},
+    };
+    for (const Row& row : rows) {
+        TelescopeCommandLimits limits;
+        limits.sync_order = row.order;
+        RecordingChecks checks{row.state, {}};
+        INFO("order " << static_cast<int>(row.order) << " ra " << row.ra << " dec " << row.dec);
+        CHECK(error_code_of([&] {
+                  alpacacore::util::check_sync(limits, row.ra, row.dec, "SyncToCoordinates", checks);
+              }) == row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(checks.calls.empty());
+        }
+    }
+    // RA first, in util::validate_ra_dec()'s words with the caller's name.
+    CHECK(text_of([&] { alpacacore::util::check_sync_arguments(25.0, 91.0, "SyncToCoordinates"); }) ==
+          "SyncToCoordinates: RightAscension must be in range 0 to <24 hours");
+    CHECK(text_of([&] { alpacacore::util::check_sync_arguments(0.0, 91.0, "SyncToTarget"); }) ==
+          "SyncToTarget: Declination must be in range -90 to 90 degrees");
+
+    // The default order is parked first; each order runs each check once.
+    const TelescopeCommandLimits defaults;
+    CHECK(defaults.sync_order == ParkedFaultOrder::ParkedFirst);
+    RecordingChecks parked_first;
+    alpacacore::util::check_sync(defaults, 12.0, 45.0, "SyncToCoordinates", parked_first);
+    CHECK(parked_first.calls == std::vector<std::string>{"connected", "parked", "fault"});
+    TelescopeCommandLimits limits;
+    limits.sync_order = ParkedFaultOrder::FaultFirst;
+    RecordingChecks fault_first;
+    alpacacore::util::check_sync_state(limits, fault_first);
+    CHECK(fault_first.calls == std::vector<std::string>{"connected", "fault", "parked"});
+    limits.sync_order = ParkedFaultOrder::NoFaultCheck;
+    RecordingChecks no_fault;
+    alpacacore::util::check_sync_state(limits, no_fault);
+    CHECK(no_fault.calls == std::vector<std::string>{"connected", "parked"});
+}

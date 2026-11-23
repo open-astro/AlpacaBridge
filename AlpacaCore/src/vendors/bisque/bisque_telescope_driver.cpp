@@ -120,6 +120,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_stop_epsilon = util::kMoveAxisStopBelow1e9;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
     limits.slew_order = util::ParkedFaultOrder::FaultFirst;
+    limits.sync_order = util::ParkedFaultOrder::FaultFirst;
     limits.guide_rate_ra_min = 0.0;
     limits.guide_rate_ra_max = kSiderealRateArcsecPerSec / 3600.0;
     limits.guide_rate_dec_min = 0.0;
@@ -1114,11 +1115,10 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_link_locked();
-            check_not_parked("SyncToCoordinates");
+            util::check_sync_state(kCommandLimits, GateChecks{*this, "SyncToCoordinates"});
         }
 
         auto& protocol = BisqueProtocolWrapper::instance();

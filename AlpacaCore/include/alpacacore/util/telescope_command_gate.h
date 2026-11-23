@@ -26,8 +26,8 @@
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
 // Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes),
-// TrackingRate, DestinationSideOfPier, the target setters, the rate offsets and the Alt/Az slews with SyncToAltAz
-// (#2418). SyncToCoordinates joins next.
+// TrackingRate, DestinationSideOfPier, the target setters, the rate offsets, the Alt/Az slews with SyncToAltAz
+// and SyncToCoordinates (#2418).
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
 // only: the ranges and the InvalidValue texts are fields of the limits (each driver keeps its own words), so a driver
@@ -135,6 +135,8 @@ struct TelescopeCommandLimits {
     bool alt_az_azimuth_360 = true;
     ParkedFaultOrder alt_az_order = ParkedFaultOrder::ParkedFirst;
     bool alt_az_site_first = false;
+
+    ParkedFaultOrder sync_order = ParkedFaultOrder::ParkedFirst;
 
     TelescopeArgumentTexts texts;
 };
@@ -407,6 +409,27 @@ void check_alt_az_sync(const TelescopeCommandLimits& limits, double altitude, do
                        Checks&& checks) {
     check_alt_az_arguments(limits, altitude, azimuth, who);
     check_alt_az_sync_state(limits, checks);
+}
+
+// SyncToCoordinates (and SyncToTarget, which passes the target): RA and Dec, then connected, parked and fault in the
+// driver's order. A sync moves no axis, so it has no Tracking check (syncs are exempt from the slews' Tracking rule).
+// The sync bound (util::check_sync_bound) needs the mount's position, so it stays the driver's, after the state half.
+
+inline void check_sync_arguments(double ra_hours, double dec_degrees, std::string_view who) {
+    validate_ra_dec(ra_hours, dec_degrees, who);
+}
+
+template <typename Checks>
+void check_sync_state(const TelescopeCommandLimits& limits, Checks&& checks) {
+    checks.check_connected();
+    telescope_gate_detail::parked_and_fault(limits.sync_order, /*stop=*/false, /*check_fault=*/true, checks);
+}
+
+template <typename Checks>
+void check_sync(const TelescopeCommandLimits& limits, double ra_hours, double dec_degrees, std::string_view who,
+                Checks&& checks) {
+    check_sync_arguments(ra_hours, dec_degrees, who);
+    check_sync_state(limits, checks);
 }
 
 }  // namespace alpacacore::util

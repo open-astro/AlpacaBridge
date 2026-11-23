@@ -2213,10 +2213,9 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_locked("SyncToCoordinates");
+        util::check_sync_state(kCommandLimits, GateChecks{*this, "SyncToCoordinates"});
 
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;

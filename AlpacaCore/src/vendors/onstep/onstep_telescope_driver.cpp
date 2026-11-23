@@ -143,6 +143,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.move_axis_stop_epsilon = 1e-6;
     limits.stop_checks_fault = false;
+    limits.sync_order = util::ParkedFaultOrder::FaultFirst;
     limits.tracking_rate_max = 3;
     limits.texts.tracking_rate = "TrackingRate must be 0 (sidereal), 1 (lunar), 2 (solar) or 3 (King)";
     limits.rate_offset_ra_scale = kRaArcsecPerRaSecond;
@@ -2095,10 +2096,8 @@ public:
     // mount (Goto.cpp validate(): CE_SLEW_IN_SLEW) and used to read as success, as
     // did every :CM# refusal; the driver refuses first and reads the reply.
     void sync_locked(double ra, double dec, const char* who, TargetWrites targets) {
-        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
-        check_connected();
-        refuse_while_faulted_locked(who);
-        check_not_parked_locked(who);
+        // Arguments first, even while disconnected (#1478); then connected, the fault (named, #1414) and parked.
+        util::check_sync(kCommandLimits, ra, dec, who, GateChecks{*this, who});
         sync_to_mount_locked(ra, dec, who, targets);
     }
 
