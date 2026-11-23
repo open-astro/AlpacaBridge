@@ -129,6 +129,24 @@ TEST_CASE("Gemini Focuser Snapshot - IsMoving is true right after a successful M
     CHECK(rig.driver().get_is_moving() == false);
 }
 
+// Issue #2580 (the Celestron focus motor's sibling): the focuser arrives between the poll's position read and its
+// IsMoving read. A frame that says stopped must carry a position read after the arrival.
+TEST_CASE(
+    "Gemini Focuser Snapshot - a focuser arriving mid-poll never serves IsMoving false with a mid-travel Position",
+    "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_position(1000);
+    rig.fake().set_moving(true);
+    REQUIRE(rig.connect());
+    REQUIRE(rig.driver().get_is_moving());
+
+    rig.fake().arrive_after_position_reply(4000);
+    // A client polls IsMoving and reads Position once it is false.
+    for (int i = 0; i < 3 && rig.driver().get_is_moving(); ++i) rig.tick();
+    CHECK_FALSE(rig.driver().get_is_moving());
+    CHECK(rig.driver().get_position() == 4000);
+}
+
 TEST_CASE("Gemini Focuser Snapshot - Halt reaches the device and IsMoving reads false",
           "[gemini][focuser][snapshot][unit][fake]") {
     GeminiRig rig;

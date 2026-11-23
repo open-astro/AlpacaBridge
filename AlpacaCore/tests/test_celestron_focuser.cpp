@@ -226,6 +226,29 @@ TEST_CASE("Celestron Focuser Driver - Move sends the raw target and IsMoving fol
     CHECK(rig.driver().get_position() == 5000);
 }
 
+// Issue #2580: the motor arrives between the poll's position read and its slew-done read. A frame that says stopped
+// must carry a position read after the arrival, so once IsMoving reads false Position is the target.
+TEST_CASE("Celestron Focuser Driver - a motor arriving mid-poll never serves IsMoving false with a mid-travel Position",
+          "[celestron][focuser][unit][fake]") {
+    CelestronRig rig;
+    REQUIRE(rig.fake().ok());
+    rig.fake().set_limits(1000, 61000);
+    rig.fake().set_raw_position(30000);  // Position 31000
+    REQUIRE(rig.connect());
+
+    rig.driver().move(5000);  // raw 56000
+    rig.tick();
+    REQUIRE(rig.driver().get_is_moving());
+    REQUIRE(rig.driver().get_position() == 31000);  // the explicit fake has not moved the encoder yet
+
+    rig.fake().complete_move_after_position_reply();
+    // A client polls IsMoving and reads Position once it is false, as the travel-mode case does.
+    for (int i = 0; i < 3 && rig.driver().get_is_moving(); ++i) rig.tick();
+    CHECK_FALSE(rig.fake().moving());
+    CHECK_FALSE(rig.driver().get_is_moving());
+    CHECK(rig.driver().get_position() == 5000);
+}
+
 TEST_CASE("Celestron Focuser Driver - Move clamps to the calibrated range", "[celestron][focuser][unit][fake]") {
     // ConformU expects graceful clamping for Move outside 0..MaxStep, as the
     // other focuser drivers do, rather than InvalidValue.
