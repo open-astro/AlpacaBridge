@@ -1323,8 +1323,11 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    // Nothing is parked on the clock yet, so the pulse task below is the first thread at the hook.
-    REQUIRE(clock.waiter_count() == 0);
+    // The status poll (util::PolledState) parks on the clock as soon as Connect starts it, and nothing advances the
+    // clock before the reaper has run, so once it is parked the pulse task below is the first thread at the hook
+    // (#2598).
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(5000)));
+    REQUIRE(clock.waiter_count() == 1);
     clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
