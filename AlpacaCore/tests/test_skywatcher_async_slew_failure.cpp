@@ -815,7 +815,7 @@ TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cance
                               clock);
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
-    mount.jump_axis_degrees(1, 45.0);  // away from home and park, so the operation moves RA
+    mount.jump_axis_degrees(1, 45.0);                       // away from home and park, so the operation moves RA
     sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame answers for the flags
     const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
     sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
@@ -850,6 +850,43 @@ TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cance
     CHECK(mount.motion_log().size() == motion_before);  // the body's tail sent no stop and no motion
     CHECK(read_slewing(*driver) == SlewingRead::False);
     sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
+// open-astro#2604: AbortSlew ends a Park only after its own stops were answered. When its RA ":L" is refused,
+// AbortSlew throws and leaves the Park to its cancelled body, which still stops both axes as it winds down.
+TEST_CASE("SkyWatcher async - a Park whose AbortSlew stop failed is still stopped by its body (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    const int ra_stops = mount.stop_count(1);
+    const int dec_stops = mount.stop_count(2);
+    mount.reject_instant_stop(1, 1);  // AbortSlew's RA ":L" only
+    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.stop_count(1) > ra_stops);   // the body's RA stop
+    CHECK(mount.stop_count(2) > dec_stops);  // and its Dec stop, which AbortSlew never reached
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_FALSE(driver->get_at_park());
     driver->set_connected(false);
 }
 

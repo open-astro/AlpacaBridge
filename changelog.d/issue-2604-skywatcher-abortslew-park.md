@@ -1,0 +1,3 @@
+### Fixed
+
+- **Sky-Watcher AbortSlew ends a Park or FindHome at once** (Sky-Watcher telescope, issue #2604): AbortSlew cancelled a Park or FindHome body but left the body to end the operation as it wound down, so for a moment after a successful AbortSlew, Slewing still read true and SiteLongitude was refused "while the mount slews". AbortSlew now ends the Park or FindHome itself after its own stops: Slewing reads false and SiteLongitude is accepted as soon as it returns, and the cancelled body sends nothing more to the board. A failed AbortSlew stop leaves the operation to its body, which still stops the axes as before. A Park or FindHome that runs still refuses SiteLongitude, and a failed one keeps its error (#2552).

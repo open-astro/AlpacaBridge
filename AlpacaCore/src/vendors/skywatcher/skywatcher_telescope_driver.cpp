@@ -3106,12 +3106,15 @@ public:
 
     void abort_slew() override {
         stop_pulse_ops();
+        StateLock lock(lock_gate_);
         // Cancel an in-flight async slew/refinement (the slot joins the body
         // when the next one starts or on disconnect; cancel() wakes its waits
         // and the refine loop exits promptly -- without this, the refinement
-        // re-slews after the abort's stop).
+        // re-slews after the abort's stop). Under the operation lock
+        // (open-astro#2604): a body woken by the cancel takes that lock back
+        // only after this call has stopped the axes and ended its Park or
+        // FindHome, so it finds nothing left to do and sends nothing.
         slew_.cancel();
-        StateLock lock(lock_gate_);
         check_stop_allowed_locked();  // open-astro#2068: the stop is sent on a faulted link
         check_not_fully_parked_locked("AbortSlew");
         // open-astro#1341: a MoveAxis(axis, 0) stop body still polling would
@@ -3166,6 +3169,12 @@ public:
         cmd_axis_rate_deg_s_[1] = 0.0;
         goto_in_progress_ = false;
         restoring_tracking_ = false;
+        // open-astro#2604: AbortSlew owns the end of a Park or FindHome it
+        // cancelled, as it does a goto's: Slewing reads false and SiteLongitude
+        // is accepted once it returns. The cancelled body finds its flag down
+        // and leaves the axes alone (abandon_slew_body_locked()).
+        parking_ = false;
+        homing_ = false;
         set_slewing_cached_false_locked();
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
@@ -6137,15 +6146,19 @@ private:
         const Wire protocol = wire();
         const auto deadline = clock_.now() + kLandingSettleTimeout;
         try {
+            // A stopped body reads nothing more: the canceller owns the axes (open-astro#2604).
+            if (body_stopped()) {
+                return;
+            }
             uint32_t last = protocol.inquire_position(channel);
             while (clock_.now() < deadline) {
-                if (body_stopped()) {
-                    return;
-                }
                 lock.unlock();
                 body_sleep(kLandingSettle);
                 lock.lock();
                 check_connected();
+                if (body_stopped()) {
+                    return;
+                }
                 const AxisStatus status = protocol.inquire_status(channel);
                 const uint32_t now = protocol.inquire_position(channel);
                 if (!status.running && now == last) {
@@ -6871,9 +6884,11 @@ private:
     }
 
     // A Park or FindHome body that failed or was stopped: end its phase flag
-    // unless a newer operation owns it, and stop the axes if cancelled.
+    // unless a newer operation owns it, and stop the axes if cancelled. A
+    // flag already down means AbortSlew stopped the axes and ended the
+    // operation (open-astro#2604): nothing is left to send.
     void abandon_slew_body_locked(util::OperationContext& ctx, bool& phase_flag) {
-        if (!owns_slew_state_locked(ctx)) {
+        if (!owns_slew_state_locked(ctx) || !phase_flag) {
             return;
         }
         phase_flag = false;
