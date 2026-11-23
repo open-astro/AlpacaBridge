@@ -20,6 +20,12 @@
 // HAE16 firmware signature, and reports a pulse-guide :ZQ/:ZS as having
 // closed the error. The arrow commands :mw#/:me#/:mn#/:ms# step the modelled
 // RA or Dec (issue #2424). Everything else gets a harmless ack.
+//
+// ConformU mode (#2614, the fake ConformU row of #2078): constructed with a FakeMountMotionModel::Config, the same
+// wire answers the reads and the motion commands from the shared motion model instead: a GOTO moves over time
+// (:GLS reads 2 until it lands), :MP1# parks (6 once it arrives), :MH#/:MSH# go to the zero position (7), tracking
+// follows :ST1#/:ST0#, a :Z pulse and the arrows move the axes at the guide and :SR rates, :SLO/:SLA set the site and
+// :SUT/:GUT keep the mount's clock. The scripted behaviour above is the default and does not change.
 
 #ifndef _WIN32
 
@@ -32,12 +38,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "connect_hold_gate.h"
+#include "fake_mount_motion_model.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 
@@ -51,6 +60,34 @@ public:
         : model_code_(std::move(model_code)),
           landing_error_arcsec_(landing_ra_error_arcsec),
           server_([this](const std::string& chunk) { return respond(chunk); }) {}
+
+    /// ConformU mode (#2614): answers from a FakeMountMotionModel built from @p motion (see the file comment). The
+    /// scripted knobs below that shape a reply (set_reject_goto(), set_fail_reads(), hold_next_reply(), ...) still
+    /// apply; the ones that script the motion itself (set_position(), set_system_status(), set_park_lands(), the
+    /// landing error) are the model's business here.
+    FakeIoptronMount(std::string model_code, FakeMountMotionModel::Config motion)
+        : model_code_(std::move(model_code)),
+          landing_error_arcsec_(0.0),
+          motion_(std::make_unique<FakeMountMotionModel>(std::move(motion))),
+          server_([this](const std::string& chunk) { return respond(chunk); }) {
+        longitude_units_.store(std::llround(motion_->site_longitude_degrees() * 3600.0 * 100.0));
+        latitude_field_.store(std::llround((motion_->site_latitude_degrees() + 90.0) * 3600.0 * 100.0));
+    }
+
+    /// The motion model of a ConformU-mode mount; null for the scripted default.
+    FakeMountMotionModel* motion() const { return motion_.get(); }
+
+    /// The model setup of the fake ConformU row: the made-up Sydney Opera House site (never a real observing site),
+    /// a 6 degree/s GOTO (the driver's top MoveAxis rate) and the zero position the mount parks and homes at, the
+    /// counterweight-down pole pointing the HAE29C finds (hour angle -6 h, Dec at the site's pole, issue #2420).
+    static FakeMountMotionModel::Config conformu_motion_config() {
+        FakeMountMotionModel::Config config;
+        config.latitude_degrees = -33.856784;
+        config.longitude_degrees = 151.215297;
+        config.slew_deg_per_s = 6.0;
+        config.park = config.home = {-6.0, -90.0};
+        return config;
+    }
 
     bool ok() const { return server_.ok(); }
     int port() const { return server_.port(); }
@@ -268,6 +305,9 @@ private:
             gep_failing_.fetch_sub(1);
             return "0#";
         }
+        if (motion_) {
+            if (auto reply = handle_modelled(cmd)) return *reply;
+        }
         if (cmd == ":AG#") {
             std::lock_guard<std::mutex> lock(mutex_);
             return guide_rate_reply_.empty() ? std::string("0#") : guide_rate_reply_;
@@ -331,6 +371,10 @@ private:
             if (reject_goto_.load() || (cmd == ":MS1#" && reject_normal_goto_.load())) {
                 return "0";  // rejected: nothing moves
             }
+            // The firmware's altitude limit (":GAL#" answers 0 degrees below): a target under the horizon is refused.
+            if (motion_ && motion_->altitude_degrees_of(pending_ra_hours(), pending_dec_degrees()) < 0.0) {
+                return "0";
+            }
             std::string reply = "1";
             if (cmd == ":MS1#") {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -340,6 +384,12 @@ private:
                 }
             }
             gep_failing_.store(fail_gep_after_goto_.exchange(0));
+            if (motion_) {
+                // The mount slews over the travel time and tracks once it arrives (:GLS reads 2, then 1).
+                motion_->set_tracking(true);
+                (void)motion_->goto_radec(pending_ra_hours(), pending_dec_degrees());
+                return reply;
+            }
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
@@ -400,6 +450,153 @@ private:
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
     }
 
+    // ---- ConformU mode: the commands the shared motion model answers (#2614) ----
+
+    double pending_ra_hours() const { return static_cast<double>(pending_ra_) / (15.0 * 3600.0 * 100.0); }
+    double pending_dec_degrees() const { return static_cast<double>(pending_dec_) / (3600.0 * 100.0); }
+
+    // iOptron's arrow speeds (":SRn#", n 1..9) as the driver offers them as AxisRates: 1, 2, 8, 16, 64, 128, 256 and
+    // 512 times 15 arcsec/s, then the 6 degree/s maximum.
+    static double arrow_rate_deg_per_s(int level) {
+        static constexpr double kSteps[] = {1.0, 2.0, 8.0, 16.0, 64.0, 128.0, 256.0, 512.0};
+        if (level >= 1 && level <= 8) return kSteps[level - 1] * 15.0 / 3600.0;
+        return 6.0;
+    }
+
+    // The ":AG#" guide rate in degrees per second: RA then Dec, each two digits of hundredths of sidereal.
+    double guide_rate_deg_per_s(bool ra_axis) {
+        std::string reply;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            reply = guide_rate_reply_;
+        }
+        if (reply.size() < 4) return 0.5 * FakeMountMotionModel::kSiderealDegPerSec;
+        return std::atoi(reply.substr(ra_axis ? 0 : 2, 2).c_str()) / 100.0 * FakeMountMotionModel::kSiderealDegPerSec;
+    }
+
+    // Dec polarity of the arrow and pulse commands, in iOptron's labels (":ms#" and ":ZE#" are Dec+, ":mn#" and
+    // ":ZC#" Dec-): on pier side 0 Dec+ lowers the reading, on side 1 it raises it (the #2424 rig check).
+    double dec_sign(bool labelled_dec_plus) const {
+        const bool raises_dec = (motion_->pier_side() == 1) ? labelled_dec_plus : !labelled_dec_plus;
+        return raises_dec ? 1.0 : -1.0;
+    }
+
+    static long long ra_units_of(double ra_hours) {
+        const long long units = std::llround(ra_hours * 15.0 * 3600.0 * 100.0);
+        return units >= 129600000LL ? units - 129600000LL : units;
+    }
+
+    // The ":GLS#" system status the model implies: 6 parked, 2 slewing (a GOTO, Park, the zero search or an arrow
+    // move), 7 stopped at the zero position, 3 auto-guiding for the length of a pulse, 1 tracking, else 0 stopped.
+    static int modelled_status(const FakeMountMotionModel::State& m) {
+        if (m.parked) return 6;
+        if (m.slewing || m.axis_moving[0] || m.axis_moving[1]) return 2;
+        if (m.at_home) return 7;
+        if (m.pulse_active) return 3;
+        return m.tracking ? 1 : 0;
+    }
+
+    std::optional<std::string> handle_modelled(const std::string& cmd) {
+        using Axis = FakeMountMotionModel::Axis;
+        if (cmd == ":GEP#") {
+            const auto m = motion_->state();
+            return signed_eight(std::llround(m.dec_degrees * 3600.0 * 100.0)) + nine(ra_units_of(m.ra_hours)) +
+                   std::to_string(m.pier_side) + "1#";
+        }
+        if (cmd == ":GAC#") {
+            return signed_eight(std::llround(motion_->altitude_degrees() * 3600.0 * 100.0)) +
+                   nine(std::llround(motion_->azimuth_degrees() * 3600.0 * 100.0) % 129600000LL) + "#";
+        }
+        if (cmd == ":GLS#") {
+            char site[32];
+            const long long lon = longitude_units_.load();
+            std::snprintf(site, sizeof(site), "%c%08lld%08lld", lon < 0 ? '-' : '+', lon < 0 ? -lon : lon,
+                          latitude_field_.load());
+            return std::string(site) + std::to_string(gps_status_.load()) +
+                   std::to_string(modelled_status(motion_->state())) + std::to_string(tracking_rate_digit_.load()) +
+                   "001#";
+        }
+        if (cmd.rfind(":SLO", 0) == 0 || cmd.rfind(":SLA", 0) == 0) {
+            const long long units = std::atoll(cmd.substr(4, 9).c_str());
+            const bool is_lon = (cmd[3] == 'O');
+            (is_lon ? longitude_units_ : latitude_field_).store(is_lon ? units : units + 90LL * 360000LL);
+            motion_->set_site(static_cast<double>(latitude_field_.load() - 90LL * 360000LL) / 360000.0,
+                              static_cast<double>(longitude_units_.load()) / 360000.0);
+            return std::string("1");
+        }
+        if (cmd.rfind(":SUT", 0) == 0) {
+            utc_offset_ms_.store(std::atoll(cmd.substr(4, 13).c_str()) - ms_since_j2000(motion_->now()));
+            return std::string("1");
+        }
+        if (cmd == ":GUT#") {
+            char b[32];
+            std::snprintf(b, sizeof(b), "+000%d%013lld#", dst_observed_.load() ? 1 : 0,
+                          ms_since_j2000(motion_->now()) + utc_offset_ms_.load());
+            return std::string(b);
+        }
+        if (cmd == ":SDS1#" || cmd == ":SDS0#") {
+            dst_observed_.store(cmd == ":SDS1#");
+            return std::string("1");
+        }
+        if (cmd.size() == 5 && cmd.rfind(":SR", 0) == 0 && cmd[3] >= '1' && cmd[3] <= '9') {
+            arrow_level_.store(cmd[3] - '0');
+            return std::string("1");
+        }
+        if (cmd == ":mw#" || cmd == ":me#") {
+            motion_->move_axis(Axis::Ra, (cmd == ":mw#" ? 1.0 : -1.0) * arrow_rate_deg_per_s(arrow_level_.load()));
+            return std::string();  // no reply, as the firmware
+        }
+        if (cmd == ":ms#" || cmd == ":mn#") {
+            motion_->move_axis(Axis::Dec, dec_sign(cmd == ":ms#") * arrow_rate_deg_per_s(arrow_level_.load()));
+            return std::string();
+        }
+        if (cmd == ":qR#" || cmd == ":qD#") {
+            motion_->move_axis(cmd == ":qR#" ? Axis::Ra : Axis::Dec, 0.0);
+            return std::string("1");
+        }
+        if (cmd == ":Q#") {
+            motion_->stop();
+            return std::string("1");
+        }
+        if (cmd == ":ST1#" || cmd == ":ST0#") {
+            motion_->set_tracking(cmd == ":ST1#");
+            return std::string("1");
+        }
+        if (cmd == ":MP1#") {
+            motion_->park();
+            return std::string("1");
+        }
+        if (cmd == ":MP0#") {
+            motion_->unpark();
+            return std::string("1");
+        }
+        if (cmd == ":MH#" || cmd == ":MSH#") {
+            motion_->go_home();
+            return std::string("1");  // ":MSH#" is a bare '1' with no '#' (issue #2420), as the scripted branch
+        }
+        if (cmd == ":CM#") {
+            motion_->set_position(pending_ra_hours(), pending_dec_degrees());
+            return std::string("1");
+        }
+        if (cmd.size() == 9 && cmd.rfind(":Z", 0) == 0 && std::string("SQEC").find(cmd[2]) != std::string::npos) {
+            using std::chrono::milliseconds;
+            const milliseconds duration(std::atoi(cmd.substr(3, 5).c_str()));
+            if (cmd[2] == 'S' || cmd[2] == 'Q') {
+                motion_->pulse(Axis::Ra, (cmd[2] == 'S' ? 1.0 : -1.0) * guide_rate_deg_per_s(true), duration);
+            } else {
+                motion_->pulse(Axis::Dec, dec_sign(cmd[2] == 'E') * guide_rate_deg_per_s(false), duration);
+            }
+            return std::string(pulse_acks_.load() ? "1" : "");
+        }
+        return std::nullopt;
+    }
+
+    static long long ms_since_j2000(FakeMountMotionModel::TimePoint at) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   at - FakeMountMotionModel::TimePoint{std::chrono::seconds(946728000)})
+            .count();
+    }
+
     static constexpr long long kArrowStepUnits = 60LL * 100LL;  // 60 arcsec in 0.01 arcsec units
     std::atomic<int> pier_side_{0};
     std::atomic<int> system_status_{1};
@@ -438,6 +635,10 @@ private:
     std::atomic<bool> goto_tracks_off_{false};
     std::atomic<bool> pulse_reports_guiding_{false};
     std::atomic<bool> pulse_acks_{true};
+    std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only; before server_, whose thread reads it
+    std::atomic<int> arrow_level_{1};
+    std::atomic<long long> utc_offset_ms_{0};
+    std::atomic<bool> dst_observed_{false};
     FakeMountServer server_;
 };
 

@@ -109,6 +109,20 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
     return pred();
 }
 
+// Runs fn and returns what it threw, or nullopt, so a test's own std::thread body fails its case after join() instead
+// of letting the exception reach std::terminate and end the test binary (#2585).
+template <typename Fn>
+std::optional<std::string> thrown_by(Fn&& fn) {
+    try {
+        fn();
+    } catch (const std::exception& ex) {
+        return std::string(ex.what());
+    } catch (...) {
+        return std::string("non-std exception");
+    }
+    return std::nullopt;
+}
+
 // Runs a blocking driver call on its own thread, stepping the clock until it returns, then rethrows what it threw.
 // `started` must hold, on real time, before the first step: a task parked on the clock from before the call (a pulse
 // timer the call reaps) would otherwise satisfy the rendezvous while the call is still on the socket, and virtual
@@ -861,8 +875,9 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
     driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
     REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
     std::atomic<bool> sync_done{false};
+    std::optional<std::string> sync_error;
     std::thread syncer([&] {
-        driver->slew_to_coordinates(6.0, 22.0);
+        sync_error = thrown_by([&] { driver->slew_to_coordinates(6.0, 22.0); });
         sync_done.store(true);
     });
     // #2518: the blocking slew's own GOTO reaching the fake proves it claimed the slot. Before that, virtual time
@@ -870,6 +885,8 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
     const bool claimed = wait_until([&] { return st->goto_count.load() > before + 1; }, 3000);
     const bool finished = advance_until(clock, [&] { return sync_done.load(); });
     syncer.join();
+    INFO("syncer threw: " << sync_error.value_or(""));
+    REQUIRE_FALSE(sync_error.has_value());
     REQUIRE(claimed);
     REQUIRE(finished);
     const int tracking_writes_after_sync = st->command_count('T');
@@ -1351,8 +1368,9 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
 
     // The superseding pulse reaps the parked one: cancel, notify, join.
     std::atomic<bool> reaped{false};
+    std::optional<std::string> reaper_error;
     std::thread reaper([&] {
-        driver->pulse_guide(0, 300);
+        reaper_error = thrown_by([&] { driver->pulse_guide(0, 300); });
         reaped.store(true);
     });
     CHECK(wait_until([&] { return reaped.load(); }, 2000));
@@ -1360,6 +1378,8 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
     // Whatever happened, reaching the timer's deadline wakes it, so the case ends instead of hanging in a join.
     clock.advance(std::chrono::seconds(5));
     reaper.join();
+    INFO("reaper threw: " << reaper_error.value_or(""));
+    REQUIRE_FALSE(reaper_error.has_value());
     driver->set_connected(false);
     driver.reset();
     clock.set_before_block(nullptr);
@@ -1915,6 +1935,7 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     auto bodies_returned = std::make_shared<std::atomic<int>>(0);
     alpacacore::test::Latch planned;
     std::thread poller;
+    std::optional<std::string> poller_error;
     const auto inner = st->responder();
     alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
         if (polling.load() && !chunk.empty()) {
@@ -1934,7 +1955,8 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
             body_returned_before_tick.store(wait_until([&] { return bodies_returned->load() >= 1; }, 5000));
             polling.store(true);
             poller = std::thread([&, driver] {
-                (void)alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+                poller_error =
+                    thrown_by([&] { (void)alpacacore::vendor::celestron::poll_status_now_for_testing(*driver); });
                 polling.store(false);
             });
             // The tick has read its plan with mutex_ free; its exchanges wait for this one to be answered.
@@ -1968,6 +1990,8 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     REQUIRE_NOTHROW(driver->find_home());
     REQUIRE(poller.joinable());
     poller.join();
+    INFO("poller threw: " << poller_error.value_or(""));
+    REQUIRE_FALSE(poller_error.has_value());
     alpacacore::vendor::celestron::set_status_poll_after_plan_hook_for_testing(*driver, nullptr);
     REQUIRE(body_returned_before_tick.load());
     REQUIRE(tick_planned_in_gap.load());

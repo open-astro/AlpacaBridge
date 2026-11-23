@@ -1850,6 +1850,7 @@ HELPER_FAKES = {
     "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
     "fake_synscan_handset.h": "stateful SynScan handset responder plugged into FakeMountServer for the SynScan async, slot and supersede cases; the SynScan roster row stays on fake_mount_server.h",
     "fake_celestron_handset.h": "stateful NexStar hand-controller responder plugged into FakeMountServer for the Celestron async cases; the Celestron roster row stays on fake_mount_server.h",
+    "fake_mount_motion_model.h": "protocol-neutral equatorial mount motion model (GOTO travel time, tracking, pulses, park, home) that FakeIoptronMount answers from in its ConformU mode (#2614); the fake ZWO AM, CGX, NexStar/SynScan and OnStep rows reuse it",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",

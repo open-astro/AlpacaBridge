@@ -72,6 +72,12 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.guide_rate_range = "GuideRate must be a finite number greater than 0";
     limits.tracking_rate_max = 4;  // DriveRates 0-3 and 4, the custom rate
     limits.texts.tracking_rate = "Invalid tracking rate";
+    // The Alt/Az slews check the site before the parked state; azimuth 360 is refused.
+    limits.alt_az_azimuth_360 = false;
+    limits.alt_az_site_first = true;
+    limits.texts.altitude_range = "altitude must be in [-90, 90] degrees";
+    limits.texts.azimuth_range = "azimuth must be in [0, 360) degrees";
+    limits.texts.alt_az_texts_name_member = true;
     return limits;
 }();
 
@@ -2239,26 +2245,15 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
-        validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
+        util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAzAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         std::uint64_t generation = 0;
         std::string previous_slew_error;
         {
             StateLock lock(lock_gate_);
-            check_connected();
-            if (!site_info_valid_) {
-                ensure_site_info_cached_locked();
-                // ensure_site_info_cached_locked() sets site_info_valid_ on success;
-                // this re-check detects a failed cache populate, not a dead condition.
-                // cppcheck-suppress identicalInnerCondition
-                if (!site_info_valid_) {
-                    throw AlpacaException("Site information unavailable for Alt/Az slew",
-                                          AlpacaError::ValueNotSet);
-                }
-            }
-            ensure_not_parked_locked("SlewToAltAzAsync");
-            refuse_alt_az_slew_while_tracking_locked("SlewToAltAzAsync");
+            util::check_alt_az_slew_state(
+                kCommandLimits, GateChecks{*this, "SlewToAltAzAsync", /*fast_parked=*/false, /*refresh_site=*/false});
             previous_slew_error = last_slew_error_;
             supersede_slew_dispatch_locked();
             generation = slew_operation_generation_;
@@ -2291,17 +2286,10 @@ public:
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
         std::uint64_t generation = 0;
-        validate_alt_az(altitude, azimuth, "SlewToAltAz");
+        util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAz");
         {
             StateLock lock(lock_gate_);
-            check_connected();
-            ensure_site_info_cached_locked();
-            if (!site_info_valid_) {
-                throw AlpacaException("Site information unavailable for Alt/Az slew",
-                                      AlpacaError::ValueNotSet);
-            }
-            ensure_not_parked_locked("SlewToAltAz");
-            refuse_alt_az_slew_while_tracking_locked("SlewToAltAz");
+            util::check_alt_az_slew_state(kCommandLimits, GateChecks{*this, "SlewToAltAz"});
             auto converted = alt_az_to_ra_dec(
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
@@ -2735,11 +2723,13 @@ private:
     // The command gate's state checks in iOptron's words (#2258): util/telescope_command_gate.h decides the order,
     // these answer each step with the driver's own texts and reads. check_connected() also refuses a latched fault,
     // so the gate's fault step has nothing left to check. PulseGuide reads the parked flag from the cache
-    // (`fast_parked`); the other families may refresh it from the mount.
+    // (`fast_parked`); the other families may refresh it from the mount. SlewToAltAzAsync reads the site only while
+    // none is cached (`refresh_site` false); SlewToAltAz also refreshes a cached site past its TTL.
     struct GateChecks {
         const iOptronTelescopeDriver& driver;
         const char* who = nullptr;
         bool fast_parked = false;
+        bool refresh_site = true;
         void check_connected() const { driver.check_connected(); }
         void check_not_parked(bool /*stop*/) const {
             fast_parked ? driver.ensure_not_parked_fast_locked(who) : driver.ensure_not_parked_locked(who);
@@ -2755,6 +2745,13 @@ private:
                                       AlpacaError::InvalidOperation);
             }
         }
+        void check_site() const {
+            if (refresh_site || !driver.site_info_valid_) driver.ensure_site_info_cached_locked();
+            if (!driver.site_info_valid_) {
+                throw AlpacaException("Site information unavailable for Alt/Az slew", AlpacaError::ValueNotSet);
+            }
+        }
+        void check_not_tracking() const { driver.refuse_alt_az_slew_while_tracking_locked(who); }
     };
 
     // Not get_tracking_locked(): :GLS reports slewing (2) instead of tracking,
@@ -3685,17 +3682,6 @@ private:
         const double dec_arcsec = dec_delta_degrees * 3600.0;
         return ra_arcsec <= kSlewCompletionToleranceArcsec &&
                dec_arcsec <= kSlewCompletionToleranceArcsec;
-    }
-
-    static void validate_alt_az(double altitude_degrees, double azimuth_degrees, const char* label) {
-        if (!std::isfinite(altitude_degrees) || altitude_degrees < -90.0 || altitude_degrees > 90.0) {
-            throw AlpacaException(std::string(label) + " altitude must be in [-90, 90] degrees",
-                                  AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(azimuth_degrees) || azimuth_degrees < 0.0 || azimuth_degrees >= 360.0) {
-            throw AlpacaException(std::string(label) + " azimuth must be in [0, 360) degrees",
-                                  AlpacaError::InvalidValue);
-        }
     }
 
     void sync_site_settings_with_mount_locked() {

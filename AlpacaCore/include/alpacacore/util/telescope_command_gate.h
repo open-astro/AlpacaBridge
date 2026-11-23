@@ -19,14 +19,15 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <string_view>
 
 // The telescope command gate (#2258): the checks a mount runs before a command, in one order for every mount
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
 // Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes),
-// TrackingRate, DestinationSideOfPier, the target setters, the rate offsets and SyncToCoordinates (#2418). The Alt/Az
-// slews join next.
+// TrackingRate, DestinationSideOfPier, the target setters, the rate offsets, the Alt/Az slews with SyncToAltAz
+// and SyncToCoordinates (#2418).
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
 // only: the ranges and the InvalidValue texts are fields of the limits (each driver keeps its own words), so a driver
@@ -44,12 +45,14 @@
 //   void check_no_fault();           // DriverException (decision 0009 rule 1)
 //   void check_tracking();           // InvalidOperation (equatorial slews only)
 //   void check_sidereal_rate();      // InvalidOperation unless TrackingRate is driveSidereal (rate offsets only)
+//   void check_site();               // the driver's refusal while the site is unknown (Alt/Az members only)
+//   void check_not_tracking();       // InvalidOperation while Tracking is true (Alt/Az slews only)
 //
 // The gate itself does no I/O, takes no lock and keeps no state (decision 0016 rules 1 and 2): a driver calls it
 // where it ran its checks before, holding the lock its check callbacks expect. That is its state lock when the
 // callbacks read state under a lock the caller holds, and no lock when each callback takes the state lock itself.
-// Only the parked-against-fault order and the protocol limits differ per driver; both are data in
-// TelescopeCommandLimits, never a vendor name in here.
+// Only the parked-against-fault order (and the Alt/Az site check's place) and the protocol limits differ per driver;
+// both are data in TelescopeCommandLimits, never a vendor name in here.
 
 namespace alpacacore::util {
 
@@ -79,7 +82,20 @@ struct TelescopeArgumentTexts {
     const char* right_ascension_rate_range = "RightAscensionRate is out of range";
     const char* declination_rate_not_finite = "DeclinationRate must be finite";
     const char* declination_rate_range = "DeclinationRate is out of range";
+    const char* altitude_range = "Altitude out of range";
+    const char* azimuth_range = "Azimuth out of range";
+    /// True: an Alt/Az text follows the member's name and a space ("SlewToAltAz altitude must be ...").
+    bool alt_az_texts_name_member = false;
 };
+
+/// The largest double under 1e-9, for a driver whose MoveAxis stop is |rate| < 1e-9 (strictly under): the gate's
+/// stop test is <=, so this epsilon keeps 1e-9 itself a move (ZWO #2415, Bisque #2582). It is
+/// std::nextafter(1e-9, 0.0), which is not constexpr before C++23 (GCC folds it, clang rejects it). A driver whose
+/// stop is |rate| <= 1e-9 uses 1e-9 itself.
+inline constexpr double kMoveAxisStopBelow1e9 = 0x1.12e0be826d694p-30;
+// One ulp under 1e-9 (in [2^-30, 2^-29) a double's ulp is 2^-82), so nothing lies between it and 1e-9.
+static_assert(kMoveAxisStopBelow1e9 < 1e-9 && 1e-9 - kMoveAxisStopBelow1e9 == 0x1p-82,
+              "kMoveAxisStopBelow1e9 is the largest double under 1e-9");
 
 /// A driver's protocol limits, orders and argument texts. Every range defaults to "no limit"; the PulseGuide
 /// direction range (0-3) and the lower bounds (duration 0, axis 0) are universal and not fields.
@@ -112,6 +128,13 @@ struct TelescopeCommandLimits {
     double rate_offset_ra_scale = 1.0;
     double rate_offset_dec_scale = 1.0;
     double rate_offset_max = std::numeric_limits<double>::infinity();
+
+    /// The Alt/Az slews and SyncToAltAz. Altitude takes [-90, 90] and azimuth [0, 360], or [0, 360) when
+    /// alt_az_azimuth_360 is false. alt_az_site_first: the site check runs right after the connection check, before
+    /// the parked and fault checks, instead of after them.
+    bool alt_az_azimuth_360 = true;
+    ParkedFaultOrder alt_az_order = ParkedFaultOrder::ParkedFirst;
+    bool alt_az_site_first = false;
 
     ParkedFaultOrder sync_order = ParkedFaultOrder::ParkedFirst;
 
@@ -338,6 +361,54 @@ template <typename Checks>
 void check_rate_offset(const TelescopeCommandLimits& limits, RateOffsetAxis axis, double rate, Checks&& checks) {
     check_rate_offset_arguments(limits, axis, rate);
     check_rate_offset_state(limits, checks);
+}
+
+// The Alt/Az slews (SlewToAltAz, SlewToAltAzAsync) and SyncToAltAz: altitude and azimuth, then connected, parked and
+// fault in the driver's order, and the site the conversion to RA/Dec needs (before parked, or after the fault, per
+// driver). A slew then refuses while Tracking is true (ITelescopeV4, #1377: a tracking mount drifts off the Alt/Az).
+// A sync does not: ITelescopeV4 only says it "may", and a plate-solve sync runs on a tracking mount.
+
+inline void check_alt_az_arguments(const TelescopeCommandLimits& limits, double altitude, double azimuth,
+                                   std::string_view who) {
+    const auto refuse = [&](const char* text) {
+        throw AlpacaException(limits.texts.alt_az_texts_name_member ? std::string(who) + " " + text : std::string(text),
+                              AlpacaError::InvalidValue);
+    };
+    if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
+        refuse(limits.texts.altitude_range);
+    }
+    if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0 ||
+        (azimuth == 360.0 && !limits.alt_az_azimuth_360)) {
+        refuse(limits.texts.azimuth_range);
+    }
+}
+
+template <typename Checks>
+void check_alt_az_sync_state(const TelescopeCommandLimits& limits, Checks&& checks) {
+    checks.check_connected();
+    if (limits.alt_az_site_first) checks.check_site();
+    telescope_gate_detail::parked_and_fault(limits.alt_az_order, /*stop=*/false, /*check_fault=*/true, checks);
+    if (!limits.alt_az_site_first) checks.check_site();
+}
+
+template <typename Checks>
+void check_alt_az_slew_state(const TelescopeCommandLimits& limits, Checks&& checks) {
+    check_alt_az_sync_state(limits, checks);
+    checks.check_not_tracking();
+}
+
+template <typename Checks>
+void check_alt_az_slew(const TelescopeCommandLimits& limits, double altitude, double azimuth, std::string_view who,
+                       Checks&& checks) {
+    check_alt_az_arguments(limits, altitude, azimuth, who);
+    check_alt_az_slew_state(limits, checks);
+}
+
+template <typename Checks>
+void check_alt_az_sync(const TelescopeCommandLimits& limits, double altitude, double azimuth, std::string_view who,
+                       Checks&& checks) {
+    check_alt_az_arguments(limits, altitude, azimuth, who);
+    check_alt_az_sync_state(limits, checks);
 }
 
 // SyncToCoordinates (and SyncToTarget, which passes the target): RA and Dec, then connected, parked and fault in the
