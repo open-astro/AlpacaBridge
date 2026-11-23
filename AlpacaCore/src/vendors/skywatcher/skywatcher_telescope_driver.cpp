@@ -3172,7 +3172,8 @@ public:
         // open-astro#2604: AbortSlew owns the end of a Park or FindHome it
         // cancelled, as it does a goto's: Slewing reads false and SiteLongitude
         // is accepted once it returns. The cancelled body finds its flag down
-        // and leaves the axes alone (abandon_slew_body_locked()).
+        // and leaves the axes alone (abandon_slew_body_locked()): a canceller
+        // that clears the flag must have stopped the axes itself, as here.
         parking_ = false;
         homing_ = false;
         set_slewing_cached_false_locked();
@@ -3537,6 +3538,8 @@ private:
         slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        // abandon_slew_body_locked() skips a cancelled body's stop once its flag is down, so a canceller that
+        // clears these must have stopped the axes itself (open-astro#2604). This runs after the slot is joined.
         parking_ = false;
         homing_ = false;
         goto_in_progress_ = false;
@@ -6739,6 +6742,9 @@ private:
         claim = motion_owner_.claim(util::MotionCommand::Slew);
         supersede_pulse_locked(0);
         supersede_pulse_locked(1);
+        // The replaced body is Superseded and leaves the axes to this
+        // operation; abandon_slew_body_locked() skips a stop once the flag
+        // is down, so only a canceller that stopped the axes may clear it.
         parking_ = false;
         homing_ = false;
         // The replaced goto's 8 s Slewing window is not the new operation's
