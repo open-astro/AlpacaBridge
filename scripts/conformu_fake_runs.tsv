@@ -2,7 +2,7 @@ vendor	deviceType	fakeHeader	status	slice	reportPath	reason
 skywatcher	telescope	fake_skywatcher_mount.h	run	1	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt	-
 skywatcher	telescope	fake_skywatcher_serial_board.h	run	2	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-telescope-fake_skywatcher_serial_board-Linux-arm64.txt	-
 zwo	telescope	fake_mount_server.h	pending	6	-	needs a ZWO AM simulator: the row serves FakeMountServer with a fixed reply table (:GU# "NG#", :Gps# "0#"), so the mount never moves, tracks or parks; FakeZwoMount is stateful but runs on a test FakeTaskClock and has no sky model
-zwo	camera	fake_zwo_sdk.h	pending	6	-	no ConformU report yet: the fake now serves a camera whose bins 1 to 4 and 192 x 96 sensor agree with MaxBin 4 and refuses a target temperature outside -40 to 30 C, as the SDK does (#2610), but the row has not been through ConformU with the exposure model of #2414 (the host times each exposure in real time through FakeZWOSDK::exposure_clock); runs once the arm64 ConformU fake job passes it and its report is committed
+zwo	camera	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-camera-fake_zwo_sdk-Linux-arm64.txt	-
 zwo	filterwheel	fake_zwo_efw_sdk.h	run	4	AlpacaCore/conformu/ZWO/Fake/Fake-filterwheel-fake_zwo_efw_sdk-Linux-arm64.txt	-
 zwo	focuser	fake_zwo_eaf_sdk.h	run	3	AlpacaCore/conformu/ZWO/Fake/Fake-focuser-fake_zwo_eaf_sdk-Linux-arm64.txt	-
 zwo	rotator	fake_zwo_caa_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-rotator-fake_zwo_caa_sdk-Linux-arm64.txt	-
@@ -30,9 +30,9 @@ qhy	filterwheel	fake_qhy_cfw3.h	run	4	AlpacaCore/conformu/QHY/Fake/Fake-filterwh
 qhy	focuser	fake_qhy_qfocuser.h	run	3	AlpacaCore/conformu/QHY/Fake/Fake-focuser-fake_qhy_qfocuser-Linux-arm64.txt	-
 playerone	camera	fake_playerone_sdk.h	pending	6	-	needs an exposure model: FakePlayerOneSDK reports an image ready at once (ConformU: ImageReady true before the exposure time elapsed) and a pixel size of 0
 playerone	filterwheel	fake_playerone_pw_sdk.h	run	4	AlpacaCore/conformu/Player One/Fake/Fake-filterwheel-fake_playerone_pw_sdk-Linux-arm64.txt	-
-touptek	camera	fake_touptek_sdk.h	pending	6	-	no ConformU report yet: the fake's default camera now lists bins 1 to 4 under MaxBin 4, refuses a TEC set point outside -50 to 30 C as the SDK does (#2610), and the ConformU factory turns frame delivery on, but the row has not been through ConformU; runs once the arm64 ConformU fake job passes it and its report is committed
+touptek	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
 touptek	switch	fake_touptek_powerbox_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_powerbox_sdk-Linux-arm64.txt	-
-altair	camera	fake_touptek_sdk.h	pending	6	-	no ConformU report yet: the Altair driver over FakeToupTekSDK now has a default camera that lists bins 1 to 4 under MaxBin 4, refuses a TEC set point outside -50 to 30 C as the SDK does (#2610), and the ConformU factory turns frame delivery on, but the row has not been through ConformU; runs once the arm64 ConformU fake job passes it and its report is committed
+altair	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/Altair/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
 svbony	camera	fake_svbony_sdk.h	pending	6	-	needs an exposure and guide model: FakeSVBSDK reports an exposure done at once (ConformU: ImageReady true before the exposure time elapsed), its pulse_guide returns at once where the SDK blocks for the pulse (IsPulseGuiding drops early), and it has no temperature controls (CCDTemperature and HeatSinkTemperature fail "Failed to get control value")
 gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camera-fake_gphoto_sdk-Linux-arm64.txt	-
 wandererastro	covercalibrator	fake_serial_streamer.h	pending	6	-	needs a cover simulator: the row serves one fixed WandererCover status frame, so the cover angle never follows an open or close command and CoverState stays Moving (ConformU: OpenCover "The open cover operation timed out." after 60 s; every other check passed)

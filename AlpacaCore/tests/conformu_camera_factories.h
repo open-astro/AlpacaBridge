@@ -133,6 +133,8 @@ struct ToupTekCameraHost {
     ToupTekCameraHost() {
         fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
         fake.deliver_frame = true;  // an exposure ends in a frame, as on a camera (the unit default is none)
+        // The frame follows the exposure time, so ConformU sees Exposing (the unit default: at once).
+        fake.real_time_exposure = true;
     }
 };
 #endif

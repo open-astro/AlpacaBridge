@@ -860,6 +860,31 @@ TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK TEC refuses a set point ou
     driver->set_connected(false);
 }
 
+TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure time when real_time_exposure is set",
+          "[touptek][camera][unit]") {
+    // Falsified by: trigger() raising the frame event at once under real_time_exposure (the camera is Idle with
+    // an image ready before the exposure time has passed), or the timer ignoring stop() so the abort of an hour's
+    // exposure leaves the fake's destructor waiting an hour.
+    auto fake = fake_with_one_camera();
+    fake.deliver_frame = true;
+    fake.real_time_exposure = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    const auto started = std::chrono::steady_clock::now();
+    driver->start_exposure(0.6, true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
+    REQUIRE(spin_until([&] { return driver->get_image_ready(); }));
+    CHECK(std::chrono::steady_clock::now() - started >= 550ms);
+
+    driver->start_exposure(3600.0, true);
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    driver->abort_exposure();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on", "[touptek][camera][unit]") {
     // Falsified by: set_cooler_on(true) silently succeeding, writing the TEC register of a camera without
     // one, or get_can_set_ccd_temperature returning true.
