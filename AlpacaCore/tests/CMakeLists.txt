@@ -323,6 +323,7 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
     # SkyPortal WiFi adapter beacon, for the CGX form's Find adapter button.
     list(APPEND TEST_SOURCES test_celestron_aux_beacon.cpp)
+    list(APPEND TEST_SOURCES test_celestron_nexstar_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
