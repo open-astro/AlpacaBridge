@@ -598,6 +598,28 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
     }
 }
 
+// #2586: live() is running() minus a body told to stop. A cancelled or
+// superseded body still winding down is running() but not live(), so a driver
+// can tell a live operation from one that only has to return.
+TEST_CASE("AsyncOperation - live() is false for a stopped body that has not returned yet",
+          "[util][async_operation][unit]") {
+    Harness h;
+    auto p = probe();
+    auto g = h.gate();
+    CHECK_FALSE(h.op->live());
+    REQUIRE(h.start_within(gated_body(p, g)));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    CHECK(h.op->live());
+
+    SECTION("cancelled") { h.op->cancel(); }
+    SECTION("superseded by the shared generation") { h.generation.bump(); }
+    CHECK(h.op->running());
+    CHECK_FALSE(h.op->live());
+    g->open();
+    REQUIRE(eventually([&] { return !h.op->running(); }));
+    CHECK_FALSE(h.op->live());
+}
+
 // Case 6: a throw never reaches std::terminate; the current body's is kept
 // (rule 9).
 TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]") {

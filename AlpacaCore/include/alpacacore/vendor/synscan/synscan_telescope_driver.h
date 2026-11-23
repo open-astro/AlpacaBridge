@@ -79,6 +79,10 @@ void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<
 /// lock held, so a case can hold the teardown there and check whose exchanges it cuts (#2070). An empty function
 /// removes it.
 void set_closing_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the slew slot's thread as each slew or Park body returns, before the slot counts it as returned,
+/// with no driver lock held, so a case can act while a cancelled body is still winding down (#2586). An empty
+/// function removes it.
+void set_slew_body_exit_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seams of the host clock re-sync (open-astro#2419): `hook` runs as each re-sync body ends, with no driver lock
 /// held, and is told whether the body wrote the mount clock; an empty function removes it.

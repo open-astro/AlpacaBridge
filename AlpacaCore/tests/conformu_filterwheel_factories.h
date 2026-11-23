@@ -96,9 +96,12 @@ inline std::unique_ptr<FilterWheelDriver> make_playerone_filterwheel(int device_
 
 #ifdef FAKE_CONFORMU_WANDERERASTRO
 // The SFW status frame of the WandererAstro filter wheel tests (the wheel at Position 2), streamed every 50 ms.
+// SFW wheel mode: a move command lands the wheel on its slot 600 ms later, as the SFW turns (Position is -1 until
+// the streamed slot matches the target).
 inline FakeSerialStreamer& wandererastro_sfw() {
     static FakeSerialStreamer streamer("WSFW368A20260124A3ABCDEFGHIA0A0A0A0A0A0A0A0A1A\n",
-                                       std::chrono::milliseconds(50));
+                                       std::chrono::milliseconds(50), std::chrono::milliseconds(0),
+                                       std::chrono::milliseconds(600));
     return streamer;
 }
 inline std::unique_ptr<FilterWheelDriver> make_wandererastro_filterwheel(int device_number) {

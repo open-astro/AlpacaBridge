@@ -39,6 +39,7 @@ struct State {
     bool parked = false;
     bool faulted = false;
     bool tracking = true;
+    bool sidereal = true;  // TrackingRate is driveSidereal
 };
 
 // A driver's state checks, recorded.
@@ -61,6 +62,10 @@ struct RecordingChecks {
     void check_tracking() {
         calls.emplace_back("tracking");
         if (!state.tracking) throw AlpacaException("tracking off", AlpacaError::InvalidOperation);
+    }
+    void check_sidereal_rate() {
+        calls.emplace_back("sidereal");
+        if (!state.sidereal) throw AlpacaException("not sidereal", AlpacaError::InvalidOperation);
     }
 };
 
@@ -497,6 +502,77 @@ TEST_CASE("Telescope command gate - a target write refuses in the order value, c
     alpacacore::util::check_target_right_ascension(limits, 12.0, passing);
     alpacacore::util::check_target_declination(limits, 45.0, passing);
     CHECK(passing.calls == std::vector<std::string>{"connected", "fault", "connected", "fault"});
+}
+
+TEST_CASE("Telescope command gate - a rate-offset write refuses in the order value, connected, fault, sidereal rate",
+          "[util][command-gate]") {
+    TelescopeCommandLimits limits;
+    limits.rate_offset_ra_scale = 15.0;
+    limits.rate_offset_dec_scale = 0.5;
+    limits.rate_offset_max = 1800.0;
+    limits.texts.right_ascension_rate_not_finite = "ra not finite";
+    limits.texts.right_ascension_rate_range = "ra out of range";
+    limits.texts.declination_rate_not_finite = "dec not finite";
+    limits.texts.declination_rate_range = "dec out of range";
+    using alpacacore::util::RateOffsetAxis;
+    State not_sidereal;
+    not_sidereal.sidereal = false;
+    State all_wrong = everything_wrong();
+    all_wrong.sidereal = false;
+    State faulted_not_sidereal = faulted();
+    faulted_not_sidereal.sidereal = false;
+    struct Row {
+        State state;
+        RateOffsetAxis axis;
+        double rate;
+        int expected;
+        const char* text;  // the driver's text, when expected is InvalidValue
+    };
+    const std::vector<Row> rows = {
+        {State{}, RateOffsetAxis::RightAscension, 0.0, 0, {}},
+        {State{}, RateOffsetAxis::RightAscension, 120.0, 0, {}},  // 1800 at the mount: the limit is inclusive
+        {State{}, RateOffsetAxis::RightAscension, -120.0, 0, {}},
+        {State{}, RateOffsetAxis::Declination, 3600.0, 0, {}},  // the scale applies per axis
+        {State{}, RateOffsetAxis::RightAscension, 120.01, AlpacaError::InvalidValue, "ra out of range"},
+        {State{}, RateOffsetAxis::RightAscension, -120.01, AlpacaError::InvalidValue, "ra out of range"},
+        {State{}, RateOffsetAxis::Declination, 3600.1, AlpacaError::InvalidValue, "dec out of range"},
+        {State{}, RateOffsetAxis::RightAscension, kNaN, AlpacaError::InvalidValue, "ra not finite"},
+        {State{}, RateOffsetAxis::Declination, -kInf, AlpacaError::InvalidValue, "dec not finite"},
+        // Finite, but not once scaled to the mount's unit.
+        {State{}, RateOffsetAxis::RightAscension, std::numeric_limits<double>::max(), AlpacaError::InvalidValue,
+         "ra not finite"},
+        {all_wrong, RateOffsetAxis::Declination, kNaN, AlpacaError::InvalidValue, "dec not finite"},
+        {all_wrong, RateOffsetAxis::RightAscension, 1.0, AlpacaError::NotConnected, {}},
+        {faulted_not_sidereal, RateOffsetAxis::Declination, 1.0, AlpacaError::DriverException, {}},
+        {not_sidereal, RateOffsetAxis::RightAscension, 1.0, AlpacaError::InvalidOperation, {}},
+        {not_sidereal, RateOffsetAxis::Declination, 1.0, AlpacaError::InvalidOperation, {}},
+        {parked(), RateOffsetAxis::RightAscension, 1.0, 0, {}},  // an offset starts no move
+        {tracking_off(), RateOffsetAxis::Declination, 1.0, 0, {}},
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        INFO("rate " << row.rate);
+        CHECK(error_code_of([&] { alpacacore::util::check_rate_offset(limits, row.axis, row.rate, checks); }) ==
+              row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(text_of([&] { alpacacore::util::check_rate_offset_arguments(limits, row.axis, row.rate); }) ==
+                  row.text);
+            CHECK(checks.calls.empty());
+        }
+    }
+    RecordingChecks passing;
+    alpacacore::util::check_rate_offset(limits, RateOffsetAxis::RightAscension, 1.0, passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "fault", "sidereal"});
+
+    // The default limits refuse only a non-finite value, in their default words.
+    const TelescopeCommandLimits defaults;
+    CHECK_NOTHROW(alpacacore::util::check_rate_offset_arguments(defaults, RateOffsetAxis::Declination, 1e300));
+    CHECK(text_of([&] {
+              alpacacore::util::check_rate_offset_arguments(defaults, RateOffsetAxis::RightAscension, kNaN);
+          }) == "RightAscensionRate must be finite");
+    CHECK(text_of([&] {
+              alpacacore::util::check_rate_offset_arguments(defaults, RateOffsetAxis::Declination, kInf);
+          }) == "DeclinationRate must be finite");
 }
 
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {

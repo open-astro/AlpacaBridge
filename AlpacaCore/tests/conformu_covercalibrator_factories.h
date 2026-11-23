@@ -28,6 +28,11 @@
 
 #include "fake_gemini_flatpanel.h"
 #endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
+
+#include "fake_serial_streamer.h"
+#endif
 
 namespace alpacacore::test::conformu {
 
@@ -48,6 +53,21 @@ inline FakeGeminiFlatPanel& gemini_flatpanel() {
 }
 inline std::unique_ptr<CoverCalibratorDriver> make_gemini_flatpanel_pro(int device_number) {
     return vendor::gemini::create_gemini_flatpanel_pro(device_number, gemini_flatpanel().slave_path());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+// The WandererCover V4 Pro status frame of the WandererAstro cover tests (open angle 10.0, close angle 270.0,
+// brightness 0), streamed every 300 ms. The streamer has no cover mode, so the frame never follows an open, close or
+// brightness command.
+inline FakeSerialStreamer& wandererastro_cover() {
+    static FakeSerialStreamer streamer("WandererCoverV4ProA20240301A10.0A270.0A10.0A12.5A0A0A0\n",
+                                       std::chrono::milliseconds(300));
+    return streamer;
+}
+inline std::unique_ptr<CoverCalibratorDriver> make_wandererastro_covercalibrator(int device_number) {
+    return vendor::wandererastro::create_wandererastro_covercalibrator(device_number,
+                                                                       wandererastro_cover().slave_path());
 }
 #endif
 
