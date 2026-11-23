@@ -88,6 +88,15 @@ struct TelescopeArgumentTexts {
     bool alt_az_texts_name_member = false;
 };
 
+/// The largest double under 1e-9, for a driver whose MoveAxis stop is |rate| < 1e-9 (strictly under): the gate's
+/// stop test is <=, so this epsilon keeps 1e-9 itself a move (ZWO #2415, Bisque #2582). It is
+/// std::nextafter(1e-9, 0.0), which is not constexpr before C++23 (GCC folds it, clang rejects it). A driver whose
+/// stop is |rate| <= 1e-9 uses 1e-9 itself.
+inline constexpr double kMoveAxisStopBelow1e9 = 0x1.12e0be826d694p-30;
+// One ulp under 1e-9 (in [2^-30, 2^-29) a double's ulp is 2^-82), so nothing lies between it and 1e-9.
+static_assert(kMoveAxisStopBelow1e9 < 1e-9 && 1e-9 - kMoveAxisStopBelow1e9 == 0x1p-82,
+              "kMoveAxisStopBelow1e9 is the largest double under 1e-9");
+
 /// A driver's protocol limits, orders and argument texts. Every range defaults to "no limit"; the PulseGuide
 /// direction range (0-3) and the lower bounds (duration 0, axis 0) are universal and not fields.
 struct TelescopeCommandLimits {
