@@ -89,10 +89,13 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a pulse whose first ACK was lost
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, owner_info(mount));
     connect_home_and_track(mount, *driver);
 
-    // The RA packet is applied but its ACK is lost, and the mount keeps it active: the axis stays ambiguous.
+    // The RA packet is applied but its ACK is lost, and the mount keeps it active: the axis stays ambiguous. Without
+    // auto-completion the packet stays active until the case ends it, so the body is still watching it (for up to
+    // the 2 s packet plus the 0.5 s margin, real time) when the second pulse arrives.
+    mount.set_auto_complete_motions(false);
     mount.set_hold_guide_until_completed(true);
     mount.drop_next_reply(0x10, 0x26, true);
-    CHECK(thrown_by([&] { driver->pulse_guide(2, 100); }).code == alpacacore::AlpacaError::DriverException);
+    CHECK(thrown_by([&] { driver->pulse_guide(2, 2000); }).code == alpacacore::AlpacaError::DriverException);
     const int guide_commands = mount.count_command(0x10, 0x26);
 
     const auto refused = thrown_by([&] { driver->pulse_guide(2, 100); });
@@ -137,7 +140,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stale RA pulse failure refuses
     for (const int direction : {2, 0}) {  // East (RA), North (Dec)
         const auto refused = thrown_by([&] { driver->pulse_guide(direction, 100); });
         INFO("direction " << direction << ": " << refused.text);
-        CHECK(refused.code == alpacacore::AlpacaError::DriverException);
+        // REQUIRE: an accepted pulse would park its body on the clock, and the Tracking write below would join it.
+        REQUIRE(refused.code == alpacacore::AlpacaError::DriverException);
     }
     CHECK(mount.count_command(0x10, 0x26) == ra_guides);
     CHECK(mount.count_command(0x11, 0x26) == dec_guides);
