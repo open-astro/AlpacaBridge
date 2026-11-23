@@ -25,7 +25,8 @@ Two modes:
            review-comment.md. Every listed rule needs a checklist line
            `- <record file> rule <n>: pass|defect|n/a: <reason>` (a period, an en
            dash or an em dash in place of the colon after the verdict also
-           counts), a rule may not get two verdicts, and a defect line needs the "Issues found"
+           counts, and so does the skeleton's `VERDICT:` kept before the
+           verdict), a rule may not get two verdicts, and a defect line needs the "Issues found"
            sign-off as the last line (bold, italics or a closing period or
            exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
@@ -61,8 +62,9 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
 # Consumers: the workflow step "Fold the decision-record checklist" in .github/workflows/claude-review.yml
 # imports fold_checklist (and through it CHECKLIST_RE, sign_off and the sign-off constants); rename them there too.
+# Before the verdict: an optional `VERDICT:`, the skeleton's placeholder word the agent sometimes keeps (#2592).
 # After the verdict: a colon, a period (PR #2315), or an en or em dash the agent writes anyway (#2460).
-CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*[:.\u2013\u2014]\s*\S", re.I)
+CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(?:verdict\s*:\s*)?(pass|defect|n/a)\s*[:.\u2013\u2014]\s*\S", re.I)
 ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
 APPROVED_SIGN_OFF = "\u2705 Approved"
 
