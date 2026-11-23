@@ -115,6 +115,10 @@ public:
     /// GOTO then lands at once and ":ST"/":Q" change no status, as before.
     void set_goto_tracks_off(bool on) { goto_tracks_off_.store(on); }
 
+    /// Issue #2562: ":MP1#" (park) makes the ":GLS" system status read 6 (parked) at once. Off by default: a Park then
+    /// changes no status, as before, and a case sets the status it needs with set_system_status().
+    void set_park_lands(bool on) { park_lands_.store(on); }
+
     /// Issue #2186, HAE29C firmware: a ":Z" pulse-guide command makes the ":GLS" system status read 3 (auto-guiding)
     /// in place of 1 for the whole of the pulse. The fake has no pulse timer, so the status stays 3 until a test sets
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
@@ -387,6 +391,9 @@ private:
         if (cmd.rfind(":Z", 0) == 0) {
             return pulse_acks_.load() ? "1" : "";
         }
+        if (cmd == ":MP1#" && park_lands_.load()) {
+            system_status_.store(6);
+        }
         if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 || cmd.rfind(":Q", 0) == 0) {
             return "1";  // set / motion / rate acks
         }
@@ -416,6 +423,7 @@ private:
     std::atomic<bool> altaz_enabled_{false};
     std::atomic<long long> alt_units_{0};
     std::atomic<long long> az_units_{0};
+    std::atomic<bool> park_lands_{false};
     std::atomic<bool> reject_goto_{false};
     std::atomic<bool> reject_normal_goto_{false};
     std::string goto_reply_;

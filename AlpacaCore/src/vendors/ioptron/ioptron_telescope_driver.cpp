@@ -1926,6 +1926,7 @@ public:
         // read must answer normally again. Clear unconditionally (a
         // soft-failed goto never set is_slewing).
         invalidate_slew_error_locked();
+        end_fast_cache_grace_locked();
         // open-astro#768: the stop is sent even when the cached status says the
         // mount is not slewing; that cache can lag a GOTO the mount accepted.
         const Wire protocol = wire();
@@ -2799,11 +2800,17 @@ private:
         // generation mismatch, preventing a ghost slew/trim after newer motion.
         // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
+        end_fast_cache_grace_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
     }
+
+    // Issue #2562: the post-connect grace serves the connect's reads to the getter burst after Connect. A motion the
+    // driver starts (every initiator supersedes, and AbortSlew) ends it: the caches then follow the mount on their
+    // TTLs, so AtPark, AtHome, Slewing and the position no longer serve a value written or read before the motion.
+    void end_fast_cache_grace_locked() const { fast_cache_until_ = std::chrono::steady_clock::time_point{}; }
 
     void clear_slew_hold_locked() const { slew_hold_.clear(); }
 
