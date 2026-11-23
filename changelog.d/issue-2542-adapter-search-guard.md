@@ -1,0 +1,2 @@
+### Fixed
+- **SkyPortal "Find adapter" search: unknown vendor and the adapter cap** (AlpacaHTTP and AlpacaCore Celestron, issue #2542): `GET /management/v1/networkadapters` now checks the vendor before it takes the one-search-at-a-time flag, so while a search runs an unknown vendor gets `InvalidValue` instead of "already running" and never blocks a real search for a moment. Beacons from a new adapter past the 16-adapter cap are now counted in the listen's "other datagram(s) ignored" debug line instead of being dropped from the tally.
