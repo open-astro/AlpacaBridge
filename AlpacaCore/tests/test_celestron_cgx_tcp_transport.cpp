@@ -583,6 +583,34 @@ TEST_CASE("Celestron CGX AUX TCP - a late reply is taken and its duplicate never
     CHECK(adapter.count(kRa, 0x01) == 3);
 }
 
+// #2540: a rate write recovered by a re-send leaves the other copy's ACK on its way. AUX has no transaction id, so an
+// ACK that lands after the next identical write went out answers it, and the driver believes a write the mount never
+// had. The first copy's reply is held until the re-send arrives; the re-send's own reply comes 150 ms later, after
+// the next write (lost, with both its re-sends) has gone out, and before 300 ms after the re-send.
+TEST_CASE("Celestron CGX AUX TCP - a recovered rate write's late second ACK never answers the next identical write",
+          "[celestron][cgx][protocol][tcp]") {
+    const std::vector<std::uint8_t> sidereal = {0xff, 0xff};
+    FakeCelestronAuxTcpAdapter adapter;
+    adapter.script(kRa, 0x06, 1, Fault::HoldUntilNext);
+    adapter.script(kRa, 0x06, 2, Fault::Late);
+    adapter.set_late_delay(milliseconds(150));
+    for (const int nth : {3, 4, 5}) adapter.script(kRa, 0x06, nth, Fault::Drop);
+    CelestronCgxProtocol protocol;
+    connect(protocol, adapter);
+    const auto session = protocol.session_generation();
+
+    const auto ack = protocol.exchange(request(kRa, 0x06, sidereal));
+    CHECK(ack.source == kRa);
+    CHECK(adapter.count(kRa, 0x06) == 2);
+    CHECK(protocol.recovered_retries() == 1);
+    CHECK(protocol.session_generation() == session);
+
+    // The next identical write never reached the motor: it must time out, not take the straggler for its ACK.
+    require_alpaca_error([&] { (void)protocol.exchange(request(kRa, 0x06, sidereal)); }, AlpacaError::DriverException);
+    CHECK(adapter.count(kRa, 0x06) == 5);  // sent, then re-sent twice: no reply was taken
+    CHECK(protocol.session_generation() != session);
+}
+
 TEST_CASE("Celestron CGX AUX TCP - assembles a reply split across segments", "[celestron][cgx][protocol][tcp]") {
     FakeCelestronAuxTcpAdapter adapter;
     adapter.set_position(kDec, 0x00abcd);
