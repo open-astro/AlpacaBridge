@@ -58,6 +58,9 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+/// Test seam (#2467): runs on the PulseGuide caller's thread after the pulse's wire turn is released and before its
+/// stop timer starts, with no driver lock held. Call only while no PulseGuide is in flight.
+void set_pulse_start_hook_for_testing(TelescopeDriver& driver, std::function<void(int axis)> hook);
 /// The same for the MoveAxis bound's slot (#2412).
 void set_motion_bound_spawn_for_testing(TelescopeDriver& driver,
                                         std::function<std::thread(std::function<void()>)> spawn);

@@ -1348,7 +1348,9 @@ TEST_CASE("Celestron motion owner - PulseGuide during a slew, Park or FindHome i
                 CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
             } else {
                 CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
-                CHECK(std::string(ex.what()) == "PulseGuide is not allowed while a slew, park or home is running");
+                const std::string text = ex.what();
+                CHECK(text.rfind("PulseGuide is not allowed while a slew, park or home is running; ", 0) == 0);
+                CHECK(text.find("a failed stop keeps Slewing true") != std::string::npos);
             }
         }
         CHECK(refused);

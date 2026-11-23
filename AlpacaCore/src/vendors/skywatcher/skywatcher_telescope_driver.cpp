@@ -311,6 +311,12 @@ public:
     // for members that touch no wire: the getters, the set_connected() link probe, restart_duty_worker_if_armed().
     using StateLock = util::StateLock;
 
+    // A dispatch that lost its axis to a newer motion command. Distinct from AlpacaException only so a pulse
+    // body logs it at INFO: it is an expected outcome, not a failure (#2467).
+    struct MotionSupersededError : AlpacaException {
+        using AlpacaException::AlpacaException;
+    };
+
 private:
     // Every exchange with the motor board goes through this gate. A caller that holds the state lock
     // gives it up for the call and takes it back after (also when the call throws); the operation lock,
@@ -1645,6 +1651,8 @@ public:
         start_slew_body(
             [this, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
+                // A fresh slot thread's lock table is empty, so this cannot throw today; a cleanup for a refused lock
+                // must store last_slew_error_ and take its locks through the gate (decision 0016 rule 6, #2467).
                 StateLock lock(lock_gate_);
                 SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
@@ -1766,6 +1774,8 @@ public:
         start_slew_body(
             [this, target_ra_axis, target_dec_axis, claim](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
+                // A fresh slot thread's lock table is empty, so this cannot throw today; a cleanup for a refused lock
+                // must store last_slew_error_ and take its locks through the gate (decision 0016 rule 6, #2467).
                 StateLock lock(lock_gate_);
                 SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
@@ -2167,7 +2177,12 @@ public:
                     start_speed_motion_locked(lock, kAxisRa, rate);
                 }
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
+                // A newer motion command taking the axis during the dispatch is expected, not a fault (#2467).
+                if (dynamic_cast<const MotionSupersededError*>(&e) != nullptr) {
+                    ALPACA_LOG_INFO("SkyWatcher", std::string("PulseGuide dispatch superseded: ") + e.what());
+                } else {
+                    ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
+                }
                 recover_ra_drive_rate();
                 StateLock lock(lock_gate_);
                 release_pulse_locked(lock);
@@ -2640,6 +2655,8 @@ public:
             "SlewToCoordinatesAsync", ra, dec,
             [this, ra, dec](util::OperationContext& ctx, uint64_t slew_epoch, const util::MotionClaim& claim) {
                 BodyScope scope(ctx);
+                // A fresh slot thread's lock table is empty, so this cannot throw today; a cleanup for a refused lock
+                // must store last_slew_error_ and take its locks through the gate (decision 0016 rule 6, #2467).
                 StateLock lock(lock_gate_);
                 SlewClaimScope claim_scope(*this, lock, claim);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
@@ -4808,7 +4825,7 @@ private:
         }
         const bool kept = stop_axis_and_wait_locked(lock, channel, claim);
         if (!kept) {
-            throw AlpacaException("Motion superseded before dispatch");
+            throw MotionSupersededError("Motion superseded before dispatch");
         }
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
@@ -5675,6 +5692,7 @@ private:
     // slew task with restoring_tracking_ set, so Slewing stays true while the
     // axes read free -- see that flag for why the two had to be separated.
     void verify_post_slew_tracking_rate_locked(StateLock& lock) {
+        assert(lock.owns_lock() && "the caller holds the state lock: this reads tracking_ and the RA rates");
         if (!tracking_ || ra_duty_rate_deg_s_ != 0.0) {
             ALPACA_LOG_INFO("SkyWatcher", std::string("Post-slew tracking rate check skipped: ") +
                                               (!tracking_ ? "tracking is off"

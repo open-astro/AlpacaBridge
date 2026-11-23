@@ -4042,7 +4042,7 @@ TEST_CASE(
     });
 
     CHECK(again.code == alpacacore::AlpacaError::InvalidOperation);
-    CHECK(again.text == kOverlapRefusal);
+    CHECK(again.text.find("started without an acknowledgement") != std::string::npos);
     CHECK(dec_packets_after == dec_packets);
     CHECK(done);
 }

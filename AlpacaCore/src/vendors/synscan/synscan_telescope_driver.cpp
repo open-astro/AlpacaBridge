@@ -1219,7 +1219,8 @@ public:
                     }
                 };
                 hooks.poll_slewing = [&] {
-                    return poll_hardware_slewing_locked(lock, true, false, [&ctx] { return slot_stopped(&ctx); });
+                    return poll_hardware_slewing_locked(lock, true, std::nullopt,
+                                                        [&ctx] { return slot_stopped(&ctx); });
                 };
                 hooks.stop_tracking = [&] {
                     if (!send_in_turn(
@@ -1343,7 +1344,7 @@ public:
             util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
             // open-astro#775: ITelescopeV4 raises InvalidOperation for a
             // PulseGuide while a slew is in progress. The gate asks the handset, with mutex_ released.
-            if (get_slewing_fresh(lock)) {
+            if (pulse_blocked_fresh(lock, axis)) {
                 throw AlpacaException("PulseGuide is not allowed while the mount is slewing",
                                       AlpacaError::InvalidOperation);
             }
@@ -1362,7 +1363,7 @@ public:
             const WireTurn turn(*this, lock);
             check_connected();
             check_not_parked_locked("PulseGuide");
-            if (slewing_by_driver_state_locked() || slewing_cached_) {
+            if (pulse_blocked_by_driver_state_locked(axis) || slewing_cached_) {
                 throw AlpacaException("PulseGuide is not allowed while the mount is slewing",
                                       AlpacaError::InvalidOperation);
             }
@@ -1439,6 +1440,9 @@ public:
 
         // Each axis has its own slot; the supersede above happened before the turn
         // was released, so the old timer cannot stop this replacement pulse.
+        if (pulse_start_hook_) {
+            pulse_start_hook_(axis);  // test seam: the old timer may run here
+        }
         try {
             pulse_ops_[axis].start(
                 [this, axis, duration](util::OperationContext& ctx) { run_pulse_stop_body(ctx, axis, duration); });
@@ -3101,6 +3105,7 @@ public:
         pulse_ops_[0].set_spawn_for_testing(spawn);
         pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
     }
+    void set_pulse_start_hook_for_testing(std::function<void(int)> hook) { pulse_start_hook_ = std::move(hook); }
 
     // Forward the module's seams (util::PolledState::pause_for_testing / poll_now_for_testing). A paused poll waits its
     // ticks on the task clock and probes nothing: a case that scripts the handset's replies or advances the clock
@@ -3908,22 +3913,34 @@ private:
 
     bool get_slewing_locked() const { return slewing_by_driver_state_locked() || served_frame_locked().value.slewing; }
 
-    // The PulseGuide slew gate: asks the handset for the end of the answer, not the polled frame. `lock` (mutex_) is
+    // What refuses a PulseGuide on `axis` (#2263, #2467): the slewing state, except a MoveAxis on the OTHER axis, which
+    // the pulse runs beside (each axis has its own motor command). A MoveAxis on the pulse's own axis still refuses it.
+    // pulse_blocked_fresh() is the PulseGuide slew gate: it asks the handset, not the polled frame. `lock` (mutex_) is
     // held on entry and on return; the `L` runs with it released.
-    bool get_slewing_fresh(std::unique_lock<std::mutex>& lock) const {
-        return slewing_by_driver_state_locked() || poll_hardware_slewing_locked(lock);
+    bool pulse_blocked_by_driver_state_locked(int axis) const {
+        if (parking_ || refining_locked() || slew_hold_.active(clock_.now())) {
+            return true;
+        }
+        return manual_axis_slewing_[static_cast<std::size_t>(axis)];
+    }
+    bool pulse_blocked_fresh(std::unique_lock<std::mutex>& lock, int axis) const {
+        return pulse_blocked_by_driver_state_locked(axis) || poll_hardware_slewing_locked(lock, false, 1 - axis);
     }
 
     // Control path only: asks the handset now (the Park and landing loops are what detect a GOTO's end). The
-    // getters serve the frame instead. ignore_dec_jog: a Dec-only MoveAxis does not touch the RA motor or
-    // tracking, so ra_motion_active_locked() leaves it out.
+    // getters serve the frame instead. ignore_jog_axis: a MoveAxis on that axis is left out: a Dec-only MoveAxis does
+    // not touch the RA motor or tracking (ra_motion_active_locked()), and a PulseGuide runs beside a MoveAxis on the
+    // other axis (#2263, #2467).
     // The read runs with `lock` (mutex_) released. A body passes `lost`: nothing is applied, not even a failed read's
     // count, once `lost()` (evaluated with mutex_ held) says a newer operation owns the state (the caller checks that
     // itself).
     bool poll_hardware_slewing_locked(std::unique_lock<std::mutex>& lock, bool propagate_error = false,
-                                      bool ignore_dec_jog = false, const std::function<bool()>& lost = {}) const {
-        if (manual_axis_slewing_[0] || (manual_axis_slewing_[1] && !ignore_dec_jog)) {
-            return true;
+                                      std::optional<int> ignore_jog_axis = std::nullopt,
+                                      const std::function<bool()>& lost = {}) const {
+        for (int axis = 0; axis < 2; ++axis) {
+            if (manual_axis_slewing_[static_cast<std::size_t>(axis)] && ignore_jog_axis != axis) {
+                return true;
+            }
         }
         if (slew_hold_.active(clock_.now())) {
             return true;
@@ -3985,7 +4002,7 @@ private:
         if (pulsing || parking_ || refining_locked()) {
             return true;
         }
-        return poll_hardware_slewing_locked(lock, false, true);
+        return poll_hardware_slewing_locked(lock, false, 1);
     }
 
     // Reads the handset's tracking mode into the cache before a command starts a motion or checks Tracking, so a
@@ -4313,8 +4330,8 @@ private:
             }
             // The hardware answer, not get_slewing_locked(): a refinement scope holds the public Slewing true. The
             // read runs with mutex_ released; a poll that was overtaken applies nothing.
-            bool slewing =
-                poll_hardware_slewing_locked(lock, false, false, [&] { return lost_ownership_locked(claim, ctx); });
+            bool slewing = poll_hardware_slewing_locked(lock, false, std::nullopt,
+                                                        [&] { return lost_ownership_locked(claim, ctx); });
             if (lost_ownership_locked(claim, ctx)) {
                 return false;
             }
@@ -4594,7 +4611,7 @@ private:
     // and the answer is then not written over its slewing flag. A failed `L` keeps the last flag.
     bool clock_resync_handset_slewing_locked(std::unique_lock<std::mutex>& lock) const {
         const uint64_t epoch = motion_epoch_;
-        return poll_hardware_slewing_locked(lock, false, false, [&] { return motion_epoch_ != epoch; });
+        return poll_hardware_slewing_locked(lock, false, std::nullopt, [&] { return motion_epoch_ != epoch; });
     }
 
     // Under the re-sync's wire turn and mutex_ (released for the `J`): true only when the handset answers that it
@@ -4940,6 +4957,8 @@ private:
     // generation, so a pulse on one axis never supersedes the other's. A
     // replacement pulse or a moving MoveAxis bumps its own axis's generation,
     // a slew or Park both (supersede_pulse_locked()).
+    // Test seam (set_pulse_start_hook_for_testing): set only while no PulseGuide is in flight, read by pulse_guide().
+    std::function<void(int)> pulse_start_hook_;
     util::OperationGeneration slew_generation_;
     util::AsyncOperation slew_{"SynScan slew", slew_generation_, clock_};
     util::OperationGeneration poll_generation_;
@@ -4991,6 +5010,12 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_pulse_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_start_hook_for_testing(TelescopeDriver& driver, std::function<void(int axis)> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_pulse_start_hook_for_testing(std::move(hook));
     }
 }
 
