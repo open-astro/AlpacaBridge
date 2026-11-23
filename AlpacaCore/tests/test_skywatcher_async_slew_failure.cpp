@@ -853,6 +853,54 @@ TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cance
     driver->set_connected(false);
 }
 
+// open-astro#2604: a body cancelled in its landing settle wait reads nothing more from the board. The Park lands, its
+// body reads RA's position (`:j`) and sleeps the settle interval; AbortSlew cancels it there, and the wake seam holds
+// it until the reads AbortSlew makes itself are done. Released, the body ends with no status (`:f`) or position
+// (`:j`) read.
+TEST_CASE("SkyWatcher async - a body cancelled in its landing settle wait reads nothing more (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);               // only the body reads the board
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return !mount.axis_running(1) && !mount.axis_running(2); }, std::chrono::milliseconds(60000)));
+    // The wait loop reads only `:f`; the settle wait starts with a `:j` and then sleeps.
+    const int positions_at_stop = mount.frames_seen('j');
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.frames_seen('j') > positions_at_stop; }, std::chrono::milliseconds(5000)));
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);  // still parking: the body is in the settle sleep
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());
+    const int status_reads = mount.frames_seen('f');
+    const int position_reads = mount.frames_seen('j');
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.frames_seen('f') == status_reads);
+    CHECK(mount.frames_seen('j') == position_reads);
+    CHECK_FALSE(driver->get_at_park());
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
 // open-astro#2604: AbortSlew ends a Park only after its own stops were answered. When its RA ":L" is refused,
 // AbortSlew throws and leaves the Park to its cancelled body, which still stops both axes as it winds down.
 TEST_CASE("SkyWatcher async - a Park whose AbortSlew stop failed is still stopped by its body (#2604)",
