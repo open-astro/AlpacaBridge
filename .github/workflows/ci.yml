@@ -1306,6 +1306,13 @@ jobs:
         # Also checks the guard macros reach alpacacore_tests, so the registry cannot compile empty.
         run: python3 scripts/check_contract_sweep.py
 
+      - name: Vendor binaries - Check every vendored binary against SHA256SUMS
+        if: ${{ !cancelled() }}
+        # Issue #2633: a swapped or added .so/.a/firmware under
+        # AlpacaCore/external/ is a binary diff no reviewer can read. Its unit
+        # tests run in the scripts/tests step above.
+        run: python3 scripts/check_vendor_binaries.py
+
       - name: ConformU reports - Self-test the ConformU report checker
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         # main() returns 0 with "nothing to check" whenever the changed-file
