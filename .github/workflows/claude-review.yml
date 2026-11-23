@@ -180,7 +180,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           # Fork code is read, never built or executed, in this job; the
           # safe-to-review label is the maintainer accepting that read.
-          allow-unsafe-pr-checkout: true
+          allow-unsafe-pr-checkout: true  # zizmor: ignore[unsafe-checkout] -- label-gated read, never built or run; see above
           fetch-depth: 1
           persist-credentials: false
 
