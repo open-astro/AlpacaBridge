@@ -871,9 +871,11 @@ public:
 private:
     // #2412: a site, time or Sync write while motion the driver started is under way (a GOTO, Park or landing body,
     // a MoveAxis) is refused: the handset's limit and pointing maths would change under the motion. Pulse guiding is
-    // not motion here. Under mutex_.
+    // not motion here. A slew body that AbortSlew (or a newer initiator) has stopped and that is only winding down
+    // does not refuse (#2586): it sends nothing more, and AbortSlew has already stopped the mount; a newer initiator
+    // has armed its own state by then. Under mutex_.
     void refuse_while_moving_locked(const char* what) const {
-        if (slew_.running() || slewing_by_driver_state_locked()) {
+        if (slew_.live() || slewing_by_driver_state_locked()) {
             throw AlpacaException(std::string(what) + " cannot be written while the mount is moving",
                                   AlpacaError::InvalidOperation);
         }

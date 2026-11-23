@@ -2536,15 +2536,6 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
           "[synscan][telescope][goto-safety]") {
     const bool goto_motion = GENERATE(false, true);
     MoveAxisBoundRig rig;
-    // The GOTO body's end. AbortSlew cancels the body but does not join it, and the slot counts as running (so the
-    // writes are refused) until the body returns (#2561). Shared: the body thread never outlives what it sets.
-    const auto body_ended = std::make_shared<std::atomic<bool>>(false);
-    sc_bound::set_slew_spawn_for_testing(*rig.driver, [body_ended](std::function<void()> body) {
-        return std::thread([body_ended, body = std::move(body)] {
-            body();
-            body_ended->store(true);
-        });
-    });
     if (goto_motion) {
         rig.st->goto_never_ends.store(true);  // the GOTO body keeps waiting on it
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
@@ -2561,10 +2552,8 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
                          alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.st->requests.load() == requests);
 
+    // At once: the cancelled GOTO body may still be winding down, and it no longer refuses (#2586).
     REQUIRE_NOTHROW(rig.driver->abort_slew());
-    if (goto_motion) {
-        REQUIRE(wait_until([&] { return body_ended->load(); }, 5000));
-    }
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
     CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
