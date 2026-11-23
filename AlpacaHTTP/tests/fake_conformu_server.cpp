@@ -204,6 +204,18 @@ const std::vector<ConformuHost> kHosts = {
      "FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal)",
      [] { return !cu::gemini_flatpanel().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_pro)},
 #endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+    {"wandererastro", "covercalibrator", "fake_serial_streamer.h", alpacacore::DeviceType::CoverCalibrator,
+     "wandererastro-fake", "WandererAstro WandererCover V4 Pro (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
+     "FakeSerialStreamer (a streamed WandererCover status frame over a pseudo-terminal)",
+     [] { return !cu::wandererastro_cover().slave_path().empty(); }, driver_of(cu::make_wandererastro_covercalibrator)},
+#endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+    {"wandererastro", "switch", "fake_serial_streamer.h", alpacacore::DeviceType::Switch, "wandererastro-fake",
+     "WandererAstro WandererBox Pro V3 (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
+     "FakeSerialStreamer (a streamed WandererBox status frame over a pseudo-terminal)",
+     [] { return !cu::wandererastro_box().slave_path().empty(); }, driver_of(cu::make_wandererastro_box_switch)},
+#endif
 #ifdef FAKE_CONFORMU_ONSTEP
     {"onstep", "switch", "fake_mount_server.h", alpacacore::DeviceType::Switch, "onstep-fake",
      "OnStepX auxiliary features (fake controller, test only)", "ALPACACORE_ENABLE_ONSTEP",

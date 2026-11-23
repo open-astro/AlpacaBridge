@@ -21,6 +21,7 @@
 
 #include <alpacacore/switch_driver.h>
 
+#include <chrono>
 #include <memory>
 
 #ifdef FAKE_CONFORMU_ONSTEP
@@ -38,6 +39,11 @@
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
 
 #include "fake_gemini_pdh.h"
+#endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
+
+#include "fake_serial_streamer.h"
 #endif
 #if defined(FAKE_CONFORMU_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
@@ -83,6 +89,20 @@ inline FakeTouptekPowerboxSDK& touptek_powerbox() {
 inline std::unique_ptr<SwitchDriver> make_touptek_switch(int device_number) {
     return vendor::touptek::create_touptek_switch(device_number, vendor::touptek::default_stellavita_config(),
                                                   touptek_powerbox());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+// The WandererBox Pro V3 status frame of the WandererAstro box tests, streamed every 500 ms. The streamer has no box
+// mode, so no output state follows a command.
+inline FakeSerialStreamer& wandererastro_box() {
+    static FakeSerialStreamer streamer(
+        "ZXWBProV3A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A13.10A1A1A1A1A1A1A0A0A0A1A1A120A\n",
+        std::chrono::milliseconds(500));
+    return streamer;
+}
+inline std::unique_ptr<SwitchDriver> make_wandererastro_box_switch(int device_number) {
+    return vendor::wandererastro::create_wandererastro_box_switch(device_number, wandererastro_box().slave_path());
 }
 #endif
 
