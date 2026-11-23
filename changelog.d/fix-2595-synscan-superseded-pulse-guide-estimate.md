@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan RightAscension and Declination after a superseded PulseGuide**, SynScan driver, issue #2595. A pulse that ended early (a newer pulse on the same axis, or a Tracking write that ends a running RA pulse) left its full-duration displacement in the position estimate, so the next pulse built on it and the readings ran ahead of what the mount drove (15.75 arcsec against 2.25 arcsec for a 2 s East pulse cut at 200 ms and followed by 100 ms East). The driver now takes back the part of the pulse the mount did not drive. Covered by `AlpacaCore/tests/test_synscan_superseded_pulse_estimate.cpp`.
