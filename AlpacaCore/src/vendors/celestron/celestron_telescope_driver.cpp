@@ -772,10 +772,9 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        throw_if_link_faulted();
+        util::check_destination_side_of_pier_state(kCommandLimits, GateChecks{*this, "DestinationSideOfPier"});
         if (!site_info_valid_) {
             return -1;
         }

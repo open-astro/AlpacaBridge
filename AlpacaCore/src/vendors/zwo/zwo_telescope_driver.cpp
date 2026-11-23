@@ -1156,7 +1156,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         double longitude = 0.0;
         bool has_longitude = false;
         std::chrono::system_clock::time_point sidereal_at;
@@ -1168,7 +1168,7 @@ public:
             }
             sidereal_at = sidereal_instant_locked();
         }
-        check_connected();
+        util::check_destination_side_of_pier_state(kCommandLimits, GateChecks{*this, "DestinationSideOfPier"});
         if (!has_longitude) {
             return get_side_of_pier();
         }

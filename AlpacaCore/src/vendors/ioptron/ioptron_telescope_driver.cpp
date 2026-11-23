@@ -1205,7 +1205,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         return serve_cached_or_refill([&] { return site_info_valid_; },
                                       [&] {
                                           if (!site_info_valid_) {

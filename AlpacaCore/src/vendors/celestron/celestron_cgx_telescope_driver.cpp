@@ -1437,7 +1437,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+    util::check_destination_side_of_pier_arguments(ra, dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     require_site_locked();

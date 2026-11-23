@@ -1255,7 +1255,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();

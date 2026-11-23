@@ -591,7 +591,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        detail::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         double lst_hours = util::local_sidereal_hours(remote_utc_locked(), site_longitude_);
         double hour_angle = util::shortest_ra_delta_hours(lst_hours, ra);
