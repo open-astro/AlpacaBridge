@@ -1473,6 +1473,30 @@ TEST_CASE("Celestron PolledState - three failed probes latch the fault and one g
     CHECK(driver.get_right_ascension() == ra_at_connect);
 }
 
+TEST_CASE("Celestron PolledState - a pause set after the poll thread passed its pause check stops that tick",
+          "[celestron][telescope][snapshot][polledstate]") {
+    PolledMountRig rig;
+    REQUIRE(rig.connect());
+    auto& driver = rig.driver();
+    // The poll thread is past the module's pause check and about to take the tick mutex when the pause lands.
+    auto named = std::make_shared<std::promise<std::thread::id>>();
+    auto first = std::make_shared<std::atomic<bool>>(false);
+    cel::set_status_poll_before_tick_hook_for_testing(driver, [&driver, named, first] {
+        if (first->exchange(true)) return;
+        cel::set_status_poll_paused_for_testing(driver, true);
+        named->set_value(std::this_thread::get_id());
+    });
+    auto ready = named->get_future();
+    const int before = rig.fake().st->transactions.load();
+    rig.clock().advance(std::chrono::seconds(1));
+    REQUIRE(ready.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto body = ready.get();
+    // The body is back to waiting for its next period: its tick is over.
+    REQUIRE(rig.clock().wait_for_waiter_thread(body, std::chrono::seconds(5)));
+    CHECK(rig.fake().st->transactions.load() == before);
+    cel::set_status_poll_before_tick_hook_for_testing(driver, nullptr);
+}
+
 TEST_CASE("Celestron PolledState - a FindHome tick that reaches nothing keeps a latched fault",
           "[celestron][telescope][snapshot][polledstate]") {
     PolledMountRig rig;

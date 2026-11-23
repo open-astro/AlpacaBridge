@@ -3545,8 +3545,15 @@ private:
         if (seeding_.load()) {
             return seed_;
         }
+        run_status_poll_before_tick_hook();  // test seam: no lock held, the pause check below follows it
         // Held for the whole tick, so pausing the poll can wait out a tick already in flight.
         std::lock_guard<std::mutex> tick_lock(status_poll_tick_mutex_);
+        // The module checks its own pause flag before probe() runs, so a pause set after that check would still let
+        // this tick through. Test seam: a paused driver ticks only for poll_status_now_for_testing's thread. Nothing
+        // measured counts as a good probe, which a paused poll body tolerates.
+        if (poll_paused_.load() && direct_tick_thread_.load() != std::this_thread::get_id()) {
+            return std::nullopt;
+        }
         try {
             return probe_tick();
         } catch (...) {
@@ -3619,6 +3626,7 @@ private:
                 // A check that got no answer or a bad reply is a failed probe (decision 0010 rule 7: nullopt means
                 // the device answered): the FindHome's counter above has judged it, and the module counts it too.
                 // No second timeout in this tick (Disconnect waits for the tick) and no sample.
+                // A claim superseded meanwhile makes this throw harmless: the frame is the mount's, the stops were skipped.
                 throw AlpacaException("Celestron FindHome completion check failed (no answer or a bad reply)",
                                       AlpacaError::DriverException);
             }
@@ -3722,6 +3730,17 @@ private:
         }
     }
 
+    void run_status_poll_before_tick_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_before_tick_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poll_after_plan_hook() {
         std::function<void()> hook;
         {
@@ -3737,10 +3756,12 @@ private:
     void stop_status_poller() { polled_.stop_and_join(); }
 
 public:
-    // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
-    // without a tick started before the pause adding to them. The pause survives a relink: set_connected(true) does
-    // not clear it, so a case that reconnects unpauses before it expects the body to tick.
+    // Returns once no poll-body tick is in flight, and a tick that starts after it measures nothing (probe() reads
+    // poll_paused_ under the tick mutex), so a case that pauses the poll then counts mount transactions without a
+    // tick started before the pause adding to them. The pause survives a relink: set_connected(true) does not clear
+    // it, so a case that reconnects unpauses before it expects the body to tick.
     void set_status_poll_paused_for_testing(bool paused) {
+        poll_paused_.store(paused);
         polled_.pause_for_testing(paused);
         std::lock_guard<std::mutex> drain(status_poll_tick_mutex_);
     }
@@ -3749,7 +3770,9 @@ public:
     // lost.
     bool poll_status_now_for_testing() {
         probe_tick_ = 0;
+        direct_tick_thread_.store(std::this_thread::get_id());
         polled_.poll_now_for_testing();
+        direct_tick_thread_.store(std::thread::id());
         return !link_lost();
     }
 
@@ -3776,6 +3799,11 @@ public:
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         status_poll_after_sample_hook_ = std::move(hook);
+    }
+
+    void set_status_poll_before_tick_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_before_tick_hook_ = std::move(hook);
     }
 
     void set_status_poll_after_plan_hook_for_testing(std::function<void()> hook) {
@@ -4660,6 +4688,9 @@ private:
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> status_poll_after_plan_hook_;  // guarded by status_poll_hook_mutex_
+    std::function<void()> status_poll_before_tick_hook_;  // guarded by status_poll_hook_mutex_
+    std::atomic<bool> poll_paused_{false};                // test seam: see probe()
+    std::atomic<std::thread::id> direct_tick_thread_{};   // the thread inside poll_status_now_for_testing, if any
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
@@ -4749,6 +4780,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_status_poll_before_tick_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_before_tick_hook_for_testing(std::move(hook));
     }
 }
 
