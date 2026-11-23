@@ -43,6 +43,7 @@ namespace {
 namespace ioptron = alpacacore::vendor::ioptron;
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::test::age_past_connect_grace;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
@@ -231,7 +232,7 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     REQUIRE(driver->get_connected());
 
     // The connect primes every cache for 30 s of task-clock time; past that a position read asks the mount.
-    clock.advance(std::chrono::seconds(31));
+    age_past_connect_grace(clock);
     mount.hold_next_reply(kHold);
     std::atomic<bool> read_ok{false};
     std::string read_error;
@@ -337,7 +338,7 @@ TEST_CASE("iOptron telescope - a cache that lapses between its freshness check a
                                                               std::nullopt, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    inner.advance(std::chrono::seconds(31));  // past the post-connect grace: a lapsed cache now refills
+    age_past_connect_grace(inner);  // past the post-connect grace: a lapsed cache now refills
 
     // Each pass primes the Alt/Az cache with a refill under the operation lock, ages it to just under its 1 s
     // TTL, then reads it on a clock that moves 1 ms per read: with a few reads between the getter's check and
@@ -382,7 +383,7 @@ TEST_CASE(
     for (int before_ms = 5; before_ms >= 1; --before_ms) {
         INFO("hold closes " << before_ms << " ms after the check");
         clock.set_tick(std::chrono::nanoseconds::zero());
-        inner.advance(std::chrono::seconds(31));  // every earlier hold and the post-connect grace are over
+        age_past_connect_grace(inner);  // every earlier hold and the post-connect grace are over
         driver->set_park();
         driver->pulse_guide(2, 100);
         inner.advance(kDecHold - milliseconds(before_ms));
@@ -416,7 +417,7 @@ TEST_CASE(
     for (int before_ms = 5; before_ms >= 1; --before_ms) {
         INFO("hold closes " << before_ms << " ms after the check");
         clock.set_tick(std::chrono::nanoseconds::zero());
-        inner.advance(std::chrono::seconds(31));  // the post-connect grace and every earlier window are over
+        age_past_connect_grace(inner);  // the post-connect grace and every earlier window are over
         const int sent_before = mount.count(":MS1#");
         driver->slew_to_coordinates_async(12.0, 20.0);
         REQUIRE(wait_for_goto_dispatch(mount, sent_before));
@@ -454,7 +455,7 @@ TEST_CASE(
     for (int before_ms = 5; before_ms >= 1; --before_ms) {
         INFO("hold closes " << before_ms << " ms after the check");
         clock.set_tick(std::chrono::nanoseconds::zero());
-        inner.advance(std::chrono::seconds(31));  // the post-connect grace and every earlier window are over
+        age_past_connect_grace(inner);  // the post-connect grace and every earlier window are over
         const int sent_before = mount.count(":MS1#");
         driver->slew_to_coordinates_async(12.0, 20.0);
         REQUIRE(wait_for_goto_dispatch(mount, sent_before));
