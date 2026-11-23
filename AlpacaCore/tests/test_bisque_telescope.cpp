@@ -1171,6 +1171,24 @@ TEST_CASE("Bisque AtHome - MoveAxis at a nonzero rate clears it and a stop does 
     REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.0));
 }
 
+// #2582: Bisque's MoveAxis stop is |rate| < 1e-9, strictly under. A rate of 1e-9 starts a jog; 1e-10, -1e-10 and the
+// largest double under 1e-9 stop the axis. Green before and after the threshold moved into the gate limits; it pins
+// that the move doesn't change where the stop starts.
+TEST_CASE("Bisque MoveAxis - 1e-9 is a move and a smaller rate is a stop (#2582)",
+          "[bisque][telescope][unit][moveaxis]") {
+    const double stop_rate = GENERATE(1e-10, -1e-10, std::nextafter(1e-9, 0.0));
+    CAPTURE(stop_rate);
+    ClockedBisque rig;
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1e-9));
+    CHECK(rig.mount.move_starts.load() == 1);
+    CHECK(rig.mount.move_stops.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, stop_rate));
+    CHECK(rig.mount.move_stops.load() == 1);
+    CHECK(rig.mount.move_starts.load() == 1);  // the stop started no jog
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
 TEST_CASE("Bisque AtHome - Park clears it (#2461)", "[bisque][telescope][findhome][taskclock]") {
     ClockedBisque rig;
     home(rig);
