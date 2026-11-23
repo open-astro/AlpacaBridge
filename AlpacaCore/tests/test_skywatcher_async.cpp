@@ -790,6 +790,29 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, 0) with no manual motion leaves a run
     driver->set_connected(false);
 }
 
+// #2605: Sky-Watcher's MoveAxis stop is |rate| <= 1e-9. With RA at rest, 1e-9 and the largest double under it are
+// stops (a no-op: nothing moves and Slewing stays false), and the smallest double over it starts a jog. Green before
+// and after the threshold moved into the gate limits; it pins that the move doesn't change where the stop starts.
+TEST_CASE("SkyWatcher async - MoveAxis 1e-9 is a stop and the next double up is a move (#2605)",
+          "[skywatcher][async][moveaxis]") {
+    const double stop_rate = GENERATE(1e-9, std::nextafter(1e-9, 0.0), -1e-9);
+    CAPTURE(stop_rate);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    REQUIRE_FALSE(mount.axis_running(1));
+
+    driver->move_axis(0, stop_rate);
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(mount.axis_running(1));
+
+    driver->move_axis(0, std::nextafter(1e-9, 1.0));
+    CHECK(driver->get_slewing());
+    CHECK(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) leaves a running Dec pulse to end itself (#630)",
           "[skywatcher][async][pulseguide]") {
     FakeTaskClock clock;
