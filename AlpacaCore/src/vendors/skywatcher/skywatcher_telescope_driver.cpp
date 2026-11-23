@@ -135,6 +135,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.move_axis_axes = 2;
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    // Sky-Watcher's stop is |rate| <= 1e-9, and the gate's test is <= too, so the epsilon is 1e-9 itself (#2605).
+    limits.move_axis_stop_epsilon = 1e-9;
     limits.guide_rate_ra_min = limits.guide_rate_dec_min = 0.0;
     limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegPerSec;
     limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: the motor controller sets no bound of its own
@@ -145,6 +147,7 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.tracking_rate = "Unsupported tracking rate";
     return limits;
 }();
+static_assert(kCommandLimits.move_axis_stop_epsilon == 1e-9, "a Sky-Watcher MoveAxis rate of exactly 1e-9 is a stop");
 // Above ~128x sidereal the controller needs high-speed (fast) mode.
 constexpr double kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
@@ -2878,9 +2881,8 @@ public:
         // #2257: the arguments are checked first, before the gate and the parked check; nothing indexes the
         // per-axis stop slots before they have been.
         util::check_move_axis_arguments(kCommandLimits, axis, rate);
-        constexpr double kStopEpsilon = 1e-9;
         // A stop is sent on a faulted link, a start is refused (open-astro#2068).
-        const bool is_stop = std::abs(rate) <= kStopEpsilon;
+        const bool is_stop = util::is_move_axis_stop(kCommandLimits, rate);
         const auto check_gate = [&] { is_stop ? check_stop_allowed_locked() : check_writable_locked(); };
         {
             // Gate BEFORE reaping the pulse (open-astro#630): a reaped pulse
@@ -2891,7 +2893,7 @@ public:
             check_gate();
             check_not_parked_locked("MoveAxis");
             require_site_locked();  // MoveAxis is sky-referenced (#297)
-            if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
+            if (is_stop && !manual_axis_slewing_[axis]) {
                 invalidate_position_cache_locked(false);
                 // open-astro#575: a stored failure is cleared. open-astro#2552: no new epoch, since this commands
                 // nothing and supersedes nothing: a goto, Park or FindHome in flight still owns its failure.
@@ -2923,7 +2925,7 @@ public:
             // clear manual_axis_slewing_ or restore tracking over the new
             // command. The other axis's body has its own generation.
             stop_generation_[axis].bump();
-            const bool moving = std::abs(rate) > kStopEpsilon;
+            const bool moving = !is_stop;
             if (moving) {
                 supersede_pulse_locked(axis);
                 parked_ = false;
