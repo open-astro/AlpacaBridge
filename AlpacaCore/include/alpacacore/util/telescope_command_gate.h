@@ -19,14 +19,15 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <string_view>
 
 // The telescope command gate (#2258): the checks a mount runs before a command, in one order for every mount
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
 // Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes),
-// TrackingRate, DestinationSideOfPier, the target setters and the rate offsets (#2418). Sync and the Alt/Az slews
-// join next.
+// TrackingRate, DestinationSideOfPier, the target setters, the rate offsets and the Alt/Az slews with SyncToAltAz
+// (#2418). SyncToCoordinates joins next.
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
 // only: the ranges and the InvalidValue texts are fields of the limits (each driver keeps its own words), so a driver
@@ -44,12 +45,14 @@
 //   void check_no_fault();           // DriverException (decision 0009 rule 1)
 //   void check_tracking();           // InvalidOperation (equatorial slews only)
 //   void check_sidereal_rate();      // InvalidOperation unless TrackingRate is driveSidereal (rate offsets only)
+//   void check_site();               // the driver's refusal while the site is unknown (Alt/Az members only)
+//   void check_not_tracking();       // InvalidOperation while Tracking is true (Alt/Az slews only)
 //
 // The gate itself does no I/O, takes no lock and keeps no state (decision 0016 rules 1 and 2): a driver calls it
 // where it ran its checks before, holding the lock its check callbacks expect. That is its state lock when the
 // callbacks read state under a lock the caller holds, and no lock when each callback takes the state lock itself.
-// Only the parked-against-fault order and the protocol limits differ per driver; both are data in
-// TelescopeCommandLimits, never a vendor name in here.
+// Only the parked-against-fault order (and the Alt/Az site check's place) and the protocol limits differ per driver;
+// both are data in TelescopeCommandLimits, never a vendor name in here.
 
 namespace alpacacore::util {
 
@@ -79,6 +82,10 @@ struct TelescopeArgumentTexts {
     const char* right_ascension_rate_range = "RightAscensionRate is out of range";
     const char* declination_rate_not_finite = "DeclinationRate must be finite";
     const char* declination_rate_range = "DeclinationRate is out of range";
+    const char* altitude_range = "Altitude out of range";
+    const char* azimuth_range = "Azimuth out of range";
+    /// True: an Alt/Az text follows the member's name and a space ("SlewToAltAz altitude must be ...").
+    bool alt_az_texts_name_member = false;
 };
 
 /// A driver's protocol limits, orders and argument texts. Every range defaults to "no limit"; the PulseGuide
@@ -112,6 +119,13 @@ struct TelescopeCommandLimits {
     double rate_offset_ra_scale = 1.0;
     double rate_offset_dec_scale = 1.0;
     double rate_offset_max = std::numeric_limits<double>::infinity();
+
+    /// The Alt/Az slews and SyncToAltAz. Altitude takes [-90, 90] and azimuth [0, 360], or [0, 360) when
+    /// alt_az_azimuth_360 is false. alt_az_site_first: the site check runs right after the connection check, before
+    /// the parked and fault checks, instead of after them.
+    bool alt_az_azimuth_360 = true;
+    ParkedFaultOrder alt_az_order = ParkedFaultOrder::ParkedFirst;
+    bool alt_az_site_first = false;
 
     TelescopeArgumentTexts texts;
 };
@@ -336,6 +350,54 @@ template <typename Checks>
 void check_rate_offset(const TelescopeCommandLimits& limits, RateOffsetAxis axis, double rate, Checks&& checks) {
     check_rate_offset_arguments(limits, axis, rate);
     check_rate_offset_state(limits, checks);
+}
+
+// The Alt/Az slews (SlewToAltAz, SlewToAltAzAsync) and SyncToAltAz: altitude and azimuth, then connected, parked and
+// fault in the driver's order, and the site the conversion to RA/Dec needs (before parked, or after the fault, per
+// driver). A slew then refuses while Tracking is true (ITelescopeV4, #1377: a tracking mount drifts off the Alt/Az).
+// A sync does not: ITelescopeV4 only says it "may", and a plate-solve sync runs on a tracking mount.
+
+inline void check_alt_az_arguments(const TelescopeCommandLimits& limits, double altitude, double azimuth,
+                                   std::string_view who) {
+    const auto refuse = [&](const char* text) {
+        throw AlpacaException(limits.texts.alt_az_texts_name_member ? std::string(who) + " " + text : std::string(text),
+                              AlpacaError::InvalidValue);
+    };
+    if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
+        refuse(limits.texts.altitude_range);
+    }
+    if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0 ||
+        (azimuth == 360.0 && !limits.alt_az_azimuth_360)) {
+        refuse(limits.texts.azimuth_range);
+    }
+}
+
+template <typename Checks>
+void check_alt_az_sync_state(const TelescopeCommandLimits& limits, Checks&& checks) {
+    checks.check_connected();
+    if (limits.alt_az_site_first) checks.check_site();
+    telescope_gate_detail::parked_and_fault(limits.alt_az_order, /*stop=*/false, /*check_fault=*/true, checks);
+    if (!limits.alt_az_site_first) checks.check_site();
+}
+
+template <typename Checks>
+void check_alt_az_slew_state(const TelescopeCommandLimits& limits, Checks&& checks) {
+    check_alt_az_sync_state(limits, checks);
+    checks.check_not_tracking();
+}
+
+template <typename Checks>
+void check_alt_az_slew(const TelescopeCommandLimits& limits, double altitude, double azimuth, std::string_view who,
+                       Checks&& checks) {
+    check_alt_az_arguments(limits, altitude, azimuth, who);
+    check_alt_az_slew_state(limits, checks);
+}
+
+template <typename Checks>
+void check_alt_az_sync(const TelescopeCommandLimits& limits, double altitude, double azimuth, std::string_view who,
+                       Checks&& checks) {
+    check_alt_az_arguments(limits, altitude, azimuth, who);
+    check_alt_az_sync_state(limits, checks);
 }
 
 }  // namespace alpacacore::util
