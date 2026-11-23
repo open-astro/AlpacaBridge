@@ -25,7 +25,7 @@
 // driver. A member refuses in this order: argument (InvalidValue), connected, parked, link fault, tracking (#2257).
 //
 // Families: PulseGuide, MoveAxis, the equatorial slews and the guide-rate setters (the members #2257 probes),
-// TrackingRate, DestinationSideOfPier and the target setters (#2418). Sync, the Alt/Az slews and the rate offsets
+// TrackingRate, DestinationSideOfPier, the target setters and the rate offsets (#2418). Sync and the Alt/Az slews
 // join next.
 //
 // Arguments are data. Each family's `_arguments` check takes the arguments and the driver's TelescopeCommandLimits
@@ -43,6 +43,7 @@
 //   void check_not_parked(bool stop);  // InvalidWhileParked
 //   void check_no_fault();           // DriverException (decision 0009 rule 1)
 //   void check_tracking();           // InvalidOperation (equatorial slews only)
+//   void check_sidereal_rate();      // InvalidOperation unless TrackingRate is driveSidereal (rate offsets only)
 //
 // The gate itself does no I/O, takes no lock and keeps no state (decision 0016 rules 1 and 2): a driver calls it
 // where it ran its checks before, holding the lock its check callbacks expect. That is its state lock when the
@@ -54,6 +55,9 @@ namespace alpacacore::util {
 
 /// The axis of a guide-rate write.
 enum class GuideRateAxis : std::uint8_t { RightAscension, Declination };
+
+/// The axis of a rate-offset write: RightAscensionRate or DeclinationRate.
+enum class RateOffsetAxis : std::uint8_t { RightAscension, Declination };
 
 /// Which of the parked and link-fault checks a member family runs first. #2257 leaves this order as each driver has
 /// it, so it is per driver and member family. NoFaultCheck: the family runs the parked check only, because the
@@ -71,6 +75,10 @@ struct TelescopeArgumentTexts {
     const char* guide_rate_not_finite = "GuideRate must be a finite number";
     const char* guide_rate_range = "GuideRate is out of range";
     const char* tracking_rate = "TrackingRate is not a supported DriveRates value";
+    const char* right_ascension_rate_not_finite = "RightAscensionRate must be finite";
+    const char* right_ascension_rate_range = "RightAscensionRate is out of range";
+    const char* declination_rate_not_finite = "DeclinationRate must be finite";
+    const char* declination_rate_range = "DeclinationRate is out of range";
 };
 
 /// A driver's protocol limits, orders and argument texts. Every range defaults to "no limit"; the PulseGuide
@@ -97,6 +105,13 @@ struct TelescopeCommandLimits {
     double guide_rate_dec_max = std::numeric_limits<double>::infinity();
 
     int tracking_rate_max = std::numeric_limits<int>::max();  ///< TrackingRate takes 0 .. tracking_rate_max
+
+    /// A rate-offset write takes a value whose product with the axis's scale (the client's unit to the mount's) is
+    /// finite and at most rate_offset_max in magnitude, in the mount's unit. By default the scale is 1 and there is
+    /// no limit, so only a non-finite value is refused.
+    double rate_offset_ra_scale = 1.0;
+    double rate_offset_dec_scale = 1.0;
+    double rate_offset_max = std::numeric_limits<double>::infinity();
 
     TelescopeArgumentTexts texts;
 };
@@ -291,6 +306,36 @@ template <typename Checks>
 void check_target_declination(const TelescopeCommandLimits& limits, double dec_degrees, Checks&& checks) {
     check_target_declination_arguments(dec_degrees);
     check_target_state(limits, checks);
+}
+
+// The rate offsets (RightAscensionRate, DeclinationRate set): the value, then connected, the link fault and
+// TrackingRate (ITelescopeV4: InvalidOperation unless it is driveSidereal). An offset changes the tracking rate of an
+// axis already tracking and starts no move, so it has no parked or Tracking check.
+
+inline void check_rate_offset_arguments(const TelescopeCommandLimits& limits, RateOffsetAxis axis, double rate) {
+    const bool ra = axis == RateOffsetAxis::RightAscension;
+    const double scaled = rate * (ra ? limits.rate_offset_ra_scale : limits.rate_offset_dec_scale);
+    if (!std::isfinite(scaled)) {
+        telescope_gate_detail::refuse(ra ? limits.texts.right_ascension_rate_not_finite
+                                         : limits.texts.declination_rate_not_finite);
+    }
+    if (std::abs(scaled) > limits.rate_offset_max) {
+        telescope_gate_detail::refuse(ra ? limits.texts.right_ascension_rate_range
+                                         : limits.texts.declination_rate_range);
+    }
+}
+
+template <typename Checks>
+void check_rate_offset_state(const TelescopeCommandLimits& /*limits*/, Checks&& checks) {
+    checks.check_connected();
+    checks.check_no_fault();
+    checks.check_sidereal_rate();
+}
+
+template <typename Checks>
+void check_rate_offset(const TelescopeCommandLimits& limits, RateOffsetAxis axis, double rate, Checks&& checks) {
+    check_rate_offset_arguments(limits, axis, rate);
+    check_rate_offset_state(limits, checks);
 }
 
 }  // namespace alpacacore::util
