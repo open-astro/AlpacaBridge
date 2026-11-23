@@ -16,6 +16,7 @@
 #include <alpacacore/util/task_clock.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -64,5 +65,17 @@ void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> h
 /// no driver lock held; a case blocks there to hold a pulse body while another command runs. Pass an empty function
 /// to clear it.
 void set_pulse_poll_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Where set_pulse_pre_lock_hook_for_testing()'s hook runs: before a guide poll's MC_AUX_GUIDE_ACTIVE read, or before
+/// the end-of-pulse position read (publish_guide_end_frame()).
+enum class CgxPulsePreLockPoint : std::uint8_t { GuidePoll, GuideEndFrame };
+/// Runs `hook` on the pulse body's thread just before the body takes the motion-start lock to re-check its stop
+/// reason ahead of a guide poll's read or the end-of-pulse read, with no driver lock held; a case blocks there to land
+/// a supersede between the body's unlocked check and that read. Pass an empty function to clear it.
+void set_pulse_pre_lock_hook_for_testing(TelescopeDriver& driver, std::function<void(CgxPulsePreLockPoint)> hook);
+/// Runs `hook` on the initiator's thread just before each MC_AUX_GUIDE_ACTIVE read in a slew, Park or FindHome's wait
+/// for a superseded pulse's packet, passed the timeout that read gets (nullopt: the transport's); a case blocks there
+/// to model a slow read on the task clock. Pass an empty function to clear it.
+void set_guide_end_read_hook_for_testing(TelescopeDriver& driver,
+                                         std::function<void(std::optional<std::chrono::milliseconds>)> hook);
 
 }  // namespace alpacacore::vendor::celestron

@@ -125,8 +125,11 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     return limits;
 }();
-// #2263: a PulseGuide while a slew, Park or FindHome runs (util::MotionOwner's refusal text).
-constexpr const char* kPulseRefusedText = "PulseGuide is not allowed while a slew, park or home is running";
+// #2263: a PulseGuide while a slew, Park or FindHome runs (util::MotionOwner's refusal text). It says why the refusal
+// can outlast the motion: Slewing stays true while a stop failed or is pending, because the mount may still be moving.
+constexpr const char* kPulseRefusedText =
+    "PulseGuide is not allowed while a slew, park or home is running; a failed stop keeps Slewing true, and with it "
+    "this refusal, until the mount is stopped";
 constexpr const char* kPulseOnJogRefusedText = "PulseGuide is not allowed on an axis MoveAxis is moving";
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
@@ -1473,7 +1476,7 @@ public:
                 hooks.dispatch = [&] {
                     do_slew_to_coordinates(lock, park_ra, park_dec, &ctx, [&] { return still_mine(ctx); });
                 };
-                hooks.poll_slewing = [&] { return poll_hardware_slewing(lock); };
+                hooks.poll_slewing = [&] { return poll_hardware_slewing(lock, park_claim); };
                 hooks.stop_tracking = [&] {
                     const bool sent = send_motion_locked(
                         lock, [&] { return still_mine(ctx); },
@@ -2076,6 +2079,7 @@ public:
                     while (left > 0) {
                         const int chunk = std::min(left, 255);
                         try {
+                            run_pulse_chunk_hook();  // test seam: a newer command can land before the chunk's gate
                             std::unique_lock<std::mutex> chunk_lock(mutex_);
                             const bool sent = send_motion_locked(
                                 chunk_lock, [&] { return pulse_owns_locked(ctx, claim); },
@@ -2103,19 +2107,20 @@ public:
                 // guiding for the first chunk only: stop the axis as AbortSlew does and drop the pulse state
                 // before the refusal reaches the client. The correction predicted the whole pulse and the
                 // cross-axis hold was for its length, so both close too (decision 0022 rule 2).
-                {
-                    std::lock_guard<std::mutex> guard(mutex_);
-                    pulse_hold_[axis_index].clear();
-                    pg_correction_[axis_index].clear();
-                    pg_hold_[other_index].clear();
-                }
-                if (connected_) {
-                    try {
-                        protocol.move_axis_fixed_rate(axis, 0);
-                    } catch (...) {
-                        ALPACA_LOG_ERROR("Celestron", "PulseGuide stop after a refused chain start failed on axis " +
-                                                          std::to_string(axis) + "; the axis may still be moving");
-                    }
+                // The windows close and the connection is read under mutex_; the stop then goes through the send
+                // gate with mutex_ free, like every other motion write. initiator_mutex_ keeps every other claimer
+                // out, so the gate needs no claim. A start() refused because a stale chain body would not return within
+                // its 2 s room (a pulse burst on a hung link) takes this path too: the pulse ends at its first chunk.
+                std::unique_lock<std::mutex> guard(mutex_);
+                pulse_hold_[axis_index].clear();
+                pg_correction_[axis_index].clear();
+                pg_hold_[other_index].clear();
+                try {
+                    send_motion_locked(
+                        guard, [this] { return connected_.load(); }, [&] { protocol.move_axis_fixed_rate(axis, 0); });
+                } catch (...) {
+                    ALPACA_LOG_ERROR("Celestron", "PulseGuide stop after a refused chain start failed on axis " +
+                                                      std::to_string(axis) + "; the axis may still be moving");
                 }
                 throw;
             }
@@ -2142,6 +2147,17 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SlewToCoordinates");
+        // The flip decision's pier read can throw: it runs before the claim, as the async slew's does, so a failed read
+        // leaves a running PulseGuide (and the rest of the mount) as it was. initiator_mutex_ keeps every claimer out
+        // while mutex_ is free for the read; do_slew_to_coordinates() takes the decision as it is.
+        FlipDecision flip_decision;
+        {
+            double ra_biased = std::fmod(ra + ra_slew_offset_hours_, 24.0);
+            if (ra_biased < 0.0) ra_biased += 24.0;
+            flip_decision.flip = compute_flip(lock, ra, dec, ra_biased, flip_decision.ra_raw, flip_decision.dec_raw);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+        }
         claim_slew_locked();  // supersedes a slew, park or pulse body in flight; none is joined
         const util::MotionClaim mine = slew_claim_;
         const auto still_mine = [this, mine] { return !lost_locked(mine); };
@@ -2149,6 +2165,10 @@ public:
         // owner hears finished() only here, on every exit, so a PulseGuide during the landing read, the settle and
         // the tracking restore is refused instead of superseding the slew (set_slewing_flag_locked()).
         blocking_slew_ = mine;
+        // Ends the blocking slew on every exit. Its destructor takes mutex_ again when a throw left it released, so
+        // `lock` MUST be declared before this guard: the guard is destroyed first and `lock` is still alive for the
+        // re-lock, then `lock` itself releases. `mine` is a local of the call and outlives the guard for the same
+        // reason.
         struct EndBlockingSlew {
             CelestronTelescopeDriver& driver;
             std::unique_lock<std::mutex>& lock;
@@ -2166,7 +2186,7 @@ public:
             }
         } end_blocking_slew{*this, lock, mine};
         // The initiator lock stays held through the dispatch, so no other initiator runs while mutex_ is free.
-        if (!do_slew_to_coordinates(lock, ra, dec, nullptr, still_mine)) {
+        if (!do_slew_to_coordinates(lock, ra, dec, nullptr, still_mine, &flip_decision)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
         ilock.unlock();
@@ -3130,6 +3150,9 @@ private:
     // `fn` (the exchanges, decision 0016 rule 1) and held again on return or throw. `owns` is tested under mutex_ in
     // the same step that takes the gate, so there is no gap between the check and the send. Returns false, with `fn`
     // not run, when `owns` is false. The gate is held for one command group only, never across a wait or a read.
+    // A pulse chunk (and a pulse's first write) queues behind a stop or GOTO exchange already on the wire, which can
+    // last a full transaction timeout on a slow link: the chunk is late, never lost, and it is sent only if its claim
+    // still holds once the gate frees (accepted; a hardware-timed chunk that goes out late just ends the pulse late).
     template <typename Owns, typename Fn>
     bool send_motion_locked(std::unique_lock<std::mutex>& lock, Owns&& owns, Fn&& fn) const {
         send_cv_.wait(lock, [&] { return !owns() || motion_sends_in_flight_ == 0; });
@@ -3704,6 +3727,17 @@ private:
         }
     }
 
+    void run_pulse_chunk_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = pulse_chunk_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_failure_stop_hook() const {
         std::function<void()> hook;
         {
@@ -3800,6 +3834,11 @@ public:
         slewing_read_hook_ = std::move(hook);
     }
 
+    void set_pulse_chunk_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        pulse_chunk_hook_ = std::move(hook);
+    }
+
     void set_failure_stop_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         failure_stop_hook_ = std::move(hook);
@@ -3886,14 +3925,19 @@ private:
     }
 
     // The control path (the slew-complete loops): asks the mount, with mutex_ free for the exchange.
-    bool get_slewing_fresh(std::unique_lock<std::mutex>& lock) const {
+    // `claim` is the slew's own motion claim (see poll_hardware_slewing()).
+    bool get_slewing_fresh(std::unique_lock<std::mutex>& lock, const util::MotionClaim& claim) const {
         if (const auto decided = slewing_from_control_path_locked()) {
             return *decided;
         }
-        return poll_hardware_slewing(lock);
+        return poll_hardware_slewing(lock, claim);
     }
 
-    bool poll_hardware_slewing(std::unique_lock<std::mutex>& lock) const {
+    // `claim` is the slew or Park this read serves: the blocking slew's wait passes its own, the Park hook its own, so
+    // the read knows it owns the mount from what it was given, not from a comment. It is compared with the owner after
+    // the read (lost_locked()), which stays lost for good after any later claim or cancel: never call this from the
+    // status poll with a stale claim, or slewing_cached_ freezes.
+    bool poll_hardware_slewing(std::unique_lock<std::mutex>& lock, const util::MotionClaim& claim) const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
@@ -3913,10 +3957,7 @@ private:
         bool hardware_slewing = false;
         // The read runs with mutex_ free: a newer motion command (AbortSlew, MoveAxis, Park, a new slew) may take the
         // mount meanwhile, and its state is then not this read's to change.
-        // The slew or Park this read serves. Compared with the stored slew_claim_, which stays lost for good after any
-        // later claim or cancel: call only right after a fresh claim_slew_locked() (the blocking slew's wait, the Park
-        // hook), never from the status poll, or slewing_cached_ freezes.
-        const util::MotionClaim generation = slew_claim_;
+        const util::MotionClaim& generation = claim;
         try {
             const SamplePlan landed_plan = sample_plan_locked(true);
             std::tie(hardware_slewing, landed) = without_lock(lock, [&] {
@@ -4346,8 +4387,18 @@ private:
     // the goto. Returns false, writing nothing further, when it was false: the slew was taken over. The publish
     // block sits between the two reads, so the first test is what keeps a claim that landed during the J read from
     // having its Slewing overwritten; a pier read that throws puts the stored errors back.
+    // The forced-flip decision compute_flip() made: whether the GOTO goes to the flipped encoder pair, and that pair.
+    struct FlipDecision {
+        bool flip = false;
+        uint32_t ra_raw = 0;
+        uint32_t dec_raw = 0;
+    };
+
+    // `decided` is a flip decision the caller made before it claimed the mount (the blocking slew); null makes this
+    // call read the pier itself, after the claim (the Park body).
     bool do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec,
-                                const util::OperationContext* body_ctx, const std::function<bool()>& still_mine) {
+                                const util::OperationContext* body_ctx, const std::function<bool()>& still_mine,
+                                const FlipDecision* decided = nullptr) {
         util::validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_slew_safety(lock, "SlewToCoordinates");
         if (!still_mine()) {
@@ -4418,11 +4469,17 @@ private:
 
         uint32_t flip_ra = 0, flip_dec = 0;
         bool flip = false;
-        try {
-            flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
-        } catch (...) {
-            roll_back_locked();
-            throw;
+        if (decided != nullptr) {
+            flip = decided->flip;
+            flip_ra = decided->ra_raw;
+            flip_dec = decided->dec_raw;
+        } else {
+            try {
+                flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+            } catch (...) {
+                roll_back_locked();
+                throw;
+            }
         }
         if (!still_mine()) {
             return false;
@@ -4501,7 +4558,7 @@ private:
             if (lost_locked(mine)) {
                 return false;
             }
-            bool slewing = get_slewing_fresh(lock);
+            bool slewing = get_slewing_fresh(lock, mine);
             // cppcheck-suppress identicalConditionAfterEarlyExit
             if (lost_locked(mine)) {
                 return false;  // the read released mutex_: a concurrent motion command took the mount meanwhile
@@ -4712,6 +4769,7 @@ private:
     std::atomic<std::thread::id> direct_tick_thread_{};   // the thread inside poll_status_now_for_testing, if any
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
+    std::function<void()> pulse_chunk_hook_;    // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
     SlewBodyHook slew_body_hook_;               // guarded by status_poll_hook_mutex_
     std::function<void(ClockResyncStep)> clock_resync_hook_;  // guarded by status_poll_hook_mutex_
@@ -4811,6 +4869,12 @@ void set_status_poll_before_tick_hook_for_testing(TelescopeDriver& driver, std::
 void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_plan_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_pulse_chunk_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_pulse_chunk_hook_for_testing(std::move(hook));
     }
 }
 

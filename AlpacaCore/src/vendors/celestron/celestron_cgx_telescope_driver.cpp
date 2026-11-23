@@ -39,6 +39,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -390,6 +391,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         pulse_poll_hook_for_testing_ = std::move(hook);
     }
+    void set_pulse_pre_lock_hook_for_testing(std::function<void(CgxPulsePreLockPoint)> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_pre_lock_hook_for_testing_ = std::move(hook);
+    }
+    void set_guide_end_read_hook_for_testing(std::function<void(CelestronCgxProtocol::Timeout)> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        guide_end_read_hook_for_testing_ = std::move(hook);
+    }
 
 protected:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010 rule 5).
@@ -418,7 +427,8 @@ private:
         std::unique_lock<std::mutex> lock_;
     };
 
-    // Runs a body's wire stage under motion_start_mutex_, the lock every claim is made under, so a body that a newer
+    // Runs a body's wire stage under motion_start_mutex_, the lock every claim is made under (this gate, not the
+    // MotionTransition above, keeps a superseded or cancelled body silent), so a body that a newer
     // command superseded or a stop cancelled sends nothing once the stage starts (decision 0006 rule 6). An open
     // motion_transition_ does not stop it: a slew, Park or FindHome opens one while this body still owns the axes and
     // releases the lock for its wait on the guide packet before its claim, and may then be refused without claiming
@@ -663,13 +673,22 @@ private:
     // Test seam (set_pulse_poll_hook_for_testing): runs on the pulse body's thread at the top of every guide poll,
     // before it reads its stop reason, with no driver lock held. Guarded by mutex_.
     std::function<void()> pulse_poll_hook_for_testing_;
-    void run_hook_for_testing(const std::function<void()>& seam) {
-        std::function<void()> hook;
+    // Test seam (set_pulse_pre_lock_hook_for_testing): runs on the pulse body's thread just before it takes
+    // motion_start_mutex_ for a guide poll's read or for publish_guide_end_frame(), with no driver lock held. Guarded
+    // by mutex_.
+    std::function<void(CgxPulsePreLockPoint)> pulse_pre_lock_hook_for_testing_;
+    // Test seam (set_guide_end_read_hook_for_testing): runs on the initiator's thread in wait_for_guide_end() just
+    // before each MC_AUX_GUIDE_ACTIVE read, passed that read's timeout, with transition_mutex_ held and no other driver
+    // lock. Guarded by mutex_.
+    std::function<void(CelestronCgxProtocol::Timeout)> guide_end_read_hook_for_testing_;
+    template <typename... Args>
+    void run_hook_for_testing(const std::function<void(Args...)>& seam, std::type_identity_t<Args>... args) {
+        std::function<void(Args...)> hook;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             hook = seam;
         }
-        if (hook) hook();
+        if (hook) hook(args...);
     }
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
@@ -749,9 +768,9 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
     } guide_end_pending;
     if (supersede_motion) {
         // A slew, Park or FindHome supersedes a running pulse without a join (decision 0006 rule 3, #2263): the bump
-        // under motion_start_mutex_ marks the body Superseded, so it sends its axis nothing more, the next chunk and
-        // the end-of-pulse read included, and the cancel only wakes it (Superseded wins). The packet it left on the
-        // mount is waited out below, on the mount's own report.
+        // under motion_start_mutex_ marks the body Superseded, so it sends its axis nothing more, the next chunk, the
+        // next guide poll and the end-of-pulse read included (each re-checks under that lock), and the cancel only
+        // wakes it (Superseded wins). The packet it left on the mount is waited out below, on the mount's own report.
         std::lock_guard<std::mutex> state_lock(driver_.mutex_);
         for (std::size_t index = 0; index < 2; ++index)
             superseded_pulses[index] = driver_.pulse_slots_[index].running();
@@ -822,13 +841,22 @@ void CelestronCgxTelescopeDriver::wait_for_guide_end(const std::array<bool, 2>& 
     const auto deadline = clock_.now() + bound;
     for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
         if (!axes[pulse_index(axis)]) continue;
-        // A stop accepted meanwhile owns cleanup, and MotionTransition refuses the displaced command.
-        while (!stop_pending_.load() && protocol_.is_aux_guide_active(axis)) {
-            if (clock_.now() >= deadline)
-                throw AlpacaException(
-                    std::string("Celestron CGX still reports a ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
-                        " guide packet active after " + std::to_string(bound.count()) + " ms; nothing was sent",
-                    AlpacaError::DriverException);
+        // A timeout on the RA axis throws before Dec is read: the command is refused either way, so a Dec read
+        // would only spend time. A stop accepted meanwhile owns cleanup, and MotionTransition refuses the displaced
+        // command. The deadline is checked before each read, and the read gets only the time left, so a read that
+        // blocks near its I/O timeout cannot carry the wait past the bound.
+        const auto timed_out = [&] {
+            return AlpacaException(
+                std::string("Celestron CGX still reports a ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
+                    " guide packet active after " + std::to_string(bound.count()) + " ms; nothing was sent",
+                AlpacaError::DriverException);
+        };
+        while (!stop_pending_.load()) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock_.now());
+            if (remaining <= std::chrono::milliseconds::zero()) throw timed_out();
+            run_hook_for_testing(guide_end_read_hook_for_testing_, CelestronCgxProtocol::Timeout{remaining});
+            if (!protocol_.is_aux_guide_active(axis, remaining)) break;
+            if (clock_.now() >= deadline) throw timed_out();
             clock_.sleep_for(std::chrono::milliseconds(20));
         }
     }
@@ -1841,14 +1869,19 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     const CgxAxis axis = dec_axis ? CgxAxis::Declination : CgxAxis::RightAscension;
     const std::size_t index = pulse_index(axis);
     constexpr const char* kOverlapRefusal = "PulseGuide cannot overlap telescope motion or another guide pulse";
+    constexpr const char* kAmbiguousRefusal =
+        "PulseGuide refused: the previous pulse on this axis started without an acknowledgement, and the driver is "
+        "still waiting for the mount to report its packet inactive";
     {
         // A slew, Park or FindHome owns both axes, so the pulse is refused (#2263). A pulse on this axis whose first
         // packet's ACK was lost keeps it; any other pulse on this axis is superseded below, one on the other axis
         // keeps running.
         std::lock_guard<std::mutex> lock(mutex_);
-        if (motion_owner_.slew_running() || pulse_start_ambiguous_[index])
-            throw AlpacaException(kOverlapRefusal, AlpacaError::InvalidOperation);
+        if (motion_owner_.slew_running()) throw AlpacaException(kOverlapRefusal, AlpacaError::InvalidOperation);
+        if (pulse_start_ambiguous_[index]) throw AlpacaException(kAmbiguousRefusal, AlpacaError::InvalidOperation);
     }
+    // Either axis's kept failure refuses every PulseGuide until a command clears it (#2467): IsPulseGuiding raises it,
+    // so it never reports a pulse it cannot describe.
     if (const auto failure = pulse_failure()) {
         throw AlpacaException("Celestron CGX pulse guide remains unresolved: " + *failure,
                               AlpacaError::DriverException);
@@ -1890,6 +1923,12 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     const int first_chunk = std::min(255, total_centiseconds);
     auto start_promise = std::make_shared<std::promise<PulseGuideStart>>();
     const auto start_result = start_promise->get_future().share();
+    // A start() refused after the claim above (a stale slot that will not reap) keeps the claim: harmless, the next
+    // claim on this axis supersedes it and no body runs for it. start() runs under motion_start_mutex_: with this
+    // axis's current body and kMaxStaleBodies superseded ones still running it waits up to kStaleReapTimeout (2 s,
+    // task clock) for one to return, and a stale body waiting for this lock (its guide-poll re-check or
+    // publish_guide_end_frame()) cannot return meanwhile, so that wait can run its full 2 s and refuse. Left as is
+    // (#2467): it takes a fifth pulse on one axis while the four before it there are all still running.
     pulse_slots_[index].start([this, claim, axis, index, velocity, first_chunk,
                                remaining = total_centiseconds - first_chunk,
                                start_result](util::OperationContext& context) {
@@ -2842,6 +2881,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
 // reads and writes nothing (decision 0006 rule 6). A cancelled pulse still publishes where it stopped.
 void CelestronCgxTelescopeDriver::publish_guide_end_frame(util::OperationContext& context,
                                                           const util::MotionClaim& claim) {
+    run_hook_for_testing(pulse_pre_lock_hook_for_testing_, CgxPulsePreLockPoint::GuideEndFrame);
     const std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     if (superseded(context, claim)) return;
     try {
@@ -2877,7 +2917,17 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
         // nothing more, the end-of-pulse read included.
         if (reason == util::StopReason::Superseded) return;
         cancelled = cancelled || reason != util::StopReason::None;
-        const bool active = protocol_.is_aux_guide_active(axis);
+        bool active;
+        {
+            // The check above ran with no lock, so a supersede can land before the read: re-check under
+            // motion_start_mutex_, which every supersede of a pulse is made under, and hold it across the read, as
+            // publish_guide_end_frame() does (decision 0006 rule 6). The lock order allows it: motion_start_mutex_,
+            // then the protocol I/O lock.
+            run_hook_for_testing(pulse_pre_lock_hook_for_testing_, CgxPulsePreLockPoint::GuidePoll);
+            const std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
+            if (superseded(context, claim)) return;
+            active = protocol_.is_aux_guide_active(axis);
+        }
         if (active) {
             if (clock_.now() >= operation_deadline || (cancelled && clock_.now() >= segment_deadline))
                 throw AlpacaException("Celestron CGX pulse guide did not finish its current segment",
@@ -2968,6 +3018,19 @@ void set_drain_hook_for_testing(TelescopeDriver& driver, std::function<void()> h
 void set_pulse_poll_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
         cgx->set_pulse_poll_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_pulse_pre_lock_hook_for_testing(TelescopeDriver& driver, std::function<void(CgxPulsePreLockPoint)> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_pulse_pre_lock_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_guide_end_read_hook_for_testing(TelescopeDriver& driver,
+                                         std::function<void(std::optional<std::chrono::milliseconds>)> hook) {
+    if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
+        cgx->set_guide_end_read_hook_for_testing(std::move(hook));
     }
 }
 

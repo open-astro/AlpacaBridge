@@ -163,6 +163,7 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope_snapshot.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_synscan_serial_ownership.cpp)
+    list(APPEND TEST_SOURCES test_synscan_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -183,6 +184,7 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_skywatcher_telescope_deferred_connect.cpp)
+    list(APPEND TEST_SOURCES test_skywatcher_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
@@ -324,6 +326,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
     # SkyPortal WiFi adapter beacon, for the CGX form's Find adapter button.
     list(APPEND TEST_SOURCES test_celestron_aux_beacon.cpp)
+    list(APPEND TEST_SOURCES test_celestron_nexstar_motion_owner.cpp)
+    list(APPEND TEST_SOURCES test_celestron_cgx_motion_owner.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
