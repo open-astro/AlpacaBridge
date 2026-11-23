@@ -51,12 +51,16 @@ void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thr
 
 /// Test seams for the status poll (decision 0010). `driver` must come from the factories above; anything else is
 /// ignored (poll_status_now_for_testing returns false).
-/// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs.
+/// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs. Returns once no body tick is in
+/// flight, and a body tick that was already past the module's pause check measures nothing.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// One poll tick on the calling thread (a full frame). False when the connection is gone or lost.
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs at the start of a poll tick, before its pause check and its first exchange, without any driver lock held; null
+/// clears it.
+void set_status_poll_before_tick_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs once a poll tick has planned its sample (whether it reads Slewing), before its site read and sample exchanges,
 /// without any driver lock held; null clears it.
 void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);

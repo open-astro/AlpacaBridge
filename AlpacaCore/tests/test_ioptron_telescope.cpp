@@ -2591,6 +2591,83 @@ TEST_CASE("iOptron hold window - FindHome, Park and Unpark hold Slewing for 5 s,
     driver->set_connected(false);
 }
 
+// Issue #2562: the 30 s post-connect cache grace is for the burst of getters a client sends after Connect. A motion
+// the driver starts ends it, so a Park, FindHome or GOTO inside those 30 s is followed by the mount's status on the
+// 1 s TTL, not by the status the driver wrote or read at its start. These cases do not pass the grace first.
+TEST_CASE("iOptron fast cache - a Park right after Connect reads AtPark once the mount reports parked",
+          "[ioptron][telescope][unit][fake][fast-cache]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->park();
+    REQUIRE(mount.count(":MP1#") == 1);
+    mount.set_system_status(6);  // parked
+    clock.advance(std::chrono::seconds(1));
+    CHECK(driver->get_at_park());
+    clock.advance(std::chrono::seconds(5));  // past the Park's 5 s window
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron fast cache - a FindHome right after Connect reads AtHome once the mount reports home",
+          "[ioptron][telescope][unit][fake][fast-cache]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MH#") == 1);
+    mount.set_system_status(2);  // on its way to zero
+    clock.advance(std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_at_home());
+    mount.set_system_status(7);              // at zero
+    clock.advance(std::chrono::seconds(5));  // past the FindHome's 5 s window
+    CHECK(driver->get_at_home());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron fast cache - a GOTO right after Connect reads Slewing false once the mount lands",
+          "[ioptron][telescope][unit][fake][fast-cache]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);  // the accepted GOTO reads status 2 until the case lands it
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));  // past the GOTO's 5 s window
+    CHECK(driver->get_slewing());
+    mount.set_system_status(1);  // landed, tracking
+    clock.advance(std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// AbortSlew ends the grace too: a motion the driver did not start (a handset slew running at Connect) is stopped, and
+// Slewing follows the mount once it reads stopped.
+TEST_CASE("iOptron fast cache - an AbortSlew right after Connect reads Slewing false once the mount stops",
+          "[ioptron][telescope][unit][fake][fast-cache]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);  // a handset slew
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->abort_slew();
+    REQUIRE(mount.count(":Q#") == 1);
+    CHECK(driver->get_slewing());  // still decelerating
+    mount.set_system_status(0);    // stopped
+    clock.advance(std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // ── Issue #2420: FindHome on the HAE29C EQ (0036) is the :MSH# zero sensor search ─────────────────────────────
 //
 // After a power loss the HAE29C reports status 7 (at zero) wherever it points, so FindHome always searches there,
@@ -4856,4 +4933,30 @@ TEST_CASE("iOptron goto-safety - PulseGuide on the jogging axis is refused and t
         driver->move_axis(leg.axis, 0.0);
         driver->set_connected(false);
     }
+}
+
+// Issue #2504, the settle trim boundary (HAE16, 0012, lands 12" off so a trim is due): a pulse while the GOTO has
+// not been seen stopped is refused; once PulseGuide's own status read sees the mount stopped, the client's pulse is
+// accepted and takes over from the trim that has not gone out (#2063).
+// Falsified by: ioptron_telescope_driver.cpp pulse_guide() refusing on slew_in_progress_ alone (the stop seen leg).
+TEST_CASE("iOptron goto-safety - PulseGuide refused before a trimmed GOTO is seen stopped, accepted after (#2504)",
+          "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    const int pulses = mount.count(":Z");
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.count(":Z") == pulses);
+
+    // The fake landed 12" off and reads stopped; nobody polled Slewing, so no trim has gone out.
+    clock.advance(std::chrono::seconds(6));
+    driver->pulse_guide(3, 3000);
+    CHECK(mount.count(":Z") == pulses + 1);
+    CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
 }

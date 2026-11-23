@@ -46,8 +46,8 @@ std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_nu
                                                                    util::TaskClock& clock = util::default_task_clock());
 
 /// Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling thread
-/// (paused or not; false when the connection is gone). `driver` must come from the factories above; anything else is
-/// ignored.
+/// (paused or not; false when the connection is gone). A pause holds across a reconnect. `driver` must come from the
+/// factories above; anything else is ignored.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,

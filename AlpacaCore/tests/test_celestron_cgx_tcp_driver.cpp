@@ -542,7 +542,7 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - Device metadata", "[celestron][
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
-    CHECK(driver->get_unique_id() == "Celestron_CGX_USB_3");  // the fallback; the router assigns the stored ID
+    CHECK(driver->get_unique_id() == "Celestron_CGX_3");  // the fallback; the router assigns the stored ID
     CHECK_FALSE(driver->get_device_firmware().has_value());
 }
 
@@ -582,6 +582,24 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - state machine before and after 
     rig.set_connected(false);
     CHECK_FALSE(rig.driver->get_connected());
     require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); }, AlpacaError::NotConnected);
+}
+
+// #2517 changed read_sky_position() to read Dec before RA: while tracking, RA moves and Dec does not, so the RA count
+// read last is the one closest to the UTC the position is computed at (~0.3" at 21 ms an exchange over WiFi, #2540).
+// PulseGuide's polarity read is one of its callers; the state poll is held, so its reads are the only 0x01s.
+TEST_CASE("Celestron CGX WiFi Telescope Driver - a control read of the sky position reads Dec before RA",
+          "[celestron][cgx][telescope][tcp]") {
+    TcpRig rig;
+    rig.set_connected(true);
+    rig.find_home();
+    rig.driver->set_tracking(true);
+    const auto before = rig.adapter.received().size();
+    rig.driver->pulse_guide(0, 10);
+    const auto frames = rig.adapter.received();
+    std::vector<std::uint8_t> position_reads;
+    for (std::size_t i = before; i < frames.size() && frames[i].command != 0x26; ++i)
+        if (frames[i].command == 0x01) position_reads.push_back(frames[i].destination);
+    CHECK(position_reads == std::vector<std::uint8_t>{kDec, kRa});
 }
 
 TEST_CASE("Celestron CGX WiFi Telescope Driver - value ranges and unsupported members while connected",

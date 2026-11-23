@@ -189,7 +189,7 @@ public:
         return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L";
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
-    std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "Celestron_CGX_" + std::to_string(device_number_); }
     std::string get_description() const override {
         if (!tcp_) return "Celestron CGX/CGX-L direct USB mount";
         return "Celestron CGX/CGX-L mount over SkyPortal WiFi (TCP); lost replies recovered: " +
@@ -1437,7 +1437,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+    util::check_destination_side_of_pier_arguments(ra, dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     require_site_locked();

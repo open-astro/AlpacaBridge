@@ -3260,6 +3260,15 @@ Response Router::handle_network_adapters(const Request& request, std::uint32_t s
         return response;
     }
 
+    // The vendor first: an unknown vendor is refused without claiming the one-search flag (#2542).
+    const std::string vendor = request.get_query_param("vendor");
+    if (!catalog_.has_network_adapter_finder(vendor)) {
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+            "No network adapter search for vendor '" + util::escape_for_log(vendor) + "' in this build");
+        response.set_body(alpaca_response);
+        return response;
+    }
     if (network_adapter_search_.exchange(true)) {
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
@@ -3272,18 +3281,12 @@ Response Router::handle_network_adapters(const Request& request, std::uint32_t s
         ~SearchEnd() { running.store(false); }
     } search_end{network_adapter_search_};
 
-    const std::string vendor = request.get_query_param("vendor");
     try {
-        const auto adapters = catalog_.find_network_adapters(vendor);
-        if (!adapters.has_value()) {
-            AlpacaResponse alpaca_response = make_error_response(
-                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                "No network adapter search for vendor '" + util::escape_for_log(vendor) + "' in this build");
-            response.set_body(alpaca_response);
-            return response;
-        }
+        // Registered (checked above); finders are only added, never removed.
+        const auto adapters =
+            catalog_.find_network_adapters(vendor).value_or(std::vector<alpacacore::catalog::FoundNetworkAdapter>{});
         nlohmann::json list = nlohmann::json::array();
-        for (const auto& adapter : *adapters) {
+        for (const auto& adapter : adapters) {
             list.push_back({{"Host", adapter.host}, {"Ssid", adapter.ssid}, {"Module", adapter.module}});
         }
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);

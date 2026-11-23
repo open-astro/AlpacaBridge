@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <string>
 
 #include "catch2_compat.h"
@@ -337,6 +338,118 @@ TEST_CASE("SkyWatcher async - count-frame FindHome rejects a short landing", "[s
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// open-astro#2552: a MoveAxis takes no slew-slot claim, so it does not supersede a FindHome body, and a rate-0
+// MoveAxis on an axis with no jog commands nothing at all. Neither may hide the body's later failure. Both used to
+// start a new failure epoch, and the body's failure path then returned before it dropped homing_: Slewing read
+// true with nothing moving, the failure was lost, and the failure stop never ran. (A Park cannot meet this: a
+// MoveAxis while parking is refused with InvalidWhileParked before it touches the epoch.)
+// Only Dec has a way to go here, and it stalls in goto mode, so the body's 180 s wait gives up with Dec still
+// running; the MoveAxis drives the idle RA axis (a jog, started and stopped) or commands nothing (the no-op).
+namespace {
+
+// The body's 180 s wait started before this budget does, so it times out inside it. Kept tight: once the body has
+// ended, each step waits out the clock rendezvous in real time, so a red run would otherwise take an hour.
+constexpr auto kPastSlewTimeout = std::chrono::milliseconds(181000);
+
+enum class MidBodyMoveAxis : std::uint8_t { NoOp, Jog };
+
+void move_axis_on_clock(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, int axis,
+                        double rate) {
+    auto call = std::async(std::launch::async, [&] { driver.move_axis(axis, rate); });
+    REQUIRE(run_clock_until(
+        clock, [&] { return call.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; },
+        std::chrono::milliseconds(10000)));
+    call.get();
+}
+
+void mid_body_move_axis(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                        FakeSkyWatcherMount& mount, MidBodyMoveAxis move) {
+    if (move == MidBodyMoveAxis::NoOp) {
+        move_axis_on_clock(clock, driver, 0, 0.0);
+        return;
+    }
+    move_axis_on_clock(clock, driver, 0, 1.0);
+    REQUIRE(mount.axis_running(1));
+    move_axis_on_clock(clock, driver, 0, 0.0);
+    REQUIRE(run_clock_until(clock, [&] { return !mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+}
+
+void check_home_failure_after_move_axis(MidBodyMoveAxis move) {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 5.0);
+    REQUIRE_NOTHROW(driver->find_home());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(10000)));
+    mount.set_axis_running(2, true, /*speed_mode=*/false);
+    mid_body_move_axis(clock, *driver, mount, move);
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);  // the body runs on
+
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        kPastSlewTimeout));
+    REQUIRE(last == SlewingRead::Threw);  // the failure is kept, not a silent false
+    CHECK(message.find("FindHome failed") != std::string::npos);
+    CHECK(message.find("Slew timed out") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(2));  // the failure stop ran
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(driver->get_at_home());
+    // The phase flag is down: once AbortSlew clears the failure, Slewing reads false.
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher async - a FindHome that fails after a rate-0 MoveAxis keeps its failure (#2552)",
+          "[skywatcher][async][homefailure]") {
+    check_home_failure_after_move_axis(MidBodyMoveAxis::NoOp);
+}
+
+TEST_CASE("SkyWatcher async - a FindHome that fails after a jog keeps its failure (#2552)",
+          "[skywatcher][async][homefailure]") {
+    check_home_failure_after_move_axis(MidBodyMoveAxis::Jog);
+}
+
+// open-astro#2552, the goto sibling: the rate-0 no-op does not supersede a goto either (it takes no claim), so a
+// goto that times out after one still stops the stalled axis and keeps its failure.
+TEST_CASE("SkyWatcher async - a goto that times out after a rate-0 MoveAxis stops and keeps its failure (#2552)",
+          "[skywatcher][async][slewfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    REQUIRE(run_clock_until(clock, [&] { return mount.frames_seen('J') >= 2; }, std::chrono::milliseconds(10000)));
+    mount.set_axis_running(2, true, /*speed_mode=*/false);
+    move_axis_on_clock(clock, *driver, 1, 0.0);
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        kPastSlewTimeout));
+    REQUIRE(last == SlewingRead::Threw);
+    CHECK(message.find("Slew timed out") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(mount.axis_running(1));
+    REQUIRE_NOTHROW(driver->abort_slew());
     driver->set_connected(false);
 }
 

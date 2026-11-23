@@ -398,6 +398,49 @@ TEST_CASE("Telescope command gate - a TrackingRate write refuses in the order ra
           AlpacaError::InvalidValue);
 }
 
+TEST_CASE("Telescope command gate - DestinationSideOfPier refuses in the order RA, Dec, connected, fault",
+          "[util][command-gate]") {
+    const TelescopeCommandLimits limits;
+    struct Row {
+        State state;
+        double ra;
+        double dec;
+        int expected;
+    };
+    const std::vector<Row> rows = {
+        {State{}, 0.0, -90.0, 0},
+        {State{}, 23.99, 90.0, 0},
+        {State{}, 24.0, 0.0, AlpacaError::InvalidValue},
+        {State{}, -0.01, 0.0, AlpacaError::InvalidValue},
+        {State{}, kNaN, 0.0, AlpacaError::InvalidValue},
+        {State{}, 0.0, 90.01, AlpacaError::InvalidValue},
+        {State{}, 0.0, kInf, AlpacaError::InvalidValue},
+        {everything_wrong(), 25.0, 91.0, AlpacaError::InvalidValue},
+        {everything_wrong(), 12.0, 45.0, AlpacaError::NotConnected},
+        {faulted(), 12.0, 45.0, AlpacaError::DriverException},
+        {parked(), 12.0, 45.0, 0},  // it moves no axis
+        {tracking_off(), 12.0, 45.0, 0},
+    };
+    for (const Row& row : rows) {
+        RecordingChecks checks{row.state, {}};
+        INFO("ra " << row.ra << " dec " << row.dec);
+        CHECK(error_code_of([&] {
+                  alpacacore::util::check_destination_side_of_pier(limits, row.ra, row.dec, checks);
+              }) == row.expected);
+        if (row.expected == AlpacaError::InvalidValue) {
+            CHECK(checks.calls.empty());
+        }
+    }
+    // RA first, in util::validate_ra_dec()'s words with the member's name.
+    CHECK(text_of([&] { alpacacore::util::check_destination_side_of_pier_arguments(25.0, 91.0); }) ==
+          "DestinationSideOfPier: RightAscension must be in range 0 to <24 hours");
+    CHECK(text_of([&] { alpacacore::util::check_destination_side_of_pier_arguments(0.0, 91.0); }) ==
+          "DestinationSideOfPier: Declination must be in range -90 to 90 degrees");
+    RecordingChecks passing;
+    alpacacore::util::check_destination_side_of_pier(limits, 12.0, 45.0, passing);
+    CHECK(passing.calls == std::vector<std::string>{"connected", "fault"});
+}
+
 TEST_CASE("Telescope command gate - a family with no fault check runs the parked check only", "[util][command-gate]") {
     TelescopeCommandLimits limits;
     limits.pulse_guide_order = ParkedFaultOrder::NoFaultCheck;

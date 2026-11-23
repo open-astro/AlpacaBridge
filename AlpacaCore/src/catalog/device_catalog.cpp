@@ -12,6 +12,7 @@
 
 #include <alpacacore/catalog/device_catalog.h>
 
+#include <algorithm>
 #include <charconv>
 #include <stdexcept>
 #include <string>
@@ -359,6 +360,11 @@ void DeviceCatalog::add_network_adapter_finder(std::string vendor, NetworkAdapte
         }
     }
     network_adapter_finders_.emplace_back(std::move(vendor), std::move(finder));
+}
+
+bool DeviceCatalog::has_network_adapter_finder(std::string_view vendor) const {
+    return std::any_of(network_adapter_finders_.begin(), network_adapter_finders_.end(),
+                       [&](const auto& entry) { return entry.first == vendor && entry.second; });
 }
 
 std::optional<std::vector<FoundNetworkAdapter>> DeviceCatalog::find_network_adapters(std::string_view vendor) const {

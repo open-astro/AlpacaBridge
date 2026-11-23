@@ -161,6 +161,7 @@ public:
     // registered only when the vendor is built.
     using NetworkAdapterFinder = std::function<std::vector<FoundNetworkAdapter>()>;
     void add_network_adapter_finder(std::string vendor, NetworkAdapterFinder finder);  // replaces the vendor's
+    bool has_network_adapter_finder(std::string_view vendor) const;
     // nullopt when no finder is registered for the vendor; otherwise the finder's result.
     std::optional<std::vector<FoundNetworkAdapter>> find_network_adapters(std::string_view vendor) const;
 
