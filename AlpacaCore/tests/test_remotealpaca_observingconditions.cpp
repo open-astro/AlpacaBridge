@@ -299,7 +299,8 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - sensors the upstream lacks
     CHECK(oc.get_device_state().size() == 12);
     // Members this driver does not proxy.
     CHECK(oc.get_supported_actions().empty());
-    require_alpaca_error([&] { (void)oc.action("anything", ""); }, AlpacaError::ActionNotImplemented);
+    CHECK(alpaca_error_message([&] { (void)oc.action("anything", ""); }, AlpacaError::ActionNotImplemented) ==
+          "Action not supported: anything");
     require_alpaca_error([&] { (void)oc.command_blind("x", false); }, AlpacaError::NotImplemented);
 }
 
