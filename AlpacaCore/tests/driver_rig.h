@@ -154,14 +154,22 @@ inline void tick(FakeTaskClock& clock, std::chrono::nanoseconds period, std::chr
     REQUIRE(clock.wait_for_waiters(1, bound));
 }
 
+// A driver's poll thread may not have parked on the clock yet when a case advances it right after the connect, and an
+// advance that lands before the thread registers its wait is lost to it (its first tick is then a period after the
+// later time). So the first advance waits, up to a second of real time, for any waiter to be there. Only a driver whose
+// poll has ended (a lost link) pays the second, and nothing is lost by it.
+inline void wait_for_a_parked_waiter(FakeTaskClock& clock) {
+    static_cast<void>(clock.wait_for_waiters(1, std::chrono::seconds(1)));
+}
+
 // Ages the clock past a driver's 30 s post-connect grace (31 s after `connected_at`, the clock's current time by
-// default) in steps of at most 5 s, waiting after each for what it woke to park again. A driver with no poll wakes
-// nothing and each wait returns at once; a driver with one polls at each step, so no getter reads a frame older
-// than util::kLinkStalenessBound, which one 31 s jump would leave it.
+// default) in steps of at most 5 s, waiting after each for what it woke to park again: a driver with a poll samples at
+// each step, so no getter reads a frame older than util::kLinkStalenessBound, which one 31 s jump would leave it.
 inline void age_past_connect_grace(FakeTaskClock& clock, FakeTaskClock::clock::time_point connected_at,
                                    std::chrono::milliseconds bound = std::chrono::seconds(5)) {
     constexpr auto kStep = std::chrono::seconds(5);
     const auto target = connected_at + std::chrono::seconds(31);
+    wait_for_a_parked_waiter(clock);
     while (clock.now() < target) {
         clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
         static_cast<void>(clock.wait_for_woken_settled(bound));
@@ -169,6 +177,21 @@ inline void age_past_connect_grace(FakeTaskClock& clock, FakeTaskClock::clock::t
 }
 
 inline void age_past_connect_grace(FakeTaskClock& clock) { age_past_connect_grace(clock, clock.now()); }
+
+// Advances the clock by `d` in steps of at most 5 s, waiting after each for what it woke to park again: a driver with
+// a poll samples at each step, so a getter that reads afterwards serves a frame measured at the end of `d`, and none
+// is older than util::kLinkStalenessBound (one long jump would leave it so). Each step of 250 ms or more is one poll
+// cycle (the poll sleeps one period per wake and skips the ticks a step spans, with no catch-up).
+inline void advance_polling(FakeTaskClock& clock, std::chrono::nanoseconds d,
+                            std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    constexpr auto kStep = std::chrono::seconds(5);
+    const auto target = clock.now() + d;
+    wait_for_a_parked_waiter(clock);
+    while (clock.now() < target) {
+        clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
+        static_cast<void>(clock.wait_for_woken_settled(bound));
+    }
+}
 
 // Connects the driver, then waits (up to `bound` of real time) for its poll body to park on the clock.
 // Returns whether it parked; a caller that must fail on a missed rendezvous wraps the call in REQUIRE.

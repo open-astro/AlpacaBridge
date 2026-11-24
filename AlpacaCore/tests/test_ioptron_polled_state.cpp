@@ -46,6 +46,7 @@ namespace {
 namespace ioptron = alpacacore::vendor::ioptron;
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::TelescopeDriver;
+using alpacacore::test::age_past_connect_grace;
 using alpacacore::test::FakeIoptronMount;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::PtyIoptronMount;
@@ -101,14 +102,6 @@ void step(FakeTaskClock& clock, std::chrono::nanoseconds d) {
 
 // One poll period: exactly one poll cycle runs and finishes.
 void tick(FakeTaskClock& clock) { step(clock, kPollPeriod); }
-
-// Past the 30 s connect grace and every TTL of today's caches, in steps well under util::kLinkStalenessBound, so a
-// polled frame is refreshed at each step (one 31 s jump would let a getter read a frame older than the bound).
-void age_past_connect_grace(FakeTaskClock& clock) {
-    for (int i = 0; i < 7; ++i) {
-        step(clock, seconds(5));
-    }
-}
 
 // Every exchange the mount received, as a count: a getter that sends one changes it.
 std::size_t sent(FakeIoptronMount& mount) { return mount.commands().size(); }

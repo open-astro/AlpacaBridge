@@ -315,7 +315,8 @@ TEST_CASE("FakeIoptronMount ConformU mode: the driver reads AtPark after Park ov
     driver->park();
     CHECK_FALSE(driver->get_at_park());  // inside the driver's Park hold
     rig.advance(seconds(6));
-    clock.advance(seconds(6));  // past the hold and the status cache
+    clock.advance(seconds(6));  // past the hold: the poll wakes and samples the parked mount
+    REQUIRE(clock.wait_for_woken_settled(seconds(5)));
     CHECK(driver->get_at_park());
     CHECK(rig.mount.motion()->parked());
     driver->set_connected(false);

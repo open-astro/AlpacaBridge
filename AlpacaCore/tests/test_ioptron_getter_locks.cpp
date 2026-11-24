@@ -11,9 +11,10 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // iOptron getters never wait on device I/O (decision 0016, issues #910 and #1829).
-// The mount fake holds its next reply, which keeps a handshake or a cache refill on
+// The mount fake holds its next reply, which keeps a handshake or a site cache refill on
 // the wire for a known time; a member that needs no device access must answer while
-// it is held, and a getter that would ask the mount must not wait for a connect.
+// it is held, and a getter that would ask the mount must not wait for a connect. The pointing and status getters
+// read the poll's frame (#2491), covered by test_ioptron_polled_state.cpp.
 // Decision 0005: the budget is wall time spent in a getter, not a driver timeout.
 
 #ifndef _WIN32
@@ -25,8 +26,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -73,30 +72,6 @@ void check_answers_at_once(const char* label, Fn&& fn) {
     });
     CHECK(elapsed < kGetterBudget);
 }
-
-// A clock that moves by one tick on every read, over a FakeTaskClock that keeps the waits parked. The
-// time-of-check case below needs the clock to move between a getter's freshness check and its refill.
-class TickingClock final : public alpacacore::util::TaskClock {
-public:
-    explicit TickingClock(alpacacore::test::FakeTaskClock& inner) : inner_(inner) {}
-
-    // Sets the tick and restarts the count: the next read is inner.now() exactly.
-    void set_tick(std::chrono::nanoseconds tick) {
-        tick_ = tick;
-        reads_ = 0;
-    }
-    clock::time_point now() const override { return inner_.now() + tick_ * static_cast<std::int64_t>(reads_++); }
-    bool wait_for(std::unique_lock<std::mutex>& lock, std::condition_variable& cv, std::chrono::nanoseconds timeout,
-                  const std::function<bool()>& pred) override {
-        return inner_.wait_for(lock, cv, timeout, pred);
-    }
-    void sleep_for(std::chrono::nanoseconds duration) override { inner_.sleep_for(duration); }
-
-private:
-    alpacacore::test::FakeTaskClock& inner_;
-    std::chrono::nanoseconds tick_{0};
-    mutable std::atomic<std::uint64_t> reads_{0};
-};
 
 // Blocks until the async slew body has sent one more :MS1# than `sent_before`, or 5 s of real time pass.
 bool wait_for_goto_dispatch(alpacacore::test::FakeIoptronMount& mount, int sent_before) {
@@ -219,9 +194,10 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     driver->set_connected(false);
 }
 
-// Issue #1829: a getter whose TTL cache has lapsed asks the mount (:GEP# here) and waits for the wire for that
-// one read; a member that needs no device access must not wait behind it.
-TEST_CASE("iOptron telescope - members that need no device access answer while a cache refill is on the wire",
+// Issue #1829, with the site cache only (#2491 rule 9: the pointing and status getters read the poll's frame): a site
+// member whose 60 s cache has lapsed asks the mount (:GUT# here) and waits for the wire for that one read; a member
+// that needs no device access must not wait behind it.
+TEST_CASE("iOptron telescope - members that need no device access answer while a site cache refill is on the wire",
           "[ioptron][telescope][getter-locks]") {
     alpacacore::test::FakeIoptronMount mount("0036", 0.0);
     REQUIRE(mount.ok());
@@ -231,14 +207,16 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    // The connect primes every cache for 30 s of task-clock time; past that a position read asks the mount.
+    // The connect primes the site cache for 30 s of task-clock time and then 60 s; past that SiderealTime asks the
+    // mount.
+    age_past_connect_grace(clock);
     age_past_connect_grace(clock);
     mount.hold_next_reply(kHold);
     std::atomic<bool> read_ok{false};
     std::string read_error;
     std::thread reader([&] {
         try {
-            static_cast<void>(driver->get_declination());
+            static_cast<void>(driver->get_sidereal_time());
             read_ok = true;
         } catch (const std::exception& e) {
             read_error = e.what();
@@ -261,6 +239,9 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     });
     check_answers_at_once("CanSlewAsync", [&] { CHECK(driver->get_can_slew_async()); });
     check_answers_at_once("IsPulseGuiding", [&] { CHECK_FALSE(driver->get_is_pulse_guiding()); });
+    // The poll's frame answers too: the held exchange keeps the site refill on the wire, not the poll's reads.
+    check_answers_at_once("Declination", [&] { static_cast<void>(driver->get_declination()); });
+    check_answers_at_once("Slewing", [&] { CHECK_FALSE(driver->get_slewing()); });
     // Every sample above landed while the held reply still kept the refill on the wire.
     CHECK(steady_clock::now() - sampled_from < kHold);
 
@@ -322,152 +303,41 @@ TEST_CASE("iOptron telescope - cache-backed getters answer from a fresh cache wh
     driver->set_connected(false);
 }
 
-// Review of #1829: a cache-backed getter checks its cache under the state lock and refills it under both. The
-// check and the refill read the clock separately, so a cache right at its TTL (a 1 Hz poller lands there every
-// read) can be fresh for the check and lapsed for the refill, which then reached the mount holding the state lock
-// alone: Wire refused the exchange, and the refusal counted toward the fault latch. A cache that lapsed between
-// the two is served as it stands; the next read refills it under the operation lock.
-TEST_CASE("iOptron telescope - a cache that lapses between its freshness check and its refill is served as it is",
+// Decision 0022 with the poll (#2491): once the slew hold has closed, the mount, not the window, says whether the slew
+// ended, and a status sampled inside the hold is never taken for the answer. The poll that began inside the hold
+// publishes a frame that says "stopped" (the firmware still reported its old status just after the GOTO went out); the
+// hold then closes, and Slewing must stay true until a frame sampled after it says the same. HEM27 (0025): no GOTO
+// trim.
+TEST_CASE("iOptron telescope - a frame sampled inside the slew hold does not end the slew once the hold has closed",
           "[ioptron][telescope][getter-locks]") {
-    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    mount.set_alt_az(45.0, 180.0);
-    alpacacore::test::FakeTaskClock inner;
-    TickingClock clock(inner);
+    alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
                                                               std::nullopt, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    age_past_connect_grace(inner);  // past the post-connect grace: a lapsed cache now refills
+    age_past_connect_grace(clock);
 
-    // Each pass primes the Alt/Az cache with a refill under the operation lock, ages it to just under its 1 s
-    // TTL, then reads it on a clock that moves 1 ms per read: with a few reads between the getter's check and
-    // the refill's own, one of these ages lapses in between. None of them may reach the mount.
-    for (int age_ms = 995; age_ms < 1000; ++age_ms) {
-        INFO("cache age " << age_ms << " ms at the check");
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        inner.advance(std::chrono::seconds(2));
-        REQUIRE_NOTHROW(static_cast<void>(driver->get_altitude()));
-        const auto sent_before = mount.commands().size();
-        inner.advance(milliseconds(age_ms));
-        clock.set_tick(milliseconds(1));
-        REQUIRE_NOTHROW(static_cast<void>(driver->get_altitude()));
-        CHECK(mount.commands().size() == sent_before);
-    }
-    driver->set_connected(false);
-}
+    const int sent_before = mount.count(":MS1#");
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount, sent_before));
+    mount.set_system_status(1);  // the firmware still reports tracking just after the GOTO went out
+    ioptron::set_state_poll_paused_for_testing(*driver, true);
+    clock.advance(milliseconds(250));
+    ioptron::poll_state_now_for_testing(*driver);  // a frame sampled 250 ms into the 5 s hold: stopped
+    CHECK(driver->get_slewing());                  // the hold
 
-// The sibling: a hold window, not a TTL, keeps the getter off the wire, and the cache behind it was invalidated
-// (SetPark drops the position cache) rather than primed. When the hold closes between the check and the body,
-// the refill has nothing to serve as it stands and must go to the mount, under the operation lock: the body runs
-// again under both locks instead of refusing the read.
-TEST_CASE(
-    "iOptron telescope - a hold window that closes between the check and the refill of an invalidated cache "
-    "refills under the operation lock",
-    "[ioptron][telescope][getter-locks]") {
-    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
-    REQUIRE(mount.ok());
-    mount.set_alt_az(45.0, 180.0);  // SetPark reads the Alt/Az for the park position
-    alpacacore::test::FakeTaskClock inner;
-    TickingClock clock(inner);
-    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
-                                                              std::nullopt, false, clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
+    // The hold closes with no poll in between: the frame on hand predates it.
+    clock.advance(std::chrono::seconds(5));
+    mount.set_system_status(2);  // the mount has been slewing all along
+    CHECK(driver->get_slewing());
 
-    // A 100 ms RA pulse holds Declination (the axis not pulsing) at its last read for the pulse, the completion
-    // delay and the hold grace (2.6 s). Each pass drops the position cache, arms the hold, ages it to just under
-    // its end, then reads on a clock that moves 1 ms per read, so one of these ages closes the hold between the
-    // getter's check and the refill's own.
-    constexpr auto kDecHold = milliseconds(100 + 500 + 2000);
-    for (int before_ms = 5; before_ms >= 1; --before_ms) {
-        INFO("hold closes " << before_ms << " ms after the check");
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        age_past_connect_grace(inner);  // every earlier hold and the post-connect grace are over
-        driver->set_park();
-        driver->pulse_guide(2, 100);
-        inner.advance(kDecHold - milliseconds(before_ms));
-        clock.set_tick(milliseconds(1));
-        REQUIRE_NOTHROW(static_cast<void>(driver->get_declination()));
-    }
-    driver->set_connected(false);
-}
-
-// The third sibling: Slewing's body reaches the wire itself, for the HAE29C/HAE16 GOTO trim, once the slew hold has
-// closed and the status says the mount stopped. With the hold open for the check and closed for the body, the trim's
-// position read ran under the state lock alone, Wire refused it, the catch took that for a trim that failed, and
-// Slewing reported the GOTO landed with the RA error the trim exists to remove, for good.
-TEST_CASE(
-    "iOptron telescope - a slew hold that closes between the check and the body runs the GOTO trim under the "
-    "operation lock",
-    "[ioptron][telescope][getter-locks]") {
-    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/12.0);  // past the 5" trim deadband
-    REQUIRE(mount.ok());
-    alpacacore::test::FakeTaskClock inner;
-    TickingClock clock(inner);
-    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
-                                                              std::nullopt, false, clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-
-    // Each pass: a GOTO arms the 5 s slew hold at its dispatch, a status read inside the hold refills the status
-    // cache under the operation lock (the fake reports the mount stopped, 12 arcsec east of the target), then
-    // Slewing is read on a clock that moves 1 ms per read with the hold 1-5 ms from closing. Every read must
-    // report the slew still in progress: from the hold, or from the trim pulse that closes the residual.
-    for (int before_ms = 5; before_ms >= 1; --before_ms) {
-        INFO("hold closes " << before_ms << " ms after the check");
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        age_past_connect_grace(inner);  // the post-connect grace and every earlier window are over
-        const int sent_before = mount.count(":MS1#");
-        driver->slew_to_coordinates_async(12.0, 20.0);
-        REQUIRE(wait_for_goto_dispatch(mount, sent_before));
-        static_cast<void>(driver->get_at_home());  // refills the status cache: stopped
-        inner.advance(std::chrono::seconds(5) - milliseconds(before_ms));
-        clock.set_tick(milliseconds(1));
-        CHECK(driver->get_slewing());
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        driver->abort_slew();
-    }
-    driver->set_connected(false);
-}
-
-// The landing decision itself, on a model with no GOTO trim: once the slew hold has closed, the mount says whether
-// the slew ended (decision 0022), never a status fetched inside the hold. With the hold open for the check and
-// closed for the body, that stale status was served as it stood under the state lock alone, and Slewing reported
-// the GOTO landed while the mount was still moving.
-TEST_CASE(
-    "iOptron telescope - a slew hold that closes between the check and the body asks the mount whether the "
-    "slew ended",
-    "[ioptron][telescope][getter-locks]") {
-    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);  // HEM27: no GOTO trim
-    REQUIRE(mount.ok());
-    alpacacore::test::FakeTaskClock inner;
-    TickingClock clock(inner);
-    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
-                                                              std::nullopt, false, clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-
-    // Each pass: a GOTO arms the 5 s slew hold at its dispatch, a status read inside the hold caches "stopped"
-    // under the operation lock, then the mount starts reporting the slew (only a fresh read sees it), and Slewing
-    // is read on a clock that moves 1 ms per read with the hold 1-5 ms from closing. Every read must report the
-    // slew in progress: from the hold, or from the mount.
-    for (int before_ms = 5; before_ms >= 1; --before_ms) {
-        INFO("hold closes " << before_ms << " ms after the check");
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        age_past_connect_grace(inner);  // the post-connect grace and every earlier window are over
-        const int sent_before = mount.count(":MS1#");
-        driver->slew_to_coordinates_async(12.0, 20.0);
-        REQUIRE(wait_for_goto_dispatch(mount, sent_before));
-        CHECK_FALSE(driver->get_at_home());  // refills the status cache: stopped
-        mount.set_system_status(2);          // slewing from now on
-        inner.advance(std::chrono::seconds(5) - milliseconds(before_ms));
-        clock.set_tick(milliseconds(1));
-        CHECK(driver->get_slewing());
-        clock.set_tick(std::chrono::nanoseconds::zero());
-        mount.set_system_status(1);
-        driver->abort_slew();
-    }
+    ioptron::poll_state_now_for_testing(*driver);  // a frame sampled after the hold: slewing
+    CHECK(driver->get_slewing());
+    mount.set_system_status(1);
+    ioptron::poll_state_now_for_testing(*driver);  // the mount has stopped on its target, past the hold: landed
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
