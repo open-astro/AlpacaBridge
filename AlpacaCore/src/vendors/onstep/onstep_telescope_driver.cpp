@@ -1208,6 +1208,8 @@ public:
         if (!keep_goto_bound) {
             goto_deadline_.reset();
             goto_target_.reset();
+            goto_running_ = false;
+            goto_seen_slewing_ = false;
         }
     }
 
@@ -1216,7 +1218,7 @@ public:
     // driver's own state is read, so a :GU# the driver cannot parse refuses nothing; a motion from a hand
     // controller is not seen. A pulse guide does not count.
     void refuse_while_moving_locked(const char* who) const {
-        const bool moving = slew_hold_.active(clock_.now()) || goto_target_.has_value() || manual_axis_slewing_[0] ||
+        const bool moving = slew_hold_.active(clock_.now()) || goto_unlanded_locked() || manual_axis_slewing_[0] ||
                             manual_axis_slewing_[1] || park_home_request_;
         if (moving) {
             throw AlpacaException(std::string(who) + " is not allowed while the mount is moving",
@@ -2806,6 +2808,8 @@ private:
         }
         goto_deadline_ = clock_.now() + kGotoTimeout;
         goto_target_ = util::MountPosition{ra, dec};
+        goto_running_ = true;
+        goto_seen_slewing_ = false;
         store_target_locked(ra, dec, targets);
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
@@ -2910,6 +2914,7 @@ private:
 
     void wait_for_slew_complete_locked(StateLock& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
+        goto_running_ = false;  // the wait's own :GU# showed no GOTO
         // The control path ends the motion: publish where the mount stopped, so the position read right after
         // Slewing goes false is not one the poll took during the GOTO (decision 0010).
         const auto ended_at = clock_.now();
@@ -3094,6 +3099,8 @@ private:
             note_read_ok_locked();
             if (!status.is_slewing) {
                 slew_hold_.clear();  // landed: a reading with no GOTO (decision 0022 rules 2, 3)
+            } else if (goto_target_) {
+                goto_seen_slewing_ = true;  // the GOTO ran: its end is judged (#2406)
             }
             note_status_read_locked(status, true);
         } catch (const std::exception& ex) {
@@ -3347,9 +3354,11 @@ private:
     // is sent under, and the dispatch write-through shows the GOTO until a later frame replaces it.
     void finish_slew_if_ended_locked(PolledFrame& frame) const {
         if (frame.status.is_slewing) {
+            goto_seen_slewing_ = goto_seen_slewing_ || goto_target_.has_value();  // its end is judged (#2406)
             return;
         }
-        slew_hold_.clear();           // landed: a frame with no GOTO (decision 0022 rules 2, 3)
+        slew_hold_.clear();  // landed: a frame with no GOTO (decision 0022 rules 2, 3)
+        goto_running_ = false;
         judge_landing_locked(frame);  // a far miss stops the mount and gives up the restore (#2406)
         if (!tracking_before_slew_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_home_request_) {
             return;
@@ -3369,15 +3378,20 @@ private:
                 stop_overdue_goto_locked();
             } else {
                 goto_deadline_.reset();
+                goto_target_.reset();  // a GOTO never seen running is no longer judged
             }
         }
         check_abort_stop_locked(status);
     }
 
+    // #2406: a GOTO of this driver has not landed: no frame has shown it end yet, or a :GU# showed it running and
+    // its end is not judged yet.
+    bool goto_unlanded_locked() const { return goto_running_ || goto_seen_slewing_; }
+
     // #2406: a tick whose :GU# failed still enforces the bound of a GOTO no frame has seen end: the mount may still
     // be running it, so the stops go out.
     void check_goto_bound_unread_locked() const {
-        if (goto_target_ && goto_deadline_ && clock_.now() >= *goto_deadline_) {
+        if (goto_unlanded_locked() && goto_deadline_ && clock_.now() >= *goto_deadline_) {
             stop_overdue_goto_locked();
         }
     }
@@ -3385,13 +3399,16 @@ private:
     // #2406 (#2396 AB-7): `frame` shows no GOTO, and its position was read after that :GU#. A GOTO that ended more
     // than util::kLandingFarMissArcsec from its target on either axis did not land: it is stopped, and Slewing
     // raises it. One frame is taken as still, without util::LandingGate's stillness pair.
+    // Only a GOTO a :GU# has shown running is judged: a frame from before the mount started it holds the position
+    // before the slew. A GOTO never seen running is left to the kGotoTimeout bound.
     // TODO(#2406): check on a rig that :GU# shows no GOTO only once both axes have stopped.
     void judge_landing_locked(const PolledFrame& frame) const {
-        if (!goto_target_ || frame.status.is_slewing || !frame.equatorial_known) {
+        if (!goto_target_ || !goto_seen_slewing_ || frame.status.is_slewing || !frame.equatorial_known) {
             return;
         }
         const util::MountPosition target = *goto_target_;
         goto_target_.reset();
+        goto_seen_slewing_ = false;
         const double miss = util::axis_miss_arcsec({frame.ra_hours, frame.dec_degrees}, target);
         if (miss <= util::kLandingFarMissArcsec) {
             return;
@@ -3445,6 +3462,8 @@ private:
     void stop_goto_locked(std::string text) const {
         goto_deadline_.reset();
         goto_target_.reset();
+        goto_running_ = false;
+        goto_seen_slewing_ = false;
         slew_hold_.clear();
         tracking_before_slew_ = false;
         motion_error_ = std::move(text);
@@ -3900,9 +3919,14 @@ private:
     // a frame that shows none, and cleared at the deadline, by the next motion command, an AbortSlew and a connect. A
     // fail-safe timeout, not a hold window: Slewing's hold stays slew_hold_ (decision 0022 rule 1). Under mutex_.
     mutable std::optional<std::chrono::steady_clock::time_point> goto_deadline_;
-    // #2406: the running GOTO's target, until a frame that shows no GOTO judges its landing (judge_landing_locked());
-    // cleared like goto_deadline_ otherwise. Set means a GOTO of this driver has not landed. Under mutex_.
+    // #2406: the last GOTO's target, until a frame with no GOTO after one that showed it running judges its landing
+    // (judge_landing_locked()); cleared like goto_deadline_ otherwise. Under mutex_.
     mutable std::optional<util::MountPosition> goto_target_;
+    // #2406: no frame has shown the GOTO end since its :MS#. Under mutex_.
+    mutable bool goto_running_ = false;
+    // #2406: a :GU# showed the GOTO running since its :MS# (not the write-through), so its end is judged. Under
+    // mutex_.
+    mutable bool goto_seen_slewing_ = false;
     // #2406: a sync went out since the connect, so the next one is bounded (sync_locked()). Under mutex_.
     bool synced_this_session_ = false;
     // #2406: kMaxMoveAxisDuration from each axis's MoveAxis start. Under mutex_.
