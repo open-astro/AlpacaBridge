@@ -1090,10 +1090,6 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
     return resp;
 }
 
-// A verb the Alpaca Management API does not define for `what`: HTTP 400 with a
-// text/plain message (Alpaca API Reference s2.5, #1508).
-void set_wrong_verb_text(Response& response, const char* what);
-
 // A Device API request the router cannot interpret: HTTP 400 text/plain (#1476).
 void set_bad_request_text(Response& response, const std::string& message);
 
@@ -1385,7 +1381,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
         RouteMatch match = parse_route(request.path());
 
         // Check if route is valid
-        if (!match.is_management && match.device_type.empty()) {
+        if (match.management == nullptr && match.device_type.empty()) {
             // No valid route matched - return 404
             response.set_status(404, "Not Found");
             std::uint32_t client_tx_id = 0;
@@ -1401,7 +1397,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             return response;
         }
 
-        if (match.is_management) {
+        if (match.management != nullptr) {
             return handle_management(request, match, server_transaction_id);
         } else {
             return handle_device(request, match, server_transaction_id);
@@ -1421,140 +1417,10 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
 RouteMatch Router::parse_route(const std::string& path) {
     RouteMatch match;
 
-    // Root endpoint - return helpful information (JSON API)
-    if (path == "/api" || path == "/api/") {
-        match.is_management = true;
-        match.management_endpoint = "root";
-        return match;
-    }
-
-    // Management endpoints (support both /management/v1/... and /management/... for compatibility)
-    if (path == "/management/v1/description" || path == "/management/description") {
-        match.is_management = true;
-        match.management_endpoint = "description";
-        return match;
-    }
-    if (path == "/management/v1/apiversions" || path == "/management/apiversions") {
-        match.is_management = true;
-        match.management_endpoint = "apiversions";
-        return match;
-    }
-    if (path == "/management/v1/buildinfo" || path == "/management/buildinfo") {
-        match.is_management = true;
-        match.management_endpoint = "buildinfo";
-        return match;
-    }
-    if (path == "/management/v1/configureddevices" || path == "/management/configureddevices") {
-        match.is_management = true;
-        match.management_endpoint = "configureddevices";
-        return match;
-    }
-    if (path == "/management/v1/faileddevices" || path == "/management/faileddevices") {
-        match.is_management = true;
-        match.management_endpoint = "faileddevices";
-        return match;
-    }
-    if (path == "/management/v1/devicecatalog" || path == "/management/devicecatalog") {
-        match.is_management = true;
-        match.management_endpoint = "devicecatalog";
-        return match;
-    }
-    if (path == "/management/v1/thermalcameras" || path == "/management/thermalcameras") {
-        match.is_management = true;
-        match.management_endpoint = "thermalcameras";
-        return match;
-    }
-    if (path == "/management/v1/attachedcameras" || path == "/management/attachedcameras") {
-        match.is_management = true;
-        match.management_endpoint = "attachedcameras";
-        return match;
-    }
-    if (path == "/management/v1/attacheddevices" || path == "/management/attacheddevices") {
-        match.is_management = true;
-        match.management_endpoint = "attacheddevices";
-        return match;
-    }
-    if (path == "/management/v1/networkadapters" || path == "/management/networkadapters") {
-        match.is_management = true;
-        match.management_endpoint = "networkadapters";
-        return match;
-    }
-    if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
-        match.is_management = true;
-        match.management_endpoint = "configuredevice";
-        return match;
-    }
-    if (path == "/management/v1/removedevice" || path == "/management/removedevice") {
-        match.is_management = true;
-        match.management_endpoint = "removedevice";
-        return match;
-    }
-    if (path == "/management/v1/updatedevice" || path == "/management/updatedevice") {
-        match.is_management = true;
-        match.management_endpoint = "updatedevice";
-        return match;
-    }
-    if (path == "/management/v1/loglevel" || path == "/management/loglevel") {
-        match.is_management = true;
-        match.management_endpoint = "loglevel";
-        return match;
-    }
-    if (path == "/management/v1/logs" || path == "/management/logs") {
-        match.is_management = true;
-        match.management_endpoint = "logs";
-        return match;
-    }
-    if (path == "/management/v1/logfiles" || path == "/management/logfiles") {
-        match.is_management = true;
-        match.management_endpoint = "logfiles";
-        return match;
-    }
-    {
-        static const std::regex kLogfileItemRegex(
-            R"(^/management/(?:v1/)?logfiles/([^/?]+)/?$)");
-        std::smatch logfile_match;
-        if (std::regex_match(path, logfile_match, kLogfileItemRegex)) {
-            match.is_management = true;
-            match.management_endpoint = "logfile";
-            match.method_name = logfile_match[1].str();
-            return match;
-        }
-    }
-    if (path == "/management/v1/shutdown" || path == "/management/shutdown") {
-        match.is_management = true;
-        match.management_endpoint = "shutdown";
-        return match;
-    }
-    if (path == "/management/v1/restart" || path == "/management/restart") {
-        match.is_management = true;
-        match.management_endpoint = "restart";
-        return match;
-    }
-    if (path == "/management/v1/synctime" || path == "/management/synctime") {
-        match.is_management = true;
-        match.management_endpoint = "synctime";
-        return match;
-    }
-    {
-        // WiFi manager: /management/v1/wifi/<sub>[/<arg>] — sub+arg travel in
-        // method_name ("status", "profiles", "profiles/<uuid>", ...).
-        static const std::regex kWifiRegex(R"(^/management/(?:v1/)?wifi/([a-z]+(?:/[^/?]+)?)/?$)");
-        std::smatch wifi_match;
-        if (std::regex_match(path, wifi_match, kWifiRegex)) {
-            match.is_management = true;
-            match.management_endpoint = "wifi";
-            match.method_name = wifi_match[1].str();
-            return match;
-        }
-    }
-    {
-        // Software update: /management/v1/update/<status|check|install|channel>.
-        static const std::regex kUpdateRegex(R"(^/management/(?:v1/)?update/([a-z]+)/?$)");
-        std::smatch update_match;
-        if (std::regex_match(path, update_match, kUpdateRegex)) {
-            match.is_management = true;
-            match.management_endpoint = "update";
-            match.method_name = update_match[1].str();
+    // open-astro#2485: the management paths, from the one route table.
+    for (const ManagementRoute& route : management_routes()) {
+        if (route.tail != nullptr ? route.tail(path, match.method_name) : path == route.path || path == route.alias) {
+            match.management = &route;
             return match;
         }
     }
@@ -1594,62 +1460,211 @@ RouteMatch Router::parse_route(const std::string& path) {
     return match;
 }
 
+namespace {
+// The three management paths with a tail; the tail travels in RouteMatch::method_name.
+bool match_tail(const std::string& path, const std::regex& pattern, std::string& tail) {
+    std::smatch found;
+    if (!std::regex_match(path, found, pattern)) {
+        return false;
+    }
+    tail = found[1].str();
+    return true;
+}
+
+bool match_log_file_tail(const std::string& path, std::string& tail) {
+    static const std::regex kLogfileItemRegex(R"(^/management/(?:v1/)?logfiles/([^/?]+)/?$)");
+    return match_tail(path, kLogfileItemRegex, tail);
+}
+
+// WiFi manager: /management/v1/wifi/<sub>[/<arg>]; the tail is "status", "profiles", "profiles/<uuid>", ...
+bool match_wifi_tail(const std::string& path, std::string& tail) {
+    static const std::regex kWifiRegex(R"(^/management/(?:v1/)?wifi/([a-z]+(?:/[^/?]+)?)/?$)");
+    return match_tail(path, kWifiRegex, tail);
+}
+
+// Software update: /management/v1/update/<status|check|install|channel>.
+bool match_update_tail(const std::string& path, std::string& tail) {
+    static const std::regex kUpdateRegex(R"(^/management/(?:v1/)?update/([a-z]+)/?$)");
+    return match_tail(path, kUpdateRegex, tail);
+}
+
+// A table handler is one signature; these adapt the handlers that take less.
+template <Response (Router::*Handle)(const Request&, std::uint32_t)>
+Response call(Router& router, const Request& request, const RouteMatch& /*match*/, std::uint32_t server_tx_id) {
+    return (router.*Handle)(request, server_tx_id);
+}
+
+template <Response (Router::*Handle)(const Request&, const RouteMatch&, std::uint32_t)>
+Response call_with_match(Router& router, const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
+    return (router.*Handle)(request, match, server_tx_id);
+}
+
+template <Response (Router::*Handle)(const Request&, const std::string&, std::uint32_t)>
+Response call_with_tail(Router& router, const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
+    return (router.*Handle)(request, match.method_name, server_tx_id);
+}
+
+unsigned verb_bit(HttpMethod method) {
+    switch (method) {
+        case HttpMethod::GET:
+            return ManagementRoute::kVerbGet;
+        case HttpMethod::POST:
+            return ManagementRoute::kVerbPost;
+        case HttpMethod::PUT:
+            return ManagementRoute::kVerbPut;
+        case HttpMethod::DELETE_:
+            return ManagementRoute::kVerbDelete;
+        case HttpMethod::UNKNOWN:
+            break;
+    }
+    return ManagementRoute::kVerbOther;
+}
+
+// The Allow header of a 405: the accepted verbs.
+std::string allow_header(unsigned verbs) {
+    std::string allow;
+    for (const auto& [bit, name] : {std::pair<unsigned, const char*>{ManagementRoute::kVerbGet, "GET"},
+                                    {ManagementRoute::kVerbPost, "POST"},
+                                    {ManagementRoute::kVerbPut, "PUT"},
+                                    {ManagementRoute::kVerbDelete, "DELETE"}}) {
+        if ((verbs & bit) != 0) {
+            allow += allow.empty() ? std::string(name) : std::string(", ") + name;
+        }
+    }
+    return allow;
+}
+}  // namespace
+
+const std::vector<ManagementRoute>& Router::management_routes() {
+    using G = ManagementRoute::Guard;
+    using W = ManagementRoute::WrongVerb;
+    constexpr unsigned kGet = ManagementRoute::kVerbGet;
+    constexpr unsigned kWrite = ManagementRoute::kVerbPost | ManagementRoute::kVerbPut;
+    constexpr unsigned kDelete = ManagementRoute::kVerbDelete;
+    constexpr unsigned kAny = ManagementRoute::kEveryVerb;
+    constexpr const char* kPostPut = "Method not allowed. Use POST or PUT.";
+    // Decision 0007 surface 2: a route that accepts a verb other than GET changes state and is guarded.
+    // Issue #348: a POST with Content-Type text/plain is not preflighted, so nothing on the browser side
+    // stops a drive-by page from reaching these; the guard does. test_route_table section G walks this table.
+    // clang-format off
+    static const std::vector<ManagementRoute> kRoutes = {
+        // Root endpoint: server information (JSON API). Reads only, whatever the verb.
+        {"/api", "/api/", nullptr, kAny, G::None, "", W::None, "", false, &call<&Router::handle_root>},
+        // PUT/POST rewrite the server description and the SyncSystemClockFromClients opt-out, which keeps a
+        // cross-origin clock step from being accepted at all.
+        {"/management/v1/description", "/management/description", nullptr, kGet | kWrite, G::BeforeVerbCheck,
+         "server description", W::AlpacaText, "Unsupported HTTP method for description endpoint", false,
+         &call<&Router::handle_description>},
+        {"/management/v1/apiversions", "/management/apiversions", nullptr, kGet, G::None, "", W::AlpacaText,
+         "Unsupported HTTP method for apiversions endpoint", false, &call<&Router::handle_api_versions>},
+        {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kAny, G::None, "", W::None, "", false,
+         &call<&Router::handle_build_info>},
+        {"/management/v1/configureddevices", "/management/configureddevices", nullptr, kGet, G::None, "",
+         W::AlpacaText, "Unsupported HTTP method for configureddevices endpoint", false,
+         &call<&Router::handle_configured_devices>},
+        {"/management/v1/faileddevices", "/management/faileddevices", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for faileddevices endpoint", false,
+         &call<&Router::handle_failed_devices>},
+        {"/management/v1/devicecatalog", "/management/devicecatalog", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for devicecatalog endpoint", false,
+         &call<&Router::handle_device_catalog>},
+        {"/management/v1/thermalcameras", "/management/thermalcameras", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for thermalcameras endpoint", false,
+         &call<&Router::handle_thermal_cameras>},
+        {"/management/v1/attachedcameras", "/management/attachedcameras", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for attachedcameras endpoint", false,
+         &call<&Router::handle_attached_cameras>},
+        {"/management/v1/attacheddevices", "/management/attacheddevices", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for attacheddevices endpoint", false,
+         &call<&Router::handle_attached_devices>},
+        {"/management/v1/networkadapters", "/management/networkadapters", nullptr, kGet, G::None, "",
+         W::MethodNotAllowed, "Unsupported HTTP method for networkadapters endpoint", false,
+         &call<&Router::handle_network_adapters>},
+        // Rewrites persisted device configuration, which survives a restart.
+        {"/management/v1/configuredevice", "/management/configuredevice", nullptr, kWrite, G::BeforeVerbCheck,
+         "device configuration", W::MethodNotAllowed, kPostPut, false, &call<&Router::handle_configure_device>},
+        // Removes a configured device, taking its persisted entry with it.
+        {"/management/v1/removedevice", "/management/removedevice", nullptr, kWrite, G::BeforeVerbCheck,
+         "device removal", W::MethodNotAllowed, kPostPut, false, &call<&Router::handle_remove_device>},
+        // open-astro#2057: rewrites persisted device config, like configuredevice.
+        {"/management/v1/updatedevice", "/management/updatedevice", nullptr, kWrite, G::BeforeVerbCheck,
+         "device update", W::MethodNotAllowed, kPostPut, false, &call<&Router::handle_update_device>},
+        // Turning the log level down is how evidence of the others gets hidden after the fact.
+        {"/management/v1/loglevel", "/management/loglevel", nullptr, kGet | kWrite, G::BeforeVerbCheck, "log level",
+         W::MethodNotAllowed, "Unsupported HTTP method for log level endpoint", false,
+         &call<&Router::handle_log_level>},
+        {"/management/v1/logs", "/management/logs", nullptr, kGet, G::None, "", W::MethodNotAllowed,
+         "Unsupported HTTP method for logs endpoint", false, &call<&Router::handle_logs>},
+        // The DELETE removes every log file. The guard follows the verb check, so a cross-origin wrong verb is
+        // answered 405 (docs/wifi-api.md).
+        {"/management/v1/logfiles", "/management/logfiles", nullptr, kGet | kDelete, G::AfterVerbCheck, "log files",
+         W::MethodNotAllowed, "Unsupported HTTP method for log files endpoint", false,
+         &call<&Router::handle_log_files_list>},
+        // The DELETE destroys a log file. The guard comes before the name check, so a cross-origin caller learns
+        // nothing about which names exist.
+        {"/management/v1/logfiles/{name}", "/management/logfiles/{name}", &match_log_file_tail, kGet | kDelete,
+         G::BeforeVerbCheck, "log file", W::MethodNotAllowed, "Unsupported HTTP method for log file endpoint", false,
+         &call_with_tail<&Router::handle_log_file_item>},
+        // Stops the daemon. On a remote rig undoing this needs physical access.
+        {"/management/v1/shutdown", "/management/shutdown", nullptr, kWrite, G::BeforeVerbCheck, "shutdown",
+         W::MethodNotAllowed, kPostPut, false, &call<&Router::handle_shutdown>},
+        // Restarts the daemon, dropping every connected client mid-session.
+        {"/management/v1/restart", "/management/restart", nullptr, kWrite, G::BeforeVerbCheck, "restart",
+         W::MethodNotAllowed, kPostPut, false, &call<&Router::handle_restart>},
+        // Sets the system clock, and marks the host client-stepped (open-astro#291).
+        {"/management/v1/synctime", "/management/synctime", nullptr, kGet | kWrite, G::BeforeVerbCheck,
+         "time synchronisation", W::MethodNotAllowed,
+         "Method not allowed. GET reads the server time; POST or PUT sets it.", true,
+         &call<&Router::handle_sync_time>},
+        // PR #198: the first guarded routes.
+        {"/management/v1/wifi/{sub}", "/management/wifi/{sub}", &match_wifi_tail, kGet | kWrite | kDelete,
+         G::BeforeVerbCheck, "WiFi management", W::Handler, "", false, &call_with_match<&Router::handle_wifi>},
+        // check fetches from the network, install starts the helper, channel switches the apt source.
+        {"/management/v1/update/{sub}", "/management/update/{sub}", &match_update_tail, kGet | kWrite,
+         G::BeforeVerbCheck, "software update", W::Handler, "", false,
+         &call_with_match<&Router::handle_software_update>},
+    };
+    // clang-format on
+    return kRoutes;
+}
+
 Response Router::handle_management(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
-    if (match.management_endpoint == "root") {
-        return handle_root(request, server_tx_id);
-    } else if (match.management_endpoint == "description") {
-        return handle_description(request, server_tx_id);
-    } else if (match.management_endpoint == "apiversions") {
-        return handle_api_versions(request, server_tx_id);
-    } else if (match.management_endpoint == "buildinfo") {
-        return handle_build_info(request, server_tx_id);
-    } else if (match.management_endpoint == "configureddevices") {
-        return handle_configured_devices(request, server_tx_id);
-    } else if (match.management_endpoint == "faileddevices") {
-        return handle_failed_devices(request, server_tx_id);
-    } else if (match.management_endpoint == "devicecatalog") {
-        return handle_device_catalog(request, server_tx_id);
-    } else if (match.management_endpoint == "thermalcameras") {
-        return handle_thermal_cameras(request, server_tx_id);
-    } else if (match.management_endpoint == "attachedcameras") {
-        return handle_attached_cameras(request, server_tx_id);
-    } else if (match.management_endpoint == "attacheddevices") {
-        return handle_attached_devices(request, server_tx_id);
-    } else if (match.management_endpoint == "networkadapters") {
-        return handle_network_adapters(request, server_tx_id);
-    } else if (match.management_endpoint == "configuredevice") {
-        return handle_configure_device(request, server_tx_id);
-    } else if (match.management_endpoint == "removedevice") {
-        return handle_remove_device(request, server_tx_id);
-    } else if (match.management_endpoint == "updatedevice") {
-        return handle_update_device(request, server_tx_id);
-    } else if (match.management_endpoint == "loglevel") {
-        return handle_log_level(request, server_tx_id);
-    } else if (match.management_endpoint == "logs") {
-        return handle_logs(request, server_tx_id);
-    } else if (match.management_endpoint == "logfiles") {
-        return handle_log_files_list(request, server_tx_id);
-    } else if (match.management_endpoint == "logfile") {
-        return handle_log_file_item(request, match.method_name, server_tx_id);
-    } else if (match.management_endpoint == "shutdown") {
-        return handle_shutdown(request, server_tx_id);
-    } else if (match.management_endpoint == "restart") {
-        return handle_restart(request, server_tx_id);
-    } else if (match.management_endpoint == "synctime") {
-        return handle_sync_time(request, server_tx_id);
-    } else if (match.management_endpoint == "wifi") {
-        return handle_wifi(request, match, server_tx_id);
-    } else if (match.management_endpoint == "update") {
-        return handle_software_update(request, match, server_tx_id);
+    const ManagementRoute& route = *match.management;
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    const bool accepted = route.wrong_verb == ManagementRoute::WrongVerb::None ||
+                          route.wrong_verb == ManagementRoute::WrongVerb::Handler ||
+                          (route.verbs & verb_bit(request.method())) != 0;
+    if (route.guard == ManagementRoute::Guard::BeforeVerbCheck ||
+        (route.guard == ManagementRoute::Guard::AfterVerbCheck && accepted)) {
+        if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, route.guard_what)) {
+            return *rejected;
+        }
+    }
+    if (accepted) {
+        return route.handler(*this, request, match, server_tx_id);
     }
 
     Response response;
-    AlpacaResponse alpaca_response = make_error_response(
-        0, server_tx_id,
-        util::ErrorCode::INVALID_VALUE,
-        "Unknown management endpoint"
-    );
-    response.set_body(alpaca_response);
+    if (route.wrong_verb == ManagementRoute::WrongVerb::AlpacaText) {
+        // Alpaca API Reference s2.5: a method the path does not define is a text message with HTTP 400 (#1508).
+        set_bad_request_text(response, route.wrong_verb_message);
+        return response;
+    }
+    // open-astro#674: a non-zero query-string ID wins over one in the body.
+    if (route.body_transaction_id && client_tx_id == 0 && !request.body().empty()) {
+        if (auto body = parse_json(request.body())) {
+            client_tx_id = extract_client_transaction_id(*body);
+        }
+    }
+    response.set_content_type("application/json");
+    response.set_body(
+        make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, route.wrong_verb_message));
+    response.set_status(405, "Method Not Allowed");
+    response.set_header("Allow", allow_header(route.verbs));
     return response;
 }
 
@@ -1771,21 +1786,6 @@ Response Router::handle_description(const Request& request, std::uint32_t server
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // PUT/POST here rewrites the server description and the
-    // SyncSystemClockFromClients opt-out, and that opt-out is what keeps a
-    // cross-origin clock step from being accepted at all -- so leaving this
-    // endpoint unguarded would have handed back the guard on synctime.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "server description")) {
-        return *rejected;
     }
 
     try {
@@ -2053,11 +2053,6 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                                ": enabled=" + (host_check_enabled_.load(std::memory_order_acquire) ? "true" : "false") +
                                ", allowed hosts='" + join_host_list(resulting_hosts) + "'");
             }
-        } else if (request.method() != HttpMethod::GET) {
-            // Alpaca API Reference s2.5: a method the path does not define is a
-            // text message with HTTP 400 (#1508).
-            set_wrong_verb_text(response, "description");
-            return response;
         }
 
         nlohmann::json desc = build_description_payload();
@@ -2095,12 +2090,6 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // #1486: the Management API defines this path for GET only.
-    if (request.method() != HttpMethod::GET) {
-        set_wrong_verb_text(response, "configureddevices");  // #1508: 400 + text, not 405
-        return response;
     }
 
     try {
@@ -2245,16 +2234,6 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for faileddevices endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
     }
 
     try {
@@ -2450,12 +2429,6 @@ void set_bad_request_text(Response& response, const std::string& message) {
     response.set_status(400, "Bad Request");
     response.set_content_type("text/plain");
     response.set_body(message);
-}
-
-void set_wrong_verb_text(Response& response, const char* what) {
-    response.set_status(400, "Bad Request");
-    response.set_content_type("text/plain");
-    response.set_body(std::string("Unsupported HTTP method for ") + what + " endpoint");
 }
 }  // namespace
 
@@ -3041,12 +3014,6 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // #1486: the Management API defines this path for GET only.
-    if (request.method() != HttpMethod::GET) {
-        set_wrong_verb_text(response, "apiversions");  // #1508: 400 + text, not 405
-        return response;
-    }
-
     try {
         // Alpaca API versions endpoint returns array of supported API versions
         // Currently only version 1 is defined
@@ -3110,16 +3077,6 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for devicecatalog endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
-    }
-
     try {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = catalog_json::describe_json(catalog_);
@@ -3145,16 +3102,6 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for thermalcameras endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
     }
 
     const std::string vendor = request.get_query_param("vendor");
@@ -3200,16 +3147,6 @@ Response Router::handle_attached_cameras(const Request& request, std::uint32_t s
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for attachedcameras endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
-    }
-
     const std::string vendor = request.get_query_param("vendor");
     try {
         const auto cameras = catalog_.list_cameras(vendor);
@@ -3248,16 +3185,6 @@ Response Router::handle_network_adapters(const Request& request, std::uint32_t s
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for networkadapters endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
     }
 
     // The vendor first: an unknown vendor is refused without claiming the one-search flag (#2542).
@@ -3331,16 +3258,6 @@ Response Router::handle_attached_devices(const Request& request, std::uint32_t s
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for attacheddevices endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
     }
 
     try {
@@ -3702,28 +3619,6 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // Rewrites persisted device configuration, which survives a restart.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device configuration")) {
-        return *rejected;
-    }
-
-    // Only allow POST or PUT requests
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "POST, PUT");
-        return response;
-    }
-
     try {
         // Parse JSON body
         nlohmann::json config;
@@ -3833,28 +3728,6 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // Removes a configured device, taking its persisted entry with it.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device removal")) {
-        return *rejected;
-    }
-
-    // Only allow POST or PUT requests
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "POST, PUT");
-        return response;
     }
 
     try {
@@ -3973,17 +3846,6 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    // open-astro#2057: rewrites persisted device config, so it takes the same guard as configuredevice.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device update")) {
-        return *rejected;
-    }
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                              "Method not allowed. Use POST or PUT."));
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "POST, PUT");
-        return response;
-    }
 
     const auto refuse = [&](const std::string& message) {
         response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, message));
@@ -4076,20 +3938,6 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // Changing verbosity is the quiet one: it is how evidence of any of the
-    // others gets turned down after the fact. GET is exempt, so the web UI's
-    // polling of the current level is unaffected.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log level")) {
-        return *rejected;
-    }
-
     auto send_payload = [&](std::uint32_t ctx_id) {
         AlpacaResponse alpaca_response(ctx_id, server_tx_id);
         alpaca_response.value = make_log_level_payload();
@@ -4102,90 +3950,67 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             return send_payload(client_tx_id);
         }
 
-        if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
-            if (request.body().empty()) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::VALUE_NOT_SET,
-                    "Missing request body"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            auto json_opt = parse_json(request.body());
-            if (!json_opt) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_VALUE,
-                    "Invalid JSON payload"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            const auto& body = *json_opt;
-            auto body_client_tx = extract_client_transaction_id(body);
-            if (body_client_tx != 0) {
-                client_tx_id = body_client_tx;
-            }
-
-            const nlohmann::json* level_node = nullptr;
-            if (body.contains("level")) {
-                level_node = &body["level"];
-            } else if (body.contains("Level")) {
-                level_node = &body["Level"];
-            }
-            if (level_node && !level_node->is_string()) {
-                AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                                         "'level' must be a string");
-                response.set_body(err);
-                return response;
-            }
-            std::string requested_level;
-            if (level_node) {
-                requested_level = level_node->get<std::string>();
-            } else {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include a 'level' property"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            auto parsed_level = util::parse_log_level_name(requested_level);
-            if (!parsed_level.has_value()) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_VALUE,
-                    "Unknown log level: " + requested_level
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            alpacacore::logging::set_log_level(*parsed_level);
-            try {
-                util::save_runtime_log_level(*parsed_level);
-            } catch (const std::exception& save_err) {
-                // Persistence is best-effort; failure must not block the API.
-                util::log_warning(std::string("Failed to persist log level: ") + log_what(save_err));
-            }
-            util::log_info("Log level set to " + log_level_to_string(*parsed_level));
-            return send_payload(client_tx_id);
+        // POST or PUT: the route table answers any other verb.
+        if (request.body().empty()) {
+            AlpacaResponse err =
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET, "Missing request body");
+            response.set_body(err);
+            return response;
         }
 
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Unsupported HTTP method for log level endpoint"
-        );
-        response.set_body(err);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET, POST, PUT");
-        return response;
+        auto json_opt = parse_json(request.body());
+        if (!json_opt) {
+            AlpacaResponse err =
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, "Invalid JSON payload");
+            response.set_body(err);
+            return response;
+        }
+
+        const auto& body = *json_opt;
+        auto body_client_tx = extract_client_transaction_id(body);
+        if (body_client_tx != 0) {
+            client_tx_id = body_client_tx;
+        }
+
+        const nlohmann::json* level_node = nullptr;
+        if (body.contains("level")) {
+            level_node = &body["level"];
+        } else if (body.contains("Level")) {
+            level_node = &body["Level"];
+        }
+        if (level_node && !level_node->is_string()) {
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                     "'level' must be a string");
+            response.set_body(err);
+            return response;
+        }
+        std::string requested_level;
+        if (level_node) {
+            requested_level = level_node->get<std::string>();
+        } else {
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
+                                                     "Request must include a 'level' property");
+            response.set_body(err);
+            return response;
+        }
+
+        auto parsed_level = util::parse_log_level_name(requested_level);
+        if (!parsed_level.has_value()) {
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                     "Unknown log level: " + requested_level);
+            response.set_body(err);
+            return response;
+        }
+
+        alpacacore::logging::set_log_level(*parsed_level);
+        try {
+            util::save_runtime_log_level(*parsed_level);
+        } catch (const std::exception& save_err) {
+            // Persistence is best-effort; failure must not block the API.
+            util::log_warning(std::string("Failed to persist log level: ") + log_what(save_err));
+        }
+        util::log_info("Log level set to " + log_level_to_string(*parsed_level));
+        return send_payload(client_tx_id);
     } catch (const std::exception& e) {
         AlpacaResponse err = make_error_response(
             client_tx_id, server_tx_id,
@@ -4203,19 +4028,6 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        response.set_content_type("application/json");
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Unsupported HTTP method for logs endpoint"
-        );
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET");
-        return response;
     }
 
     // Serve today's on-disk daily file. The in-memory history buffer was
@@ -4284,15 +4096,6 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.method() == HttpMethod::DELETE_) {
-        // Issue #348: the collection DELETE removes EVERY log file, which is
-        // the same evidence-removal shape as the per-file DELETE next to it
-        // and as turning the log level down. Guarding the per-file form and
-        // not this one would have been the accident the audit exists to
-        // remove. The web UI's deleteAllLogFiles() is same-origin, so this is
-        // a no-op for it; GET (the listing) stays exempt.
-        if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log files")) {
-            return *rejected;
-        }
         const auto files = util::list_log_files();
         const std::filesystem::path log_directory = util::get_log_directory();
         std::size_t deleted = 0;
@@ -4329,18 +4132,6 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             response.set_body(err);
             return response;
         }
-    }
-
-    if (request.method() != HttpMethod::GET) {
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_OPERATION,
-            "Unsupported HTTP method for log files endpoint"
-        );
-        response.set_body(err);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET, DELETE");
-        return response;
     }
 
     if (request.has_query_param("download")) {
@@ -4452,25 +4243,8 @@ Response Router::handle_log_file_item(const Request& request,
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // Issue #348: DELETE here destroys a log file, which is the same
-    // evidence-removal shape as turning the log level down. Placed before the
-    // filename validation so a cross-origin caller learns nothing about which
-    // names exist. GET is exempt, so the web UI's log viewer is unaffected.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log file")) {
-        return *rejected;
-    }
-
-    // A wrong verb is answered before the name is checked, so the answer does not depend on the name (#2484).
-    if (request.method() != HttpMethod::GET && request.method() != HttpMethod::DELETE_) {
-        response.set_content_type("application/json");
-        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                                 "Unsupported HTTP method for log file endpoint");
-        response.set_body(err);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET, DELETE");
-        return response;
-    }
-
+    // The route table answers a wrong verb before the name is checked, so the answer does not depend on the
+    // name (#2484).
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -4534,28 +4308,6 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // Stops the daemon. On a remote rig undoing this needs physical access.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "shutdown")) {
-        return *rejected;
-    }
-
-    // Only allow POST or PUT requests
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "POST, PUT");
-        return response;
     }
 
     std::function<void()> shutdown_callback;
@@ -4662,15 +4414,6 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         client_tx_id = extract_client_transaction_id(*body_json);
     }
 
-    // Since open-astro#291 a successful set has a second effect beyond the
-    // clock: it marks the host client-stepped, which suppresses the
-    // undisciplined-clock WARN on the next telescope connect. A cross-origin
-    // POST could otherwise move the clock by years *and* hide the log line
-    // that would have explained the resulting pointing error.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "time synchronisation")) {
-        return *rejected;
-    }
-
     // GET returns the server's current time (epoch seconds) without changing
     // anything — the web UI polls this to display a live server clock and to
     // detect drift against the browser's clock.
@@ -4691,17 +4434,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         return response;
     }
 
-    // Only POST or PUT may set the clock.
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Method not allowed. GET reads the server time; POST or PUT sets it.");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "GET, POST, PUT");
-        return response;
-    }
-
+    // POST or PUT sets the clock; the route table answers any other verb.
     // Parse the client's Unix epoch (seconds). Accept either {"Epoch": n} or
     // {"Value": n} for compatibility with the other management endpoints.
     std::int64_t epoch_seconds = -1;
@@ -4772,12 +4505,6 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // CSRF guard for state-changing operations (PR #198 follow-up). Same
-    // rejection the synctime endpoint uses; see reject_cross_origin_request().
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "WiFi management")) {
-        return *rejected;
     }
 
     const std::string& sub = match.method_name;
@@ -4934,12 +4661,6 @@ Response Router::handle_software_update(const Request& request, const RouteMatch
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // CSRF guard for the state-changing sub-endpoints (check fetches from
-    // the network, install starts the helper); GET status is exempt.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "software update")) {
-        return *rejected;
-    }
-
     auto fail = [&](std::int32_t code, const std::string& msg) {
         AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, code, msg);
         response.set_body(alpaca_response);
@@ -4997,28 +4718,6 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    // Issue #348: the whole management surface is unauthenticated under the
-    // documented trusted-LAN threat model, which is a deliberate stance; the
-    // point is that every state-changing endpoint should take that stance on
-    // purpose rather than differ by accident. A POST with Content-Type:
-    // text/plain is not preflighted and the handlers parse the body
-    // regardless of content type, so nothing on the browser side stops a
-    // drive-by request from reaching this.
-    // Restarts the daemon, dropping every connected client mid-session --
-    // an imaging run lost to a page the operator merely had open.
-    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "restart")) {
-        return *rejected;
-    }
-
-    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, "Method not allowed. Use POST or PUT.");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
-        response.set_header("Allow", "POST, PUT");
-        return response;
     }
 
     std::function<void()> restart_callback;

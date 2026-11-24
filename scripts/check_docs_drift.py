@@ -2698,7 +2698,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0003-docs-drift-gates.md": 1,
     "0005-task-clock.md": 4,
     "0006-async-operation-ownership.md": 0,
-    "0007-lan-surface-threat-model.md": 13,
+    "0007-lan-surface-threat-model.md": 12,
     "0009-link-loss-and-relink-policy.md": 0,
     "0011-cgx-logical-reference-continuity.md": 0,
     "0012-bundled-libgphoto2.md": 1,

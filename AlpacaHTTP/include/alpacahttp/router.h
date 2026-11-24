@@ -62,13 +62,16 @@ namespace alpacahttp {
 class DeviceCall;  // src/http/device_call.h: one Device API call, built per request
 class PersistedConfigStore;  // src/http/persisted_config_store.h: config/registered_devices.json
 class ClientConnectionLedger;  // src/http/client_connection_ledger.h: per-client Connected bookkeeping
+class Router;
+struct ManagementRoute;
 
 struct RouteMatch {
     std::string device_type;
     std::uint32_t device_number = 0;
+    // A device method, or the tail of a management path (logfiles/<name>, wifi/<sub>, update/<sub>).
     std::string method_name;
-    bool is_management = false;
-    std::string management_endpoint;
+    // open-astro#2485: the management route table row the path matched, null for a device path.
+    const ManagementRoute* management = nullptr;
     // #574: set when the path's device-number digits don't fit in a valid
     // uint32_t range (either overflowed to a wrapped value, or the digit
     // string itself overflowed even a 64-bit parse). device_type and
@@ -78,10 +81,54 @@ struct RouteMatch {
     bool device_number_invalid = false;
 };
 
+// open-astro#2485: one row of the management route table (Router::management_routes()). parse_route() matches
+// the path against it and handle_management() applies, in order: the origin guard when it runs before the verb
+// check, the verb check, the guard when it runs after it, then the handler.
+struct ManagementRoute {
+    static constexpr unsigned kVerbGet = 1U << 0;
+    static constexpr unsigned kVerbPost = 1U << 1;
+    static constexpr unsigned kVerbPut = 1U << 2;
+    static constexpr unsigned kVerbDelete = 1U << 3;
+    static constexpr unsigned kVerbOther = 1U << 4;  // a verb Request::parse_method does not know
+    static constexpr unsigned kEveryVerb = kVerbGet | kVerbPost | kVerbPut | kVerbDelete | kVerbOther;
+
+    // reject_cross_origin_request() (decision 0007). It passes every GET.
+    enum class Guard : std::uint8_t {
+        None,
+        BeforeVerbCheck,  // every request but a GET, a wrong verb included
+        AfterVerbCheck,   // an accepted verb only: the logfiles collection, where a wrong verb is answered 405
+    };
+    // The answer to a verb the route does not accept (decision 0007 rule 13).
+    enum class WrongVerb : std::uint8_t {
+        None,              // every verb reaches the handler (/api, buildinfo)
+        AlpacaText,        // an Alpaca-defined path: 400 with a text/plain message (#1508)
+        MethodNotAllowed,  // an AlpacaBridge-only path: 405, Allow and InvalidOperation (#2484)
+        Handler,           // sub-routed (wifi/*, update/*): the handler checks the verb per sub-path
+    };
+    using Handler = Response (*)(Router&, const Request&, const RouteMatch&, std::uint32_t server_tx_id);
+    // Matches a path with a tail and stores the tail; null for an exact path.
+    using TailMatcher = bool (*)(const std::string& path, std::string& tail);
+
+    const char* path;   // "/management/v1/<name>", or "/api"; a tail is written {name}
+    const char* alias;  // the unversioned spelling
+    TailMatcher tail;
+    unsigned verbs;
+    Guard guard;
+    const char* guard_what;  // names the route in the 403 message
+    WrongVerb wrong_verb;
+    const char* wrong_verb_message;
+    // open-astro#674: synctime echoes a ClientTransactionID sent only in the JSON body on every reply.
+    bool body_transaction_id;
+    Handler handler;
+};
+
 class Router {
 public:
     Router();
     ~Router();
+
+    // open-astro#2485: the management route table; public so test_route_table can walk it.
+    static const std::vector<ManagementRoute>& management_routes();
 
     // open-astro#664: a hook that adds descriptors to the catalog before
     // load_persisted_devices() runs, so a ConfigSource::Persisted device can

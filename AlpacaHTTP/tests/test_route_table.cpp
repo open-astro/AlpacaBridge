@@ -34,6 +34,11 @@
 //  D. Rejection fixture: exact HTTP status, Alpaca error number and message
 //     for a wrong verb, an unknown method, an out-of-range device number and a
 //     NaN parameter, as on origin/main c4640d6e.
+//  G. Management routes (#2485): Router::management_routes() equals
+//     kManagementFixture row by row, and for every row, both path spellings and
+//     five verbs, with and without a foreign Origin: a wrong verb gets its
+//     family's answer, every state-changing route refuses a cross-origin
+//     request with 403, and an accepted verb is never refused.
 //
 // The per-request cost check that used to be E is gone (#657): a wall-clock
 // ratio was coarse in Release. scripts/check_docs_drift.py check 14 now
@@ -108,14 +113,19 @@ struct Answer {
     int error_number = kNoEnvelope;
     std::string message;
     std::string content_type;
+    std::string allow;
+    unsigned client_tx_id = 0;
 };
 
-// No Origin header: a foreign Origin is answered 403 before the wrong-verb 400.
+// No Origin header unless `foreign_origin`: a foreign Origin is answered 403 before the wrong-verb 400.
 Answer send(alpacahttp::Router& router, const std::string& verb, const std::string& path,
-            const std::string& body = std::string()) {
+            const std::string& body = std::string(), bool foreign_origin = false) {
     alpacahttp::Request request;
     std::ostringstream raw;
     raw << verb << " " << path << " HTTP/1.1\r\nHost: localhost\r\n";
+    if (foreign_origin) {
+        raw << "Origin: http://evil.example\r\n";
+    }
     if (!body.empty()) {
         raw << "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " << body.size() << "\r\n";
     }
@@ -125,10 +135,12 @@ Answer send(alpacahttp::Router& router, const std::string& verb, const std::stri
     Answer answer;
     answer.status = response.status_code();
     answer.content_type = response.get_header("Content-Type");
+    answer.allow = response.get_header("Allow");
     const auto json = nlohmann::json::parse(response.body(), nullptr, false);
     if (json.is_object()) {
         answer.error_number = json.value("ErrorNumber", -1);
         answer.message = json.value("ErrorMessage", "");
+        answer.client_tx_id = json.value("ClientTransactionID", 0U);
     } else {
         answer.message = response.body();
     }
@@ -543,6 +555,226 @@ void check_type_names(alpacahttp::Router& router) {
     report("F type names", failures);
 }
 
+// G. The management surface, one row per route (#2485).
+using Guard = alpacahttp::ManagementRoute::Guard;
+using WrongVerb = alpacahttp::ManagementRoute::WrongVerb;
+
+constexpr unsigned kVerbGet = alpacahttp::ManagementRoute::kVerbGet;
+constexpr unsigned kVerbPost = alpacahttp::ManagementRoute::kVerbPost;
+constexpr unsigned kVerbPut = alpacahttp::ManagementRoute::kVerbPut;
+constexpr unsigned kVerbDelete = alpacahttp::ManagementRoute::kVerbDelete;
+constexpr unsigned kVerbOther = alpacahttp::ManagementRoute::kVerbOther;  // PATCH, which parse_method does not know
+constexpr unsigned kEveryVerb = alpacahttp::ManagementRoute::kEveryVerb;
+
+struct ManagementRow {
+    const char* path;   // a tail is written {name}; the probe replaces it with `tail`
+    const char* alias;  // the unversioned spelling
+    const char* tail;
+    unsigned verbs;
+    Guard guard;
+    const char* guard_what;
+    WrongVerb wrong_verb;
+    const char* wrong_verb_message;
+    unsigned safe_verbs;  // verbs the probe may send without an Origin: they change nothing here
+    // open-astro#674: the wrong-verb 405 echoes a ClientTransactionID sent only in the JSON body.
+    bool body_transaction_id = false;
+};
+
+constexpr const char* kPostPut = "Method not allowed. Use POST or PUT.";
+
+// clang-format off
+const std::vector<ManagementRow> kManagementFixture = {
+    {"/api", "/api/", nullptr, kEveryVerb, Guard::None, "", WrongVerb::None, "", kEveryVerb},
+    {"/management/v1/description", "/management/description", nullptr, kVerbGet | kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "server description", WrongVerb::AlpacaText,
+     "Unsupported HTTP method for description endpoint", kVerbGet | kVerbPost | kVerbPut},
+    {"/management/v1/apiversions", "/management/apiversions", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::AlpacaText, "Unsupported HTTP method for apiversions endpoint", kVerbGet},
+    {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kEveryVerb, Guard::None, "", WrongVerb::None, "",
+     kEveryVerb},
+    {"/management/v1/configureddevices", "/management/configureddevices", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::AlpacaText, "Unsupported HTTP method for configureddevices endpoint", kVerbGet},
+    {"/management/v1/faileddevices", "/management/faileddevices", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for faileddevices endpoint", kVerbGet},
+    {"/management/v1/devicecatalog", "/management/devicecatalog", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for devicecatalog endpoint", kVerbGet},
+    {"/management/v1/thermalcameras", "/management/thermalcameras", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for thermalcameras endpoint", kVerbGet},
+    {"/management/v1/attachedcameras", "/management/attachedcameras", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for attachedcameras endpoint", kVerbGet},
+    {"/management/v1/attacheddevices", "/management/attacheddevices", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for attacheddevices endpoint", kVerbGet},
+    {"/management/v1/networkadapters", "/management/networkadapters", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for networkadapters endpoint", kVerbGet},
+    {"/management/v1/configuredevice", "/management/configuredevice", nullptr, kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "device configuration", WrongVerb::MethodNotAllowed, kPostPut, kVerbPost | kVerbPut},
+    {"/management/v1/removedevice", "/management/removedevice", nullptr, kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "device removal", WrongVerb::MethodNotAllowed, kPostPut, kVerbPost | kVerbPut},
+    {"/management/v1/updatedevice", "/management/updatedevice", nullptr, kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "device update", WrongVerb::MethodNotAllowed, kPostPut, kVerbPost | kVerbPut},
+    {"/management/v1/loglevel", "/management/loglevel", nullptr, kVerbGet | kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "log level", WrongVerb::MethodNotAllowed,
+     "Unsupported HTTP method for log level endpoint", kVerbGet | kVerbPost | kVerbPut},
+    {"/management/v1/logs", "/management/logs", nullptr, kVerbGet, Guard::None, "", WrongVerb::MethodNotAllowed,
+     "Unsupported HTTP method for logs endpoint", kVerbGet},
+    // The collection DELETE removes every log file: never sent without an Origin.
+    {"/management/v1/logfiles", "/management/logfiles", nullptr, kVerbGet | kVerbDelete, Guard::AfterVerbCheck,
+     "log files", WrongVerb::MethodNotAllowed, "Unsupported HTTP method for log files endpoint", kVerbGet},
+    // An invalid file name: GET and DELETE are refused after the verb check.
+    {"/management/v1/logfiles/{name}", "/management/logfiles/{name}", "not-a-log-file", kVerbGet | kVerbDelete,
+     Guard::BeforeVerbCheck, "log file", WrongVerb::MethodNotAllowed, "Unsupported HTTP method for log file endpoint",
+     kVerbGet | kVerbDelete},
+    // No shutdown or restart callback is installed, and synctime refuses a missing Epoch.
+    {"/management/v1/shutdown", "/management/shutdown", nullptr, kVerbPost | kVerbPut, Guard::BeforeVerbCheck,
+     "shutdown", WrongVerb::MethodNotAllowed, kPostPut, kVerbPost | kVerbPut},
+    {"/management/v1/restart", "/management/restart", nullptr, kVerbPost | kVerbPut, Guard::BeforeVerbCheck,
+     "restart", WrongVerb::MethodNotAllowed, kPostPut, kVerbPost | kVerbPut},
+    {"/management/v1/synctime", "/management/synctime", nullptr, kVerbGet | kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "time synchronisation", WrongVerb::MethodNotAllowed,
+     "Method not allowed. GET reads the server time; POST or PUT sets it.", kVerbGet | kVerbPost | kVerbPut, true},
+    // Sub-routed: the handler checks the verb per sub-path (test_routing covers them). Only the guard is probed.
+    {"/management/v1/wifi/{sub}", "/management/wifi/{sub}", "status", kVerbGet | kVerbPost | kVerbPut | kVerbDelete,
+     Guard::BeforeVerbCheck, "WiFi management", WrongVerb::Handler, "", 0},
+    {"/management/v1/update/{sub}", "/management/update/{sub}", "check", kVerbGet | kVerbPost | kVerbPut,
+     Guard::BeforeVerbCheck, "software update", WrongVerb::Handler, "", 0},
+};
+// clang-format on
+
+// The Allow header of the 405 family: the accepted verbs in this order.
+std::string allow_list(unsigned verbs) {
+    std::string allow;
+    for (const auto& [bit, name] : {std::pair<unsigned, const char*>{kVerbGet, "GET"},
+                                    {kVerbPost, "POST"},
+                                    {kVerbPut, "PUT"},
+                                    {kVerbDelete, "DELETE"}}) {
+        if ((verbs & bit) != 0) {
+            allow += allow.empty() ? std::string(name) : std::string(", ") + name;
+        }
+    }
+    return allow;
+}
+
+std::string describe(const Answer& a) {
+    return "HTTP " + std::to_string(a.status) + " error " + std::to_string(a.error_number) + " type '" +
+           a.content_type + "' Allow '" + a.allow + "' '" + a.message + "'";
+}
+
+bool is_wrong_verb_answer(const Answer& a) {
+    return a.status == 405 || (a.status == 400 && a.content_type.find("text/plain") == 0 &&
+                               starts_with(a.message, "Unsupported HTTP method for "));
+}
+
+// Empty when `a` is the row's wrong-verb answer, else what was wanted.
+std::string wrong_verb_mismatch(const ManagementRow& row, const Answer& a) {
+    if (row.wrong_verb == WrongVerb::AlpacaText) {
+        // Alpaca API Reference s2.5 (#1508): 400 with a text message, no envelope.
+        if (a.status == 400 && a.error_number == kNoEnvelope && a.content_type.find("text/plain") == 0 &&
+            a.message == row.wrong_verb_message && a.allow.empty()) {
+            return "";
+        }
+        return "want 400 text/plain '" + std::string(row.wrong_verb_message) + "'";
+    }
+    // The AlpacaBridge-only paths (#2484): 405 with Allow and InvalidOperation.
+    if (a.status == 405 && a.error_number == alpacacore::AlpacaError::InvalidOperation &&
+        a.content_type.find("application/json") == 0 && a.message == row.wrong_verb_message &&
+        a.allow == allow_list(row.verbs)) {
+        return "";
+    }
+    return "want 405 Allow '" + allow_list(row.verbs) + "' InvalidOperation '" + row.wrong_verb_message + "'";
+}
+
+void check_management_routes(alpacahttp::Router& router) {
+    std::vector<std::string> failures;
+    std::size_t probes = 0;
+    const std::vector<std::pair<std::string, unsigned>> verbs = {
+        {"GET", kVerbGet}, {"POST", kVerbPost}, {"PUT", kVerbPut}, {"DELETE", kVerbDelete}, {"PATCH", kVerbOther}};
+    for (const ManagementRow& row : kManagementFixture) {
+        // A route that accepts a verb other than GET changes state, so it is guarded. The WrongVerb::None rows
+        // (/api and buildinfo) answer every verb alike and change nothing.
+        if (row.wrong_verb != WrongVerb::None && (row.verbs & ~kVerbGet) != 0 && row.guard == Guard::None) {
+            failures.push_back(std::string(row.path) + ": accepts a state-changing verb with no origin guard");
+        }
+        const std::string guard_message = "Cross-origin " + std::string(row.guard_what) + " requests are not allowed";
+        for (const char* spelling : {row.path, row.alias}) {
+            std::string path(spelling);
+            if (row.tail != nullptr) {
+                path = path.substr(0, path.find('{')) + row.tail;
+            }
+            for (const auto& [verb, bit] : verbs) {
+                const bool accepted = (row.verbs & bit) != 0;
+                const bool safe = (row.safe_verbs & bit) != 0;
+                const std::string where = verb + " " + path;
+
+                // No Origin: a wrong verb gets the family's answer, an accepted one reaches the handler.
+                if (row.wrong_verb != WrongVerb::Handler && (!accepted || safe)) {
+                    // A wrong verb carries a body ID, which only a body_transaction_id row echoes.
+                    const Answer a = send(router, verb, path, accepted ? "" : R"({"ClientTransactionID": 4242})");
+                    ++probes;
+                    if (!accepted) {
+                        if (const std::string why = wrong_verb_mismatch(row, a); !why.empty()) {
+                            failures.push_back(where + ": " + describe(a) + ", " + why);
+                        }
+                        const unsigned echoed = row.body_transaction_id ? 4242U : 0U;
+                        if (row.wrong_verb == WrongVerb::MethodNotAllowed && a.client_tx_id != echoed) {
+                            failures.push_back(where + ": ClientTransactionID " + std::to_string(a.client_tx_id) +
+                                               ", want " + std::to_string(echoed));
+                        }
+                    } else if (a.status == 403 || is_wrong_verb_answer(a)) {
+                        failures.push_back(where + ": accepted verb refused, " + describe(a));
+                    }
+                }
+
+                // A foreign Origin. The guard passes every GET.
+                const bool guarded = bit != kVerbGet && (row.guard == Guard::BeforeVerbCheck ||
+                                                         (row.guard == Guard::AfterVerbCheck && accepted));
+                if (!guarded && (row.wrong_verb == WrongVerb::Handler || (accepted && !safe))) {
+                    continue;
+                }
+                const Answer a = send(router, verb, path, std::string(), true);
+                ++probes;
+                if (guarded) {
+                    if (a.status != 403 || a.error_number != kInvalidValue || a.message != guard_message) {
+                        failures.push_back(where + " cross-origin: " + describe(a) + ", want 403 '" + guard_message +
+                                           "'");
+                    }
+                } else if (!accepted) {
+                    if (const std::string why = wrong_verb_mismatch(row, a); !why.empty()) {
+                        failures.push_back(where + " cross-origin: " + describe(a) + ", " + why);
+                    }
+                } else if (a.status == 403 || is_wrong_verb_answer(a)) {
+                    failures.push_back(where + " cross-origin: accepted verb refused, " + describe(a));
+                }
+            }
+        }
+    }
+    std::cout << "G: " << probes << " probes over " << kManagementFixture.size() << " management routes\n";
+    report("G management routes", failures);
+}
+
+// G. The router's own table vs the fixture, row by row, so a row the probes cannot name (a new route) fails too.
+// The table is a C++ value, read through Router::management_routes(); no source scan is needed.
+void check_management_table() {
+    const auto& table = alpacahttp::Router::management_routes();
+    std::vector<std::string> failures;
+    if (table.size() != kManagementFixture.size()) {
+        failures.push_back("router table has " + std::to_string(table.size()) + " rows, fixture " +
+                           std::to_string(kManagementFixture.size()));
+    }
+    for (std::size_t i = 0; i < std::min(table.size(), kManagementFixture.size()); ++i) {
+        const alpacahttp::ManagementRoute& route = table[i];
+        const ManagementRow& row = kManagementFixture[i];
+        if (std::string(route.path) != row.path || std::string(route.alias) != row.alias ||
+            (route.tail != nullptr) != (row.tail != nullptr) || route.verbs != row.verbs || route.guard != row.guard ||
+            std::string(route.guard_what) != row.guard_what || route.wrong_verb != row.wrong_verb ||
+            std::string(route.wrong_verb_message) != row.wrong_verb_message ||
+            route.body_transaction_id != row.body_transaction_id || route.handler == nullptr) {
+            failures.push_back("row " + std::to_string(i) + " (" + route.path + ") differs from the fixture (" +
+                               row.path + ")");
+        }
+    }
+    report("G management table", failures);
+}
+
 }  // namespace
 
 int main() {
@@ -551,6 +783,11 @@ int main() {
     check_type_names(router);
     check_route_table(router);
     check_source_tables();
+    {
+        // case: every management route answers a wrong verb per its family and refuses a cross-origin write (#2485)
+        check_management_table();
+        check_management_routes(router);
+    }
 
     auto& registry = alpacacore::management::DeviceRegistry::instance();
     const auto stubs = make_stubs();
