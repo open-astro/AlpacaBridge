@@ -313,7 +313,7 @@ TEST_CASE("OnStep snapshot - a write is read back at once and a poll that sample
     // A GOTO start reads as Slewing past its grace, though the fake still answers no GOTO, until a tick says so.
     rig.driver->set_tracking(true);
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.clock.advance(seconds(3));  // past the 2 s slew grace; the poll is paused, so no tick runs
     CHECK(rig.driver->get_slewing());
     REQUIRE(rig.tick());
@@ -450,9 +450,9 @@ TEST_CASE(
     Rig rig;
     rig.connect();
     rig.pause();
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
-    rig.mount->set_status("nNpEW180#");                // the GOTO ended with tracking off
-    rig.clock.advance(seconds(3));                     // past the slew grace
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);  // starts with tracking on: a restore is owed
+    rig.mount->set_status("nNpEW180#");                 // the GOTO ended with tracking off
+    rig.clock.advance(seconds(3));                      // past the slew grace
 
     SECTION("the tick that reads the end restores it") {
         REQUIRE(rig.tick());
@@ -492,7 +492,7 @@ TEST_CASE("OnStep snapshot - a poll body cancelled mid-sample sends no tracking 
     Rig rig(/*with_site=*/true, /*response_timeout_ms=*/20000);  // the held :GU# must not time out
     rig.connect();
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));  // the poll body parks for its first tick
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);    // starts with tracking on: a restore is owed
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);   // starts with tracking on: a restore is owed
     rig.mount->set_status("nNpEW180#");                  // the GOTO ended with tracking off
     const auto polls = rig.mount->count(":GU#");
     rig.mount->block_status = true;
@@ -702,9 +702,9 @@ TEST_CASE("OnStep snapshot - a pulse-end body superseded by a newer PulseGuide s
     Rig rig;
     rig.connect();
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
-    rig.mount->set_status("npEW180#");                 // the GOTO runs, tracking off: the poll ticks restore nothing
-    rig.clock.advance(seconds(3));                     // past the slew grace
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);  // starts with tracking on: a restore is owed
+    rig.mount->set_status("npEW180#");                  // the GOTO runs, tracking off: the poll ticks restore nothing
+    rig.clock.advance(seconds(3));                      // past the slew grace
     REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
     const auto waits = rig.clock.wait_count();
     rig.driver->pulse_guide(2, 500);  // the old pulse-end body waits 550 ms
@@ -743,7 +743,7 @@ TEST_CASE("OnStep snapshot - Slewing is true as soon as SlewToCoordinatesAsync r
     rig.mount->set_on_command([&](const std::string& chunk) {
         if (chunk.rfind(":MS", 0) == 0) during = rig.driver->get_slewing() ? 1 : 0;
     });
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.mount->set_on_command(nullptr);
     CHECK(during.load() == 1);
     CHECK(rig.driver->get_slewing());
@@ -769,7 +769,7 @@ TEST_CASE("OnStep snapshot - a synchronous slew that lands inside the grace retu
         }
     });
     const auto start = rig.clock.now();
-    REQUIRE_NOTHROW(synchronous_slew(rig, 2.0, 20.0));
+    REQUIRE_NOTHROW(synchronous_slew(rig, 12.0, 45.0));
     const auto elapsed = rig.clock.now() - start;
     CHECK(elapsed < seconds(2));
     CHECK_FALSE(rig.driver->get_slewing());
@@ -782,7 +782,7 @@ TEST_CASE("OnStep snapshot - AbortSlew inside the hold clears Slewing at once",
     rig.connect();
     rig.pause();
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.driver->get_slewing());
     rig.driver->abort_slew();
     CHECK_FALSE(rig.driver->get_slewing());
@@ -797,7 +797,7 @@ TEST_CASE("OnStep snapshot - a reconnect inside the hold leaves Slewing false",
     rig.connect();
     rig.pause();
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.driver->get_slewing());
     rig.driver->set_connected(false);
     rig.connect();
@@ -851,7 +851,7 @@ TEST_CASE("OnStep snapshot - a reading taken before the :MS# answer does not end
     std::atomic<int> calls{0};
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
         if (calls.fetch_add(1) != 0) return;
-        rig.driver->slew_to_coordinates_async(2.0, 20.0);  // tracking on: a restore is owed at the end
+        rig.driver->slew_to_coordinates_async(12.0, 45.0);  // tracking on: a restore is owed at the end
     });
     REQUIRE(rig.tick());  // sampled "no GOTO" before the :MS#
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
@@ -872,7 +872,7 @@ TEST_CASE("OnStep snapshot - a short goto reports landed before the 2 s hold end
     Rig rig;
     rig.connect();
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.mount->set_status("npEW180#");  // the GOTO runs
     REQUIRE(rig.driver->get_slewing());
     rig.clock.advance(milliseconds(500));
@@ -1114,7 +1114,7 @@ TEST_CASE("OnStep snapshot - a GOTO whose :MS# send fails leaves Slewing false a
     rig.pause();
     rig.mount->set_status("NpEW180#");  // tracking, no GOTO
     rig.mount->overlong_goto = true;
-    CHECK(error_of([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); }) ==
+    CHECK(error_of([&] { rig.driver->slew_to_coordinates_async(12.0, 45.0); }) ==
           alpacacore::AlpacaError::DriverException);
     REQUIRE(rig.mount->count(":MS") == 1);
     CHECK_FALSE(rig.driver->get_slewing());
