@@ -2028,7 +2028,9 @@ SiteInfo ZWOMountProtocolWrapper::get_site_info() {
     return info;
 }
 
-void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
+namespace {
+
+std::string site_info_command(const SiteInfo& info) {
     if (!std::isfinite(info.latitude_degrees) || info.latitude_degrees < -90.0 || info.latitude_degrees > 90.0) {
         throw AlpacaException("Latitude must be in [-90,+90]", AlpacaError::InvalidValue);
     }
@@ -2038,12 +2040,33 @@ void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
 
     const std::string lat = format_angle_star(info.latitude_degrees, 2);
     const std::string lon = format_angle_star(-info.longitude_degrees, 3);
+    return ":SMGE" + lat + "&" + lon;
+}
 
-    const std::string response = trim_copy(send_command(":SMGE" + lat + "&" + lon, false));
+void check_site_info_reply(const std::string& response) {
     throw_if_mount_error(response, ":SMGE");
     if (!response.empty() && response[0] != '1') {
         throw AlpacaException("Failed to set site coordinates", AlpacaError::InvalidOperation);
     }
+}
+
+}  // namespace
+
+void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
+    check_site_info_reply(trim_copy(send_command(site_info_command(info), false)));
+}
+
+bool ZWOMountProtocolWrapper::set_site_info_if(const std::function<std::optional<SiteInfo>()>& decide) {
+    const auto response = pimpl_->send_built_command(
+        [&]() -> std::optional<std::string> {
+            const auto info = decide();
+            if (!info) return std::nullopt;
+            return site_info_command(*info);
+        },
+        false);
+    if (!response) return false;
+    check_site_info_reply(trim_copy(*response));
+    return true;
 }
 
 TimeInfo ZWOMountProtocolWrapper::get_time_info() {
