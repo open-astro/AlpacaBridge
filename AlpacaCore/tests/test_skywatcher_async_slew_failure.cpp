@@ -688,8 +688,8 @@ TEST_CASE("SkyWatcher async - an AbortSlew whose stop check does not start raise
     driver->set_connected(false);
 }
 
-// open-astro#2407 (maintainer decision 2026-11-24): a Sync more than util::kMaxSyncOffsetDegrees from where the
-// mount points is refused (InvalidValue), and writes nothing. A Sky-Watcher board has no sky reference at power-up,
+// open-astro#2407 (the issue's Decisions, 2026-11-24): a Sync more than util::kMaxSyncOffsetDegrees from where
+// the mount points is refused (InvalidValue), and writes nothing. A Sky-Watcher board has no sky reference at power-up,
 // so the first Sync after each Connect is exempt: it sets the reference.
 namespace {
 
