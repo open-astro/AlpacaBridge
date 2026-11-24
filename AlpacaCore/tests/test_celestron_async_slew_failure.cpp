@@ -105,6 +105,7 @@ struct FakeCelestronState {
     std::atomic<bool> unsettled{false};         // every position read is 40 arcsec further in RA: never still
     std::atomic<int> drift_reads{0};
     std::atomic<bool> reject_positions{false};  // every position read goes unanswered
+    std::atomic<bool> aligned{true};            // what the hand controller's alignment query ('J') answers
     std::atomic<bool> hold_home{false};         // MC_LEVEL_DONE answers "not done" while set
     std::atomic<int> goto_count_at_write{-1};   // goto_count when the last site ('W') or time ('H') write arrived
     alpacacore::test::CelestronLanding landing;
@@ -219,7 +220,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shar
                 st->goto_cancelled.store(true);
                 return "#";
             case 'J':  // alignment complete (the slew-safety gate requires it)
-                return "1#";
+                return st->aligned.load() ? "1#" : "0#";
             case 'p':  // pier side used by the DEC guide command
                 return "W#";
             case 't':  // tracking mode query
@@ -2141,6 +2142,79 @@ TEST_CASE("Celestron sync slew - a failed landing read fails the slew and Slewin
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("Slew completion handling failed") != std::string::npos);
     CHECK(st->cancel_goto_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// #2409 (review): a mount with no reference at power-up (no hand controller, so arbitrary motor counts, or a hand
+// controller that reports itself unaligned) cannot slew until a Sync opens the slew-safety gate, so its first Sync of
+// the session is not bounded: it sets the reference. Every later Sync, and every Sync of an aligned hand controller,
+// is bounded. The fake reports RA 1.75 h, Dec +45 deg; (3.75 h, +15 deg) is about 38 deg away, (1.75 h, +15 deg) 30.
+namespace {
+int motor_sync_count(FakeCelestronState& st) {  // MC_SET_POSITION (0x04) on either motor
+    std::lock_guard<std::mutex> lock(st.command_mutex);
+    return static_cast<int>(std::count_if(st.commands.begin(), st.commands.end(), [](const std::string& c) {
+        return c.size() >= 4 && c[0] == 'P' && static_cast<unsigned char>(c[3]) == 0x04;
+    }));
+}
+}  // namespace
+
+TEST_CASE("Celestron Sync - with no hand controller the first Sync is not bounded and a slew then works",
+          "[celestron][telescope][async][goto-safety]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    st->firmware_major.store(0);
+    st->firmware_minor.store(0);  // no usable HC: the Sync writes the motor positions
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(3.75, 15.0));
+    CHECK(motor_sync_count(*st) == 2);
+    CHECK_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Sync - on an unaligned hand controller the first Sync is not bounded and a slew then works",
+          "[celestron][telescope][async][goto-safety]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    st->aligned.store(false);
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    using alpacacore::test::require_alpaca_error;
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);  // no reference yet: the gate refuses
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(3.75, 15.0));
+    CHECK(st->command_count('s') + st->command_count('S') == 1);
+    CHECK_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Sync - an aligned hand controller bounds even its first Sync",
+          "[celestron][telescope][async][goto-safety]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    using alpacacore::test::require_alpaca_error;
+    require_alpaca_error([&] { driver->sync_to_coordinates(3.75, 15.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(st->command_count('s') + st->command_count('S') == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Sync - after the unbounded first Sync of an unaligned mount the next Sync is bounded",
+          "[celestron][telescope][async][goto-safety]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    st->aligned.store(false);
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    using alpacacore::test::require_alpaca_error;
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(3.75, 15.0));
+    require_alpaca_error([&] { driver->sync_to_coordinates(1.75, 15.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(st->command_count('s') + st->command_count('S') == 1);
     driver->set_connected(false);
 }
 
