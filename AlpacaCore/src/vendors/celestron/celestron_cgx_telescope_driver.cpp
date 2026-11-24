@@ -78,6 +78,12 @@ constexpr int kMaxSlewCorrections = 3;
 // corrections kept within about 0.5" (7 counts); 2000 counts leaves room for an unmeasured approach overshoot and
 // still stops a wrong-way FAST leg at its second 200 ms poll.
 constexpr std::int32_t kGotoWrongWayCounts = 2000;
+// How far an axis may coast away from a new GOTO target before it turns, when the GOTO is sent while a slew, Park or
+// FindHome still drives the axes (a retarget): 5 degrees. The controller cannot reverse an axis at once, and failure
+// 0014 recorded Dec coasting 2.4 degrees in about 1.26 s while it decelerated from full rate. Until the axis first
+// closes on the new target its distance may grow this much past its first read; from then on kGotoWrongWayCounts
+// applies past the farthest point of the coast.
+constexpr std::int32_t kGotoCoastCounts = static_cast<std::int32_t>(kCgxEncoderStepsPerRevolution / 72);
 // The most a correction is aimed ahead of the sky (#2541). The lead is the previous correction's aim-to-tracking time,
 // travel included, so a long correction would aim the next, short one far past its target. A short correction over
 // WiFi read its arrival 140-270 ms after the aim (rig 2026-11-21), so this leaves those leads unchanged.
@@ -583,8 +589,10 @@ private:
     std::string home_axes_status();
     void log_home_wait(std::chrono::steady_clock::time_point& next_log);
     void start_slew_operation(double ra, double dec);
+    // `axes_may_coast`: the GOTO was sent while a slew, Park or FindHome still drove the axes (#2640).
     void run_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
-                            CgxPointingSide destination_side, std::pair<std::uint32_t, std::uint32_t> positions);
+                            CgxPointingSide destination_side, std::pair<std::uint32_t, std::uint32_t> positions,
+                            bool axes_may_coast);
     void run_flip_slew_operation(util::OperationContext& context, const util::MotionClaim& claim, double ra, double dec,
                                  CgxPointingSide destination_side);
     // The home searches of a FindHome, Park or meridian home route, per axis (RA, Dec): when the current search
@@ -643,14 +651,16 @@ private:
     bool finish_slew_operation(util::OperationContext& context, const util::MotionClaim& claim,
                                util::TaskClock::clock::time_point deadline, double right_ascension_hours,
                                double declination_degrees, CgxPointingSide pointing_side, GotoTargets first_leg,
-                               const char* timeout_message);
+                               const char* timeout_message, bool first_leg_may_coast = false);
     // Waits for both axes to report the leg done. Each poll reads the position of every axis of `targets` still
     // moving: one whose shorter-way distance to its target has grown more than kGotoWrongWayCounts past the distance
     // at its first read went the wrong way (#2640), and this throws DriverException; the caller's catch stops it.
+    // With `may_coast` (a GOTO sent while the axes still moved) an axis may first coast kGotoCoastCounts away.
     bool wait_for_slew_completion(util::OperationContext& context, const util::MotionClaim& claim,
                                   util::TaskClock::clock::time_point deadline, const char* timeout_message,
                                   const GotoTargets& targets,
-                                  std::chrono::milliseconds poll_interval = std::chrono::milliseconds(200));
+                                  std::chrono::milliseconds poll_interval = std::chrono::milliseconds(200),
+                                  bool may_coast = false);
     bool wait_for_slew_settle(util::OperationContext& context) const;
     void require_site_change_allowed_locked() const;
     void set_tracking_rate_locked(int rate, std::unique_lock<std::mutex>& lock);
@@ -1556,8 +1566,15 @@ bool CelestronCgxTelescopeDriver::wait_for_slew_completion(util::OperationContex
                                                            const util::MotionClaim& claim,
                                                            util::TaskClock::clock::time_point deadline,
                                                            const char* timeout_message, const GotoTargets& targets,
-                                                           std::chrono::milliseconds poll_interval) {
-    std::array<std::optional<std::int32_t>, 2> start_distance;
+                                                           std::chrono::milliseconds poll_interval, bool may_coast) {
+    // Per axis: the distance at the first read, the distance the limit counts from (the first read, then the farthest
+    // point of a coast), and whether the axis has closed on its target yet.
+    struct Watch {
+        std::optional<std::int32_t> first;
+        std::int32_t base = 0;
+        bool closing = false;
+    };
+    std::array<Watch, 2> watch;
     while (true) {
         const auto reason = motion_stop_reason(context, claim);
         if (reason != util::StopReason::None) {
@@ -1576,14 +1593,25 @@ bool CelestronCgxTelescopeDriver::wait_for_slew_completion(util::OperationContex
             if (done || !target.has_value()) continue;
             const std::int32_t distance =
                 std::abs(signed_cgx_encoder_delta(protocol_.get_axis_position(axis), target.value()));
-            const std::int32_t start = start_distance[index].value_or(distance);
-            start_distance[index] = start;
-            if (distance > start + kGotoWrongWayCounts) {
+            Watch& axis_watch = watch[index];
+            if (!axis_watch.first.has_value()) {
+                axis_watch.first = distance;
+                axis_watch.base = distance;
+                axis_watch.closing = !may_coast;
+            } else if (!axis_watch.closing) {
+                if (distance < axis_watch.base)
+                    axis_watch.closing = true;
+                else
+                    axis_watch.base = distance;
+            }
+            const std::int32_t limit = axis_watch.closing ? axis_watch.base + kGotoWrongWayCounts
+                                                          : axis_watch.first.value_or(distance) + kGotoCoastCounts;
+            if (distance > limit) {
                 const std::string message =
                     std::string("Celestron CGX ") + (index == 0 ? "RA" : "Dec") +
-                    " moved away from its GOTO target: " + std::to_string(distance) + " counts from it, " +
-                    std::to_string(start) +
-                    " at the start of the leg; the controller took the long way round, so the mount was stopped";
+                    " moved away from its GOTO target: " + std::to_string(distance) + " counts from it, past the " +
+                    std::to_string(limit) + " allowed (" + std::to_string(axis_watch.first.value_or(distance)) +
+                    " at the start of the leg); the controller took the long way round, so the mount was stopped";
                 ALPACA_LOG_ERROR("Celestron CGX", message);
                 throw AlpacaException(message, AlpacaError::DriverException);
             }
@@ -1598,7 +1626,7 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                                                         util::TaskClock::clock::time_point deadline,
                                                         double right_ascension_hours, double declination_degrees,
                                                         CgxPointingSide pointing_side, GotoTargets first_leg,
-                                                        const char* timeout_message) {
+                                                        const char* timeout_message, bool first_leg_may_coast) {
     // The mount stands untracked from the moment a correction is aimed until it tracks, and the sky moves on: over WiFi
     // (~21 ms an exchange) the check read came 140-270 ms, 2-4", after the aim (rig 2026-11-21). So each leg starts
     // tracking as it lands, before the check reads it, and each correction is aimed at the sky that far ahead: its
@@ -1610,7 +1638,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
     GotoTargets leg = first_leg;
     while (true) {
         if (!wait_for_slew_completion(context, claim, deadline, timeout_message, leg,
-                                      std::chrono::milliseconds(corrections == 0 ? 200 : 20)))
+                                      std::chrono::milliseconds(corrections == 0 ? 200 : 20),
+                                      corrections == 0 && first_leg_may_coast))
             return false;
         bool arrived = false;
         if (!run_motion_stage(context, claim, [&] {
@@ -2706,6 +2735,7 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     CgxHemisphere hemisphere;
     double latitude;
     bool needs_home_route;
+    bool axes_may_coast = false;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (parked_) throw AlpacaException("Cannot slew while parked", AlpacaError::InvalidWhileParked);
@@ -2750,7 +2780,9 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
         // and so does the owner of a slew in flight: the claim comes after it.
         // A retarget finds Tracking already off and sends nothing here.
         if (tracking_) set_tracking_locked(false, lock);
-        // Both axes (#2263): a slew in flight is superseded; its body sends nothing more.
+        // Both axes (#2263): a slew in flight is superseded; its body sends nothing more. Read before the claim: a
+        // slew, Park or FindHome still running may leave the axes coasting into the new GOTO (#2640).
+        axes_may_coast = motion_owner_.slew_running();
         claim = motion_owner_.claim(util::MotionCommand::Slew);
         at_home_ = false;
         parked_ = false;
@@ -2775,14 +2807,15 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
             target_dec_degrees_ = dec;
             target_ra_set_ = target_dec_set_ = true;
         }
-        motion_slot_.start([this, claim, ra, dec, side, needs_home_route, positions](util::OperationContext& context) {
-            const SlewClaimEnd end(*this, claim);
-            if (needs_home_route) {
-                run_flip_slew_operation(context, claim, ra, dec, side);
-            } else {
-                run_slew_operation(context, claim, ra, dec, side, positions);
-            }
-        });
+        motion_slot_.start(
+            [this, claim, ra, dec, side, needs_home_route, positions, axes_may_coast](util::OperationContext& context) {
+                const SlewClaimEnd end(*this, claim);
+                if (needs_home_route) {
+                    run_flip_slew_operation(context, claim, ra, dec, side);
+                } else {
+                    run_slew_operation(context, claim, ra, dec, side, positions, axes_may_coast);
+                }
+            });
         stop_slot_.clear_failure();
     } catch (...) {
         finish_slew_claim(claim);
@@ -2829,11 +2862,13 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
 
 void CelestronCgxTelescopeDriver::run_slew_operation(util::OperationContext& context, const util::MotionClaim& claim,
                                                      double ra, double dec, CgxPointingSide destination_side,
-                                                     std::pair<std::uint32_t, std::uint32_t> positions) {
+                                                     std::pair<std::uint32_t, std::uint32_t> positions,
+                                                     bool axes_may_coast) {
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     try {
         static_cast<void>(finish_slew_operation(context, claim, deadline, ra, dec, destination_side,
-                                                {positions.first, positions.second}, "Celestron CGX slew timed out"));
+                                                {positions.first, positions.second}, "Celestron CGX slew timed out",
+                                                axes_may_coast));
     } catch (...) {
         if (superseded(context, claim)) {
             log_superseded_failure("Slew", std::current_exception());

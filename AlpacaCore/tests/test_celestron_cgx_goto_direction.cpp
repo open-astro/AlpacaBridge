@@ -47,6 +47,8 @@ constexpr double kLatitude = 30.0;  // generic northern site
 constexpr std::uint32_t kDecHome = cgx::kCgxEncoderStepsPerRevolution / 2;
 // The driver's wrong-way bound (kGotoWrongWayCounts), in encoder counts.
 constexpr std::int32_t kWrongWayBound = 2000;
+// The driver's coast allowance for a retarget (kGotoCoastCounts): 5 degrees.
+constexpr std::int32_t kCoastBound = static_cast<std::int32_t>(cgx::kCgxEncoderStepsPerRevolution / 72);
 constexpr std::uint32_t kFast = 1000000;  // counts per second, ~21 deg/s: a long leg ends in a few simulated seconds
 
 std::uint32_t counts(double degrees) { return cgx::encode_cgx_encoder_degrees(degrees); }
@@ -116,6 +118,11 @@ struct DirectionRig {
     }
     bool stopped_away() const { return failure.find("moved away from its GOTO target") != std::string::npos; }
     std::int32_t dec_from_home() const { return cgx::signed_cgx_encoder_delta(mount.axis_position(kDec), kDecHome); }
+    // Moves Dec so its label reads `offset` counts from home (the label is the physical position plus the home offset).
+    void set_dec_from_home(std::uint32_t offset) {
+        mount.set_physical_position(kDec,
+                                    mount.axis_physical_position(kDec) + kDecHome + offset - mount.axis_position(kDec));
+    }
     int count(std::uint8_t axis, std::uint8_t command) const { return mount.count_command(axis, command); }
 };
 
@@ -204,4 +211,60 @@ TEST_CASE("Celestron CGX GOTO direction - a SLOW correction driven the long way 
     CHECK(cgx::signed_cgx_encoder_delta(rig.mount.axis_position(kDec), target) < 0);
     CHECK(cgx::signed_cgx_encoder_delta(rig.mount.axis_position(kDec), target) >
           -static_cast<std::int32_t>(counts(5.0)));
+}
+
+TEST_CASE("Celestron CGX GOTO direction - a retarget may coast away from its new target before it turns",
+          "[celestron][cgx][telescope][goto-direction]") {
+    DirectionRig rig;
+    // The fake turns an axis at once; the controller cannot. Dec holds unless the case moves it, so each section moves
+    // it as a decelerating axis would, one poll at a time.
+    rig.mount.set_axis_velocity_counts_per_second(kDec, 1);
+    rig.slew(0.5, 30.0);  // slew A: Dec +60 degrees from home
+    REQUIRE(rig.drive([&] { return rig.count(kDec, 0x02) == 1; }));
+    REQUIRE(rig.clock.wait_for_waiters(1, 2s));
+    // A is in flight, 40 degrees up and still climbing, when slew B retargets it 20 degrees back (+20 from home).
+    rig.set_dec_from_home(counts(40.0));
+    rig.slew(0.5, 70.0);
+    REQUIRE(rig.count(kDec, 0x02) == 2);
+    // B's first poll takes its distance. The clock's waiter may still be A's superseded body, so wait for the read.
+    const int planned = rig.count(kDec, 0x01);
+    REQUIRE(rig.drive([&] { return rig.count(kDec, 0x01) > planned; }));
+    const auto at_next_poll = [&](std::uint32_t dec_from_home) {
+        rig.set_dec_from_home(dec_from_home);
+        const int reads = rig.count(kDec, 0x01);
+        return rig.drive([&] { return rig.count(kDec, 0x01) > reads || rig.ended(); });
+    };
+    const auto lands = [&] {
+        rig.mount.set_axis_velocity_counts_per_second(kDec, kFast);
+        REQUIRE(rig.drive([&] { return rig.ended(); }));
+        INFO("failure: " << rig.failure);
+        CHECK(rig.failure.empty());
+        CHECK(rig.dec_from_home() == static_cast<std::int32_t>(counts(20.0)));
+    };
+
+    SECTION("a 2.4 degree coast, as failure 0014 recorded from full rate: the slew lands") {
+        REQUIRE(at_next_poll(counts(41.2)));
+        REQUIRE(at_next_poll(counts(42.4)));
+        lands();
+    }
+    SECTION("a coast past the allowance: the slew is stopped") {
+        REQUIRE(at_next_poll(counts(40.0) + static_cast<std::uint32_t>(kCoastBound + 10)));
+        REQUIRE(rig.drive([&] { return rig.ended(); }));
+        INFO("failure: " << rig.failure);
+        CHECK(rig.stopped_away());
+    }
+    SECTION("once it turns, the bound counts from the farthest point of the coast") {
+        REQUIRE(at_next_poll(counts(41.0)));
+        REQUIRE(at_next_poll(counts(40.5)));  // closing
+        SECTION("backing off less than the bound past that point: the slew lands") {
+            REQUIRE(at_next_poll(counts(41.0) + static_cast<std::uint32_t>(kWrongWayBound - 10)));
+            lands();
+        }
+        SECTION("backing off past the bound: the slew is stopped") {
+            REQUIRE(at_next_poll(counts(41.0) + static_cast<std::uint32_t>(kWrongWayBound + 10)));
+            REQUIRE(rig.drive([&] { return rig.ended(); }));
+            INFO("failure: " << rig.failure);
+            CHECK(rig.stopped_away());
+        }
+    }
 }
