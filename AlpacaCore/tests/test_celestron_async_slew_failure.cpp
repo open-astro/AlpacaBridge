@@ -2020,7 +2020,9 @@ SlewingRead after_failed_goto_then(const std::function<void(alpacacore::Telescop
     st.first_cancel_delay_ms.store(800);  // under the 1 s reply timeout: the failure stop is acknowledged, late
     REQUIRE_NOTHROW(start(driver));
     REQUIRE(wait_until([&] { return read_slewing(driver) == SlewingRead::Threw; }, 10000));
-    REQUIRE(st.cancel_goto_count.load() == 1);  // the failure stop's cancel is on the wire, not yet answered
+    // The failure stop's cancel is on the wire, not yet answered. A Park body can store its error before it sends the
+    // cancel (seen on arm64 CI), so wait for the cancel itself; its 800 ms late answer still leaves the window open.
+    REQUIRE(wait_until([&] { return st.cancel_goto_count.load() == 1; }, 2000));
     REQUIRE_NOTHROW(takeover(driver));
     return read_slewing(driver);
 }
