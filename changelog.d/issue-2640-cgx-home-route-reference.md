@@ -1,0 +1,3 @@
+### Fixed
+
+- **CGX home reference after an interrupted home route, and a pre-GOTO pose guard**, Celestron CGX driver, issue #2640. FindHome, Park and the meridian home route now write the home reference only after the mount was seen searching for home; a home that answers done with no search running fails with nothing written, so AtHome and AtPark stay false. An AbortSlew, Park or failure during a home route leaves the reference unknown until FindHome. The home pose reads SideOfPier 0 even when Dec rests a count short of its home label. Before any GOTO the driver refuses, with `InvalidValue` and nothing sent, an encoder target below the horizon or past the pole or meridian limit of its pointing side. Fake-only; the guarded rig re-run is pending.

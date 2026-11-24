@@ -168,9 +168,10 @@ struct HomeRig {
 
 }  // namespace
 
-TEST_CASE("Celestron CGX home reference - the #2640 rig sequence never GOTOs on a reference from a home that ran no "
-          "search",
-          "[celestron][cgx][telescope][home-reference]") {
+TEST_CASE(
+    "Celestron CGX home reference - the #2640 rig sequence never GOTOs on a reference from a home that ran no "
+    "search",
+    "[celestron][cgx][telescope][home-reference]") {
     HomeRig rig;
     rig.park();
     REQUIRE_FALSE(rig.call([&] { rig.driver->unpark(); }));
@@ -270,9 +271,10 @@ TEST_CASE("Celestron CGX home reference - a Park during a home route never reads
     }
 }
 
-TEST_CASE("Celestron CGX home reference - FindHome, Park and the home route write no reference from a home start "
-          "that runs no search",
-          "[celestron][cgx][telescope][home-reference]") {
+TEST_CASE(
+    "Celestron CGX home reference - FindHome, Park and the home route write no reference from a home start "
+    "that runs no search",
+    "[celestron][cgx][telescope][home-reference]") {
     HomeRig rig;
     rig.find_home();
     // Off home, so a label write there would be a wrong reference.
@@ -290,8 +292,12 @@ TEST_CASE("Celestron CGX home reference - FindHome, Park and the home route writ
         REQUIRE(rig.drive([&] { return rig.idle(); }));
     };
 
-    SECTION("FindHome") { start([&] { rig.driver->find_home(); }); }
-    SECTION("Park") { start([&] { rig.driver->park(); }); }
+    SECTION("FindHome") {
+        start([&] { rig.driver->find_home(); });
+    }
+    SECTION("Park") {
+        start([&] { rig.driver->park(); });
+    }
     SECTION("the home route of a slew to the other pointing side") {
         start([&] { rig.driver->slew_to_coordinates_async(rig.ra_at_hour_angle(-2.0), 40.0); });
         CHECK(rig.count(kRa, 0x02) == ra_gotos);

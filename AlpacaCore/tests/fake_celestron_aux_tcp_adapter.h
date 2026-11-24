@@ -44,7 +44,8 @@ namespace alpacacore::test {
 // one TCP client at a time), modelled on the 2026-11-20 rig evidence and the scratch fake_aux_adapter.py. It answers
 // at once. Its motor model is the smallest that tells a command that ran from one that did not (slice 3): a GOTO
 // (0x02, 0x17) moves the axis linearly over set_goto_duration() (default 0: it lands at once), a home search (0x0b)
-// reads searching for set_home_duration() (default 0: done at once) and moves nothing, a guide pulse (0x26) reads
+// reads searching for set_home_duration() and at least its first MC_LEVEL_DONE read (#2640: a real search reads
+// searching from its start) and moves nothing, a guide pulse (0x26) reads
 // active for its payload's duration and moves nothing, a stop (0x24 {0}) freezes a GOTO, a home search and a drift
 // where they are, a set position (0x04) relabels the axis, and a drift (set_drift()) moves an axis while SLEW_DONE
 // reads done (a tracking axis, or a status that reads done too early). Real motors accelerate and decelerate; this one
@@ -416,6 +417,7 @@ private:
         std::chrono::steady_clock::time_point goto_started{};
         std::chrono::milliseconds goto_duration{0};
         std::chrono::steady_clock::time_point home_until{};
+        int home_reads = 0;  // MC_LEVEL_DONE reads left that answer searching past home_until (#2640)
         std::chrono::steady_clock::time_point guide_until{};
         double drift = 0.0;
         std::chrono::steady_clock::time_point drift_since{};
@@ -492,6 +494,7 @@ private:
                 return {0x17, 0x88};
             case 0x0b:
                 axis.home_until = now + home_duration_;
+                axis.home_reads = 1;
                 if (const auto runaway = home_runaway_.find(request.destination); runaway != home_runaway_.end()) {
                     settle_locked(axis);
                     axis.home_until = now + std::chrono::hours(1);
@@ -500,7 +503,12 @@ private:
                 }
                 return {};
             case 0x12:
-                return {static_cast<std::uint8_t>(now < axis.home_until ? 0x00 : 0xff)};
+                if (now < axis.home_until) return {0x00};
+                if (axis.home_reads > 0) {
+                    --axis.home_reads;
+                    return {0x00};
+                }
+                return {0xff};
             case 0x13:
                 if (axis.settle_reads > 0) {
                     --axis.settle_reads;
@@ -511,6 +519,7 @@ private:
                 if (request.payload == std::vector<std::uint8_t>{0x00}) {
                     settle_locked(axis);
                     axis.home_until = now;
+                    axis.home_reads = 0;
                     axis.settle_reads = stop_settle_reads_;
                 }
                 return {};

@@ -66,6 +66,8 @@ namespace alpacacore::test {
 // none, so MC_LEVEL_DONE reads done at once with the axis off its home (#2640): MC_LEVEL_DONE reads done whenever no
 // search runs (home_done=1 on a stopped axis, docs/failures/0014-cgx-stop-completion.md). Why the rig's homes after
 // an interrupted home route answered done in 2-3 s is not established; this is the shape the driver must not trust.
+// An auto-completed home reads searching on its first MC_LEVEL_DONE read and done after it (a real search reads
+// searching from its start); it is at the physical home from the start.
 // Hardware qualification must replace assumptions before they become claims.
 
 /// Small stateful AUX endpoint for direct-USB protocol tests.
@@ -342,6 +344,7 @@ private:
         int post_stop_drift_remaining = 0;
         int crawling_home_searches = 0;
         int inert_home_starts = 0;
+        int home_searching_reads = 0;  // an auto-completed home's MC_LEVEL_DONE reads that still answer searching
         std::deque<std::deque<HomeLeg>> scripted_home_searches;
         std::deque<HomeLeg> home_legs;  // the running scripted search
         std::vector<int> stops_before_home_starts;
@@ -632,6 +635,7 @@ private:
                 }
                 axis.homing = false;
                 axis.home_legs.clear();
+                axis.home_searching_reads = 0;
                 break;
             case 0x13:
                 if (axis.stop_reads_remaining > 0) {
@@ -645,6 +649,7 @@ private:
                 axis.post_stop_drift_remaining = 0;
                 axis.stops_before_home_starts.push_back(axis.command_counts[0x24]);
                 axis.home_legs.clear();
+                axis.home_searching_reads = 0;
                 if (axis.inert_home_starts > 0) {
                     --axis.inert_home_starts;
                     axis.homing = false;
@@ -665,15 +670,24 @@ private:
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
-                if (!axis.homing) axis.physical_position = 0;
+                if (!axis.homing) {
+                    axis.physical_position = 0;
+                    axis.home_searching_reads = 1;
+                }
                 break;
             }
             case 0x12:
+                if (!axis.homing && axis.home_searching_reads > 0) {
+                    --axis.home_searching_reads;
+                    payload = {0x00};
+                    break;
+                }
                 payload = {static_cast<std::uint8_t>(axis.homing ? 0x00 : 0xff)};
                 break;
             case 0x24:
             case 0x25:
                 if (request.payload.size() != 1) return std::nullopt;
+                axis.home_searching_reads = 0;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
                 if (request.payload[0] == 0) {

@@ -34,7 +34,9 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <future>
+#include <initializer_list>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -86,6 +88,11 @@ constexpr std::chrono::milliseconds kGuideEndMargin{500};
 // A home search not done by then missed the sensor (#2213): on the rig a normal search ended within about 30 s, and a
 // missed one fell back to a crawl that needed about 420 s, so the axis is stopped and re-homed once from where it is.
 constexpr std::chrono::seconds kHomeSearchBound{60};
+// #2640: how long an axis may read MC_LEVEL_DONE done after its MC_LEVEL_START before the home counts as one that ran
+// no search. A search reads searching from its start: on the rig a home from the home position itself took about 2 s
+// (docs/celestron-cgx-usb-motion.md), and over WiFi a lost MC_LEVEL_START reply is confirmed by MC_LEVEL_DONE reading
+// searching 300 ms after it went out (decision 0011 rule 2).
+constexpr std::chrono::milliseconds kHomeStartConfirmWindow{500};
 // The home travel guard (docs/failures/0016-cgx-home-travel.md): each axis's encoder travel during one FindHome, Park
 // or meridian home route, summed across the #2213 re-home. No legitimate home found needs more than about 230 deg
 // (a direct home from the farthest slew position is 180 deg Dec; the #2213 rig miss with its re-home about 179 deg),
@@ -600,6 +607,12 @@ private:
     // kGuidePacketMax plus kGuideEndMargin on the task clock; an AbortSlew or Unpark accepted meanwhile ends it.
     // Runs with no driver lock but transition_mutex_ held.
     void wait_for_guide_end(const std::array<bool, 2>& axes);
+    // #2640: MC_LEVEL_DONE reads done whenever no search runs (home_done=1 on a stopped axis,
+    // docs/failures/0014-cgx-stop-completion.md), so a home-done read proves a home only once the search was seen
+    // running. Reads each of `axes` after its MC_LEVEL_START until it reports searching; an axis that reads done for
+    // kHomeStartConfirmWindow ran no search, and this throws DriverException: the caller's catch stops the axes, and
+    // no home label is written. `stopped` (a body's cancel or supersede) ends the wait early; false is returned then.
+    bool confirm_home_search_started(std::initializer_list<CgxAxis> axes, const std::function<bool()>& stopped = {});
     void run_pulse_guide(util::OperationContext& context, const util::MotionClaim& claim, CgxAxis axis,
                          int velocity_percent, int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
@@ -2394,6 +2407,7 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     try {
         protocol_.start_axis_home(CgxAxis::RightAscension);
         protocol_.start_axis_home(CgxAxis::Declination);
+        static_cast<void>(confirm_home_search_started({CgxAxis::RightAscension, CgxAxis::Declination}));
         motion_slot_.start([this, claim, park_after](util::OperationContext& context) {
             const SlewClaimEnd end(*this, claim);
             run_home_operation(context, claim, park_after);
@@ -2531,6 +2545,23 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
     }
 }
 
+bool CelestronCgxTelescopeDriver::confirm_home_search_started(std::initializer_list<CgxAxis> axes,
+                                                              const std::function<bool()>& stopped) {
+    const auto deadline = clock_.now() + kHomeStartConfirmWindow;
+    for (const auto axis : axes) {
+        while (protocol_.is_axis_home_done(axis)) {
+            if (stopped && stopped()) return false;
+            if (clock_.now() >= deadline)
+                throw AlpacaException(std::string("Celestron CGX ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
+                                          " reports home done with no home search running after MC_LEVEL_START; "
+                                          "the home reference was not written. Run FindHome",
+                                      AlpacaError::DriverException);
+            clock_.sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    return true;
+}
+
 void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& context, const util::MotionClaim& claim,
                                                         HomeSearch& search, util::TaskClock::clock::time_point deadline,
                                                         const char* timeout_message) {
@@ -2598,6 +2629,9 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
         const auto position = protocol_.get_axis_position(axis);
         const std::chrono::duration<double> elapsed = clock_.now() - search.started[index];
         if (!run_motion_stage(context, claim, [&] { protocol_.start_axis_home(axis); })) return;
+        if (!confirm_home_search_started({axis},
+                                         [&] { return motion_stop_reason(context, claim) != util::StopReason::None; }))
+            return;
         search.rehomed[index] = true;
         search.started[index] = clock_.now();
         const char* name = axis == CgxAxis::RightAscension ? "RA" : "Dec";
@@ -2620,6 +2654,7 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     CgxPointingSide side;
     double lst;
     CgxHemisphere hemisphere;
+    double latitude;
     bool needs_home_route;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -2650,8 +2685,13 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
         side = hour_angle >= 0.0 ? CgxPointingSide::Normal : CgxPointingSide::BeyondPole;
         needs_home_route = side != current.pointing_side;
         hemisphere = hemisphere_locked();
+        latitude = configured_site_coordinate(info_.site_latitude_degrees, "SiteLatitude");
     }
     const auto positions = cgx_sky_position_to_encoders(ra, dec, lst, hemisphere, side);
+    // #2640: the pose guard, before the tracking-off write and the claim, so a refusal sends nothing and leaves a slew
+    // in flight alone. The flip GOTO checks its own target again after the home route.
+    if (const auto refusal = cgx_encoder_target_refusal(positions.first, positions.second, hemisphere, side, latitude))
+        throw AlpacaException("Celestron CGX GOTO refused: " + *refusal, AlpacaError::InvalidValue);
     util::MotionClaim claim;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -2677,6 +2717,8 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
         };
         start_axis(CgxAxis::RightAscension, positions.first);
         start_axis(CgxAxis::Declination, positions.second);
+        if (needs_home_route)
+            static_cast<void>(confirm_home_search_started({CgxAxis::RightAscension, CgxAxis::Declination}));
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_ra_hours_ = ra;
@@ -2759,20 +2801,15 @@ void CelestronCgxTelescopeDriver::run_slew_operation(util::OperationContext& con
 void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext& context,
                                                           const util::MotionClaim& claim, double ra, double dec,
                                                           CgxPointingSide destination_side) {
-    bool rebase_started = false;
     bool reference_established = false;
-    const auto clear_cancelled_state = [this, &rebase_started, &reference_established] {
+    // #2640: the route's home search may relabel or leave the axes anywhere, so until its rebase restores the labels
+    // the reference is unknown, whether the route is cancelled, superseded or fails; FindHome establishes it again.
+    const auto clear_cancelled_state = [this, &reference_established] {
         std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
         at_home_ = false;
-        if (rebase_started && !reference_established) {
-            calibrated_ = false;
-            sync_correction_active_ = false;
-        } else {
-            // Before rebase, or after restoring the synced home labels, the
-            // existing encoder-to-sky calibration remains valid on cancellation.
-            calibrated_ = true;
-        }
+        calibrated_ = reference_established;
+        if (!reference_established) sync_correction_active_ = false;
     };
     const auto deadline = clock_.now() + std::chrono::seconds(180);
     auto next_log = clock_.now() + std::chrono::seconds(10);
@@ -2791,6 +2828,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                 protocol_.is_axis_home_done(CgxAxis::Declination)) {
                 double lst;
                 CgxHemisphere hemisphere;
+                double latitude;
                 std::uint32_t ra_rehome_label;
                 std::uint32_t dec_rehome_label;
                 {
@@ -2801,7 +2839,6 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                 // The labels by value; the outputs (lst, hemisphere, the flags) and the arguments by reference.
                 if (!run_motion_stage(context, claim, [&, ra_rehome_label, dec_rehome_label] {
                         const auto reference_generation = protocol_.session_generation();
-                        rebase_started = true;
                         protocol_.set_axis_position(CgxAxis::RightAscension, ra_rehome_label);
                         protocol_.set_axis_position(CgxAxis::Declination, dec_rehome_label);
                         {
@@ -2821,8 +2858,13 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                                         std::chrono::duration<double>(current_utc_locked()))},
                                 configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
                             hemisphere = hemisphere_locked();
+                            latitude = configured_site_coordinate(info_.site_latitude_degrees, "SiteLatitude");
                         }
                         const auto target = cgx_sky_position_to_encoders(ra, dec, lst, hemisphere, destination_side);
+                        // #2640: the target, at the sidereal time after the route, passes the pose guard again.
+                        if (const auto refusal = cgx_encoder_target_refusal(target.first, target.second, hemisphere,
+                                                                            destination_side, latitude))
+                            throw AlpacaException("Celestron CGX GOTO refused: " + *refusal, AlpacaError::InvalidValue);
                         protocol_.goto_axis_fast(CgxAxis::RightAscension, target.first);
                         protocol_.goto_axis_fast(CgxAxis::Declination, target.second);
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -2860,7 +2902,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                 parked_ = false;
                 at_home_ = false;
                 if (!reference_established) {
-                    calibrated_ = !rebase_started;
+                    calibrated_ = false;
                     needs_sync_ = false;
                     sync_correction_active_ = false;
                 }

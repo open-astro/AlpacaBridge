@@ -234,8 +234,15 @@ TEST_CASE("Celestron CGX TCP driver - FindHome through a burst of lost requests 
     const int lost = GENERATE(2, 3);
     INFO("lost=" << lost);
     rig.adapter.set_home_burst_loss(lost);  // the requests right after Dec's LEVEL_START, whatever they are
-    rig.driver->find_home();
     std::string failure;
+    // #2640: the first of them is the start's own MC_LEVEL_DONE read, so three lost fail FindHome itself.
+    auto task = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+    alpacacore::test::drain_cgx_clock_task(task, rig.clock);
+    try {
+        task.get();
+    } catch (const alpacacore::AlpacaException& error) {
+        failure = error.what();
+    }
     const auto ended = [&] {
         try {
             return !rig.driver->get_slewing();
@@ -527,8 +534,9 @@ TEST_CASE("Celestron CGX TCP driver - a GOTO lost while the mount tracked before
     rig.adapter.script(kRa, 0x02, 1, Fault::Drop);  // lost on its way to the bus: it never moved the axis
     const auto ra_reads = rig.adapter.count(kRa, 0x01);
     // Hour angle +11 (Normal): from home, tracking carries the RA axis toward this target.
+    // Dec 80, 35 degrees up: the pose guard refuses Dec 30 there, 14 degrees below the horizon (#2640).
     rig.target_ra = std::fmod(rig.driver->get_sidereal_time() - 11.0 + 24.0, 24.0);
-    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(rig.target_ra, 30.0); },
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(rig.target_ra, 80.0); },
                          AlpacaError::DriverException);
     CHECK(rig.adapter.count(kRa, 0x02) == 1);        // never re-sent
     CHECK(rig.adapter.count(kRa, 0x01) > ra_reads);  // the status was read to settle it

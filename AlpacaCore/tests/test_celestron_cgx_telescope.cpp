@@ -1137,9 +1137,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop retains flip cance
     CHECK(mount.count_command(0x11, 0x02) == 0);
     CHECK_FALSE(driver->get_at_home());
     CHECK_FALSE(driver->get_at_park());
-    CHECK(std::isfinite(driver->get_right_ascension()));
-    CHECK(std::isfinite(driver->get_declination()));
-    CHECK(driver->get_tracking());
+    // #2640: the route's home search started, so the reference is unknown until FindHome, and tracking stays off.
+    require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
+                         alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { static_cast<void>(driver->get_declination()); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
 }
 
@@ -3045,7 +3048,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
 
     driver->set_tracking(true);
     const double ra = std::fmod(driver->get_sidereal_time() + 6.0, 24.0);
-    driver->slew_to_coordinates_async(ra, 30.0);
+    // Dec -30, 21 degrees up at the southern site: the pose guard refuses Dec +30 there, 21 degrees down (#2640).
+    driver->slew_to_coordinates_async(ra, -30.0);
     CHECK(driver->get_slewing());
     REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
     CHECK(mount.count_command(0x10, 0x02) == 0);
@@ -3061,7 +3065,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
 
     const auto ra_before_sync = mount.axis_position(0x10);
     const auto dec_before_sync = mount.axis_position(0x11);
-    driver->sync_to_coordinates(ra, 31.0);
+    driver->sync_to_coordinates(ra, -29.0);
     CHECK(driver->get_tracking());
     const auto encoder_revolution = alpacacore::vendor::celestron::kCgxEncoderStepsPerRevolution;
     const auto expected_rehome_label = [encoder_revolution](std::uint32_t home, std::uint32_t before,
