@@ -4202,4 +4202,81 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
     }
 }
 
+namespace {
+
+// #2495: the fake OnStepX of this file behind its loopback server, for alpacacore::test::PolledRig.
+struct PolledOnStep {
+    std::shared_ptr<SnapshotMount> mount = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server{[m = mount](const std::string& chunk) { return m->reply(chunk); }};
+};
+
+// The OnStep telescope on the PolledRig: 1 s poll, a site in the config, replies bounded at 300 ms.
+struct OnStepPolledRig : alpacacore::test::PolledRig<PolledOnStep, alpacacore::TelescopeDriver> {
+    OnStepPolledRig()
+        : PolledRig({seconds(1), milliseconds(2000)}, [](PolledOnStep& fake, FakeTaskClock& clock) {
+              REQUIRE(fake.server.ok());
+              fake.mount->clock = &clock;
+              onstep::ConnectionInfo info;
+              info.type = onstep::ConnectionType::Network;
+              info.host = "127.0.0.1";
+              info.tcp_port = fake.server.port();
+              info.response_timeout_ms = 300;
+              return onstep::create_onstep_telescope_with_site(0, info, -33.856784, 151.215297, std::nullopt, false,
+                                                               clock);
+          }) {}
+    ~OnStepPolledRig() {
+        fake().mount->mute = false;
+        fake().mount->latency_ms = 0;
+    }
+    OnStepPolledRig(const OnStepPolledRig&) = delete;
+    OnStepPolledRig& operator=(const OnStepPolledRig&) = delete;
+};
+
+}  // namespace
+
+// #2495: a getter answers from the frame while a tick waits 200 ms for each reply; three failed probes latch
+// the fault (Connected stays true); a frame that no probe has refreshed for util::kLinkStalenessBound is a lost link,
+// on the tick that finds it and not one tick later.
+TEST_CASE("OnStep PolledState - getters answer during a slow tick, three failed probes latch, the bound loses the link",
+          "[onstep][telescope][snapshot][polledstate]") {
+    OnStepPolledRig rig;
+    REQUIRE(rig.connect());
+    auto& mount = *rig.fake().mount;
+
+    mount.latency_ms = 200;
+    const int before = mount.exchanges.load();
+    rig.clock().advance(seconds(1));  // the first tick: five exchanges at 200 ms each
+    for (int i = 0; i < 2000 && mount.exchanges.load() == before; ++i) std::this_thread::sleep_for(milliseconds(1));
+    REQUIRE(mount.exchanges.load() > before);  // the tick is inside its exchanges
+    CHECK(alpacacore::test::timed([&] { (void)rig.driver().get_right_ascension(); }) < milliseconds(20));
+    CHECK(alpacacore::test::timed([&] { (void)rig.driver().get_device_state(); }) < milliseconds(20));
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    REQUIRE(rig.clock().wait_for_waiters(1, seconds(2)));
+    mount.latency_ms = 0;
+    const auto published_at = rig.clock().now();  // the last good frame
+    const double ra = rig.driver().get_right_ascension();
+
+    mount.mute = true;
+    rig.tick(2);  // two failed probes: the frame is still served
+    CHECK(rig.driver().get_right_ascension() == ra);
+    CHECK(rig.driver().get_link_fault().empty());
+    rig.tick();  // the third latches the fault
+    CHECK(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(rig.driver().get_link_fault().empty());
+
+    // One period short of the bound: still faulted, not lost.
+    rig.clock().advance(published_at + alpacacore::util::kLinkStalenessBound - seconds(1) - rig.clock().now());
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    REQUIRE(rig.clock().wait_for_waiters(1, seconds(2)));
+    CHECK(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
+
+    rig.clock().advance(seconds(1));  // the frame is now kLinkStalenessBound old: this tick loses the link
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.driver().get_link_fault().find("lost") != std::string::npos);
+}
+
 #endif  // !_WIN32
