@@ -2061,6 +2061,126 @@ TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a GOTO or a Mo
     }
 }
 
+TEST_CASE("ZWO goto-safety - the slew bound's :Q is checked and sent again while the mount still moves",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    start_held_goto(rig);
+    const int ignored = GENERATE(1, 10);
+    CAPTURE(ignored);
+    rig.mount.ignore_stops(ignored);
+    run_polls(rig, std::chrono::minutes(15) + std::chrono::seconds(4));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") >= 1; }, 5000));
+    run_polls(rig, std::chrono::seconds(4), std::chrono::seconds(1));
+    std::string message;
+    if (ignored == 1) {
+        CHECK(count_exact(rig.mount, ":Q") == 2);
+        CHECK_FALSE(rig.mount.slewing());
+        CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+        CHECK(message.find("did not end within 15 min") != std::string::npos);
+    } else {
+        CHECK(count_exact(rig.mount, ":Q") == 3);
+        CHECK(rig.mount.slewing());
+        CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+        CHECK(message.find("still reports motion after 3 stops") != std::string::npos);
+    }
+}
+
+TEST_CASE("ZWO goto-safety - a reconnect after a link lost during a Park or a FindHome stops the mount first",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const bool home = GENERATE(false, true);
+    CAPTURE(home);
+    rig.mount.hold_running(true);
+    if (home) {
+        REQUIRE_NOTHROW(rig.driver->find_home());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->park());
+    }
+    REQUIRE(rig.mount.slewing());
+    REQUIRE(rig.mount.drop_link());
+    for (int i = 0; i < 40 && rig.driver->get_connected(); ++i) rig.tick();
+    REQUIRE_FALSE(rig.driver->get_connected());
+    const auto before = rig.mount.commands().size();
+    rig.connect();
+    const auto all = rig.mount.commands();
+    std::vector<std::string> after(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
+    const auto stop = std::find(after.begin(), after.end(), std::string(":Q"));
+    REQUIRE(stop != after.end());
+    for (auto it = after.begin(); it != stop; ++it) {
+        INFO(*it);
+        CHECK((it->rfind(":GV", 0) == 0 || it->rfind(":GMA", 0) == 0));
+    }
+    CHECK_FALSE(rig.mount.slewing());
+}
+
+TEST_CASE("ZWO goto-safety - an e3 (busy) refusal is an error: no stop and the GOTO is not sent again",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto("e3", 1);
+    const int q_before = count_exact(rig.mount, ":Q");
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    std::string message;
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    CHECK(message.find("e3") != std::string::npos);
+    CHECK(rig.mount.count(":MS") == 1);
+    CHECK(count_exact(rig.mount, ":Q") == q_before);
+    CHECK_FALSE(rig.mount.slewing());
+}
+
+TEST_CASE("ZWO goto-safety - a Sync more than 5 degrees from the reported position is refused",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();  // the fake mount points at RA 12 h, Dec +45
+    const bool target_form = GENERATE(false, true);
+    CAPTURE(target_form);
+    using alpacacore::test::require_alpaca_error;
+    if (target_form) {
+        rig.driver->set_target_right_ascension(12.0);
+        rig.driver->set_target_declination(50.5);
+        require_alpaca_error([&] { rig.driver->sync_to_target(); }, alpacacore::AlpacaError::InvalidValue);
+    } else {
+        require_alpaca_error([&] { rig.driver->sync_to_coordinates(12.0, 50.5); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    CHECK(rig.mount.count(":SMMC") == 0);
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(std::abs(rig.driver->get_declination() - 45.0) < 1e-6);
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(12.0, 49.5));  // inside the bound
+    CHECK(rig.mount.count(":SMMC") == 1);
+    CHECK(std::abs(rig.driver->get_declination() - 49.5) < 1e-6);
+}
+
+TEST_CASE("ZWO goto-safety - a redundant Connected=true while the driver moves the mount sends no site or time",
+          "[zwo][telescope][async][goto-safety]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);
+    Rig rig;
+    rig.connect();
+    const std::string motion =
+        GENERATE(std::string("GOTO"), std::string("MoveAxis"), std::string("Park"), std::string("FindHome"));
+    CAPTURE(motion);
+    rig.mount.hold_running(true);
+    if (motion == "GOTO") {
+        start_held_goto(rig);
+    } else if (motion == "MoveAxis") {
+        REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    } else if (motion == "Park") {
+        REQUIRE_NOTHROW(rig.driver->park());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->find_home());
+    }
+    run_polls(rig, std::chrono::seconds(8));
+    const int site_before = rig.mount.count(":SMGE");
+    const int time_before = rig.mount.count(":SMTI");
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    CHECK(rig.mount.count(":SMGE") == site_before);
+    CHECK(rig.mount.count(":SMTI") == time_before);
+    CHECK(rig.mount.slewing());
+    rig.driver->abort_slew();
+}
+
 // The ZWO AM's FindHome is :hC#, a slew to the home position the mount stores.
 TEST_CASE("ZWO findhomeissensorsearch is false", "[zwo][telescope][findhome-sensor]") {
     Rig rig;
