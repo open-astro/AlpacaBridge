@@ -4379,6 +4379,18 @@ TEST_CASE("OnStep Telescope Driver - a GOTO the mount starts after a frame witho
     }
 }
 
+// #2406: a GOTO no frame has seen run may still start; a failing poll at the deadline still stops it.
+TEST_CASE("OnStep Telescope Driver - a GOTO never seen running is stopped at its bound when the status poll fails",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(2.0, 20.0));
+    REQUIRE(wait_slew_done(*rig.driver, rig.clock));  // the first frame shows no GOTO yet
+    rig.mount->set_status("");                        // :GU# times out from here
+    rig.poll_after(std::chrono::seconds(118));        // 120 s from the :MS#
+    CHECK(rig.mount->count(":Q#") == 1);
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+}
+
 TEST_CASE("OnStep Telescope Driver - a synchronous GOTO the mount has not started yet is no far miss",
           "[onstep][telescope][unit][goto-safety]") {
     BoundedOnStep rig;
