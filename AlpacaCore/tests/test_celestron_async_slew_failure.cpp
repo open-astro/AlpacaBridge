@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "celestron_landing_model.h"
 #include "concurrency_stress.h"  // settle_connected
 #include "driver_rig.h"
 #include "fake_mount_server.h"
@@ -100,27 +101,9 @@ struct FakeCelestronState {
     std::atomic<int> ignore_cancels{0};        // this many cancel-goto commands are answered but do not stop the GOTO
     std::atomic<bool> hold_home{false};        // MC_LEVEL_DONE answers "not done" while set
     std::atomic<int> goto_count_at_write{-1};  // goto_count when the last site ('W') or time ('H') write arrived
-    std::mutex landing_mutex;
-    std::string landed;  // the position reply after a GOTO; empty: the fixed position
-    void land(const std::string& chunk) {
-        const auto comma = chunk.find(',');
-        if (miss_landing.load() || chunk.empty() || (chunk[0] != 'r' && chunk[0] != 'R') ||
-            comma == std::string::npos) {
-            return;
-        }
-        std::string ra = chunk.substr(1, comma - 1);
-        std::string dec = chunk.substr(comma + 1);
-        if (chunk[0] == 'R') {  // 16-bit fractions: the precise reply carries 32 bits
-            ra += "0000";
-            dec += "0000";
-        }
-        std::lock_guard<std::mutex> lock(landing_mutex);
-        landed = ra + "," + dec;
-    }
-    std::string position() {
-        std::lock_guard<std::mutex> lock(landing_mutex);
-        return landed.empty() ? std::string("12AB0500,20000500") : landed;
-    }
+    alpacacore::test::CelestronLanding landing;
+    void land(const std::string& chunk) { landing.land(chunk, miss_landing.load()); }
+    std::string position() const { return landing.position(); }
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -684,7 +667,8 @@ TEST_CASE("Celestron sync slew - tracking restoration failure is propagated",
     st->reject_next_tracking_write.store(true);
     clock.advance(std::chrono::seconds(9));
     clock.wait_for_woken_settled(std::chrono::seconds(2));
-    const bool finished_after_restore = wait_until([&] { return finished.load(); }, 5000);
+    // #2409: the landing gate reads the position twice, 500 ms apart, before the tracking restore.
+    const bool finished_after_restore = advance_until(clock, [&] { return finished.load(); });
     slew.join();
     REQUIRE(goto_dispatched);
     REQUIRE(waiting_for_completion);
@@ -1707,6 +1691,8 @@ TEST_CASE("Celestron site - site and time writes are refused while the mount mov
         CHECK(writes_refused());
         REQUIRE_NOTHROW(driver->abort_slew());
         st->hold_slew.store(false);
+        // #2409: Slewing (and the refusal) holds until the verified stop sees the mount still.
+        REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 5000));
     }
     // Stopped, the write goes out again.
     CHECK_NOTHROW(driver->set_site_latitude(10.0));
@@ -1828,7 +1814,7 @@ TEST_CASE("Celestron AbortSlew - a lost stop is sent again and the abort verifie
     driver->set_connected(false);
 }
 
-// #2409 (handset mount: every Sync bounded, maintainer decision 2026-11-24): a Sync that would move the pointing more
+// #2409 (handset mount: every Sync bounded, the #2409 Decisions (2026-11-24)): a Sync that would move the pointing more
 // than util::kMaxSyncOffsetDegrees from where the mount reports it is refused with InvalidValue and sends nothing.
 // The fake reports RA 1.75 h, Dec +45 deg.
 TEST_CASE("Celestron Sync - a Sync more than 5 degrees from the mount's position is refused",

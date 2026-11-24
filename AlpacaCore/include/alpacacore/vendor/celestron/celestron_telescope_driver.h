@@ -77,7 +77,8 @@ void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// Decided once it has read the client write generation and before its first time write, Exchange right before each
 /// try at the time write's own exchange (its motion check), Written after the write and before its publish, Finished
 /// as the body returns, whatever it did. Around it: ClientWriting and ClientWritten just before and after a client
-/// UTCDate write's exchange (under transition_mutex_ only), ExitChecked at each pass of set_connected()'s exit with
+/// UTCDate write's exchange (under transition_mutex_ and the initiator lock; ClientWriting also before a client
+/// SiteLatitude or SiteLongitude write), ExitChecked at each pass of set_connected()'s exit with
 /// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its state is published (under
 /// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held),
 /// HookBusy when on_host_clock_changed() found the gate held (on the timer thread, no driver lock held).

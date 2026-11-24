@@ -724,6 +724,9 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
                 if (command.size() >= 4 && static_cast<unsigned char>(command[3]) == 0xFE) {
                     return std::string("\x01\x00#", 3);
                 }
+                if (command.size() >= 4 && static_cast<unsigned char>(command[3]) == 0x13) {
+                    return std::string("\xFF#");  // MC_SLEW_DONE: done (AbortSlew's verified stop reads it)
+                }
                 return std::string("#");
             default:
                 return std::string("#");
@@ -747,6 +750,11 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
             log->clear();
         }
         REQUIRE_NOTHROW(driver->abort_slew());
+        // #2409: Slewing stays true until the verified stop sees the mount still (two reads 500 ms apart).
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
         CHECK_FALSE(driver->get_slewing());
         std::lock_guard<std::mutex> lock(*log_mutex);
         CHECK(std::count(log->begin(), log->end(), std::string("M")) == 1);
@@ -1165,10 +1173,11 @@ TEST_CASE("Celestron snapshot - a setter's value is read back at once and a stal
     driver->set_tracking(true);
     CHECK(driver->get_tracking());
 
-    // A sync reads back at once, with no poll in between.
-    driver->sync_to_coordinates(3.25, 41.5);
-    CHECK(std::abs(driver->get_right_ascension() - 3.25) < 1e-3);
-    CHECK(std::abs(driver->get_declination() - 41.5) < 1e-3);
+    // A sync reads back at once, with no poll in between. Within 5 deg of the mount's position (1.75 h, +45 deg):
+    // every Sync is bounded (#2409).
+    driver->sync_to_coordinates(1.85, 43.5);
+    CHECK(std::abs(driver->get_right_ascension() - 1.85) < 1e-3);
+    CHECK(std::abs(driver->get_declination() - 43.5) < 1e-3);
 
     // A poll that sampled the mount before the write must not publish over it: the write lands between that
     // poll's sample and its publish.
@@ -1640,7 +1649,7 @@ TEST_CASE("Celestron Park - the initiator and the park slew do not hold the gett
 TEST_CASE("Celestron SyncToCoordinates - the sync exchange does not hold the getters",
           "[celestron][telescope][snapshot][iolock]") {
     SlowMountDriver mount;
-    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(5.0, 20.0); });
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(1.8, 44.0); });
 }
 
 TEST_CASE("Celestron FindHome - the dispatch does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
@@ -1741,7 +1750,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held 
     cel::set_failure_stop_hook_for_testing(*driver, [&] {
         if (!syncer.joinable()) {
             const int before = st->s_count.load();
-            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.8, 44.0); });
             REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
         }
     });
@@ -1777,7 +1786,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out after an Unpark",
     cel::set_failure_stop_hook_for_testing(*driver, [&] {
         if (!syncer.joinable()) {
             const int before = st->s_count.load();
-            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.8, 44.0); });
             REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
         }
     });
@@ -1880,7 +1889,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync follo
             s_before = st->s_count.load();
             syncer = std::thread([&] {
                 try {
-                    driver->sync_to_coordinates(1.5, 20.0);  // queues on the initiator lock
+                    driver->sync_to_coordinates(1.8, 44.0);  // queues on the initiator lock
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): only its hold on the lock counts
                 }
             });
@@ -2003,6 +2012,7 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
         if (!aborted) {
             aborted = true;
             driver->abort_slew();
+            st->slewing = false;  // the mount obeys the stop, so AbortSlew's verified stop (#2409) can verify it
         }
     });
     std::atomic<bool> done{false};
@@ -2032,6 +2042,12 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
     REQUIRE(finished);  // the slew ended within the stepped window
     cel::set_slewing_read_hook_for_testing(*driver, nullptr);
     REQUIRE(aborted);
+    // #2409: Slewing holds true until AbortSlew's verified stop sees the mount still.
+    for (int i = 0; i < 100 && driver->get_slewing(); ++i) {  // each step waits for the paused poll and the check
+        if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
+        clock.advance(std::chrono::milliseconds(100));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }

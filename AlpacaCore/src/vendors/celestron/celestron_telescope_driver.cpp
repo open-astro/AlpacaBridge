@@ -22,6 +22,7 @@
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
@@ -820,6 +821,7 @@ public:
     // a motion of this driver runs: a GOTO, Park or FindHome the driver started (Slewing as the driver set it) or a
     // MoveAxis. A pulse guide does not count. NotConnected comes first: a lost link clears neither flag (the relink
     // stop reads them), and every member answers NotConnected while lost (decision 0009 rule 3). Takes mutex_ briefly.
+    // The caller holds initiator_mutex_ from this check through its write, so no motion starts in between.
     void refuse_while_moving(const char* who) const {
         check_connected();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -851,7 +853,9 @@ public:
     void set_site_latitude(double latitude) override {
         util::validate_latitude(latitude);
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        std::lock_guard<std::mutex> initiator(initiator_mutex_);
         refuse_while_moving("SiteLatitude");
+        run_clock_resync_hook(ClockResyncStep::ClientWriting);
         LocationInfo info = current_location();
         info.latitude_degrees = latitude;
         CelestronProtocolWrapper::instance().set_location(info);
@@ -874,7 +878,9 @@ public:
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        std::lock_guard<std::mutex> initiator(initiator_mutex_);
         refuse_while_moving("SiteLongitude");
+        run_clock_resync_hook(ClockResyncStep::ClientWriting);
         LocationInfo info = current_location();
         info.longitude_degrees = longitude;
         CelestronProtocolWrapper::instance().set_location(info);
@@ -1063,6 +1069,7 @@ private:
 public:
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        std::lock_guard<std::mutex> initiator(initiator_mutex_);
         check_connected();
         refuse_while_moving("UTCDate");
         const TimeWrite write = prepare_time_write(utc);
@@ -2085,7 +2092,7 @@ public:
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
         ilock.unlock();
-        if (!wait_for_slew_complete(lock, owner_generation)) {
+        if (!wait_for_slew_complete(lock, owner_generation, ra, dec)) {
             // Another client's AbortSlew / Park / MoveAxis / FindHome / slew took the
             // mount: skip the completion tail so it cannot write T2 over their motion.
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
@@ -2180,9 +2187,10 @@ public:
         }
 
         double slew_target_ra = ra;
+        double slew_target_dec = dec;
         start_slew_body(
-            [this, ra_raw, dec_raw, precise, use_passthrough, do_flip, flip_ra, flip_dec,
-             slew_target_ra](util::OperationContext& ctx) {
+            [this, ra_raw, dec_raw, precise, use_passthrough, do_flip, flip_ra, flip_dec, slew_target_ra,
+             slew_target_dec](util::OperationContext& ctx) {
                 {
                     // The goto goes out through the send gate with mutex_ free. An initiator that supersedes this body
                     // does not join it: a goto already committed to the wire lands before the newer initiator's own
@@ -2323,6 +2331,19 @@ public:
                         return;
                     }
                     const auto owns = [this, &ctx] { return body_owns_locked(ctx); };
+                    const auto landing = await_landing(lock, slew_target_ra, slew_target_dec, start + timeout, [&] {
+                        lock.unlock();
+                        const bool woke = ctx.wait_for(util::kStopVerifyPollInterval);
+                        lock.lock();
+                        return woke && owns();
+                    });
+                    if (!landing || !owns()) {
+                        return;
+                    }
+                    if (!landing->empty()) {
+                        fail_slew(lock, *landing, ctx);
+                        return;
+                    }
                     restore_tracking_after_slew(lock, owns);
                     if (!owns()) {
                         return;
@@ -2406,6 +2427,11 @@ public:
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        // #2409: a handset mount bounds every Sync (the #2409 Decisions (2026-11-24)): one that would move the pointing
+        // more than util::kMaxSyncOffsetDegrees from where the mount reports it is refused before anything is sent.
+        const auto [current_ra, current_dec] = measure_equatorial(lock);
+        check_connected();
+        util::check_sync_bound("SyncToCoordinates", {current_ra, current_dec}, {ra, dec}, util::kMaxSyncOffsetDegrees);
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {
@@ -2597,10 +2623,12 @@ public:
     void abort_slew() override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::uint64_t mine = 0;
+        bool was_moving = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may end a park in flight
+            was_moving = driver_motion_active_locked();
             // The claim supersedes the slew or park body, which finds itself Superseded and writes nothing. It is
             // bumped before any stop goes out: a blocking slew that sees the mount stopped must also see that it
             // was superseded, so it cannot run its completion tail before slew_aborted_ is set. The park state
@@ -2633,13 +2661,91 @@ public:
         pulse_guide_active_.fill(false);
         pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
         homing_ = false;
-        set_slewing_locked(false);
         slew_aborted_ = true;
         flip_in_progress_ = false;
         slew_force_until_ = util::TaskClock::clock::time_point::min();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        // #2409, the shared verified stop: an acknowledged stop is not a stopped mount. When a motion was under way,
+        // Slewing stays true while a body on its own slot (abort_verify_, so its start never reaps a slew body's
+        // thread) checks the mount stopped, sending the stop again as
+        // util::StopVerifier asks; one that never verifies leaves util::kStopNotVerifiedText for Slewing. An idle
+        // mount has nothing to verify.
+        set_slewing_locked(was_moving);
+        if (!was_moving) {
+            return;
+        }
+        const auto first_stop_sent = clock_.now();
+        lock.unlock();
+        try {
+            abort_verify_.start([this, mine, first_stop_sent](util::OperationContext& ctx) {
+                verify_abort_stop(ctx, mine, first_stop_sent);
+            });
+        } catch (const std::exception& e) {
+            // No thread for the check: the stop was acknowledged, so report it as before rather than fail it.
+            ALPACA_LOG_WARN("Celestron", std::string("AbortSlew: the stop check did not start: ") + e.what());
+            lock.lock();
+            if (motion_generation_ == mine) set_slewing_locked(false);
+        }
+    }
+
+    // The body of AbortSlew's verified stop. Reads the mount's motion flag and its position with mutex_ free; a read
+    // that fails proves nothing. Writes only while it still owns the mount: a newer initiator or a disconnect owns the
+    // state otherwise (decision 0006 rule 6).
+    void verify_abort_stop(util::OperationContext& ctx, std::uint64_t mine,
+                           util::TaskClock::clock::time_point first_stop_sent) {
+        util::StopVerifier verifier(first_stop_sent);
+        const auto owns = [this, &ctx, mine] { return body_owns_locked(ctx) && motion_generation_ == mine; };
+        while (ctx.wait_for(util::kStopVerifyPollInterval)) {
+            bool hc = false;
+            SamplePlan plan;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!owns()) return;
+                hc = hc_available_;
+                plan = sample_plan_locked(false);
+                plan.read_slewing = false;
+            }
+            std::optional<util::MotionStatusReading> status;
+            std::optional<util::PositionReading> position;
+            try {
+                auto& protocol = CelestronProtocolWrapper::instance();
+                // As the slew body polls: the hand controller's GOTO flag, else both motor controllers' slew-done.
+                // The flag alone never verifies: the position must also hold still.
+                const bool moving =
+                    hc ? protocol.is_goto_in_progress() : (!protocol.is_slew_done(0) || !protocol.is_slew_done(1));
+                status = util::MotionStatusReading{moving, clock_.now()};
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown status proves nothing
+            }
+            try {
+                const Sample sample = sample_raw(plan);
+                position = util::PositionReading{{sample.ra_hours, sample.dec_degrees}, clock_.now()};
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a failed read proves nothing
+            }
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!owns()) return;
+            switch (verifier.feed(clock_.now(), status, position)) {
+                case util::StopStep::Verified:
+                    set_slewing_locked(false);
+                    return;
+                case util::StopStep::Failed:
+                    last_home_error_.clear();
+                    last_slew_error_ = util::kStopNotVerifiedText;
+                    ALPACA_LOG_ERROR("Celestron", last_slew_error_);
+                    return;
+                case util::StopStep::Resend: {
+                    const std::string stop_error = stop_park_slew(lock, owns);
+                    if (!stop_error.empty()) {
+                        ALPACA_LOG_WARN("Celestron", "AbortSlew: the resent stop failed: " + stop_error);
+                    }
+                    verifier.stop_resent(clock_.now());
+                    break;
+                }
+                case util::StopStep::Wait:
+                    break;
+            }
+        }
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -2977,6 +3083,7 @@ private:
     // "Claim").
     void cancel_async_tasks() {
         clock_resync_.cancel_all_and_join();
+        abort_verify_.cancel_all_and_join();
         slew_.cancel_all_and_join();
         join_pulse_bodies();
     }
@@ -2999,6 +3106,7 @@ private:
         const bool displaced = slew_.running();
         slew_generation_.bump();
         slew_.cancel();
+        abort_verify_.cancel();  // an AbortSlew stop check in flight: the new owner has the mount
         ++motion_generation_;
         send_cv_.notify_all();
         return displaced;
@@ -3740,7 +3848,7 @@ private:
         }
         // The async body owns its completion polling; a getter serves its
         // published state instead of competing for a second wire read.
-        if (slew_.running()) {
+        if (slew_.running() || abort_verify_.running()) {  // abort_verify_: Slewing holds until the stop verifies
             return slewing_cached_;
         }
         if (clock_.now() < slew_force_until_ || homing_) {
@@ -4283,6 +4391,40 @@ private:
         return true;
     }
 
+    // #2409, the shared landing gate (util::LandingGate): after the mount reports a GOTO done, its position is read
+    // every `wait` (util::kStopVerifyPollInterval, mutex_ released by `wait`, false to give up) until two reads show it
+    // still; one that came to rest more than util::kLandingFarMissArcsec from the target on either axis did not land
+    // (refused, stopped at a limit, never run). Returns the failure, empty when it landed, nullopt when `wait` gave up.
+    // A mount still moving at `give_up_at` fails too. A failed read throws, as the caller's other completion reads do.
+    std::optional<std::string> await_landing(std::unique_lock<std::mutex>& lock, double target_ra, double target_dec,
+                                             util::TaskClock::clock::time_point give_up_at,
+                                             const std::function<bool()>& wait) const {
+        const util::MountPosition target{target_ra, target_dec};
+        util::LandingGate gate(target, clock_.now());
+        while (true) {
+            const auto [ra, dec] = measure_equatorial(lock);
+            const util::PositionReading reading{{ra, dec}, clock_.now()};
+            switch (gate.feed(reading)) {
+                case util::Landing::Landed:
+                    return std::string();
+                case util::Landing::FarMiss:
+                    return "Slew ended " +
+                           std::to_string(static_cast<long>(util::axis_miss_arcsec(reading.position, target))) +
+                           " arcsec from the target (limit " +
+                           std::to_string(static_cast<long>(util::kLandingFarMissArcsec)) +
+                           " arcsec): the mount did not reach it";
+                case util::Landing::Settling:
+                    break;
+            }
+            if (clock_.now() >= give_up_at) {
+                return std::string("Slew did not come to rest within 120s");
+            }
+            if (!wait()) {
+                return std::nullopt;
+            }
+        }
+    }
+
     // Poll for slew completion, RELEASING the driver mutex around every sleep
     // so a sync slew/park doesn't block all GETs and disconnect for up to
     // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
@@ -4290,7 +4432,8 @@ private:
     // connection state is re-checked after each relock.
     // Returns false when a concurrent motion command bumped motion_generation_
     // past `owner_generation` while the lock was released (the slew was superseded).
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation, double target_ra,
+                                double target_dec) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
@@ -4326,6 +4469,25 @@ private:
                 throw AlpacaException("Slew timed out");
             }
             sleep_unlocked(std::chrono::milliseconds(250));
+        }
+        std::optional<std::string> landing;
+        try {
+            landing = await_landing(lock, target_ra, target_dec, start + timeout, [&] {
+                sleep_unlocked(std::chrono::duration_cast<std::chrono::milliseconds>(util::kStopVerifyPollInterval));
+                return motion_generation_ == owner_generation;
+            });
+        } catch (const AlpacaException& ex) {
+            if (ex.error_code() == AlpacaError::NotConnected) throw;
+            landing = std::string("Slew completion handling failed: ") + ex.what();
+        } catch (const std::exception& ex) {
+            landing = std::string("Slew completion handling failed: ") + ex.what();
+        }
+        if (!landing || motion_generation_ != owner_generation) {
+            return false;
+        }
+        if (!landing->empty()) {
+            fail_blocking_slew_locked(lock, *landing, owner_generation);
+            throw AlpacaException(*landing, AlpacaError::DriverException);
         }
         // The position is read first; Slewing then flips beside it in one locked step.
         const Measurement landed = measure_full(lock);
@@ -4540,6 +4702,10 @@ private:
     // Declared last, so it is destroyed (and joins) first: its body touches the members above.
     util::OperationGeneration clock_resync_generation_;
     util::AsyncOperation clock_resync_{"Celestron clock re-sync", clock_resync_generation_, clock_};
+    // #2409: AbortSlew's verified stop (verify_abort_stop()). Its own slot, so its start() never reaps a slew body's
+    // thread; any claim of the slew slot cancels it. Declared last, so it is destroyed (and joins) first.
+    util::OperationGeneration abort_verify_generation_;
+    util::AsyncOperation abort_verify_{"Celestron AbortSlew stop check", abort_verify_generation_, clock_};
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
