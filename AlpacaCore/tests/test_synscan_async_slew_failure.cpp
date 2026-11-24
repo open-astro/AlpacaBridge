@@ -1690,10 +1690,14 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
                          alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.st->requests.load() == requests);
 
-    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    // AbortSlew verifies its stop on the task clock (#2412).
+    REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
-    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+    // Where the mount points: a Sync is bounded to 5 deg from it (#2412).
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(ra, dec));
 }
 
 TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and fails the MoveAxis",
@@ -1943,4 +1947,56 @@ TEST_CASE("SynScan Sync - a Sync more than 5 degrees from the mount's position i
     REQUIRE_NOTHROW(driver->sync_to_coordinates(ra, dec + 4.0));  // within the bound
     CHECK(st->command_count('s') == 1);
     driver->set_connected(false);
+}
+
+TEST_CASE("SynScan - the client-silence watchdog stops driver motion no client renews",
+          "[synscan][telescope][goto-safety]") {
+    const bool goto_motion = GENERATE(false, true);
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int cancels = st->cancel_count.load();
+    if (goto_motion) {
+        st->goto_hangs.store(true);
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    } else {
+        REQUIRE_NOTHROW(driver->move_axis(1, 1.0));
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    CHECK_FALSE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(29), std::chrono::seconds(30)));
+    CHECK(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
+    CHECK(st->cancel_count.load() > cancels);
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// Both dead-man guards apply (#2412 Decisions): a client-silence watchdog stop of a MoveAxis ends the move for the
+// 60 s bound too, so the bound later sends no stop of its own and leaves no "ran 60 s" error behind.
+TEST_CASE("SynScan MoveAxis - a client-silence watchdog stop leaves the 60 s bound nothing to do",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(1);
+    rig.advance(std::chrono::seconds(31));
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver->note_client_activity(t0);
+    bool stopped = false;
+    // The watchdog's AbortSlew verifies its stop on the task clock.
+    alpacacore::test::call_stepping(rig.clock, [&] {
+        stopped = rig.driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30));
+    });
+    CHECK(stopped);
+    const int stops = rig.stops(kDecMotor);
+    CHECK(stops >= kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    rig.advance(std::chrono::seconds(35));  // past the move's 60 s
+    CHECK(rig.stops(kDecMotor) == stops);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    CHECK(rig.infos.load() == 0);
+    CHECK(rig.warns.load() == 0);
 }

@@ -817,7 +817,8 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
     REQUIRE(driver->get_slewing());  // the park is still in flight
-    driver->abort_slew();            // ...but AbortSlew may cancel it
+    // ...but AbortSlew may cancel it (its stop verified on the task clock, #2412)
+    alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
 
@@ -1006,12 +1007,16 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
     using alpacacore::AlpacaException;
     struct Case {
         const char* name;
-        std::function<void(alpacacore::TelescopeDriver&)> supersede;
+        std::function<void(alpacacore::TelescopeDriver&, alpacacore::test::FakeTaskClock&)> supersede;
     };
     const Case cases[] = {
-        {"AbortSlew", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
-        {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }},
-        {"MoveAxis", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); }},
+        // AbortSlew verifies its stop on the task clock (#2412).
+        {"AbortSlew",
+         [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock& clock) {
+             alpacacore::test::call_stepping(clock, [&] { d.abort_slew(); });
+         }},
+        {"Park", [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.park(); }},
+        {"MoveAxis", [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.move_axis(0, 0.5); }},
     };
     for (const auto& c : cases) {
         INFO(c.name);
@@ -1037,7 +1042,7 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
             done.store(true);
         });
         REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
-        c.supersede(*driver);
+        c.supersede(*driver, clock);
         // The slewer sleeps on the task clock between polls; step it until it has noticed.
         const bool finished = advance_until(clock, [&] { return done.load(); });
         slewer.join();

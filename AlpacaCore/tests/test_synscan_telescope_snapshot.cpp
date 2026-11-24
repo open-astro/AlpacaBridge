@@ -120,6 +120,9 @@ std::string reply(Handset& st, const std::string& chunk) {
             return "8A4FDA00,0D527400#";
         case 'L':
             return st.slewing.load() ? "1#" : "0#";
+        case 'M':  // the cancel ends a GOTO: AbortSlew verifies the mount stopped (#2412)
+            st.slewing.store(false);
+            return "#";
         case 'm':  // mount model: an EQ mount
             return std::string(1, '\x32') + "#";
         case 'p':
@@ -294,21 +297,22 @@ TEST_CASE("SynScan snapshot - a sync, a slew start and a clock write are read ba
 
     // The fake handset keeps answering 08h42m RA / -67 deg Dec. The pulse-guide position override holds the synced
     // value for 10 s of task clock; past it the frame is what answers, so it must carry the synced position too.
+    // Each Sync stays within 5 deg of where the mount reads (the Sync bound, #2412).
     const auto past_override = seconds(11);
-    driver->sync_to_coordinates(3.5, 12.25);
+    driver->sync_to_coordinates(8.8, -66.0);
     clock.advance(past_override);
-    CHECK(std::abs(driver->get_right_ascension() - 3.5) < 1e-9);
-    CHECK(std::abs(driver->get_declination() - 12.25) < 1e-9);
+    CHECK(std::abs(driver->get_right_ascension() - 8.8) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - (-66.0)) < 1e-9);
 
     // A poll that sampled before the sync publishes after it: the sync wins.
     std::atomic<bool> once{false};
     sc::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
-        if (!once.exchange(true)) driver->sync_to_coordinates(6.0, -20.0);
+        if (!once.exchange(true)) driver->sync_to_coordinates(9.0, -64.0);
     });
     sc::poll_status_now_for_testing(*driver);
     clock.advance(past_override);
-    CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);
-    CHECK(std::abs(driver->get_declination() - (-20.0)) < 1e-9);
+    CHECK(std::abs(driver->get_right_ascension() - 9.0) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - (-64.0)) < 1e-9);
     sc::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
 
     // The next poll reads the handset (Dec only: the precise RA read is corrected against the last known RA).
@@ -324,14 +328,14 @@ TEST_CASE("SynScan snapshot - a sync, a slew start and a clock write are read ba
     CHECK_FALSE(driver->get_slewing());
     driver->slew_to_coordinates_async(2.0, 30.0);
     CHECK(driver->get_slewing());
-    driver->abort_slew();
+    alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });  // verified on the task clock (#2412)
     CHECK_FALSE(driver->get_slewing());
 
     // A stop is read back at once: the frame still says the handset was slewing at the last poll.
     st->slewing = true;
     sc::poll_status_now_for_testing(*driver);
     CHECK(driver->get_slewing());
-    driver->abort_slew();
+    alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });  // verified on the task clock (#2412)
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -1315,10 +1319,14 @@ TEST_CASE("SynScan Link - a cable pulled mid-slew loses the link and the slew bo
     const auto idle = rig.clock.waiter_count();  // the paused poll body
     rig.handset->unplug_on(after_goto());
     driver.slew_to_coordinates_async(5.5, 20.0);
-    REQUIRE(rig.clock.wait_for_waiters(idle + 1, kSettle));  // the GOTO is out, the body waits
-    rig.advance(milliseconds(8250));  // past the slew's forced-Slewing window: its completion read meets the pull
+    // The body's first status read after the GOTO meets the pull: it reads the handset inside the forced-Slewing
+    // window too, for the start grace (#2412).
+    for (int i = 0; i < 40 && (!rig.handset->unplugged() || driver.get_connected()); ++i) {
+        rig.advance(milliseconds(250));
+    }
     REQUIRE(rig.handset->unplugged());
     check_lost(driver);
+    for (int i = 0; i < 40 && rig.clock.waiter_count() > idle; ++i) rig.advance(milliseconds(250));
     CHECK(rig.clock.waiter_count() == idle);  // the body ended on its connection check
 }
 
