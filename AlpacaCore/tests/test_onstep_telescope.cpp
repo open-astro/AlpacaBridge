@@ -4360,7 +4360,7 @@ TEST_CASE("OnStep Telescope Driver - a GOTO's bound stops the mount when the sta
     require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
 }
 
-// #2406 (maintainer decision 2026-11-24): an OnStep mount has no reference at power-up, so the first sync after each
+// The #2406 Decisions (2026-11-24): an OnStep mount has no reference at power-up, so the first sync after each
 // Connect sets it and is not bounded; every later sync in the session moves the pointing by 5 degrees at most.
 TEST_CASE("OnStep Telescope Driver - a sync after the first one of a session is bounded",
           "[onstep][telescope][unit][goto-safety]") {

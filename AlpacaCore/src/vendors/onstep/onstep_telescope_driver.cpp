@@ -1502,7 +1502,7 @@ public:
         refuse_while_faulted_locked(who);
         check_not_parked_locked(who);
         refuse_while_goto_running_locked(who);
-        // #2406 (maintainer decision 2026-11-24): an OnStep mount has no reference at power-up, so the first sync
+        // The #2406 Decisions (2026-11-24): an OnStep mount has no reference at power-up, so the first sync
         // after each Connect sets it and is not bounded. Every later one may move the pointing by
         // util::kMaxSyncOffsetDegrees at most, from the position the frame holds.
         if (synced_this_session_) {
