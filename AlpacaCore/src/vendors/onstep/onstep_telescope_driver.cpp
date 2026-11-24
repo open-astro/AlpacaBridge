@@ -27,7 +27,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
@@ -65,7 +65,8 @@ namespace {
 // a continuous range, not a small set of discrete presets. See
 // OnStepProtocolWrapper::move_axis_start().
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
-// Decision 0010, OnStep adoption (#1783). One poll body samples the mount every kStatusPollPeriod, start to start on
+// Decision 0010, OnStep adoption (#1783, #2495). util::PolledState runs one poll body that samples the mount every
+// kStatusPollPeriod, start to start on
 // the task clock (ticks missed behind a slow link are skipped, never made up): :GU# and :GRa#/:GDe# on every tick,
 // :GA#/:GZ# on every kSlowPollEvery-th, so Altitude and Azimuth are never older than the 2 s cache they replace. A
 // full tick is five exchanges, about 0.13 s at 9600 baud on the HM-17 (#1242), so the line stays free for commands.
@@ -201,11 +202,17 @@ std::string describe_onstepx_error(int code) {
     }
 }
 
-// open-astro#1414 (decision 0009): consecutive failed poll ticks (or control-path
-// status reads) that latch a link fault, as on SynScan and Celestron. Each failed
-// tick costs one response timeout, so a silent mount latches in about three poll
-// periods plus three timeouts.
+// open-astro#1414 (decision 0009): consecutive failed poll probes that latch a link fault in util::PolledState, as on
+// SynScan and Celestron; control-path reads do not count (#2495). Each failed probe costs one response timeout, so a
+// silent mount latches in about three poll periods plus three timeouts.
 constexpr int kLinkFaultThreshold = 3;
+
+// Test seam: the tick number poll_status_tick_for_testing() runs on its own thread through PolledState's probe, which
+// takes no argument. Empty on every poll thread.
+std::optional<int>& forced_poll_tick() {
+    thread_local std::optional<int> tick;
+    return tick;
+}
 // OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with "10.23a"); legacy OnStep is 4.x and older. Only
 // OnStepX knows :GXEE#. is_onstepx_version() is in the wrapper, which the focuser shares (#2223).
 
@@ -476,10 +483,10 @@ class OnStepTelescopeDriver : public TelescopeDriver, protected alpacacore::Asyn
     // the :MS# or :CM# after them uses. mutex_ is never held ACROSS an exchange: every call through Wire drops
     // it for the call and takes it back after. The protocol wrapper's own lock serialises the wire itself.
     //
-    // Decision 0010 (#1783): the polled getters and DeviceState read snapshot_, which one poll body
-    // (status_poll_) fills every second, so a getter takes mutex_ alone (StateLock::Mode::State) and never
-    // reaches the wire. The poll body takes the operation lock for its exchanges, like a command, and publishes
-    // under mutex_ with the operation lock released. The StateSnapshot mutex is a leaf under mutex_.
+    // Decision 0010 (#1783, #2495): the polled getters and DeviceState read polled_ (util::PolledState), whose poll
+    // body calls probe() every second, so a getter takes mutex_ alone (StateLock::Mode::State) and never reaches the
+    // wire. The probe takes the operation lock for its exchanges, like a command, and publishes the frame itself
+    // under mutex_ with the operation lock released. The PolledState mutexes are leaves under mutex_.
     //
     // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an exchange)
     // is util::LockGate (lock_gate.h, #1729).
@@ -808,10 +815,25 @@ public:
         return published_connected_.load() && link_alive();
     }
 
-    // The held link is there and not lost (no I/O; decision 0009). Lock-free: the link pointer is atomic.
+    // The held link is there and not lost, by the wrapper or by the poll's loss bound (no I/O; decision 0009).
+    // Lock-free: the link pointer and the loss latch are atomic.
     bool link_alive() const {
         const auto link = link_.load();
-        return link && link->link_alive();
+        return link && link->link_alive() && !polled_.link_lost();
+    }
+
+    // PolledState's on_lost, on the poll thread with no driver lock held: a fault, or a frame no probe refreshed,
+    // standing for util::kLinkStalenessBound. The wrapper records the loss and closes the port, as for a pulled adapter
+    // (#1241), so the #521 relink stops time the outage; a sibling device on the link reads it too (#2223).
+    void declare_poll_loss() const {
+        const auto link = link_.load();
+        if (!link) {
+            return;
+        }
+        const std::string bound =
+            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) + " s";
+        const std::string fault = polled_.fault();
+        link->declare_link_lost(fault.empty() ? "no state frame for " + bound : "no reply for " + bound + ": " + fault);
     }
 
     // Why the held link was lost, or "" (no I/O).
@@ -844,16 +866,10 @@ public:
         }
     }
 
-    // The latched fault for the getters that read lock-free, so they never wait
-    // behind serial I/O under mutex_ (#1449): link_fault_text_ has its own narrow
-    // mutex. No staleness check here; the poll ticks and refused writes make a
-    // standing fault a lost link.
+    // The latched fault for the getters that read lock-free, so they never wait behind serial I/O under mutex_
+    // (#1449): PolledState keeps it under a leaf mutex of its own. The poll's probes make a standing fault a lost link.
     void throw_if_faulted_lock_free() const {
-        std::string fault;
-        {
-            std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
-            fault = link_fault_text_;
-        }
+        const std::string fault = polled_.fault();
         if (!fault.empty()) {
             throw AlpacaException("OnStep mount communications compromised: " + fault, AlpacaError::DriverException);
         }
@@ -861,7 +877,7 @@ public:
 
     // Why the serial link was lost, kept until the next Connect or Disconnect,
     // or else the latched fault of a silent mount (decision 0009). The wrapper's
-    // reason and link_fault_text_ under its own narrow mutex: never waits on mutex_.
+    // reason and the poll's fault under their own narrow mutexes: never waits on mutex_.
     std::string get_link_fault() const override {
         (void)link_alive();  // notice an unplug the listing would otherwise miss
         const std::string reason = link_lost_reason();
@@ -869,8 +885,8 @@ public:
             return "Link to the mount lost (" + reason + "); reconnect";
         }
         // A latched fault: Connected still true, reads refused (#1414).
-        std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
-        return link_fault_text_.empty() ? std::string{} : "Mount not answering (" + link_fault_text_ + ")";
+        const std::string fault = polled_.fault();
+        return fault.empty() ? std::string{} : "Mount not answering (" + fault + ")";
     }
 
     ALPACA_ASYNC_CONNECT_FORWARDERS()
@@ -913,6 +929,9 @@ public:
         // already connected (decision 0009 point 4, #1241).
         if (connected && connected_ && !protocol.link_alive()) {
             ALPACA_LOG_WARN("OnStep", "Connect requested on a lost link; reconnecting");
+            if (polled_.link_lost()) {
+                declare_poll_loss();  // a loss the poll latched and did not close yet: stamped for the #521 stops
+            }
             published_connected_ = false;
             connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
             protocol.release_link();
@@ -968,15 +987,13 @@ public:
             if (stop_motion_after_long_outage_locked()) {
                 relink_watch.reset();  // the driver stopped the motion: its end is the driver's own
             }
-            snapshot_.reset();
+            polled_.reset();
             site_latitude_known_ = false;
             site_longitude_known_ = false;
             utc_offset_.clear();
             mount_clock_unreadable_.reset();
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
-            link_health_.reset();
-            set_link_fault_text("");
             target_ra_set_ = false;
             target_dec_set_ = false;
             clear_manual_motion_locked();
@@ -1126,7 +1143,7 @@ public:
                 // once, by the same end rules as any other (a stop during the outage still fails it), else the watch
                 // goes on. The park and home bound still runs from the command.
                 watched_motion_ = relink_watch;
-                const auto seeded = snapshot_.read();
+                const auto seeded = polled_.read();
                 if (seeded && seeded->value.status_known) {
                     try {
                         note_motion_end_locked(
@@ -1156,20 +1173,15 @@ public:
                 model_cache_ = model;
             }
             published_connected_ = true;  // the connect is complete (#910)
-            // The poll starts once the connect is complete, with no driver lock held (decision 0006 rule 4).
+            // The poll starts once the connect is complete, with no driver lock held (decision 0006 rule 4). Its
+            // first probe is the seed above, so start() sends nothing and the first tick is one period away.
             lock.unlock();
-            std::string poll_refused;
-            try {
-                start_status_poller(kStatusPollPeriod);
-            } catch (const std::exception& ex) {
-                poll_refused = ex.what();
-            }
-            if (!poll_refused.empty()) {
+            if (!start_status_poller()) {
                 // Nothing would refresh the state for the whole session (#1895): undone as a Disconnect is,
                 // the pulse-end body a PulseGuide may have started meanwhile joined first, with no lock held.
                 stop_status_poller();
                 lock.lock();
-                fail_connect_locked("the status poll did not start (" + poll_refused + ")");
+                fail_connect_locked("the status poll did not start");
             }
         } else {
             // Decision 0016, item 4: Connected goes false under mutex_ BEFORE the close, which runs through
@@ -1302,7 +1314,7 @@ public:
         check_connected();
         throw_if_faulted_locked();  // commanded state, not a wire read: refused too (decision 0009 rule 1)
         const auto now = clock_.now();
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         bool guiding = false;
         for (int axis = 0; axis < 2; ++axis) {  // ASCOM: true while either axis pulses
             if (!pulse_guiding_active_[axis]) {
@@ -1911,7 +1923,7 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         // Here, not in set_utc_date_locked(): the connect's own time sync runs
-        // right after link_health_.reset(), where the check cannot fire (#1626).
+        // right after polled_.reset(), where the check cannot fire (#1626).
         refuse_while_faulted_locked("UTCDate");
         refuse_while_moving_locked("UTCDate");
         set_utc_date_locked(utc);
@@ -2013,7 +2025,7 @@ public:
         lock.unlock();
         run_pulse_guide_gap_hook();
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
-        // poll_status_once() checks the connection under the operation lock, and the next Connect (or the
+        // poll_tick() checks the connection under the operation lock, and the next Connect (or the
         // destructor) joins the slot before a new session starts. A start during the Disconnect's join is refused.
         start_pulse_measurement(wait);
     }
@@ -2117,7 +2129,7 @@ public:
         store_target_locked(ra, dec, targets);
         // Write-through (decision 0010): the mount now reports the synced position; a tick that sampled before
         // the sync is dropped.
-        snapshot_.write([ra, dec](PolledFrame& frame) {
+        polled_.write([ra, dec](PolledFrame& frame) {
             frame.ra_hours = ra;
             frame.dec_degrees = dec;
             frame.equatorial_known = true;
@@ -2386,7 +2398,7 @@ public:
         // fault gives the restore up without asking (the call refuses below).
         if (tracking_before_slew_) {
             try {
-                if (link_health_.faulted()) {
+                if (link_faulted()) {
                     throw AlpacaException("faulted", AlpacaError::DriverException);
                 }
                 {
@@ -2470,7 +2482,7 @@ public:
     }
 
     void set_status_poll_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
-        status_poll_.set_spawn_for_testing(std::move(spawn));
+        polled_.set_spawn_for_testing(std::move(spawn));
     }
 
     void set_disconnect_before_close_hook_for_testing(std::function<void()> hook) {
@@ -2500,24 +2512,31 @@ public:
 
     bool clock_resync_running_for_testing() const { return clock_resync_.running(); }
 
-    // Stops (true: the poll body is joined, so it parks no waiter on a fake task clock) or resumes (false) the
-    // status poll. While paused a connect does not start it. Call with no driver lock held.
+    // Stops (true: the poll body is joined, so it parks no waiter on a fake task clock) or resumes (false: its
+    // first tick one period away) the status poll. While paused a connect does not start it. Call with no driver
+    // lock held.
     void set_status_poll_paused_for_testing(bool paused) {
         status_poll_paused_for_testing_ = paused;
         if (paused) {
             stop_status_poller();
         } else if (published_connected_.load()) {
-            start_status_poller(std::chrono::nanoseconds::zero());
+            polled_.restart_poll_for_testing();
+            poll_started_ = true;
         }
     }
 
-    // One tick on the calling thread, paused or not (`full`: Alt/Az and the site retry too). False when the
-    // connection is gone or lost.
-    bool poll_status_now_for_testing(bool full) { return poll_status_once(nullptr, full ? 0 : 1); }
-    bool poll_status_tick_for_testing(int tick) { return poll_status_once(nullptr, tick); }
+    // One PolledState cycle on the calling thread, paused or not (`full`: Alt/Az and the site retry too), the
+    // module's fault count and loss close included. False when the connection is gone or lost.
+    bool poll_status_now_for_testing(bool full) { return poll_status_tick_for_testing(full ? 0 : 1); }
+    bool poll_status_tick_for_testing(int tick) {
+        forced_poll_tick() = tick;
+        polled_.poll_now_for_testing();
+        forced_poll_tick().reset();
+        return connected_.load() && published_connected_.load() && link_alive();
+    }
 
-    // False once the poll body is cancelled (the slot hands it to the joiner), while it may still be sampling.
-    bool status_poll_running_for_testing() const { return status_poll_.running(); }
+    // False once the poll body is cancelled (a disconnect has taken it), while it may still be sampling.
+    bool status_poll_running_for_testing() const { return poll_started_.load() && !poll_cancelled_.load(); }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
@@ -3014,8 +3033,8 @@ private:
     }
 
     // :GE# with no code is firmware without it, or a mount that stopped
-    // answering (#1414): a :GU# read tells them apart. A silent mount counts
-    // as a failed read toward the link fault, and the park or home fails
+    // answering (#1414): a :GU# read tells them apart. A silent mount fails the
+    // park or home (the read feeds no fault latch, #2495)
     // instead of reading as accepted. Unlike refresh_status_locked(), the
     // :GU# read here leaves status_read_since_move_ alone on purpose: the #1378
     // 'g' check then waits for the next status read, the safe side, so do not
@@ -3027,10 +3046,11 @@ private:
         }
         try {
             const MountStatus status = protocol.get_status();
-            note_read_ok_locked();
             note_status_read_locked(status, false);
         } catch (const std::exception& ex) {
-            note_read_failure_locked(ex);  // throws once the fault latched or the link went
+            if (!is_link_lost(ex)) {
+                throw_if_faulted_locked();  // a control-path read feeds no latch (#2495), but reports one
+            }
             if (const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
                 alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected) {
                 throw;  // the link is gone: NotConnected, as for any other call
@@ -3491,7 +3511,7 @@ private:
         if (!published_connected_.load() || !onstepx_ || !pier_settings_ || !pier_settings_->flips_enabled) {
             return false;
         }
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         return reading && reading->value.status_known && reading->value.status.is_gem;
     }
 
@@ -3502,7 +3522,7 @@ private:
         if (!pier_settings_) {
             return std::nullopt;
         }
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         if (!reading || !reading->value.status_known || !reading->value.equatorial_known ||
             !reading->value.status.is_gem) {
             return std::nullopt;
@@ -3585,9 +3605,7 @@ private:
         home_moves_one_axis_.reset();
         warned_stop_code_ = 0;
         warned_stop_keys_.clear();
-        snapshot_.reset();  // decision 0010: also drops a poll tick in flight
-        link_health_.reset();
-        set_link_fault_text("");
+        polled_.reset();  // decision 0010: also drops a poll tick in flight, the fault and the loss latch
         refraction_from_firmware_.reset();
         pier_settings_.reset();
         onstepx_ = false;
@@ -3796,7 +3814,7 @@ private:
     // Tracking as the getter serves it (the frame, a write-through included); a
     // frame with no status yet is filled by a control-path :GU# read first.
     bool tracking_as_served_locked() const {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         if (!reading || !reading->value.status_known) {
             refresh_status_locked();
         }
@@ -3898,7 +3916,7 @@ private:
     // the rate offsets. A read that fails leaves the default; the connect still succeeds, and the poll follows the
     // frame. Caller holds the operation lock.
     void seed_rate_state_locked() {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         const bool have_status = reading && reading->value.status_known;
         const MountStatus status = have_status ? reading->value.status : MountStatus{};
         const auto attempt = [](const char* what, const auto& read) {
@@ -4019,7 +4037,7 @@ private:
     // `refuse` false (Tracking=false, a stop) swallows that last case and carries on; a lost link and a latched fault
     // still throw.
     void ensure_status_read_locked(const char* operation, bool refuse = true) const {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         if (reading && reading->value.status_known) {
             return;
         }
@@ -4027,7 +4045,7 @@ private:
         try {
             refresh_status_locked();
         } catch (const std::exception& ex) {
-            if (is_link_lost(ex) || link_health_.faulted()) {
+            if (is_link_lost(ex) || link_faulted()) {
                 throw;
             }
             if (!refuse) {
@@ -4105,7 +4123,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             // Slewing follows the mount once it has shown the move (#1378).
             throw_if_faulted_locked();  // a latched fault is reported, as by every read (#1414)
-            const auto reading = snapshot_.read();
+            const auto reading = polled_.read();
             if (!reading || !reading->value.status_known || !manual_move_ended_locked(reading->value.status)) {
                 return true;  // keep reporting the move; an unread status is not a stop
             }
@@ -4210,63 +4228,26 @@ private:
         }
     }
 
-    // open-astro#1414, decision 0009: a mount that stops answering while its
-    // adapter stays plugged in (mount unpowered, cable pulled at the mount)
-    // latches a fault after kLinkFaultThreshold failed poll ticks (or
-    // control-path status reads) in a row: Connected stays true, and reads
-    // throw DriverException with the fault instead of serving the frame. A
-    // fault that has stood for util::kLinkStalenessBound is a lost link: the
-    // wrapper records it and closes the port as for a pulled adapter (#1241),
-    // so Connected reads false and calls throw NotConnected. Only the client's
-    // Connect relinks. The poll keeps asking while faulted, so one good tick
-    // clears the fault, and its failed ticks find the bound (a getter, which
-    // takes no operation lock, only throws the fault). Time is the task clock.
-    void note_read_ok_locked() const {
-        if (link_health_.on_reply()) {
-            ALPACA_LOG_INFO("OnStep", "Mount answering again; link fault cleared");
-            set_link_fault_text("");
-        }
-    }
-
-    void note_read_failure_locked(const std::exception& ex) const {
-        if (is_link_lost(ex)) {
-            return;  // the link is already gone (#1241); not a silent mount
-        }
-        const auto now = clock_.now();
-        if (const auto latched = link_health_.note_failure(ex.what(), kLinkFaultThreshold, now)) {
-            ALPACA_LOG_ERROR("OnStep", "Mount not answering; link fault latched: " + *latched);
-            set_link_fault_text(*latched);
-        } else if (!link_health_.faulted()) {
-            ALPACA_LOG_WARN("OnStep", "Mount read failed (" + std::to_string(link_health_.consecutive_failures()) +
-                                          " in a row): " + ex.what());
-        }
-        lose_link_if_stale_locked(now);
-        if (link_health_.faulted()) {
-            throw_fault_locked();
-        }
-    }
+    // open-astro#1414, decision 0009: a mount that stops answering while its adapter stays plugged in (mount
+    // unpowered, cable pulled at the mount) latches a fault in util::PolledState after kLinkFaultThreshold failed
+    // poll probes in a row: Connected stays true, and reads throw DriverException with the fault instead of serving
+    // the frame. A fault, or a frame no probe refreshed, standing for util::kLinkStalenessBound is a lost link:
+    // declare_poll_loss() has the wrapper record it and close the port as for a pulled adapter (#1241), so Connected
+    // reads false and calls throw NotConnected. Only the client's Connect relinks. The poll keeps asking while
+    // faulted, so one good probe clears the fault. Control-path reads (a command's :GU#, the synchronous slew's end
+    // read, the connect's seed) feed no latch (#2495): only the probe does. Time is the task clock.
+    bool link_faulted() const { return !polled_.fault().empty(); }
 
     // A read that answers from the frame or the driver's own state (the
     // position and status getters, the site, UTCDate, SiderealTime,
     // DestinationSideOfPier, DoesRefraction, IsPulseGuiding and Slewing's
     // pending Park/FindHome and grace answers) throws the latched fault
-    // (decision 0009 rule 1). A caller that holds the operation lock (a
-    // command, the poll) checks the staleness bound first: closing a lost
-    // port is a wire call, which a getter never makes.
+    // (decision 0009 rule 1), one text for all of them (#1658 review).
     void throw_if_faulted_locked() const {
-        if (link_health_.faulted()) {
-            if (holds_io_lock()) {
-                lose_link_if_stale_locked(clock_.now());
-            }
-            throw_fault_locked();
+        const std::string fault = polled_.fault();
+        if (!fault.empty()) {
+            throw AlpacaException("OnStep mount communications compromised: " + fault, AlpacaError::DriverException);
         }
-    }
-
-    // The latched fault as every faulted read reports it (decision 0009 rule 1),
-    // one text for all of them (#1658 review).
-    [[noreturn]] void throw_fault_locked() const {
-        throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
-                              AlpacaError::DriverException);
     }
 
     // A read that found the link gone.
@@ -4275,41 +4256,18 @@ private:
         return alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected;
     }
 
-    // A fault that has stood past util::kLinkStalenessBound is a lost link:
-    // the wrapper closes the port and this throws NotConnected. Caller holds
-    // the operation lock.
-    void lose_link_if_stale_locked(std::chrono::steady_clock::time_point now) const {
-        if (!link_health_.fault_stale(now, util::kLinkStalenessBound)) {
-            return;
-        }
-        const std::string reason =
-            "no reply for " +
-            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
-            " s: " + link_health_.fault();
-        wire().declare_link_lost(reason);  // Connected now reads false
-        throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
-                              AlpacaError::NotConnected);
-    }
-
     // Decision 0009 rule 1: while the fault is latched, writes throw as reads
     // do. Blind commands cannot fail on a healthy fd, so without this a
     // Tracking, Unpark or a slew would report success to a mount that is
     // not listening. AbortSlew and MoveAxis(axis, 0) send their stops first
-    // and call this after, so the stop is still tried (#1414).
+    // and call this after, so the stop is still tried (#1414). The poll's
+    // probes, not a write, find the loss bound (#2495).
     void refuse_while_faulted_locked(const char* what) const {
-        if (link_health_.faulted()) {
-            // A client that only writes still sees the link lost once the
-            // fault has stood past the bound, as a read would (#1414).
-            lose_link_if_stale_locked(clock_.now());
-            throw AlpacaException(
-                std::string(what) + ": OnStep mount communications compromised: " + link_health_.fault(),
-                AlpacaError::DriverException);
+        const std::string fault = polled_.fault();
+        if (!fault.empty()) {
+            throw AlpacaException(std::string(what) + ": OnStep mount communications compromised: " + fault,
+                                  AlpacaError::DriverException);
         }
-    }
-
-    void set_link_fault_text(const std::string& text) const {
-        std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
-        link_fault_text_ = text;
     }
 
     // ── Snapshot-served state (decision 0010, OnStep adoption, #1783) ──────────
@@ -4317,7 +4275,7 @@ private:
     // The frame's status, for the control paths: default (idle, not parked) before any :GU# answered. Takes only
     // the snapshot's own mutex.
     MountStatus frame_status_locked() const {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         return reading && reading->value.status_known ? reading->value.status : MountStatus{};
     }
 
@@ -4326,13 +4284,13 @@ private:
     // measures the mount.
     template <typename Apply>
     void write_status_locked(Apply&& apply) const {
-        snapshot_.write([&apply](PolledFrame& frame) { apply(frame.status); });
+        polled_.write([&apply](PolledFrame& frame) { apply(frame.status); });
     }
 
     // A write that changed what the mount's position means (a pulse, a MoveAxis start, the stops): the tick in
     // flight sampled before it and is dropped; the next tick measures.
     void drop_poll_in_flight_locked() const {
-        snapshot_.write([](PolledFrame&) {});
+        polled_.write([](PolledFrame&) {});
     }
 
     // A :GU# a control path read (decision 0010: control paths keep their direct reads and write through). A
@@ -4345,11 +4303,11 @@ private:
         if (counts_for_move) {
             note_status_measured_locked(status);
         }
-        const auto held = snapshot_.read();
+        const auto held = polled_.read();
         if (held && held->value.status_known && same_status(held->value.status, status)) {
             return;
         }
-        snapshot_.write([&status](PolledFrame& frame) {
+        polled_.write([&status](PolledFrame& frame) {
             frame.status = status;
             frame.status_known = true;
         });
@@ -4373,22 +4331,23 @@ private:
         }
     }
 
-    // Control path: :GU# now, written through. A failed read counts toward the
-    // link fault (and throws once it latched, or the link went); while the frame
-    // knows a status the failure is otherwise not reported, as the status cache
-    // was served before #1783 (#1414). Caller holds the operation lock.
+    // Control path: :GU# now, written through. A failed read feeds no fault latch (#2495); it throws when the link
+    // went, a fault is latched or the frame knows no status, and is otherwise not reported, as the status cache was
+    // served before #1783 (#1414). Caller holds the operation lock.
     void refresh_status_locked() const {
         try {
             const MountStatus status = wire().get_status();
-            note_read_ok_locked();
             if (!status.is_slewing) {
                 slew_hold_.clear();  // landed: a reading with no GOTO (decision 0022 rules 2, 3)
             }
             note_status_read_locked(status, true);
         } catch (const std::exception& ex) {
-            note_read_failure_locked(ex);
-            const auto reading = snapshot_.read();
-            if (!reading || !reading->value.status_known || is_link_lost(ex)) {
+            if (is_link_lost(ex)) {
+                throw;
+            }
+            throw_if_faulted_locked();
+            const auto reading = polled_.read();
+            if (!reading || !reading->value.status_known) {
                 throw;
             }
         }
@@ -4399,12 +4358,11 @@ private:
     // is: stale is not lost (decision 0010 rule 6).
     PolledFrame served_frame_locked() const {
         throw_if_faulted_locked();
-        const auto reading = snapshot_.read();
-        if (!reading) {
+        if (!polled_.read()) {
             throw AlpacaException("OnStep mount state is not available yet: the first status poll has not answered",
                                   AlpacaError::DriverException);
         }
-        return reading->value;
+        return polled_.served().value;  // NotConnected once the frame is util::kLinkStalenessBound old
     }
 
     MountStatus served_status_locked() const {
@@ -4467,7 +4425,7 @@ private:
         if (!offset_anchor_) {
             return std::nullopt;
         }
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         const auto now = clock_.now();
         if (!reading || reading->stale || now - offset_anchor_->at >= kOffsetModelHold ||
             !offset_model_allowed_locked(reading->value, now)) {
@@ -4494,7 +4452,7 @@ private:
             offset_anchor_ = OffsetAnchor{model->ra_hours, model->dec_degrees, now};
             return;
         }
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         if (!reading || reading->stale || !offset_model_allowed_locked(reading->value, now)) {
             offset_anchor_.reset();
             return;
@@ -4508,7 +4466,7 @@ private:
 
     // A sync: a running offset goes on from the synced position. Caller holds mutex_.
     void anchor_offset_model_at_sync_locked(double ra, double dec) const {
-        const auto reading = snapshot_.read();
+        const auto reading = polled_.read();
         const auto now = clock_.now();
         offset_model_floor_ = now;
         if (rate_offsets_set_locked() && reading && offset_model_allowed_locked(reading->value, now)) {
@@ -4563,13 +4521,7 @@ private:
 
     // Decision 0010 rule 5: DeviceState's TimeStamp is when the poll measured. Task-clock age; takes only the
     // snapshot's own mutex.
-    std::optional<std::chrono::nanoseconds> device_state_age() const override {
-        const auto reading = snapshot_.read();
-        if (!reading) {
-            return std::nullopt;
-        }
-        return clock_.now() - reading->measured_at;
-    }
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return polled_.age(); }
 
     // One mount sample: :GU# first, so a frame that says "not slewing" carries a position read after the stop,
     // then :GRa#/:GDe#, and with `full` :GA#/:GZ#. Throws at the first failed exchange of the mandatory part
@@ -4604,16 +4556,15 @@ private:
         return frame;
     }
 
-    // Where a control path ends a motion (the synchronous slew): reads the mount now and publishes a full frame,
-    // so Slewing false is never served beside a position from mid-motion. A failed read is handled as a failed
-    // poll tick: the last values stay served and the failure counts toward the link fault; only a lost link is
-    // reported. Caller holds the operation lock.
+    // Where a control path ends a motion (the synchronous slew): reads the mount now and publishes a full frame
+    // through the module (PolledState::begin_poll() and publish()), so Slewing false is never served beside a
+    // position from mid-motion. A failed read keeps the last values served and feeds no fault latch (#2495): the
+    // poll's probes judge the link. Only a lost link is reported. Caller holds the operation lock.
     void publish_measurement_locked() const {
-        const auto token = snapshot_.begin_poll();
-        const auto previous = snapshot_.read();
+        const auto token = polled_.begin_poll();
+        const auto previous = polled_.read();
         try {
             const PolledFrame frame = sample_locked(previous ? previous->value : PolledFrame{}, true);
-            note_read_ok_locked();
             if (publish_sample_locked(token, frame)) {
                 note_status_measured_locked(frame.status);
                 adopt_offset_model_frame_locked(frame);
@@ -4622,36 +4573,28 @@ private:
             if (is_link_lost(ex)) {
                 throw;
             }
-            try {
-                note_read_failure_locked(ex);
-            } catch (const AlpacaException& counted) {
-                if (counted.error_code() == AlpacaError::NotConnected) {
-                    throw;  // the fault stood past the bound: the link is lost
-                }
-            }
+            ALPACA_LOG_WARN("OnStep",
+                            std::string("End-of-slew read failed; the last values stay served: ") + ex.what());
         }
     }
 
     // The first frame, at the end of a connect, so the getters have an answer, status flags included, the
-    // moment Connect returns. Each read on its own, as the cache warm-up did: a mount that answers none leaves a
-    // frame with nothing known (the getters refuse it until a tick answers), and each failure counts toward the
-    // link fault. The mount's site is read here too while the config did not set it. A link lost meanwhile is
-    // not one of these: the connect checks for it after the seed and fails (#1895).
+    // moment Connect returns; PolledState::start() then sends nothing for its first probe. Each read on its own, as
+    // the cache warm-up did: a mount that answers none leaves a frame with nothing known (the getters refuse it until
+    // a tick answers), and a failure feeds no fault latch (#2495): the poll's probes do. The mount's site is read
+    // here too while the config did not set it. A link lost meanwhile is not one of these: the connect checks for it
+    // after the seed and fails (#1895).
     void seed_snapshot_locked() {
         const Wire protocol = wire();
-        const auto token = snapshot_.begin_poll();
+        const auto token = polled_.begin_poll();
         PolledFrame frame;
         frame.sampled_at = clock_.now();
         frame.sample_seq = ++sample_seq_;
-        const auto read = [this](const std::function<void()>& exchange) {
+        const auto read = [](const std::function<void()>& exchange) {
             try {
                 exchange();
-                note_read_ok_locked();
             } catch (const std::exception& ex) {
-                try {
-                    note_read_failure_locked(ex);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the connect still succeeds
-                }
+                ALPACA_LOG_WARN("OnStep", std::string("Connect read failed; the poll asks again: ") + ex.what());
             }
         };
         read([&] {
@@ -4676,80 +4619,101 @@ private:
             frame.az_degrees = altaz.azimuth_degrees;
             frame.altaz_known = true;
         });
-        snapshot_.publish(token, frame);
+        polled_.publish(token, frame);
         if (frame.status_known) {
             note_status_measured_locked(frame.status);
         }
     }
 
-    // One poll tick. Its exchanges hold the operation lock, like a command's, so they never land inside a
-    // command's sequence (:hC# then :GE#), and mutex_ is dropped for each one (decision 0016); the frame is
-    // published under mutex_ alone, so a client write between the sample and the publish drops it (decision
-    // 0010 point 4). The tick ends at its first failed exchange. Returns false when the connection is gone or
-    // lost and the body should end. `ctx` is null for the test seam's direct tick.
-    bool poll_status_once(util::OperationContext* ctx, int tick) {
-        const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
+    // PolledState's probe (decision 0010 rule 7, #2495), on the poll thread with no driver lock held, or on a test
+    // seam's thread. Each tick publishes its own frame (poll_tick()) and returns nullopt, so the module counts the
+    // reply and publishes nothing over it; a failed sample throws, which the module counts toward the fault. The
+    // first call after a connect is the seed's: the connect already published that frame.
+    std::optional<PolledFrame> probe() {
+        if (skip_next_probe_.exchange(false)) {
+            return std::nullopt;
+        }
+        const std::optional<int> forced = forced_poll_tick();
+        const int tick = forced.value_or(next_poll_tick_);
+        if (!forced) {
+            ++next_poll_tick_;
+        }
+        poll_tick([this, seam = forced.has_value()] { return !seam && poll_cancelled_.load(); }, tick);
+        return std::nullopt;
+    }
+
+    // One poll tick, the probe's or the pulse-end measurement's. Its exchanges hold the operation lock, like a
+    // command's, so they never land inside a command's sequence (:hC# then :GE#), and mutex_ is dropped for each one
+    // (decision 0016); the frame is published under mutex_ alone through PolledState::publish(), so a client write
+    // between the sample and the publish drops it (decision 0010 point 4), and the status note and the rate-offset
+    // model take only a frame whose publish took. The tick ends at its first failed exchange, which it throws; a lost
+    // link is reported to the module first (PolledState::lose_link(), decision 0009 rule 2a). It returns with nothing
+    // done when the connection is gone or `stopped()` (a cancel, decision 0006 rule 6).
+    template <typename Stopped>
+    void poll_tick(const Stopped& stopped, int tick) {
         const bool full = tick % kSlowPollEvery == 0;
-        util::StateSnapshot<PolledFrame>::Token token{};
+        util::PolledState<PolledFrame>::Token token{};
         PolledFrame frame;
         {
             StateLock lock(lock_gate_);
-            if (!connected_.load() || !published_connected_.load() || stopped() || !link_alive()) {
-                return false;
+            if (!connected_.load() || !published_connected_.load() || stopped()) {
+                return;
             }
-            const auto previous = snapshot_.read();
-            token = snapshot_.begin_poll();
+            if (!link_alive()) {
+                polled_.lose_link();
+                throw AlpacaException("OnStep link lost", AlpacaError::NotConnected);
+            }
+            const auto previous = polled_.read();
+            token = polled_.begin_poll();
             try {
                 frame = sample_locked(previous ? previous->value : PolledFrame{}, full);
-                if (stopped()) {
-                    return false;  // superseded or cancelled mid-sample: no health note, restore or site read
-                }
-                note_read_ok_locked();
             } catch (const std::exception& ex) {
                 if (stopped()) {
-                    return false;
+                    return;  // superseded or cancelled mid-sample: no verdict, restore or site read
                 }
-                try {
-                    note_read_failure_locked(ex);
-                } catch (const AlpacaException& thrown) {
-                    if (thrown.error_code() == AlpacaError::NotConnected) {
-                        return false;  // the bound has passed: the link is lost, and only a Connect relinks
-                    }
+                if (is_link_lost(ex)) {
+                    polled_.lose_link();
                 }
-                return !is_link_lost(ex);
+                throw;
+            }
+            if (stopped()) {
+                return;
             }
             try {
                 finish_slew_if_ended_locked(frame);
                 check_motion_bounds_locked(frame.status);
                 if (full && !site_known_locked()) {
-                    ensure_site_info_cached_locked();  // a site the connect could not read (#1783)
+                    ensure_site_info_cached_locked(/*probe_answered=*/true);  // one the connect could not read (#1783)
                 }
             } catch (const std::exception& ex) {
                 if (is_link_lost(ex)) {
-                    return false;
+                    polled_.lose_link();
+                    throw;
                 }
             }
             if (stopped()) {
-                return false;  // cancelled: no rate reads
+                return;  // cancelled: no rate reads
             }
             try {
                 refresh_rate_state_locked(frame.status, full);
             } catch (const std::exception& ex) {
                 if (is_link_lost(ex)) {
-                    return false;
+                    polled_.lose_link();
+                    throw;
                 }
             }
             // The pier-side settings follow a change made at a handset (#2179). Any failure but a lost link keeps
             // the previous ones.
             if (stopped()) {
-                return false;
+                return;
             }
             if (onstepx_ && tick > 0 && tick % kPierSettingsEvery == 0) {
                 try {
                     refresh_pier_settings_locked(/*at_connect=*/false);
                 } catch (const std::exception& ex) {
                     if (is_link_lost(ex)) {
-                        return false;
+                        polled_.lose_link();
+                        throw;
                     }
                 }
             }
@@ -4757,25 +4721,24 @@ private:
         run_status_poll_after_sample_hook();
         StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!connected_.load() || stopped()) {
-            return false;
+            return;
         }
         if (publish_sample_locked(token, frame)) {
             note_status_measured_locked(frame.status);
             adopt_offset_model_frame_locked(frame);
         }
-        return true;
     }
 
     // The regular tick, the pulse-end tick and the synchronous slew's end read all publish under mutex_, the ticks
     // after the operation lock is released, so they can publish out of the order they sampled in. A sample older
     // than the held frame's is skipped; a newer one in flight is left to publish (decision 0010: a client write
     // after its begin_poll() still drops it).
-    bool publish_sample_locked(util::StateSnapshot<PolledFrame>::Token token, const PolledFrame& frame) const {
-        const auto held = snapshot_.read();
+    bool publish_sample_locked(util::PolledState<PolledFrame>::Token token, const PolledFrame& frame) const {
+        const auto held = polled_.read();
         if (held && frame.sample_seq < held->value.sample_seq) {
             return false;
         }
-        return snapshot_.publish(token, frame);
+        return polled_.publish(token, frame);
     }
 
     // The tracking restore a coordinate slew owes (#1230), on the first tick frame that shows no GOTO (inside the
@@ -4873,40 +4836,33 @@ private:
         });
     }
 
-    void run_status_poller(util::OperationContext& ctx, std::chrono::nanoseconds first_wait) {
-        if (!ctx.wait_for(first_wait)) {
-            return;
-        }
-        for (int tick = 0;; ++tick) {
-            const auto started = clock_.now();
-            if (!poll_status_once(&ctx, tick)) {
-                return;
-            }
-            // Start to start: wait for the next tick, skipping any a slow tick ran over (no catch-up).
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatusPollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatusPollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
     // Call with no driver lock held (decision 0006 rule 4): the poll and pulse-end bodies take them.
+    // poll_cancelled_ stands for the cancel while the bodies are joined, so a probe in its sample gives no verdict.
     void stop_status_poller() {
-        status_poll_.cancel_all_and_join();
+        poll_cancelled_ = true;
+        polled_.stop_and_join();
         pulse_measurement_.cancel_all_and_join();
+        poll_started_ = false;
+        poll_cancelled_ = false;
     }
 
-    // One tick `wait` from now, the pulse's end plus kPulseGuideSettle, beside the regular cadence. Call with no
-    // driver lock held (decision 0006 rule 4).
+    // One tick `wait` from now, the pulse's end plus kPulseGuideSettle, beside the regular cadence: a one-shot
+    // measurement slot that publishes through the module (decision 0010 rule 7). It feeds no fault latch: the 1 s
+    // probes judge the link. Call with no driver lock held (decision 0006 rule 4).
     void start_pulse_measurement(std::chrono::nanoseconds wait) {
         if (status_poll_paused_for_testing_.load()) {
             return;
         }
         try {
             pulse_measurement_.start([this, wait](util::OperationContext& ctx) {
-                if (ctx.wait_for(wait)) {
-                    (void)poll_status_once(&ctx, 1);  // :GU# and the position
+                if (!ctx.wait_for(wait)) {
+                    return;
+                }
+                try {
+                    poll_tick([&ctx] { return ctx.stop_reason() != util::StopReason::None; }, 1);  // :GU#, position
+                } catch (const std::exception& ex) {
+                    // IsPulseGuiding still ends at kPulseMeasureBound.
+                    ALPACA_LOG_DEBUG("OnStep", std::string("Pulse-end measurement failed: ") + ex.what());
                 }
             });
         } catch (const std::exception& e) {
@@ -4916,13 +4872,19 @@ private:
         }
     }
 
-    // Call with no driver lock held (decision 0006 rule 4), at the end of a connect. A refused start (no thread)
-    // throws: the connect fails rather than serve its first frame for the whole session (#1895).
-    void start_status_poller(std::chrono::nanoseconds first_wait) {
+    // Call with no driver lock held (decision 0006 rule 4), at the end of a connect, after the seed. False when the
+    // poll did not start (no thread): the connect fails rather than serve its first frame for the whole session
+    // (#1895). While the test seam pauses the poll it is not started.
+    bool start_status_poller() {
         if (status_poll_paused_for_testing_.load()) {
-            return;
+            return true;
         }
-        status_poll_.start([this, first_wait](util::OperationContext& ctx) { run_status_poller(ctx, first_wait); });
+        next_poll_tick_ = 0;
+        skip_next_probe_ = true;  // start()'s first probe is the seed the connect published
+        const bool started = polled_.start();
+        skip_next_probe_ = false;
+        poll_started_ = started;
+        return started;
     }
 
     // A connect that cannot finish (#1895) is undone as a Disconnect is: Connected false and the session state
@@ -4963,15 +4925,19 @@ private:
     // Control path (a connect, a site write, the poll): reads :Gt#/:Gg# while
     // the pair is not known, at most every kSiteInfoRetryDelay. Once known it
     // is never read again: the site writes set it themselves. Caller holds the
-    // operation lock.
-    void ensure_site_info_cached_locked() const {
+    // operation lock. `probe_answered`: the poll's probe, whose sample has just
+    // answered; PolledState clears a latched fault only once the probe returns,
+    // so that fault does not refuse this read (#2495).
+    void ensure_site_info_cached_locked(bool probe_answered = false) const {
         if (!connected_) {
             return;
         }
         // While the link fault is latched every read throws it (decision 0009
         // rule 1), and an unread site is not fetched: that fetch would wait out
         // the reply timeout and swallow the failure (#1659).
-        throw_if_faulted_locked();
+        if (!probe_answered) {
+            throw_if_faulted_locked();
+        }
         if (site_known_locked()) {
             return;
         }
@@ -5161,7 +5127,7 @@ private:
                     ALPACA_LOG_INFO("OnStep", why + "; a client wrote UTCDate since, so the mount keeps that time");
                     return;
                 }
-                if (link_health_.faulted()) {
+                if (link_faulted()) {
                     ALPACA_LOG_WARN("OnStep", why + "; the mount is not answering, so its clock is left alone");
                     return;
                 }
@@ -5270,11 +5236,6 @@ private:
     std::atomic<double> aperture_diameter_m_ = 0.0;
     std::atomic<double> focal_length_m_ = 0.0;
 
-    // Decision 0010 (#1783): the polled frame the getters and DeviceState serve. One publisher (the poll body,
-    // plus the synchronous slew's end), any number of readers; a leaf lock under mutex_. Declared before the
-    // poll slot below, so the slot (whose body publishes into it) is destroyed first.
-    mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
-
     // The site, each coordinate known once the config, a client write or a :Gt#/:Gg# read set it (#1783); the
     // getters throw until then. Under mutex_.
     mutable double site_latitude_cached_ = 0.0;
@@ -5365,12 +5326,6 @@ private:
     // Numbers each sample (PolledFrame::sample_seq); under mutex_, taken with the operation lock held.
     mutable std::uint64_t sample_seq_ = 0;
 
-    // Decision 0009 fault latch for a silent mount (#1414). Under mutex_.
-    mutable util::PolledLinkHealth link_health_;
-    // Its text for get_link_fault(), which takes no mutex_: own narrow mutex.
-    mutable std::mutex link_fault_mutex_;
-    mutable std::string link_fault_text_;
-
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
@@ -5457,12 +5412,27 @@ private:
     // (#1430). Declared last with the re-send slot, for the same reason.
     util::OperationGeneration park_home_generation_;
     mutable util::AsyncOperation park_home_{"OnStep Park/FindHome", park_home_generation_, clock_};
-    // Decision 0010 (#1783): the status poll, one body per connection, started at the end of a connect (and by
-    // the test pause seam, never after a pulse guide) and joined before a disconnect or relink closes the port.
-    // Declared last with the other slots, after every member its body touches.
+    // Decision 0010 (#1783, #2495): the frame the getters and DeviceState serve, with the status poll, its fault
+    // latch and its loss bound, in util::PolledState. One poll body per connection, started at the end of a connect
+    // (and by the test pause seam, never after a pulse guide) and joined before a disconnect or relink closes the
+    // port. The probe, the pulse-end tick and the synchronous slew's end publish through it, ordered by sample_seq.
+    // Its mutexes are leaves under mutex_. Declared after every member the probe touches.
     std::atomic<bool> status_poll_paused_for_testing_{false};
+    // The probe's tick number: every second one reads Alt/Az, every tenth the pier settings. Reset before each start
+    // and touched by the probe only, on the poll thread.
+    int next_poll_tick_ = 0;
+    // The seed is start()'s first probe (start_status_poller()).
+    std::atomic<bool> skip_next_probe_{false};
+    // True while stop_status_poller() joins the bodies: a probe in its sample gives no verdict and publishes nothing.
+    std::atomic<bool> poll_cancelled_{false};
+    std::atomic<bool> poll_started_{false};  // for status_poll_running_for_testing()
     util::OperationGeneration status_poll_generation_;
-    mutable util::AsyncOperation status_poll_{"OnStep status poll", status_poll_generation_, clock_};
+    mutable util::PolledState<PolledFrame> polled_{
+        clock_,
+        status_poll_generation_,
+        {kStatusPollPeriod, kLinkFaultThreshold, kSnapshotMaxAge, "OnStep mount"},
+        [this] { return probe(); },
+        [this] { declare_poll_loss(); }};
     // The extra tick at the end of a pulse guide (#1783); a newer pulse replaces it.
     util::OperationGeneration pulse_measurement_generation_;
     mutable util::AsyncOperation pulse_measurement_{"OnStep pulse-end measurement", pulse_measurement_generation_,

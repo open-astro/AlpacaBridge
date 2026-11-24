@@ -796,8 +796,9 @@ TEST_CASE("OnStep snapshot - a synchronous slew publishes the position where it 
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-// A failed end read is a failed poll tick: the last values stay served and the failure counts toward the fault.
-TEST_CASE("OnStep snapshot - a failed end-of-slew read keeps the last values and counts toward the fault",
+// A failed end read keeps the last values served and, a control-path read, feeds no fault latch (#2495): only the
+// poll's probes count, so three failed ticks after it latch the fault, not two.
+TEST_CASE("OnStep snapshot - a failed end-of-slew read keeps the last values and does not count toward the fault",
           "[onstep][telescope][snapshot]") {
     Rig rig;
     rig.connect();
@@ -808,10 +809,11 @@ TEST_CASE("OnStep snapshot - a failed end-of-slew read keeps the last values and
     REQUIRE_NOTHROW(synchronous_slew(rig, 12.0, 45.0));  // the slew itself ended
     CHECK(rig.driver->get_right_ascension() == ra);
     CHECK(rig.driver->get_altitude() == alt);
-    CHECK(rig.driver->get_link_fault().empty());  // one failure
+    CHECK(rig.driver->get_link_fault().empty());  // the end read counted nothing
+    CHECK(rig.tick());                            // the first failed probe
     CHECK(rig.tick());                            // the second
     CHECK(rig.driver->get_link_fault().empty());
-    CHECK(rig.tick());  // the third latches: the end read counted as the first
+    CHECK(rig.tick());  // the third latches
     CHECK_FALSE(rig.driver->get_link_fault().empty());
     rig.mount->garble_position = false;
 }
@@ -841,19 +843,24 @@ TEST_CASE("OnStep snapshot - a failed Alt/Az read keeps the last value and does 
     rig.mount->garble_altaz = false;
 }
 
-// The connect's seed counts each failed read toward the fault, so a mount that passes the handshake but
-// answers none of them connects with the fault latched (behaviour change 13).
-TEST_CASE("OnStep snapshot - a mount that answers none of the connect's seed reads connects faulted",
-          "[onstep][telescope][snapshot]") {
+// The connect's seed feeds no fault latch (#2495; before, each failed read counted, so such a mount connected with
+// the fault latched): a mount that passes the handshake but answers none of the seed's reads connects with no fault,
+// and the getters refuse "not available" (DriverException, decision 0010 rule 8) until a probe answers.
+TEST_CASE(
+    "OnStep snapshot - a mount that answers none of the connect's seed reads connects unfaulted, with nothing known",
+    "[onstep][telescope][snapshot]") {
     Rig rig;
     rig.mount->handshake_only = true;
     rig.connect();
     rig.pause();
-    CHECK_FALSE(rig.driver->get_link_fault().empty());
-    CHECK_THROWS(rig.driver->get_right_ascension());
-    CHECK_THROWS(rig.driver->get_altitude());
+    CHECK(rig.driver->get_link_fault().empty());
+    std::string message;
+    CHECK(error_code_of([&] { (void)rig.driver->get_right_ascension(); }, &message) ==
+          alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("not available") != std::string::npos);
+    CHECK(error_code_of([&] { (void)rig.driver->get_altitude(); }) == alpacacore::AlpacaError::DriverException);
     rig.mount->handshake_only = false;
-    REQUIRE(rig.tick(true));  // one good tick clears it
+    REQUIRE(rig.tick(true));  // one good tick fills the frame
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(std::abs(rig.driver->get_right_ascension() - 12.0) < 1e-6);
 }
@@ -1879,6 +1886,13 @@ Approx exact(double value) { return Approx(value).epsilon(0.0).margin(1e-12); }
 void show(Rig& rig, const char* status, bool full = false) {
     rig.mount->set_status(status);
     REQUIRE(rig.tick(full));
+}
+
+// Moves virtual time `span` forward, then takes one tick, as the 1 s poll would have: a frame no tick refreshed for
+// util::kLinkStalenessBound is a lost link (#2495), so a long jump on a paused poll needs one.
+void elapse(Rig& rig, std::chrono::nanoseconds span) {
+    rig.clock.advance(span);
+    REQUIRE(rig.tick(false));
 }
 
 // A connected, paused rig whose mount answers `version`.
@@ -3605,7 +3619,7 @@ TEST_CASE("OnStep park watch - a park ended without parking or never ended fails
         CHECK(contains(message, "Park failed: the mount ended the park without parking"));
     }
     SECTION("never ends: fails at the bound, not one step before") {
-        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        elapse(rig, std::chrono::minutes(20) - milliseconds(1));
         CHECK_NOTHROW(rig.driver->get_at_park());
         rig.clock.advance(milliseconds(1));
         CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
@@ -3646,7 +3660,7 @@ TEST_CASE("OnStep home watch - a home ended away from home or never ended fails 
     }
     SECTION("never ends: fails at the bound, not one step before") {
         show(rig, "nNphgEW180#");  // a home with switches
-        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        elapse(rig, std::chrono::minutes(20) - milliseconds(1));
         CHECK_NOTHROW(rig.driver->get_at_home());
         rig.clock.advance(milliseconds(1));
         CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_home(); }).second,
@@ -3918,7 +3932,7 @@ TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome end
         rig.driver->find_home();
         show(rig, "nNphgEW180#");
         show(rig, "nNpEW180#");
-        rig.clock.advance(std::chrono::minutes(21));  // past the 20-minute bound
+        elapse(rig, std::chrono::minutes(21));  // past the 20-minute bound
         CHECK_NOTHROW(rig.driver->get_at_home());
         CHECK_NOTHROW(rig.driver->get_slewing());
     }
@@ -3986,7 +4000,7 @@ TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome end
         CHECK(rig.mount->count(":GXEG") == 1);
         show(rig, "nNphgEW180#");
         show(rig, "nNpEW180#");
-        rig.clock.advance(std::chrono::minutes(21));  // past the 20-minute bound
+        elapse(rig, std::chrono::minutes(21));  // past the 20-minute bound
         CHECK_NOTHROW(rig.driver->get_at_home());
         CHECK_NOTHROW(rig.driver->get_slewing());
     }
@@ -4144,9 +4158,9 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
         rig.driver->park();
         const auto parked_at = rig.clock.now();
         show(rig, "nIEW180#");
-        rig.clock.advance(std::chrono::minutes(20) + seconds(1));
+        elapse(rig, std::chrono::minutes(20) + seconds(1));
         CHECK_NOTHROW(rig.driver->get_at_park());
-        rig.clock.advance(std::chrono::minutes(144) - (rig.clock.now() - parked_at) - milliseconds(1));
+        elapse(rig, std::chrono::minutes(144) - (rig.clock.now() - parked_at) - milliseconds(1));
         CHECK_NOTHROW(rig.driver->get_at_park());
         rig.clock.advance(milliseconds(1));
         CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
@@ -4159,7 +4173,7 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
         show(rig, "NpEW180#");
         rig.driver->find_home();
         show(rig, "nNphgEW180#");  // a home with switches
-        rig.clock.advance(std::chrono::minutes(21));
+        elapse(rig, std::chrono::minutes(21));
         CHECK_NOTHROW(rig.driver->get_at_home());
     }
     SECTION("a park a relink carries over keeps its bound") {
@@ -4182,7 +4196,7 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
         show(rig, "NpEW180#");
         rig.driver->park();
         show(rig, "nIEW180#");
-        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        elapse(rig, std::chrono::minutes(20) - milliseconds(1));
         CHECK_NOTHROW(rig.driver->get_at_park());
         rig.clock.advance(milliseconds(1));
         CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
@@ -4194,12 +4208,89 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
         show(rig, "NpEW180#");
         rig.driver->park();
         show(rig, "nIEW180#");
-        rig.clock.advance(std::chrono::hours(24) - milliseconds(1));
+        elapse(rig, std::chrono::hours(24) - milliseconds(1));
         CHECK_NOTHROW(rig.driver->get_at_park());
         rig.clock.advance(milliseconds(1));
         CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
                        "did not finish the park within 1440 minutes"));
     }
+}
+
+namespace {
+
+// #2495: the fake OnStepX of this file behind its loopback server, for alpacacore::test::PolledRig.
+struct PolledOnStep {
+    std::shared_ptr<SnapshotMount> mount = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server{[m = mount](const std::string& chunk) { return m->reply(chunk); }};
+};
+
+// The OnStep telescope on the PolledRig: 1 s poll, a site in the config, replies bounded at 300 ms.
+struct OnStepPolledRig : alpacacore::test::PolledRig<PolledOnStep, alpacacore::TelescopeDriver> {
+    OnStepPolledRig()
+        : PolledRig({seconds(1), milliseconds(2000)}, [](PolledOnStep& fake, FakeTaskClock& clock) {
+              REQUIRE(fake.server.ok());
+              fake.mount->clock = &clock;
+              onstep::ConnectionInfo info;
+              info.type = onstep::ConnectionType::Network;
+              info.host = "127.0.0.1";
+              info.tcp_port = fake.server.port();
+              info.response_timeout_ms = 300;
+              return onstep::create_onstep_telescope_with_site(0, info, -33.856784, 151.215297, std::nullopt, false,
+                                                               clock);
+          }) {}
+    ~OnStepPolledRig() {
+        fake().mount->mute = false;
+        fake().mount->latency_ms = 0;
+    }
+    OnStepPolledRig(const OnStepPolledRig&) = delete;
+    OnStepPolledRig& operator=(const OnStepPolledRig&) = delete;
+};
+
+}  // namespace
+
+// #2495: a getter answers from the frame while a tick waits 200 ms for each reply; three failed probes latch
+// the fault (Connected stays true); a frame that no probe has refreshed for util::kLinkStalenessBound is a lost link,
+// on the tick that finds it and not one tick later.
+TEST_CASE("OnStep PolledState - getters answer during a slow tick, three failed probes latch, the bound loses the link",
+          "[onstep][telescope][snapshot][polledstate]") {
+    OnStepPolledRig rig;
+    REQUIRE(rig.connect());
+    auto& mount = *rig.fake().mount;
+
+    mount.latency_ms = 200;
+    const int before = mount.exchanges.load();
+    rig.clock().advance(seconds(1));  // the first tick: five exchanges at 200 ms each
+    for (int i = 0; i < 2000 && mount.exchanges.load() == before; ++i) std::this_thread::sleep_for(milliseconds(1));
+    REQUIRE(mount.exchanges.load() > before);  // the tick is inside its exchanges
+    CHECK(alpacacore::test::timed([&] { (void)rig.driver().get_right_ascension(); }) < milliseconds(20));
+    CHECK(alpacacore::test::timed([&] { (void)rig.driver().get_device_state(); }) < milliseconds(20));
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    REQUIRE(rig.clock().wait_for_waiters(1, seconds(2)));
+    mount.latency_ms = 0;
+    const auto published_at = rig.clock().now();  // the last good frame
+    const double ra = rig.driver().get_right_ascension();
+
+    mount.mute = true;
+    rig.tick(2);  // two failed probes: the frame is still served
+    CHECK(rig.driver().get_right_ascension() == ra);
+    CHECK(rig.driver().get_link_fault().empty());
+    rig.tick();  // the third latches the fault
+    CHECK(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(rig.driver().get_link_fault().empty());
+
+    // One period short of the bound: still faulted, not lost.
+    rig.clock().advance(published_at + alpacacore::util::kLinkStalenessBound - seconds(1) - rig.clock().now());
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    REQUIRE(rig.clock().wait_for_waiters(1, seconds(2)));
+    CHECK(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::DriverException);
+
+    rig.clock().advance(seconds(1));  // the frame is now kLinkStalenessBound old: this tick loses the link
+    REQUIRE(rig.clock().wait_for_woken_settled(seconds(5)));
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.driver().get_link_fault().find("lost") != std::string::npos);
 }
 
 #endif  // !_WIN32

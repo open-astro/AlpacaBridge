@@ -1327,9 +1327,10 @@ TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking late
     driver->set_connected(false);
 }
 
-// #1414: a client that only writes after the fault latched still sees the
-// link lost once the fault has stood past the bound, as a read would.
-TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the link", "[onstep][serial][connected]") {
+// #1414, #2495: a client that only writes after the fault latched sees the fault, and the link lost once the poll
+// has found the bound: PolledState's probe judges it, not the write (before #2495 the refused write lost the link).
+TEST_CASE("OnStep link loss - a write past the staleness bound throws the fault until the poll loses the link",
+          "[onstep][serial][connected]") {
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
     PortLink link(mount.slave_path());
@@ -1347,6 +1348,8 @@ TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);  // faulted, not yet stale
     }
     clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));  // no reads meanwhile
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(tick(*driver));  // the poll's next probe finds the bound
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
@@ -1851,9 +1854,8 @@ TEST_CASE("OnStep network - a reply that overruns the length bound fails at once
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
     const std::string fault = driver->get_link_fault();
     INFO("fault: " << fault);
-    CHECK(fault.find("not answering") != std::string::npos);
-    CHECK(fault.find("too long") != std::string::npos);
-    CHECK(driver->get_connected());  // a fault, not a loss
+    CHECK(fault.find("not answering") != std::string::npos);  // PolledState's text, not the exchange's (#2495)
+    CHECK(driver->get_connected());                           // a fault, not a loss
 
     mount.set_status("nNpHEo190#");
     CHECK(tick(*driver));
