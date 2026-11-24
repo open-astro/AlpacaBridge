@@ -350,7 +350,8 @@ command channel. Nothing scans the network; the host is typed in.
   as running until the status poll publishes a frame sampled `kPulseGuideSettle` (50 ms) or more after
   that end, at most `kPulseMeasureBound` (2 s) longer (#1783): a `PulseGuide` starts one extra tick for
   then (unless the other axis's pulse ends later, whose tick stays), in a slot of its own (`pulse_measurement_`; the 1 s ticks run on through the pulse), so a position read right after `IsPulseGuiding` goes false is not one
-  measured mid-pulse (ConformU's PulseGuide checks compare the RA and Dec around it). Unlike SynScan (no native pulse guide), this driver does
+  measured mid-pulse (ConformU's PulseGuide checks compare the RA and Dec around it). That slot is a one-shot measurement:
+  it publishes through `util::PolledState` (decision 0010 rule 7) and a failed sample there feeds no fault latch. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
@@ -623,9 +624,9 @@ command channel. Nothing scans the network; the host is typed in.
   re-checks under `mutex_` that the link is still connected and still lost (#1289).
 - **A mount that stops answering with the adapter still plugged in latches a fault, then a loss**
   (#1414, decision 0009): mount unpowered, or the cable pulled at the mount end, so the node and the
-  fd stay healthy and nothing answers. Each failed poll tick (below; it ends at its first failed
-  exchange) and each failed control-path `:GU#` read counts in `util::PolledLinkHealth`: the first two
-  in a row are logged WARN and the frame is still served, the third latches a fault (ERROR): the
+  fd stay healthy and nothing answers. Each failed poll probe (below; it ends at its first failed
+  exchange) counts in `util::PolledState`'s latch (#2495): the first two in a row are logged DEBUG and
+  the frame is still served, the third latches a fault (ERROR): the
   getters throw `DriverException` "OnStep mount communications compromised" while `Connected` stays
   true and `get_link_fault()` reads "Mount not answering (...)". The poll keeps asking every second,
   and one good tick clears the fault (INFO). A failed `:GA#`/`:GZ#` read on a slow tick is logged and
@@ -645,13 +646,17 @@ command channel. Nothing scans the network; the host is typed in.
   that is not listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so
   the stop is still tried and the client learns it may not have arrived (`AbortSlew` gives up its
   #1230 tracking restore without asking the mount); a new `MoveAxis` move is refused before it ends a
-  waiting `Park` or `FindHome`. A fault that has stood for `util::kLinkStalenessBound` (30 s, on the
-  driver's task clock) is a lost link: the next failed poll tick, or a refused write, calls
-  `OnStepProtocolWrapper::declare_link_lost()`, which records the reason and the loss time and closes
-  the port, as for a pulled adapter, so `Connected` reads false, calls throw `NotConnected`,
-  `DeviceState` is empty, the poll body ends, and the next Connect relinks (and runs the #521 stops
-  after a long outage). A getter, which takes no operation lock, only throws the fault; the poll finds
-  the bound within a tick. That outage runs from the loss, not from the last good reply: the failed
+  waiting `Park` or `FindHome`. A fault, or a frame no probe published, that has stood for
+  `util::kLinkStalenessBound` (30 s, on the driver's task clock) is a lost link: the module's `on_lost`
+  (`declare_poll_loss()`) calls `OnStepProtocolWrapper::declare_link_lost()` on the poll thread, which
+  records the reason and the loss time and closes the port, as for a pulled adapter, so `Connected`
+  reads false, calls throw `NotConnected`, `DeviceState` is empty, the poll body ends, and the next
+  Connect relinks (and runs the #521 stops after a long outage). A getter reads `NotConnected` once
+  the frame is that old; a write throws the fault and leaves the bound to the poll, which finds it
+  within a tick. Only the poll's probe feeds the latch (#2495, a behaviour change): the control-path
+  `:GU#` reads, the synchronous slew's end read, the pulse-end tick and the connect's seed neither
+  count a failure nor clear the fault, and a mount that answers none of the seed's reads connects
+  unfaulted, its getters refusing "not available" until a probe answers. That outage runs from the loss, not from the last good reply: the failed
   reads still found the fd alive, so a Connect right after the loss stops nothing, and one after the
   preserve window sends the stops. A silent mount latches in about three poll periods plus three
   reply timeouts.
@@ -810,17 +815,21 @@ command channel. Nothing scans the network; the host is typed in.
   own helpers check it; a disconnect clears it, with `published_connected_`, before the close.
 - **Getters and `DeviceState` are served from a polled snapshot, never from the mount** (#1783,
   [decision 0010](../../docs/decisions/0010-snapshot-served-state.md), the SynScan and Celestron shape).
-  One status poll per connection runs in an `AsyncOperation` slot (`status_poll_`), started at the end
-  of a connect (its first tick 1 s later: the connect seeds the frame; a poll that does not start, or a link
+  One status poll per connection runs through `util::PolledState<PolledFrame>` (`polled_`, #2495; decision 0010
+  rule 7), started at the end of a connect (its first tick 1 s later: the connect seeds the frame, which is the
+  module's first probe, so `start()` sends nothing; a poll that does not start, or a link
   lost during the connect's reads, fails the connect, which is undone as a Disconnect is, #1895) and joined, with the pulse-end
   tick's slot, before a disconnect or a relink closes the port and at the start of every connect, with
   no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
   the task clock, missed ticks skipped) it reads `:GU#` then `:GRa#`/`:GDe#`, and every
   `kSlowPollEvery`-th (2nd) tick `:GA#`/`:GZ#` and, while the site is not known, `:Gt#`/`:Gg#` (every
-  `kSiteInfoRetryDelay` at most), into `util::StateSnapshot<PolledFrame>`. A `PulseGuide` adds one
-  tick, in a slot of its own, that measures the pulse's end (see the pulse guiding bullet). The tick holds
+  `kSiteInfoRetryDelay` at most). The tick is the module's probe: it takes its token with
+  `PolledState::begin_poll()` before it samples, publishes the frame itself with `PolledState::publish()` and
+  returns `std::nullopt`, so the status note and the rate-offset model take only a frame whose publish took. A
+  `PulseGuide` adds one tick, in a one-shot measurement slot of its own, that measures the pulse's end (see the
+  pulse guiding bullet). The tick holds
   the operation lock for its exchanges, so it never lands inside a command's sequence, drops `mutex_`
-  for each, and publishes under `mutex_` alone after `begin_poll()`. Publishes are ordered by sample
+  for each, and publishes under `mutex_` alone. Publishes are ordered by sample
   (`PolledFrame::sample_seq`, numbered under the operation lock): a tick, the pulse-end tick or the
   synchronous slew's end read whose sample is older than the held frame's is skipped, and a newer one in
   flight is left to publish (before #1835 a publish dropped every other sample in flight, newer ones
@@ -843,14 +852,14 @@ command channel. Nothing scans the network; the host is typed in.
   the unread status for "not parked"; `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` are stops and are
   never refused over an unread status (`Tracking=false` tries the read, sends `:ST0#` if it fails, and its
   write-through then does not land; a lost link and a latched fault still throw) (#1895). Client commands write through
-  (`snapshot_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
+  (`polled_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
   or home the mount took, and a pulse, a MoveAxis start and AbortSlew drop the tick in flight, so a tick
   that sampled before the command cannot publish over it. Control paths keep their direct reads and
   write them through (`refresh_status_locked()`, only a status that differs from the frame's, so a loop
   that re-reads `:GU#` does not drop every tick): the slews' and syncs' GOTO check (their Tracking
   check reads the frame, as the getter does), Park and FindHome and their
   body, the synchronous slew's wait (which publishes a full measurement where the slew ends; a failed one
-  keeps the last values and counts toward the fault, as a failed tick), AbortSlew's
+  keeps the last values and feeds no fault latch, #2495), AbortSlew's
   tracking decision and the MoveAxis re-send tick. The tracking restore a coordinate slew owes (#1230)
   is sent by the tick that first reads the GOTO ended in a frame sampled after the `:MS#` answer (not during a MoveAxis or
   while a Park or FindHome is pending), under the same operation lock as its `:GU#`. Test seams:
@@ -862,7 +871,7 @@ command channel. Nothing scans the network; the host is typed in.
   `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> the shared link's sequence
   lock (#2223, taken with `mutex_` released, through `Wire`) -> `mutex_` (the state lock, a leaf, retaken
   inside a held sequence after each exchange); the link's wire lock is taken under the sequence lock and never
-  under `mutex_`; the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
+  under `mutex_`; the `util::PolledState` and slot mutexes are leaves under `mutex_`.
   Every command, and each poll tick, holds `io_mutex_` for the whole command through a `StateLock`
   (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places that let
   other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through `Wire`

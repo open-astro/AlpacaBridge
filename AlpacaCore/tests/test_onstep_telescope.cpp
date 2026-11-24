@@ -4505,7 +4505,14 @@ TEST_CASE("OnStep Telescope Driver - a synchronous GOTO that times out stops the
             rig.clock, [&] { rig.driver->slew_to_coordinates(12.0, 45.0); },
             [&] {
                 rig.mount->set_status("pEW180#");  // the mount shows the GOTO, which never ends
-                rig.clock.advance(std::chrono::seconds(121));
+                // A frame no tick refreshes for 30 s is a lost link (#2495): four ticks inside the 120 s bound keep
+                // it fresh, and none reaches the poll's own bound check.
+                for (int i = 0; i < 4; ++i) {
+                    rig.clock.advance(std::chrono::seconds(29));
+                    (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
+                    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*rig.driver));
+                }
+                rig.clock.advance(std::chrono::seconds(5));  // 121 s: past the wait's own timeout
             });
     } catch (const alpacacore::AlpacaException& ex) {
         timed_out = ex.error_code() == alpacacore::AlpacaError::DriverException;
@@ -4677,8 +4684,13 @@ TEST_CASE("OnStep Telescope Driver - a synchronous GOTO the poll stops at its bo
                 REQUIRE(rig.mount->count(":MS#") == 1);
                 REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the slew's wait and the poll
                 rig.mount->set_status("pEW180#");                                 // the GOTO runs, tracking on
-                // Exactly the bound: the poll's check (>=) fires, the wait's own timeout (>) does not yet.
-                rig.clock.advance(std::chrono::seconds(120));
+                // Exactly the bound: the poll's check (>=) fires, the wait's own timeout (>) does not yet. In steps
+                // the poll ticks through, so no getter reads a frame 30 s old, a lost link (#2495).
+                for (int i = 0; i < 4; ++i) {
+                    rig.clock.advance(std::chrono::seconds(29));
+                    (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
+                }
+                rig.clock.advance(std::chrono::seconds(4));
                 (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
                 REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*rig.driver));  // the bound fires
                 rig.mount->set_status("nNpEW180#");  // the stop landed: no GOTO, tracking off
