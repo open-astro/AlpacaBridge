@@ -2589,6 +2589,7 @@ void CelestronCgxTelescopeDriver::supervise_home_search(util::OperationContext& 
                 require_cgx_ack(protocol_.exchange(request), "axis stop");
             }))
             return;
+        // For RA this still-wait delays the Dec check below; the 180 s home deadline bounds it.
         while (!protocol_.is_axis_slew_done(axis)) {
             // A cancel (AbortSlew, disconnect) or a supersede (a newer slew, Park or FindHome) ends the still-wait.
             if (motion_stop_reason(context, claim) != util::StopReason::None) return;

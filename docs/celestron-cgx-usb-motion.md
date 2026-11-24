@@ -593,6 +593,15 @@ Users should use the guider's Dec backlash compensation (PHD2) or guide Dec in
 one direction only. Revisit driver compensation only if a run with a camera on
 the mount shows the take-up is real sky motion.
 
+## Sync after FindHome
+
+Since #2411 a Sync more than 5 degrees on the sky from the current position is
+refused with `InvalidValue` ("the sync would move the pointing by ... degrees,
+more than the 5.00 degree limit"), and nothing changes. After FindHome the mount
+points at the pole, so a planetarium that homes and then syncs to a far object
+gets that error. Slew near the target first, then Sync. This applies over USB
+and WiFi.
+
 ## Remaining qualification
 
 - A run with a camera on the mount to tell whether the Dec reversal take-up
