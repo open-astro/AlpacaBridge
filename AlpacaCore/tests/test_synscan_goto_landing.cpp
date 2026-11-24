@@ -419,6 +419,41 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, std::size_t mi
     if (error) std::rethrow_exception(error);
 }
 
+// Runs a blocking driver call on its own thread and steps virtual time only while that thread waits on the clock,
+// then rethrows what it threw. Not a waiter count: the status poll and a body the call supersedes park on the same
+// clock, so a count can be met before the call has even started, and virtual time then runs ahead of it (the #880
+// AbortSlew case read 5.35 s on arm64 CI). Bounded by 120 s of real time.
+template <typename Fn>
+void run_virtual_on_own_thread(alpacacore::test::FakeTaskClock& clock, Fn&& fn) {
+    std::exception_ptr error;
+    std::atomic<bool> done{false};
+    std::atomic<std::thread::id> caller_id{};
+    std::thread caller([&] {
+        caller_id.store(std::this_thread::get_id());
+        try {
+            fn();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done.store(true);
+    });
+    const auto real_deadline = Clock::now() + std::chrono::seconds(120);
+    while (!done.load() && Clock::now() < real_deadline) {
+        const auto id = caller_id.load();
+        if (id == std::thread::id{} || !clock.wait_for_waiter_thread(id, std::chrono::milliseconds(20))) {
+            continue;
+        }
+        clock.advance(kVirtualStep);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    caller.join();
+    if (error) std::rethrow_exception(error);
+}
+
 // Steps `done` out of a parked thread: virtual time jumps ahead until the flag is set.
 void release_until(alpacacore::test::FakeTaskClock& clock, const std::atomic<bool>& done) {
     while (!done.load()) {
@@ -901,8 +936,9 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     // The abort verifies its stop on the task clock (#2412), so virtual time steps under it; it returns well before
     // the move's remaining 4 s would have run out.
     const auto abort_started = clock.now();
-    // Two waiters: the status poll's and the abort's own, so no step lands while the abort is on the socket.
-    REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->abort_slew(); }, 2));
+    // Stepped only while the abort's own thread waits on the clock, so no step lands before it starts or while it is
+    // on the socket.
+    REQUIRE_NOTHROW(run_virtual_on_own_thread(clock, [&] { driver->abort_slew(); }));
     CHECK(clock.now() - abort_started < std::chrono::milliseconds(1500));  // not the move's remaining 4 s
     CHECK_FALSE(driver->get_slewing());
     advance_idle(clock, std::chrono::milliseconds(600));
@@ -1060,8 +1096,8 @@ TEST_CASE("SynScan initiator supersede - AbortSlew during a long landing move wa
     // AbortSlew verifies its stop on the task clock (#2412), so it is stepped; it takes the verify's virtual time
     // (well under a second), never the move's remaining seconds.
     const auto t0 = n.clock.now();
-    // Two waiters: the status poll's and the abort's own, so no step lands while the abort is on the socket.
-    REQUIRE_NOTHROW(run_virtual(n.clock, [&] { n.driver->abort_slew(); }, 2));
+    // Stepped only while the abort's own thread waits on the clock (see run_virtual_on_own_thread()).
+    REQUIRE_NOTHROW(run_virtual_on_own_thread(n.clock, [&] { n.driver->abort_slew(); }));
     CHECK(n.clock.now() - t0 < std::chrono::milliseconds(1500));
     advance_idle(n.clock, std::chrono::milliseconds(600));
     const auto wire = n.st->wire_log();
