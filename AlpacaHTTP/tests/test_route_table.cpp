@@ -34,10 +34,11 @@
 //  D. Rejection fixture: exact HTTP status, Alpaca error number and message
 //     for a wrong verb, an unknown method, an out-of-range device number and a
 //     NaN parameter, as on origin/main c4640d6e.
-//  G. Management routes (#2485): for every row of kManagementFixture, both
-//     path spellings and five verbs, with and without a foreign Origin: a wrong
-//     verb gets its family's answer, every state-changing route refuses a
-//     cross-origin request with 403, and an accepted verb is never refused.
+//  G. Management routes (#2485): Router::management_routes() equals
+//     kManagementFixture row by row, and for every row, both path spellings and
+//     five verbs, with and without a foreign Origin: a wrong verb gets its
+//     family's answer, every state-changing route refuses a cross-origin
+//     request with 403, and an accepted verb is never refused.
 //
 // The per-request cost check that used to be E is gone (#657): a wall-clock
 // ratio was coarse in Release. scripts/check_docs_drift.py check 14 now
@@ -555,15 +556,15 @@ void check_type_names(alpacahttp::Router& router) {
 }
 
 // G. The management surface, one row per route (#2485).
-enum class Guard { None, BeforeVerbCheck, AfterVerbCheck };
-enum class WrongVerb { None, AlpacaText, MethodNotAllowed, Handler };
+using Guard = alpacahttp::ManagementRoute::Guard;
+using WrongVerb = alpacahttp::ManagementRoute::WrongVerb;
 
-constexpr unsigned kVerbGet = 1U << 0;
-constexpr unsigned kVerbPost = 1U << 1;
-constexpr unsigned kVerbPut = 1U << 2;
-constexpr unsigned kVerbDelete = 1U << 3;
-constexpr unsigned kVerbOther = 1U << 4;  // PATCH, which parse_method does not know
-constexpr unsigned kEveryVerb = kVerbGet | kVerbPost | kVerbPut | kVerbDelete | kVerbOther;
+constexpr unsigned kVerbGet = alpacahttp::ManagementRoute::kVerbGet;
+constexpr unsigned kVerbPost = alpacahttp::ManagementRoute::kVerbPost;
+constexpr unsigned kVerbPut = alpacahttp::ManagementRoute::kVerbPut;
+constexpr unsigned kVerbDelete = alpacahttp::ManagementRoute::kVerbDelete;
+constexpr unsigned kVerbOther = alpacahttp::ManagementRoute::kVerbOther;  // PATCH, which parse_method does not know
+constexpr unsigned kEveryVerb = alpacahttp::ManagementRoute::kEveryVerb;
 
 struct ManagementRow {
     const char* path;   // a tail is written {name}; the probe replaces it with `tail`
@@ -750,6 +751,30 @@ void check_management_routes(alpacahttp::Router& router) {
     report("G management routes", failures);
 }
 
+// G. The router's own table vs the fixture, row by row, so a row the probes cannot name (a new route) fails too.
+// The table is a C++ value, read through Router::management_routes(); no source scan is needed.
+void check_management_table() {
+    const auto& table = alpacahttp::Router::management_routes();
+    std::vector<std::string> failures;
+    if (table.size() != kManagementFixture.size()) {
+        failures.push_back("router table has " + std::to_string(table.size()) + " rows, fixture " +
+                           std::to_string(kManagementFixture.size()));
+    }
+    for (std::size_t i = 0; i < std::min(table.size(), kManagementFixture.size()); ++i) {
+        const alpacahttp::ManagementRoute& route = table[i];
+        const ManagementRow& row = kManagementFixture[i];
+        if (std::string(route.path) != row.path || std::string(route.alias) != row.alias ||
+            (route.tail != nullptr) != (row.tail != nullptr) || route.verbs != row.verbs || route.guard != row.guard ||
+            std::string(route.guard_what) != row.guard_what || route.wrong_verb != row.wrong_verb ||
+            std::string(route.wrong_verb_message) != row.wrong_verb_message ||
+            route.body_transaction_id != row.body_transaction_id || route.handler == nullptr) {
+            failures.push_back("row " + std::to_string(i) + " (" + route.path + ") differs from the fixture (" +
+                               row.path + ")");
+        }
+    }
+    report("G management table", failures);
+}
+
 }  // namespace
 
 int main() {
@@ -760,6 +785,7 @@ int main() {
     check_source_tables();
     {
         // case: every management route answers a wrong verb per its family and refuses a cross-origin write (#2485)
+        check_management_table();
         check_management_routes(router);
     }
 
