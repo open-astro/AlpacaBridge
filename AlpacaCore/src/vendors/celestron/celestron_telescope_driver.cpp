@@ -365,8 +365,12 @@ public:
         }
         try {
             connect_session(protocol);
+            // After connected_ (the poll body ends at once on a disconnected driver). #2409: a refused start fails the
+            // Connect, since with no poll nothing runs the MoveAxis cap or latches a lost link.
+            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
         } catch (...) {
-            // A throw after the open closes it again; connected_ was never set.
+            // A throw after the open closes it again; clear_session_state() also drops a connected_ set just before
+            // a refused poll start.
             try {
                 protocol.disconnect();
             } catch (...) {  // NOLINT(bugprone-empty-catch): the connect's own error is the one to report
@@ -374,7 +378,7 @@ public:
             clear_session_state();
             throw;
         }
-        start_status_poller();
+        relink_stop_due_ = false;  // only a Connect that completes clears a failed relink stop (#2409)
     }
 
     // "gps_status": whether the mount's GPS module holds a link, with the module's own latitude and longitude
@@ -2483,6 +2487,7 @@ public:
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         bool was_parking = false;
         std::string stop_error;
+        std::uint64_t mine = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
@@ -2496,12 +2501,12 @@ public:
                 // and is inside its stops finishes its own failure.
                 parking_ = false;
                 claim_slew_slot_locked();
-                const std::uint64_t mine = motion_generation_;
+                mine = motion_generation_;
                 stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
             }
         }
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             if (was_parking) {
                 // A failed stop leaves Slewing to report the stored error, since the park slew may still be
                 // running.
@@ -2519,6 +2524,9 @@ public:
             } else {
                 last_home_error_.clear();
                 last_slew_error_ = "Unpark could not stop the park slew: " + stop_error;
+            }
+            if (was_parking && stop_error.empty()) {
+                start_stop_check(lock, mine, "Unpark");  // the park's stops, verified as AbortSlew's are (#2409)
             }
         }
         if (!stop_error.empty()) {
@@ -2601,6 +2609,9 @@ public:
                 [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
         }
         clear_motion_errors_locked();
+        if (stop_goto) {
+            start_stop_check(lock, mine, "MoveAxis");  // the GOTO's stops, verified as AbortSlew's are (#2409)
+        }
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -2676,6 +2687,15 @@ public:
         if (!was_moving) {
             return;
         }
+        start_stop_check(lock, mine, "AbortSlew");
+    }
+
+    // #2409: the verified stop after an acknowledged stop (AbortSlew, MoveAxis(axis, 0) during a GOTO, Unpark during a
+    // Park), sent by the owner of motion generation `mine`. Under mutex_, released around the start and held again
+    // on return: publishes Slewing true and starts verify_abort_stop() on abort_verify_. A refused start (no thread)
+    // reports the acknowledged stop as before rather than fail it.
+    void start_stop_check(std::unique_lock<std::mutex>& lock, std::uint64_t mine, const char* who) {
+        set_slewing_locked(true);
         const auto first_stop_sent = clock_.now();
         lock.unlock();
         try {
@@ -2683,11 +2703,12 @@ public:
                 verify_abort_stop(ctx, mine, first_stop_sent);
             });
         } catch (const std::exception& e) {
-            // No thread for the check: the stop was acknowledged, so report it as before rather than fail it.
-            ALPACA_LOG_WARN("Celestron", std::string("AbortSlew: the stop check did not start: ") + e.what());
+            ALPACA_LOG_WARN("Celestron", std::string(who) + ": the stop check did not start: " + e.what());
             lock.lock();
             if (motion_generation_ == mine) set_slewing_locked(false);
+            return;
         }
+        lock.lock();
     }
 
     // The body of AbortSlew's verified stop. Reads the mount's motion flag and its position with mutex_ free; a read
@@ -2857,9 +2878,9 @@ private:
                     "Reconnect: stopping the motion under way when the link was lost failed: " + stop_error +
                     "; the mount may still be moving";
                 ALPACA_LOG_ERROR("Celestron", relink_stop_failure);
-                // Still owed: a handshake step after this that throws closes the port again, and the next Connect
-                // that opens it must send the stops. A Connect that completes clears it (connected_ below), and
-                // Slewing then raises the failure in that session.
+                // Still owed: a handshake step after this that throws, or a refused status poll start, closes the
+                // port again, and the next Connect that opens it must send the stops. A Connect that completes clears
+                // it (set_connected()), and Slewing then raises the failure in that session.
                 relink_stop_due_ = true;
             }
         }
@@ -3050,9 +3071,8 @@ private:
             site_longitude_cached_ = read_site->longitude_degrees;
             site_info_valid_ = true;
         }
-        // Last step before connected_: any throw above keeps a failed relink stop owed for the next Connect, so no
-        // step that can throw goes after this line. This session reports a failed relink stop through Slewing.
-        relink_stop_due_ = false;
+        // Last step: any throw above keeps a failed relink stop owed for the next Connect. set_connected() clears it
+        // once the status poll has started too; this session reports a failed relink stop through Slewing.
         connected_ = true;
     }
 
@@ -3749,14 +3769,6 @@ private:
     // Call without mutex_ held: the poll body takes mutex_.
     void stop_status_poller() { status_poll_.cancel_all_and_join(); }
 
-    // Call without mutex_ held (AsyncOperation rule 10), after a connect.
-    void start_status_poller() {
-        try {
-            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
-        } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("Celestron", std::string("Status poll did not start: ") + e.what());
-        }
-    }
 
 public:
     // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions

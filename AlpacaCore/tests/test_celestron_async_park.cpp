@@ -395,7 +395,8 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE(driver->get_slewing());
     driver->unpark();
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(abort_verified(clock, *driver));  // #2409: Slewing holds until the Unpark's stop verifies
+    REQUIRE_FALSE(driver->get_slewing());
     // The cancelled park task must never flip AtPark afterwards.
     // Virtual time well past the GOTO and the start grace.
     CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, 1, std::chrono::milliseconds(250), 12));
@@ -1459,6 +1460,7 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both 
     CHECK(rig.st->cancel_goto_count.load() == cancels + 1);
     CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
     CHECK(zero_rate_stops(*rig.st, 1) > dec_stops);
+    CHECK(abort_verified(rig.clock, *rig.driver));  // #2409: Slewing holds until the stop verifies
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1501,6 +1503,7 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during a blocking slew stops bot
     slewer.join();
     REQUIRE(finished);
     CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+    CHECK(abort_verified(clock, *driver));  // #2409: Slewing holds until the stop verifies
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
