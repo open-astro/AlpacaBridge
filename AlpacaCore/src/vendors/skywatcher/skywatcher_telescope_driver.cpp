@@ -6793,6 +6793,10 @@ public:
         slew_.set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_abort_verify_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        abort_verify_.set_spawn_for_testing(std::move(spawn));
+    }
+
     void set_status_poll_paused_for_testing(bool paused) { status_poll_paused_for_testing_.store(paused); }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
@@ -7306,6 +7310,13 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
+                                        std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_abort_verify_spawn_for_testing(std::move(spawn));
     }
 }
 
