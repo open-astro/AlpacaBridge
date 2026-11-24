@@ -99,14 +99,14 @@ struct FakeCelestronState {
     // #2409 landing model: a GOTO the fake accepts on the hand-controller path ('r'/'R') moves the reported position
     // to its target, unless miss_landing keeps the old one (a GOTO that comes to rest far from its target).
     std::atomic<bool> miss_landing{false};
-    std::atomic<bool> odd_goto_reply{false};   // answer a GOTO with "1#" instead of "#", and start nothing
-    std::atomic<int> ignore_cancels{0};        // this many cancel-goto commands are answered but do not stop the GOTO
+    std::atomic<bool> odd_goto_reply{false};    // answer a GOTO with "1#" instead of "#", and start nothing
+    std::atomic<int> ignore_cancels{0};         // this many cancel-goto commands are answered but do not stop the GOTO
     std::atomic<int> first_cancel_delay_ms{0};  // the next cancel-goto is answered this late (then 0 again)
     std::atomic<bool> unsettled{false};         // every position read is 40 arcsec further in RA: never still
     std::atomic<int> drift_reads{0};
     std::atomic<bool> reject_positions{false};  // every position read goes unanswered
-    std::atomic<bool> hold_home{false};        // MC_LEVEL_DONE answers "not done" while set
-    std::atomic<int> goto_count_at_write{-1};  // goto_count when the last site ('W') or time ('H') write arrived
+    std::atomic<bool> hold_home{false};         // MC_LEVEL_DONE answers "not done" while set
+    std::atomic<int> goto_count_at_write{-1};   // goto_count when the last site ('W') or time ('H') write arrived
     alpacacore::test::CelestronLanding landing;
     void land(const std::string& chunk) { landing.land(chunk, miss_landing.load()); }
     std::string position() const { return landing.position(); }
