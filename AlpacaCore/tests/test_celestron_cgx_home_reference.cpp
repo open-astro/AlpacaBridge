@@ -81,13 +81,14 @@ struct HomeRig {
         alpacacore::test::set_cgx_connected(*driver, clock, true);
     }
 
-    // Waits up to 5 s of real time for `done`, advancing the clock 20 ms whenever the driver waits on it.
-    bool drive(const std::function<bool()>& done) {
-        const auto deadline = std::chrono::steady_clock::now() + 5s;
+    // Waits up to `real` for `done`, advancing the clock `step` whenever the driver waits on it.
+    bool drive(const std::function<bool()>& done, std::chrono::milliseconds step = 20ms,
+               std::chrono::seconds real = 5s) {
+        const auto deadline = std::chrono::steady_clock::now() + real;
         while (!done()) {
             if (std::chrono::steady_clock::now() >= deadline) return false;
             if (clock.wait_for_waiters(1, 1ms)) {
-                clock.advance(20ms);
+                clock.advance(step);
                 if (!clock.wait_for_woken_settled(2s)) return false;
             }
         }
@@ -307,6 +308,33 @@ TEST_CASE(
     CHECK(rig.count(kDec, 0x04) == dec_labels);
     CHECK_FALSE(rig.driver->get_at_home());
     CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.reference_unknown());
+}
+
+TEST_CASE("Celestron CGX home reference - a re-home that runs no search fails and writes no label",
+          "[celestron][cgx][telescope][home-reference][home-search]") {
+    HomeRig rig;
+    // RA's first search crawls past the #2213 bound; its re-home start then runs no search.
+    rig.mount.set_crawling_home_searches(kRa, 1);
+    rig.mount.set_auto_complete_motions(true);
+    REQUIRE_FALSE(rig.call([&] { rig.driver->find_home(); }));
+    rig.mount.set_inert_home_starts(kRa, 1);
+    std::string failure;
+    REQUIRE(rig.drive(
+        [&] {
+            try {
+                return !rig.driver->get_slewing();
+            } catch (const alpacacore::AlpacaException& error) {
+                failure = error.what();
+                return true;
+            }
+        },
+        200ms, 30s));
+    CHECK(rig.count(kRa, 0x0b) == 2);
+    CHECK(failure.find("RA reports home done with no home search running") != std::string::npos);
+    CHECK(rig.count(kRa, 0x04) == 0);
+    CHECK(rig.count(kDec, 0x04) == 0);
+    CHECK_FALSE(rig.driver->get_at_home());
     CHECK(rig.reference_unknown());
 }
 

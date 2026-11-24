@@ -2547,11 +2547,13 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 
 bool CelestronCgxTelescopeDriver::confirm_home_search_started(std::initializer_list<CgxAxis> axes,
                                                               const std::function<bool()>& stopped) {
-    const auto deadline = clock_.now() + kHomeStartConfirmWindow;
     for (const auto axis : axes) {
+        // Each axis gets its own window from its first read: a slow read of the one before cannot use it up.
+        std::optional<util::TaskClock::clock::time_point> deadline;
         while (protocol_.is_axis_home_done(axis)) {
+            if (!deadline) deadline = clock_.now() + kHomeStartConfirmWindow;
             if (stopped && stopped()) return false;
-            if (clock_.now() >= deadline)
+            if (clock_.now() >= *deadline)
                 throw AlpacaException(std::string("Celestron CGX ") + (axis == CgxAxis::RightAscension ? "RA" : "Dec") +
                                           " reports home done with no home search running after MC_LEVEL_START; "
                                           "the home reference was not written. Run FindHome",
