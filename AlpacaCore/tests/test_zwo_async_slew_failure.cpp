@@ -2112,6 +2112,60 @@ TEST_CASE("ZWO goto-safety - a redundant Connected=true while the driver moves t
     rig.driver->abort_slew();
 }
 
+TEST_CASE("ZWO goto-safety - a redundant Connected=true keeps a running jog or Park under the cap and the relink stop",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const std::string path = GENERATE(std::string("jog cap"), std::string("jog relink"), std::string("Park relink"));
+    CAPTURE(path);
+    if (path == "Park relink") {
+        rig.mount.hold_running(true);
+        REQUIRE_NOTHROW(rig.driver->park());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    }
+    run_polls(rig, std::chrono::seconds(10));
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));  // redundant: the link never went away
+    REQUIRE(rig.mount.slewing());
+    if (path == "jog cap") {
+        run_polls(rig, std::chrono::seconds(46));  // 56 s after the MoveAxis
+        CHECK(rig.mount.count(":Qe") == 0);
+        run_polls(rig, std::chrono::seconds(8));
+        REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
+        CHECK_FALSE(rig.mount.jogging());
+        std::string message;
+        CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+        CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
+        return;
+    }
+    REQUIRE(rig.mount.drop_link());
+    for (int i = 0; i < 40 && rig.driver->get_connected(); ++i) rig.tick();
+    REQUIRE_FALSE(rig.driver->get_connected());
+    const auto before = rig.mount.commands().size();
+    rig.connect();
+    const auto all = rig.mount.commands();
+    std::vector<std::string> after(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
+    const auto stop = std::find(after.begin(), after.end(), std::string(":Q"));
+    REQUIRE(stop != after.end());
+    for (auto it = after.begin(); it != stop; ++it) {
+        INFO(*it);
+        CHECK((it->rfind(":GV", 0) == 0 || it->rfind(":GMA", 0) == 0));
+    }
+    CHECK_FALSE(rig.mount.slewing());
+}
+
+TEST_CASE("ZWO goto-safety - a redundant Connected=true keeps the Sync offset",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();  // the fake mount points at RA 12 h, Dec +45
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(12.0, 46.0));
+    REQUIRE(std::abs(rig.driver->get_declination() - 46.0) < 1e-6);
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));  // redundant: the link never went away
+    rig.tick();
+    CHECK(std::abs(rig.driver->get_declination() - 46.0) < 1e-6);
+    CHECK(std::abs(rig.mount.dec_degrees() - 45.0) < 1e-6);  // the mount itself never moved
+}
+
 // The ZWO AM's FindHome is :hC#, a slew to the home position the mount stores.
 TEST_CASE("ZWO findhomeissensorsearch is false", "[zwo][telescope][findhome-sensor]") {
     Rig rig;
