@@ -350,8 +350,9 @@ TEST_CASE("CGX GOTO planning reads the axes and in-flight getters serve the poll
     while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
     CHECK(waiting);
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.reads(0x10) == ra + 3);
-    CHECK(rig.reads(0x11) == dec + 3);
+    // The planning read, the wrong-way watchdog's read on the leg's first poll (#2640), the poll and the arrival read.
+    CHECK(rig.reads(0x10) == ra + 4);
+    CHECK(rig.reads(0x11) == dec + 4);
     CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
 }
 

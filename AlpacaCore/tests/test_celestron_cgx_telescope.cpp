@@ -4225,6 +4225,7 @@ TEST_CASE(
     // A's poll sees its home or GOTO done and runs its next stage meanwhile: the rebase and GOTO, or the arrival
     // check and the tracking restore. Tracking starts before the arrival read, so that stage is done once both hold.
     const int ra_reads = mount.count_command(0x10, 0x01);
+    const int dec_reads = mount.count_command(0x11, 0x01);
     if (leg == 0) {
         mount.complete_axis_home(0x10);
         mount.complete_axis_home(0x11);
@@ -4232,11 +4233,14 @@ TEST_CASE(
         mount.complete_axis_slew(0x10);
         mount.complete_axis_slew(0x11);
     }
+    // A flip slew's GOTO leg reads RA, then Dec, on each poll (the #2640 wrong-way watchdog): staged once its Dec read
+    // is in, and A then waits on the clock, which nothing advances until B is refused.
     const bool staged = wait_until([&] {
         clock.advance(20ms);
-        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos
+        return leg == 0 ? mount.count_command(0x10, 0x02) > gotos && mount.count_command(0x11, 0x01) > dec_reads
                         : driver->get_tracking() && mount.count_command(0x10, 0x01) > ra_reads;
     });
+    if (leg == 0) REQUIRE(clock.wait_for_waiters(1, 2s));
 
     // B's position read then fails, so B is refused without claiming anything.
     mount.ack_next_with_payload(0x10, 0x01, {0x00});
