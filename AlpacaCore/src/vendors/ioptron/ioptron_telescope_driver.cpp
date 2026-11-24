@@ -863,7 +863,7 @@ public:
                 }
                 // Issue #2420: the status 7 a zero search starts from is the false zero
                 // it is there to correct. AtHome only once the search has landed.
-                return driver_motion_ != DriverMotion::HomeSearch && cached_status_.is_at_home &&
+                return driver_motion_ != DriverMotion::HomeSearch && status_view_locked().is_at_home &&
                        !home_search_unconfirmed_;
             });
     }
@@ -882,7 +882,7 @@ public:
                     throw RefillNeedsOperationLock{};
                 }
                 refresh_status_cache_locked();
-                return cached_status_.is_parked;
+                return status_view_locked().is_parked;
             });
     }
     
@@ -1183,7 +1183,7 @@ public:
     int get_side_of_pier() const override {
         return serve_cached_or_refill(
             [&] {
-                return position_cache_valid_ && !slew_in_progress_ && !cached_status_.is_slewing &&
+                return position_cache_valid_ && !slew_in_progress_ && !status_view_locked().is_slewing &&
                        (clock_.now() - last_position_update_) < kSideOfPierPositionTtl && site_info_valid_;
             },
             [&] {
@@ -1204,7 +1204,7 @@ public:
                 // polls SideOfPier alone keeps live reads after the move as well:
                 // never stale, just uncached until it asks whether the slew ended.
                 const auto now = clock_.now();
-                if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
+                if (!position_cache_valid_ || slew_in_progress_ || status_view_locked().is_slewing ||
                     (now - last_position_update_) >= kSideOfPierPositionTtl) {
                     refresh_position_cache_locked();
                 }
@@ -1454,7 +1454,7 @@ public:
                 axis_move_active_secondary_ = true;
             }
             if (!was_any_axis_active && !tracking_state_before_move_.has_value()) {
-                tracking_state_before_move_ = cached_status_.is_tracking;
+                tracking_state_before_move_ = status_view_locked().is_tracking;
             }
             move_axis_deadline_ = clock_.now() + kMaxMoveAxisDuration;
         }
@@ -1538,7 +1538,7 @@ public:
                 if (driver_motion_ == DriverMotion::HomeSearch) {
                     return true;
                 }
-                if (cached_status_.is_slewing) {
+                if (status_view_locked().is_slewing) {
                     // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
                     // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
                     // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
@@ -1546,91 +1546,95 @@ public:
                     return !(pulse_window_open() && (!slew_in_progress_ || goto_seen_stopped_) &&
                              driver_motion_ == DriverMotion::None);
                 }
-                // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
-                // compensating sidereal motion during its final ~1 s approach, so
-                // slews settle a consistent ~11-16 arcsec east of the RA target
-                // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
-                // the firmware deadbands slews shorter than ~15". Instead, close the
-                // residual with a duration-computed pulse-guide trim (guide rate is
-                // known, so err/rate gives the exact pulse length), re-measuring and
-                // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
-                // on this firmware and Dec pulse polarity flips with pier side.
-                // Slewing stays true while a trim pulse runs.
                 // Issue #2063: the client's pulse takes over from the trim of a GOTO the mount already finished.
                 if (pulse_window_open() && goto_seen_stopped_) {
                     return false;
                 }
-                if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
-                    // The trim reads the position itself. Under the state lock alone (the slew hold closed
-                    // between the freshness check and the read of `now` above) the refused exchange would be
-                    // taken for a failed trim and the GOTO reported landed with its RA error: run again under
-                    // the operation lock instead.
-                    if (!lock_gate_.holds_io()) {
-                        throw RefillNeedsOperationLock{};
-                    }
-                    ++slew_refine_count_;
-                    try {
-                        const Wire protocol = wire();
-                        Position pos = protocol.get_position();
-                        double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
-                        if (ra_err_hours > 12.0) {
-                            ra_err_hours -= 24.0;
-                        } else if (ra_err_hours < -12.0) {
-                            ra_err_hours += 24.0;
-                        }
-                        const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
-                        constexpr double kTrimMinArcsec = 5.0;    // below this: on target
-                        constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
-                        if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
-                            double guide_fraction = kDefaultGuideRateFraction;
-                            try {
-                                guide_fraction = protocol.get_guide_rates().first;
-                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the default is kept
-                                // Unreadable guide rate — fall back to the default fraction.
-                            }
-                            if (guide_fraction < 0.1 || guide_fraction > 1.0) {
-                                guide_fraction = kDefaultGuideRateFraction;
-                            }
-                            const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
-                            int duration_ms =
-                                static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
-                            duration_ms = std::clamp(duration_ms, 100, 8000);
-                            // Reported RA too large -> mount is east of target -> pulse
-                            // west (RA-, direction 3); too small -> east (RA+, 2).
-                            const int direction = ra_err_arcsec > 0 ? 3 : 2;
-                            ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
-                                                           " arcsec from RA target; pulse-guide trim " +
-                                                           std::to_string(slew_refine_count_) + "/" +
-                                                           std::to_string(kMaxSlewRefines) + " (" +
-                                                           std::to_string(duration_ms) +
-                                                           " ms, final-approach firmware quirk)");
-                            // The wire call, not pulse_guide(): the #2504 refusal must not block the GOTO's own trim.
-                            send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
-                                                       [&] { protocol.pulse_guide(direction, duration_ms); });
-                            goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
-                            status_cache_valid_ = false;
-                            position_cache_valid_ = false;
-                            return true;
-                        }
-                    } catch (const std::exception&) {
-                        // Best-effort trim; fall through and report slew complete, unless the link was lost: then
-                        // NotConnected, never a "not slewing" from a mount that is gone.
-                        throw_if_link_lost();
-                    }
-                }
-                // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
-                if (slew_in_progress_ && equatorial_slew_ && landing_gate_generation_ != 0 &&
-                    landing_gate_generation_ == slew_operation_generation_) {
-                    if (!lock_gate_.holds_io()) {
-                        throw RefillNeedsOperationLock{};
-                    }
-                    if (!async_goto_landed_locked(now)) {
-                        return true;
-                    }
-                }
-                slew_in_progress_ = false;
-                return false;
+                return advance_motion_locked(now);
             });
+    }
+
+    // What Slewing decides once the status reads stopped and no early return applies: the GOTO's settle trim, the async
+    // landing gate and, when neither is pending, the end of the slew. True while the slew goes on.
+    bool advance_motion_locked(std::chrono::steady_clock::time_point now) const {
+        // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
+        // compensating sidereal motion during its final ~1 s approach, so
+        // slews settle a consistent ~11-16 arcsec east of the RA target
+        // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
+        // the firmware deadbands slews shorter than ~15". Instead, close the
+        // residual with a duration-computed pulse-guide trim (guide rate is
+        // known, so err/rate gives the exact pulse length), re-measuring and
+        // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
+        // on this firmware and Dec pulse polarity flips with pier side.
+        // Slewing stays true while a trim pulse runs.
+        if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
+            // The trim reads the position itself. Under the state lock alone (the slew hold closed
+            // between the freshness check and the read of `now` above) the refused exchange would be
+            // taken for a failed trim and the GOTO reported landed with its RA error: run again under
+            // the operation lock instead.
+            if (!lock_gate_.holds_io()) {
+                throw RefillNeedsOperationLock{};
+            }
+            ++slew_refine_count_;
+            try {
+                const Wire protocol = wire();
+                Position pos = protocol.get_position();
+                double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
+                if (ra_err_hours > 12.0) {
+                    ra_err_hours -= 24.0;
+                } else if (ra_err_hours < -12.0) {
+                    ra_err_hours += 24.0;
+                }
+                const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
+                constexpr double kTrimMinArcsec = 5.0;    // below this: on target
+                constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
+                if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
+                    double guide_fraction = kDefaultGuideRateFraction;
+                    try {
+                        guide_fraction = protocol.get_guide_rates().first;
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the default is kept
+                        // Unreadable guide rate — fall back to the default fraction.
+                    }
+                    if (guide_fraction < 0.1 || guide_fraction > 1.0) {
+                        guide_fraction = kDefaultGuideRateFraction;
+                    }
+                    const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
+                    int duration_ms = static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
+                    duration_ms = std::clamp(duration_ms, 100, 8000);
+                    // Reported RA too large -> mount is east of target -> pulse
+                    // west (RA-, direction 3); too small -> east (RA+, 2).
+                    const int direction = ra_err_arcsec > 0 ? 3 : 2;
+                    ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
+                                                   " arcsec from RA target; pulse-guide trim " +
+                                                   std::to_string(slew_refine_count_) + "/" +
+                                                   std::to_string(kMaxSlewRefines) + " (" +
+                                                   std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
+                    // The wire call, not pulse_guide(): the #2504 refusal must not block the GOTO's own trim.
+                    send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
+                                               [&] { protocol.pulse_guide(direction, duration_ms); });
+                    goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
+                    status_cache_valid_ = false;
+                    position_cache_valid_ = false;
+                    return true;
+                }
+            } catch (const std::exception&) {
+                // Best-effort trim; fall through and report slew complete, unless the link was lost: then
+                // NotConnected, never a "not slewing" from a mount that is gone.
+                throw_if_link_lost();
+            }
+        }
+        // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
+        if (slew_in_progress_ && equatorial_slew_ && landing_gate_generation_ != 0 &&
+            landing_gate_generation_ == slew_operation_generation_) {
+            if (!lock_gate_.holds_io()) {
+                throw RefillNeedsOperationLock{};
+            }
+            if (!async_goto_landed_locked(now)) {
+                return true;
+            }
+        }
+        slew_in_progress_ = false;
+        return false;
     }
 
     // Issue #2396 (AB-7): the async GOTO landing gate, run by the Slewing read once the status reads stopped. The
@@ -1754,11 +1758,11 @@ public:
             [&] {
                 auto now = clock_.now();
                 if (tracking_rate_override_until_ > now && status_cache_valid_) {
-                    return static_cast<int>(cached_status_.tracking_rate);
+                    return static_cast<int>(status_view_locked().tracking_rate);
                 }
                 refresh_status_cache_locked();
                 // Alpaca TrackingRate uses DriveRates enum values (0-4).
-                return static_cast<int>(cached_status_.tracking_rate);
+                return static_cast<int>(status_view_locked().tracking_rate);
             });
     }
 
@@ -1839,7 +1843,7 @@ public:
             }
             // Issue #2420: a mount with a zero sensor search wakes from a power loss at status 7 wherever it points,
             // so status 7 proves nothing there and the search always runs (about 20 s from a true zero too).
-            if (!zero_search && cached_status_.is_at_home) {
+            if (!zero_search && status_view_locked().is_at_home) {
                 return;
             }
 
@@ -1877,7 +1881,7 @@ public:
         check_connected();
         
         refresh_status_cache_locked();
-        if (cached_status_.is_parked) {
+        if (status_view_locked().is_parked) {
             return;
         }
 
@@ -2550,7 +2554,7 @@ private:
         if (park_override_until_ > clock_.now()) {
             return false;
         }
-        if (status_cache_valid_ && !cached_status_.is_parked) {
+        if (status_cache_valid_ && !status_view_locked().is_parked) {
             return false;
         }
         try {
@@ -2559,7 +2563,7 @@ private:
             throw_if_link_lost();
             return false;
         }
-        return cached_status_.is_parked;
+        return status_view_locked().is_parked;
     }
 
     void ensure_not_parked_locked(const char* action) const {
@@ -2568,11 +2572,11 @@ private:
             park_override_until_ = now + kUnparkGrace;
             return;
         }
-        if (status_cache_valid_ && !cached_status_.is_parked) {
+        if (status_cache_valid_ && !status_view_locked().is_parked) {
             return;
         }
         refresh_status_cache_locked();
-        if (cached_status_.is_parked) {
+        if (status_view_locked().is_parked) {
             throw AlpacaException(std::string(action) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
         }
@@ -2585,13 +2589,13 @@ private:
             return;
         }
         if (status_cache_valid_) {
-            if (cached_status_.is_parked) {
+            if (status_view_locked().is_parked) {
                 throw AlpacaException(std::string(action) + " is not allowed while parked",
                                       AlpacaError::InvalidWhileParked);
             }
             return;
         }
-        if (cached_status_.is_parked) {
+        if (status_view_locked().is_parked) {
             throw AlpacaException(std::string(action) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
         }
@@ -2701,10 +2705,10 @@ private:
     bool get_tracking_locked() const {
         auto now = clock_.now();
         if (tracking_override_until_ > now && status_cache_valid_) {
-            return cached_status_.is_tracking;
+            return status_view_locked().is_tracking;
         }
         refresh_status_cache_locked();
-        return cached_status_.is_tracking;
+        return status_view_locked().is_tracking;
     }
 
     // ITelescopeV4: SlewToAltAz and SlewToAltAzAsync throw InvalidOperation while Tracking is true (#1377), since a
@@ -2762,10 +2766,10 @@ private:
     // refused before this runs.
     bool tracking_off_for_slew_locked() const {
         if (tracking_override_until_ > clock_.now() && status_cache_valid_) {
-            return !cached_status_.is_tracking;
+            return !status_view_locked().is_tracking;
         }
         refresh_status_cache_locked();
-        return cached_status_.system_status == 0 || cached_status_.system_status == 7;
+        return status_view_locked().system_status == 0 || status_view_locked().system_status == 7;
     }
 
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec, double phys_ra, double phys_dec,
@@ -3030,6 +3034,7 @@ private:
         if (has_target) {
             static constexpr double kStableThresholdArcsec = 30.0;
             static constexpr int kRequiredStableReads = 3;
+            static constexpr int kSlewLandingFailedReads = 3;  // failed landing reads that fail the slew
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
             double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
             int stable_count = 0;
@@ -3057,7 +3062,7 @@ private:
                 // Issue #2396: a failed position read is no sample, so it can neither count as stable nor land the
                 // slew on the position from before it.
                 if (!target_reached.has_value()) {
-                    if (++failed_reads >= kDeviceFaultThreshold) {
+                    if (++failed_reads >= kSlewLandingFailedReads) {
                         fail_synchronous_slew(
                             std::string(label) + " failed: the mount position could not be read to confirm the landing",
                             generation);
@@ -3168,21 +3173,34 @@ private:
             return;
         }
         const Wire protocol = wire();
+        MountStatus status;
         try {
-            cached_status_ = protocol.get_status();
-            status_cache_valid_ = true;
-            last_status_update_ = now;
-            note_device_read_ok_locked();
+            status = protocol.get_status();
         } catch (const std::exception& e) {
             throw_if_link_lost();
             record_device_fault_locked("Status", e.what());
             throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        ingest_status_locked(status, now);
+    }
+
+    // The status as the getters and guards read it. One read path for every consumer (decision 0016 PR 3 puts the
+    // read-back overlay here); today it is the cache as it stands.
+    const MountStatus& status_view_locked() const { return cached_status_; }
+
+    // Takes a status read at `sampled_at` into the cache and runs what a fresh status settles: the wedged-park
+    // finalizer, the zero search's stop and motion note, and the end of a driver-started Park or FindHome.
+    void ingest_status_locked(const MountStatus& status, std::chrono::steady_clock::time_point sampled_at) const {
+        const auto now = sampled_at;
+        cached_status_ = status;
+        status_cache_valid_ = true;
+        last_status_update_ = now;
+        note_device_read_ok_locked();
         finalize_wedged_park_locked();
         stop_overdue_zero_search_locked(now);
         note_zero_search_motion_locked();
-        if (!cached_status_.is_at_home) {
+        if (!status_view_locked().is_at_home) {
             home_search_unconfirmed_ = false;  // the mount left the 7 a failed search stopped at
         }
         // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
@@ -3194,16 +3212,17 @@ private:
         // moving: the false zero it starts from reads 7 too, so a 7 the mount never left is not a landing (a
         // :MSH# ignored at a false zero would otherwise read as home). A running search reads 2 until it lands, so
         // another no-motion status does not end it either.
-        const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
-        const bool search_running = driver_motion_ == DriverMotion::HomeSearch &&
-                                    (!cached_status_.is_at_home || slew_hold_.active(now) || !home_search_seen_moving_);
-        if (!search_running && (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now)))) {
+        const bool reached_home = driver_motion_ == DriverMotion::Home && status_view_locked().is_at_home;
+        const bool search_running =
+            driver_motion_ == DriverMotion::HomeSearch &&
+            (!status_view_locked().is_at_home || slew_hold_.active(now) || !home_search_seen_moving_);
+        if (!search_running && (reached_home || (!status_view_locked().is_slewing && !slew_hold_.active(now)))) {
             driver_motion_ = DriverMotion::None;
         }
         // Issue #2063: a status that shows the mount stopped past the dispatch window ends the GOTO for the
         // PulseGuide mask and MoveAxis even if no client reads Slewing. slew_in_progress_ stays for get_slewing(),
         // which still runs the settle trim and clears it.
-        if (!cached_status_.is_slewing && !slew_hold_.active(now)) {
+        if (!status_view_locked().is_slewing && !slew_hold_.active(now)) {
             goto_seen_stopped_ = true;
         }
     }
@@ -3214,8 +3233,8 @@ private:
     // Issue #2432: the watchdog slot (run_zero_search_watchdog()) reads the status at the bound, so this runs then
     // whether or not a client polls; a client's read past the bound that gets here first stops it the same way.
     void stop_overdue_zero_search_locked(std::chrono::steady_clock::time_point now) const {
-        if (driver_motion_ != DriverMotion::HomeSearch || (cached_status_.is_at_home && home_search_seen_moving_) ||
-            now < home_search_deadline_) {
+        if (driver_motion_ != DriverMotion::HomeSearch ||
+            (status_view_locked().is_at_home && home_search_seen_moving_) || now < home_search_deadline_) {
             return;
         }
         stop_zero_search_locked("FindHome: the zero sensor search did not reach the zero position within " +
@@ -3224,7 +3243,7 @@ private:
 
     // Every fresh status during a zero search: a status 2 means the search started (it reads 2 until it lands on 7).
     void note_zero_search_motion_locked() const {
-        if (driver_motion_ == DriverMotion::HomeSearch && cached_status_.is_slewing) {
+        if (driver_motion_ == DriverMotion::HomeSearch && status_view_locked().is_slewing) {
             home_search_seen_moving_ = true;
         }
     }
@@ -3234,7 +3253,7 @@ private:
     // another getter (Tracking, AtPark, TrackingRate) or an initiator refreshed the shared status just before.
     bool zero_search_start_check_due_locked(std::chrono::steady_clock::time_point now) const {
         return driver_motion_ == DriverMotion::HomeSearch && !home_search_seen_moving_ && status_cache_valid_ &&
-               !cached_status_.is_slewing && now >= home_search_start_until_;
+               !status_view_locked().is_slewing && now >= home_search_start_until_;
     }
 
     // A zero search the mount never started. A running search reads status 2 until it lands on 7 (HAE29C traces over
@@ -3254,17 +3273,18 @@ private:
             return;
         }
         note_zero_search_motion_locked();
-        if (home_search_seen_moving_ || cached_status_.is_slewing || now < home_search_start_until_) {
+        if (home_search_seen_moving_ || status_view_locked().is_slewing || now < home_search_start_until_) {
             return;
         }
         if (home_search_resent_) {
             stop_zero_search_locked("FindHome: the zero sensor search did not start (the mount stayed at status " +
-                                    std::to_string(cached_status_.system_status) + " after :MSH# was sent twice)");
+                                    std::to_string(status_view_locked().system_status) +
+                                    " after :MSH# was sent twice)");
             return;
         }
         home_search_resent_ = true;
         ALPACA_LOG_WARN("iOptron", "FindHome: the zero sensor search did not start (status " +
-                                       std::to_string(cached_status_.system_status) + "); sending :MSH# again");
+                                       std::to_string(status_view_locked().system_status) + "); sending :MSH# again");
         try {
             send_with_slew_hold_locked(std::chrono::seconds(5), [&] { wire().find_home(); });
         } catch (const std::exception& e) {
@@ -3429,7 +3449,7 @@ private:
                 if (slew_bounded && now >= slew_bound_deadline_) {
                     try {
                         refresh_status_cache_locked(true);
-                        if (cached_status_.is_slewing) {
+                        if (status_view_locked().is_slewing) {
                             stop_bounded_motion_locked("The slew did not end within " +
                                                        std::to_string(kSlewTimeout.count()) + " s");
                             return;
@@ -3504,11 +3524,11 @@ private:
         if (!park_finalize_pending_) {
             return;
         }
-        if (cached_status_.is_parked) {
+        if (status_view_locked().is_parked) {
             park_finalize_pending_ = false;
             return;
         }
-        if (!cached_status_.is_slewing || !park_target_valid_) {
+        if (!status_view_locked().is_slewing || !park_target_valid_) {
             return;
         }
         const Wire protocol = wire();
@@ -3527,7 +3547,7 @@ private:
             protocol.stop_tracking();
             cached_status_ = protocol.get_status();
             last_status_update_ = clock_.now();
-            if (cached_status_.is_parked) {
+            if (status_view_locked().is_parked) {
                 park_finalize_pending_ = false;
             }
         } catch (const std::exception&) {
@@ -3607,49 +3627,6 @@ private:
         }
         ALPACA_LOG_WARN("iOptron", std::string("Failed to sync ") + label + ": " + last_error);
         return false;
-    }
-
-    void calibrate_dec_guide_locked(int duration_ms) {
-        refresh_status_cache_locked(true);
-        if (cached_status_.is_slewing || cached_status_.is_parked) {
-            ALPACA_LOG_WARN("iOptron", "Skipping Dec guide calibration while slewing or parked");
-            return;
-        }
-
-        const Wire protocol = wire();
-        try {
-            const auto start = protocol.get_position();
-            dec_guide_calibration_side_ = start.side_of_pier;
-            if (std::abs(start.dec_degrees) > 85.0) {
-                ALPACA_LOG_WARN("iOptron", "Skipping Dec guide calibration near the pole (Dec=" +
-                                              std::to_string(start.dec_degrees) + ")");
-                return;
-            }
-            const int sample_duration = std::clamp(duration_ms, 500, 2000);
-            // The wire call, not pulse_guide(): the #2503/#2504 refusals must not block the driver's own sample.
-            protocol.pulse_guide(0, sample_duration);
-            clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
-            Position end = protocol.get_position();
-            for (int i = 0; i < 2; ++i) {
-                clock_.sleep_for(std::chrono::milliseconds(200));
-                end = protocol.get_position();
-            }
-
-            const double delta = end.dec_degrees - start.dec_degrees;
-            const double min_delta = 0.0005;  // ~1.8 arcsec
-            if (std::abs(delta) < min_delta) {
-                ALPACA_LOG_WARN("iOptron", "Dec guide calibration inconclusive; using default mapping (delta=" +
-                                              std::to_string(delta) + " deg)");
-                return;
-            }
-
-            dec_guide_inverted_ = (delta < 0.0);
-            dec_guide_calibrated_ = true;
-            ALPACA_LOG_INFO("iOptron", std::string("Dec guide calibration: ") +
-                                           (dec_guide_inverted_ ? "inverted" : "normal"));
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Dec guide calibration failed: ") + e.what());
-        }
     }
 
     // Issue #2434: one :AG# read on the connect path, and again from a per-axis setter while the rate is unknown. A
