@@ -2081,6 +2081,7 @@ TEST_CASE("Celestron GOTO - a motor-controller GOTO reply other than # is not a 
     REQUIRE(wait_until([&] { return read_slewing(*driver, &message) != SlewingRead::True; }, 10000));
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("not confirmed") != std::string::npos);
+    CHECK(wait_until([&] { return st->cancel_goto_count.load() >= 1; }, 3000));  // the unconfirmed GOTO got a stop
     driver->set_connected(false);
 }
 
