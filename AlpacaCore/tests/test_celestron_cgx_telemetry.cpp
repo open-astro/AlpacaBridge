@@ -140,7 +140,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     TelemetryRig rig;
     rig.coordinates();
     // Sync's raw-label/branch read is fresh even at a stationary home.
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     const auto lst = rig.driver->get_sidereal_time();
     const int sync_ra = rig.reads(0x10), sync_dec = rig.reads(0x11);
     auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
@@ -179,7 +179,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
 TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[celestron][cgx][telemetry]") {
     namespace cgx = alpacacore::vendor::celestron;
     TelemetryRig rig;
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const double before_ra = rig.driver->get_right_ascension();
     const double before_dec = rig.driver->get_declination();
@@ -216,7 +216,7 @@ TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[
 
 TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label writes", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const double lst = rig.driver->get_sidereal_time();
     rig.mount.set_label_read_offsets(0x11, std::vector<std::int32_t>(40, 100));  // the Dec label never reads back
@@ -245,7 +245,8 @@ TEST_CASE("CGX RightAscension holds between polls while tracking", "[celestron][
         rig.clock.advance(step);
         rig.utc += step;
     };
-    rig.mount.set_encoder_position(0x11, 0x810000);  // off the pole, so Altitude moves with the sky
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder +
+                                             0x10000);  // off the pole, so Altitude moves with the sky
     rig.driver->set_tracking(true);
     rig.poll_now();
     const double ra = rig.driver->get_right_ascension();
@@ -297,7 +298,7 @@ TEST_CASE("CGX the first read after a pulse guide shows where it ended", "[celes
 TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const auto displaced = rig.driver->get_declination();
     CHECK(displaced < 90.0);
@@ -309,7 +310,7 @@ TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cg
     CHECK(rig.reads(0x11) == home_dec);
     // A reconnect drops the frame and takes a new one before Connected reads true.
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     const int connect_ra = rig.reads(0x10), connect_dec = rig.reads(0x11);
     // The continuity check fails on the moved Dec axis, so the reference is gone with the old frame.

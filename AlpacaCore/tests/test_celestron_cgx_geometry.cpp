@@ -63,7 +63,7 @@ TEST_CASE("Celestron CGX geometry - maps northern normal and beyond-pole encoder
 
     const auto normal = cgx_sky_position_to_encoders(6.0, 30.0, 6.0, CgxHemisphere::North, CgxPointingSide::Normal);
     CHECK(normal.first == 0x000000U);
-    CHECK(normal.second == 0xaaaaabU);
+    CHECK(normal.second == 0x6aaaabU);
     const auto normal_sky = cgx_encoder_position_to_sky(normal.first, normal.second, 6.0, CgxHemisphere::North);
     ALPACA_REQUIRE_APPROX(normal_sky.right_ascension_hours, 6.0);
     CHECK(std::abs(normal_sky.declination_degrees - 30.0) < 2.2e-5);
@@ -71,7 +71,7 @@ TEST_CASE("Celestron CGX geometry - maps northern normal and beyond-pole encoder
 
     const auto beyond = cgx_sky_position_to_encoders(6.0, 30.0, 6.0, CgxHemisphere::North, CgxPointingSide::BeyondPole);
     CHECK(beyond.first == 0x800000U);
-    CHECK(beyond.second == 0x555555U);
+    CHECK(beyond.second == 0x155555U);
     const auto beyond_sky = cgx_encoder_position_to_sky(beyond.first, beyond.second, 6.0, CgxHemisphere::North);
     ALPACA_REQUIRE_APPROX(beyond_sky.right_ascension_hours, 6.0);
     CHECK(std::abs(beyond_sky.declination_degrees - 30.0) < 2.2e-5);
@@ -87,7 +87,7 @@ TEST_CASE("Celestron CGX geometry - mirrors the polar reference in the southern 
 
     const auto normal = cgx_sky_position_to_encoders(6.0, -30.0, 6.0, CgxHemisphere::South, CgxPointingSide::Normal);
     CHECK(normal.first == 0x800000U);
-    CHECK(normal.second == 0xaaaaabU);
+    CHECK(normal.second == 0x6aaaabU);
     const auto normal_sky = cgx_encoder_position_to_sky(normal.first, normal.second, 6.0, CgxHemisphere::South);
     ALPACA_REQUIRE_APPROX(normal_sky.right_ascension_hours, 6.0);
     CHECK(std::abs(normal_sky.declination_degrees + 30.0) < 2.2e-5);
@@ -96,7 +96,7 @@ TEST_CASE("Celestron CGX geometry - mirrors the polar reference in the southern 
     const auto beyond =
         cgx_sky_position_to_encoders(6.0, -30.0, 6.0, CgxHemisphere::South, CgxPointingSide::BeyondPole);
     CHECK(beyond.first == 0x000000U);
-    CHECK(beyond.second == 0x555555U);
+    CHECK(beyond.second == 0x155555U);
     const auto beyond_sky = cgx_encoder_position_to_sky(beyond.first, beyond.second, 6.0, CgxHemisphere::South);
     ALPACA_REQUIRE_APPROX(beyond_sky.right_ascension_hours, 6.0);
     CHECK(std::abs(beyond_sky.declination_degrees + 30.0) < 2.2e-5);
@@ -190,8 +190,8 @@ TEST_CASE("Celestron CGX geometry - the pose guard refuses targets below the hor
     using alpacacore::vendor::celestron::CgxPointingSide;
     using alpacacore::vendor::celestron::encode_cgx_encoder_degrees;
     using alpacacore::vendor::celestron::kCgxEncoderStepsPerRevolution;
-    constexpr std::uint32_t ra_home = kCgxEncoderStepsPerRevolution / 4;
-    constexpr std::uint32_t dec_home = kCgxEncoderStepsPerRevolution / 2;
+    constexpr std::uint32_t ra_home = alpacacore::vendor::celestron::kCgxRaHomeEncoder;
+    constexpr std::uint32_t dec_home = alpacacore::vendor::celestron::kCgxDecHomeEncoder;
     const auto refusal = [](std::pair<std::uint32_t, std::uint32_t> target, CgxHemisphere hemisphere,
                             CgxPointingSide side, double latitude) {
         return cgx_encoder_target_refusal(target.first, target.second, hemisphere, side, latitude);
@@ -222,5 +222,31 @@ TEST_CASE("Celestron CGX geometry - the pose guard refuses targets below the hor
                                            CgxPointingSide::Normal, latitude);
         REQUIRE(past_meridian.has_value());
         CHECK(past_meridian->find("meridian") != std::string::npos);
+    }
+}
+
+TEST_CASE("Celestron CGX geometry - no Dec target on either side reaches the controller's GOTO seam",
+          "[celestron][cgx][geometry][unit]") {
+    // #2640: the controller's Dec GOTO never crosses label 0xC00000 and goes the long way round instead. For every Dec
+    // target from pole to pole, on both sides and in both hemispheres, the shorter way from home must not pass it.
+    using alpacacore::vendor::celestron::cgx_sky_position_to_encoders;
+    using alpacacore::vendor::celestron::CgxHemisphere;
+    using alpacacore::vendor::celestron::CgxPointingSide;
+    using alpacacore::vendor::celestron::kCgxDecHomeEncoder;
+    using alpacacore::vendor::celestron::signed_cgx_encoder_delta;
+    constexpr std::uint32_t kSeam = 0xC00000U;
+    const auto seam_from_home = signed_cgx_encoder_delta(kSeam, kCgxDecHomeEncoder);
+    for (const auto hemisphere : {CgxHemisphere::North, CgxHemisphere::South}) {
+        for (const auto side : {CgxPointingSide::Normal, CgxPointingSide::BeyondPole}) {
+            for (double dec = -89.0; dec <= 89.0; dec += 1.0) {
+                INFO("hemisphere " << static_cast<int>(hemisphere) << " side " << static_cast<int>(side) << " dec "
+                                   << dec);
+                const auto target = cgx_sky_position_to_encoders(6.0, dec, 6.0, hemisphere, side).second;
+                const auto from_home = signed_cgx_encoder_delta(target, kCgxDecHomeEncoder);
+                const bool crosses = from_home > 0 ? seam_from_home > 0 && seam_from_home <= from_home
+                                                   : seam_from_home < 0 && seam_from_home >= from_home;
+                CHECK_FALSE(crosses);
+            }
+        }
     }
 }

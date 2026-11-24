@@ -44,7 +44,7 @@ namespace cgx = alpacacore::vendor::celestron;
 constexpr std::uint8_t kRa = 0x10;
 constexpr std::uint8_t kDec = 0x11;
 constexpr double kLatitude = 30.0;  // generic northern site
-constexpr std::uint32_t kDecHome = cgx::kCgxEncoderStepsPerRevolution / 2;
+constexpr std::uint32_t kDecHome = cgx::kCgxDecHomeEncoder;
 // The driver's wrong-way bound (kGotoWrongWayCounts), in encoder counts.
 constexpr std::int32_t kWrongWayBound = 2000;
 // The driver's coast allowance for a retarget (kGotoCoastCounts): 5 degrees.
@@ -131,9 +131,10 @@ struct DirectionRig {
 TEST_CASE("Celestron CGX GOTO direction - a FAST leg driven the long way over the pole is stopped",
           "[celestron][cgx][telescope][goto-direction]") {
     DirectionRig rig;
-    // The rig's GOTO from home: Dec +100 degrees to label 280 degrees. The seam at 270 degrees makes the fake drive
-    // Dec the other way, -260 degrees, over the pole, as the rig did.
-    rig.mount.set_goto_seam(kDec, 0xC00000U);
+    // The rig's GOTO from home: Dec +100 degrees. A seam 90 degrees from home (the equator, where the controller's
+    // seam fell before #2640 moved the Dec home label) makes the fake drive Dec the other way, -260 degrees, over the
+    // pole, as the rig did.
+    rig.mount.set_goto_seam(kDec, kDecHome + counts(90.0));
     const int dec_stops = rig.count(kDec, 0x24) + rig.count(kDec, 0x25);
     rig.slew(0.5, -10.0);
     REQUIRE(rig.drive([&] { return rig.ended(); }));
@@ -144,6 +145,31 @@ TEST_CASE("Celestron CGX GOTO direction - a FAST leg driven the long way over th
     CHECK(rig.dec_from_home() <= 0);
     CHECK(rig.dec_from_home() > -static_cast<std::int32_t>(counts(10.0)));
     CHECK(rig.count(kDec, 0x24) + rig.count(kDec, 0x25) > dec_stops);
+}
+
+TEST_CASE("Celestron CGX GOTO direction - a GOTO across the equator takes the shorter way on both sides",
+          "[celestron][cgx][telescope][goto-direction]") {
+    // The fake's Dec seam is the controller's, at label 0xC00000 (#2640). With Dec home at a quarter turn neither side
+    // of the pole reaches it, so both GOTOs from home drive Dec 100 degrees the shorter way, across the equator.
+    DirectionRig rig;
+    const auto dec_100 = static_cast<std::int32_t>(counts(100.0));
+    SECTION("Normal side, HA +0.5 h") {
+        rig.slew(0.5, -10.0);
+        REQUIRE(rig.drive([&] { return rig.ended(); }));
+        INFO("failure: " << rig.failure << "; Dec at " << rig.dec_from_home() << " counts from home");
+        CHECK(rig.failure.empty());
+        CHECK(std::abs(rig.dec_from_home() - dec_100) <= 2);
+    }
+    SECTION("BeyondPole side, HA -0.5 h, after the home route") {
+        rig.slew(-0.5, -10.0);
+        REQUIRE(rig.drive([&] { return rig.mount.axis_homing(kRa) && rig.mount.axis_homing(kDec); }));
+        rig.mount.complete_axis_home(kRa);
+        rig.mount.complete_axis_home(kDec);
+        REQUIRE(rig.drive([&] { return rig.ended(); }));
+        INFO("failure: " << rig.failure << "; Dec at " << rig.dec_from_home() << " counts from home");
+        CHECK(rig.failure.empty());
+        CHECK(std::abs(rig.dec_from_home() + dec_100) <= 2);
+    }
 }
 
 TEST_CASE("Celestron CGX GOTO direction - a GOTO leg that backs off less than the bound keeps going",
@@ -176,9 +202,9 @@ TEST_CASE("Celestron CGX GOTO direction - a GOTO leg that backs off less than th
 TEST_CASE("Celestron CGX GOTO direction - the flip GOTO after the home route is watched",
           "[celestron][cgx][telescope][goto-direction]") {
     DirectionRig rig;
-    // HA -0.5 h is BeyondPole: the home route, then Dec -100 degrees to label 80 degrees. A seam at 135 degrees sends
-    // the fake the long way, +260 degrees.
-    rig.mount.set_goto_seam(kDec, 0x600000U);
+    // HA -0.5 h is BeyondPole: the home route, then Dec -100 degrees. A seam 45 degrees short of home on that side
+    // sends the fake the long way, +260 degrees.
+    rig.mount.set_goto_seam(kDec, kDecHome - counts(45.0));
     rig.slew(-0.5, -10.0);
     REQUIRE(rig.drive([&] { return rig.mount.axis_homing(kRa) && rig.mount.axis_homing(kDec); }));
     rig.mount.complete_axis_home(kRa);

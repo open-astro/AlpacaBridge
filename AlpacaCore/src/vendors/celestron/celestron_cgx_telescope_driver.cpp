@@ -65,8 +65,6 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.texts.tracking_rate = "TrackingRate must be Sidereal, Lunar, or Solar";
     return limits;
 }();
-constexpr std::uint32_t kRaHomeEncoder = kCgxEncoderStepsPerRevolution / 4;
-constexpr std::uint32_t kDecHomeEncoder = kCgxEncoderStepsPerRevolution / 2;
 constexpr double kSlewArrivalToleranceDegrees = 3.0 / 3600.0;
 constexpr double kMaxSlewCorrectionDegrees = 1.0;
 constexpr int kMaxSlewCorrections = 3;
@@ -749,8 +747,8 @@ private:
     // Controller labels to restore after hardware homing. Sync shifts both
     // labels without moving the mount; retaining that shift preserves the
     // calibration when a meridian flip re-homes both axes.
-    std::uint32_t ra_rehome_label_ = kRaHomeEncoder;
-    std::uint32_t dec_rehome_label_ = kDecHomeEncoder;
+    std::uint32_t ra_rehome_label_ = kCgxRaHomeEncoder;
+    std::uint32_t dec_rehome_label_ = kCgxDecHomeEncoder;
     bool tracking_ = false;
     bool tracking_state_valid_ = true;
     bool parked_ = false;
@@ -1197,8 +1195,8 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             sync_correction_active_ = false;
             at_home_ = false;
             parked_ = false;
-            ra_rehome_label_ = kRaHomeEncoder;
-            dec_rehome_label_ = kDecHomeEncoder;
+            ra_rehome_label_ = kCgxRaHomeEncoder;
+            dec_rehome_label_ = kCgxDecHomeEncoder;
         }
         disconnected_checkpoint_.reset();
         reference_firmware_ = firmware;
@@ -1304,8 +1302,8 @@ void CelestronCgxTelescopeDriver::teardown_locked() {
             needs_sync_ = false;
             sync_correction_active_ = false;
             disconnected_checkpoint_.reset();
-            ra_rehome_label_ = kRaHomeEncoder;
-            dec_rehome_label_ = kDecHomeEncoder;
+            ra_rehome_label_ = kCgxRaHomeEncoder;
+            dec_rehome_label_ = kCgxDecHomeEncoder;
             parked_ = false;
             at_home_ = false;
         }
@@ -2567,16 +2565,16 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                         if (logging::get_log_level() <= logging::LogLevel::Debug)
                             ALPACA_LOG_DEBUG("Celestron CGX", "Home search done, native counts: " + home_axes_status());
                         const auto reference_generation = protocol_.session_generation();
-                        protocol_.set_axis_position(CgxAxis::RightAscension, kRaHomeEncoder);
-                        protocol_.set_axis_position(CgxAxis::Declination, kDecHomeEncoder);
+                        protocol_.set_axis_position(CgxAxis::RightAscension, kCgxRaHomeEncoder);
+                        protocol_.set_axis_position(CgxAxis::Declination, kCgxDecHomeEncoder);
                         std::unique_lock<std::mutex> lock(mutex_);
                         if (reference_generation != protocol_.session_generation())
                             throw AlpacaException("Celestron CGX session changed while establishing the home reference",
                                                   AlpacaError::DriverException);
-                        ra_rehome_label_ = kRaHomeEncoder;
-                        dec_rehome_label_ = kDecHomeEncoder;
+                        ra_rehome_label_ = kCgxRaHomeEncoder;
+                        dec_rehome_label_ = kCgxDecHomeEncoder;
                         // With the reference: a getter never sees the new reference with the old labels.
-                        write_frame(kRaHomeEncoder, kDecHomeEncoder);
+                        write_frame(kCgxRaHomeEncoder, kCgxDecHomeEncoder);
                         mechanical_hemisphere_ = info_.site_latitude_degrees.value_or(0.0) < 0.0 ? CgxHemisphere::South
                                                                                                  : CgxHemisphere::North;
                         calibrated_ = true;

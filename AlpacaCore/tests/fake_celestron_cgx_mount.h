@@ -57,10 +57,11 @@ namespace alpacacore::test {
 // fixed rate in the 0x06/0x07 direction, whatever rate the command asked for. A GOTO ends tracking on its axis: whether
 // the controller does so is not established (an assumption of the fake). Wire latency is the case's own hook
 // (set_before_request()); the fake answers at once.
-// A GOTO seam (set_goto_seam(), #2640) is an opt-in controller direction model: a GOTO on that axis moves linearly
-// and never crosses the seam label, so a target past it is reached the long way round. Whether the CGX controller has
-// such a seam, and where, is not established; the rig drove Dec the long way to a correct Normal-side target south of
-// the equator (HA +0.5 h, Dec -10). Without a seam a GOTO takes the shorter way around the 24-bit circle.
+// A GOTO seam (set_goto_seam(), #2640) is the controller's direction model: a GOTO on that axis moves linearly and
+// never crosses the seam label, so a target past it is reached the long way round. Dec starts with the seam the rig
+// established at label 0xC00000 (2026-11-24: every Dec GOTO whose shorter way crossed it went the long way, in both
+// directions and from two physical angles; GOTOs either side of it took the shorter way). Whether RA has a seam is
+// not established, so RA starts without one; without a seam a GOTO takes the shorter way around the 24-bit circle.
 // A crawling home search never reports done and does not move the encoder; it is not the controller's fallback path.
 // A scripted home search (script_home_search()) drives fixed legs at constant rates and ends exactly at the physical
 // home, or drives its last leg forever (a switch never found); it has no acceleration, no limit sensor and no hard
@@ -77,7 +78,9 @@ namespace alpacacore::test {
 /// Small stateful AUX endpoint for direct-USB protocol tests.
 class FakeCelestronCgxMount {
 public:
-    FakeCelestronCgxMount() : pty_("FakeCelestronCgxMount"), worker_([this] { run(); }) {}
+    FakeCelestronCgxMount() : pty_("FakeCelestronCgxMount"), worker_([this] { run(); }) {
+        set_goto_seam(0x11, 0xC00000U);
+    }
     ~FakeCelestronCgxMount() { stop_worker(); }
 
     FakeCelestronCgxMount(const FakeCelestronCgxMount&) = delete;
@@ -138,7 +141,7 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         axes_[axis_index(axis)].tracking_counts_per_second = counts_per_second;
     }
-    // GOTOs on `axis` move linearly and never cross `seam` (an encoder label); nullopt restores the shorter way.
+    // GOTOs on `axis` move linearly and never cross `seam` (an encoder label); nullopt gives the shorter way.
     void set_goto_seam(std::uint8_t axis, std::optional<std::uint32_t> seam) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         axes_[axis_index(axis)].goto_seam = seam;

@@ -49,7 +49,7 @@ constexpr std::uint8_t kRa = 0x10;
 constexpr std::uint8_t kDec = 0x11;
 constexpr double kLatitude = 30.0;  // generic northern site
 constexpr std::uint32_t kRaHome = cgx::kCgxEncoderStepsPerRevolution / 4;
-constexpr std::uint32_t kDecHome = cgx::kCgxEncoderStepsPerRevolution / 2;
+constexpr std::uint32_t kDecHome = cgx::kCgxDecHomeEncoder;
 
 std::uint32_t counts(double degrees) { return cgx::encode_cgx_encoder_degrees(degrees); }
 

@@ -1990,7 +1990,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemi
         driver->set_tracking(true);
 
         for (const bool beyond_pole : {false, true}) {
-            mount.set_encoder_position(0x11, beyond_pole ? 0x400000 : 0xc00000);
+            // Dec a quarter turn either side of its home label.
+            constexpr auto kDecHome = alpacacore::vendor::celestron::kCgxDecHomeEncoder;
+            mount.set_encoder_position(0x11, beyond_pole ? kDecHome - 0x400000 : kDecHome + 0x400000);
             poll_now(*driver);  // the getters serve the polled frame (#1940)
             CHECK(driver->get_side_of_pier() == (beyond_pole ? 1 : 0));
             for (const auto& [direction, north_normal_velocity] :
@@ -3076,8 +3078,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
     };
     const auto expected_ra_home =
         expected_rehome_label(encoder_revolution / 4, ra_before_sync, mount.axis_position(0x10));
-    const auto expected_dec_home =
-        expected_rehome_label(encoder_revolution / 2, dec_before_sync, mount.axis_position(0x11));
+    const auto expected_dec_home = expected_rehome_label(alpacacore::vendor::celestron::kCgxDecHomeEncoder,
+                                                         dec_before_sync, mount.axis_position(0x11));
 
     const double same_side_ra = std::fmod(driver->get_sidereal_time() + 1.0, 24.0);
     driver->slew_to_coordinates_async(same_side_ra, 25.0);
