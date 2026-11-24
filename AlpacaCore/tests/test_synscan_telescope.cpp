@@ -737,6 +737,9 @@ TEST_CASE("SynScan Telescope Driver - slews need Tracking and PulseGuide is refu
                 return "#";
             case 'L':
                 return goto_running ? "1#" : "0#";
+            case 'M':  // the cancel ends the GOTO: AbortSlew verifies the mount stopped (#2412)
+                goto_running = false;
+                return "#";
             case 't':
                 return std::string(1, static_cast<char>(tracking_mode.load())) + "#";
             case 'T':
@@ -1011,7 +1014,9 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+        // AbortSlew verifies its stop on the task clock (#2412).
+        CHECK_THROWS_AS(alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); }),
+                        alpacacore::AlpacaException);
     }
     SECTION("MoveAxis stop") {
         driver->move_axis(0, 1.0);
@@ -1089,7 +1094,7 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
 
     SECTION("AbortSlew restores the captured mode") {
         fail_pulse_end();
-        driver->abort_slew();
+        alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });  // verified on the task clock (#2412)
         CHECK(handset_mode->load() != 0);  // AbortSlew sent the captured mode
         CHECK(driver->get_tracking());
     }
