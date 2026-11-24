@@ -3388,10 +3388,10 @@ private:
     // its end is not judged yet.
     bool goto_unlanded_locked() const { return goto_running_ || goto_seen_slewing_; }
 
-    // #2406: a tick whose :GU# failed still enforces the bound of a GOTO no frame has seen end: the mount may still
-    // be running it, so the stops go out.
+    // #2406: a tick whose :GU# failed still enforces the bound of a GOTO not judged landed (one no frame has seen
+    // run may start late): the mount may still be running it, so the stops go out.
     void check_goto_bound_unread_locked() const {
-        if (goto_unlanded_locked() && goto_deadline_ && clock_.now() >= *goto_deadline_) {
+        if ((goto_target_ || goto_unlanded_locked()) && goto_deadline_ && clock_.now() >= *goto_deadline_) {
             stop_overdue_goto_locked();
         }
     }
