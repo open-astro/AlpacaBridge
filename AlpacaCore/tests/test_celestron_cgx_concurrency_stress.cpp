@@ -29,6 +29,12 @@
 
 namespace {
 
+// The storm races FindHome, Park, AbortSlew and disconnect against each other on the real clock. A home that one of
+// them supersedes while it is still starting can read MC_LEVEL_DONE between the new start and that start's check, so
+// each auto-completed home answers searching to three reads, as a real search does for seconds (#2661): the new
+// start's check and the superseded body's read, which a trace caught under CPU load, with one read to spare.
+constexpr int kRacedHomeSearchingReads = 3;
+
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(
     const std::shared_ptr<alpacacore::test::FakeCelestronCgxMount>& mount,
     alpacacore::vendor::celestron::CgxSystemNow system_now = {}) {
@@ -73,6 +79,7 @@ TEST_CASE("Celestron CGX USB telescope - connection and motion lifecycle stress"
     auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     REQUIRE(mount->ok());
     mount->set_auto_complete_motions(true);
+    mount->set_auto_home_searching_reads(kRacedHomeSearchingReads);
 
     alpacacore::test::StressCallGuard guard{
         alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
@@ -96,6 +103,7 @@ TEST_CASE("Celestron CGX USB telescope - getters read the polled frame through c
     auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     REQUIRE(mount->ok());
     mount->set_auto_complete_motions(true);
+    mount->set_auto_home_searching_reads(kRacedHomeSearchingReads);
 
     alpacacore::test::StressCallGuard motion{
         alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
@@ -140,6 +148,7 @@ TEST_CASE("Celestron CGX USB telescope - the state frame stays fresh through the
     auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     REQUIRE(mount->ok());
     mount->set_auto_complete_motions(true);
+    mount->set_auto_home_searching_reads(kRacedHomeSearchingReads);
     const auto start = std::chrono::system_clock::now();
     auto driver = make_driver(mount, [start] { return start + (std::chrono::system_clock::now() - start) * 5000; });
     driver->set_connected(true);
@@ -221,6 +230,7 @@ TEST_CASE("Celestron CGX USB telescope - destruction races an in-flight connect"
     auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     REQUIRE(mount->ok());
     mount->set_auto_complete_motions(true);
+    mount->set_auto_home_searching_reads(kRacedHomeSearchingReads);
     alpacacore::test::run_destruction_during_connect_stress([mount] { return make_driver(mount); }, 25);
 }
 
