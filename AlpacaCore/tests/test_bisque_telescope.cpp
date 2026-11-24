@@ -773,6 +773,8 @@ TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid rep
     CHECK(driver->get_slewing());
     completion_state->store(3);
     poll_now(*driver);
+    clock.advance(std::chrono::seconds(1));
+    poll_now(*driver);  // #2410: the landing gate's second read shows the mount still
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -1275,13 +1277,14 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
     REQUIRE_NOTHROW(driver->set_connected(true));
     pause_poll(*driver);
 
-    // One failure, then success: the slew completes after one 1 s poll sleep on the clock.
+    // One failure, then success: one 1 s poll sleep, then the landing gate's 500 ms sleep (#2410), which the
+    // helper's 1 s step wakes.
     const auto start = clock.now();
     auto first = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
     CHECK(advance_until(clock, [&] { return ready(first); }));
     CHECK_NOTHROW(first.get());
     CHECK(polls->load() == 2);
-    CHECK(clock.now() - start == std::chrono::seconds(1));
+    CHECK(clock.now() - start == std::chrono::seconds(2));
 
     // Persistent failure: the error names the poll failure, not the timeout, and
     // the slew is not reported complete.
@@ -1338,7 +1341,8 @@ TEST_CASE("Bisque sync slew - the poll sleep and completion run on the task cloc
     CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
     CHECK_NOTHROW(slewed.get());
     CHECK(rig.mount.slew_polls.load() == 4);
-    CHECK(rig.virtual_elapsed() == std::chrono::seconds(3));
+    // Three 1 s poll sleeps, then the landing gate's 500 ms sleep (#2410), which the helper's 1 s step wakes.
+    CHECK(rig.virtual_elapsed() == std::chrono::seconds(4));
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1366,7 +1370,11 @@ TEST_CASE("Bisque sync slew - the settle time is a task-clock sleep after comple
     ClockedBisque rig;
     rig.driver->set_slew_settle_time(5);
     auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
-    // The first poll reports completion, so the only wait is the 5 s settle.
+    // The first poll reports completion; the landing gate's second read follows 500 ms later (#2410), and the
+    // 5 s settle comes after it.
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.clock.advance(std::chrono::milliseconds(500));
+    rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
     REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::seconds(4));
     rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -1412,8 +1420,12 @@ TEST_CASE("Bisque async slew - Slewing is held for 8 task-clock seconds without 
     rig.clock.advance(std::chrono::seconds(1));
     poll_now(*rig.driver);
     CHECK(rig.mount.slew_polls.load() == 1);
+    // #2410: the slew end starts the landing gate; the next tick's read shows the mount still on its target.
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.mount.slew_polls.load() == 1);
+    CHECK(rig.mount.slew_polls.load() == 1);  // the fake counts only the polls of a slew in flight
 }
 
 // Decision 0010 replaces the 2 s position cache: a read is served from the snapshot however old it is (stale is
