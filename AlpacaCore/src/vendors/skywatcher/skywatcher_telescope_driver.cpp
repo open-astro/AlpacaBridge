@@ -22,6 +22,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
@@ -2577,6 +2578,14 @@ public:
             util::validate_ra_dec(ra, dec, "SyncToCoordinates");
             require_site_locked();
             refuse_sync_during_move_axis_locked();
+            // open-astro#2407: the board has no sky reference at power-up, so the first Sync of a session sets it;
+            // every later one is bounded.
+            if (sync_reference_set_) {
+                serve_position_locked();
+                const auto [current_ra, current_dec] = compute_ra_dec_locked();
+                util::check_sync_bound("SyncToCoordinates", {current_ra, current_dec}, {ra, dec},
+                                       util::kMaxSyncOffsetDegrees);
+            }
         }
         stop_pulse_ops();
         StateLock lock(lock_gate_);
@@ -2633,6 +2642,7 @@ public:
             ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
+        sync_reference_set_ = true;
         // After the writes, for the same reason dispatch_goto_locked() records
         // after its motor commands (open-astro#459).
         remember_command_branch_locked(axis2);
@@ -3349,6 +3359,7 @@ private:
         ++motion_generation_;
         target_ra_set_ = false;
         target_dec_set_ = false;
+        sync_reference_set_ = false;  // open-astro#2407: each session's first Sync is exempt from the bound
         // open-astro#414: the client UTCDate offset and the discipline flag
         // sampled with it are session state; a reconnect starts from the
         // host clock until the client writes UTCDate again.
@@ -6369,9 +6380,17 @@ private:
             abort_verify_.start(
                 [this, abort_generation](util::OperationContext& ctx) { run_abort_verify(ctx, abort_generation); });
         } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("SkyWatcher", std::string("AbortSlew stop check did not start: ") + e.what());
             StateLock lock(lock_gate_, StateLock::Mode::State);
             relink_stop_pending_ = true;  // unverified: the next connect still owes a stop
+            const std::string why =
+                std::string("AbortSlew: the stop could not be confirmed (the stop check did not start: ") + e.what() +
+                ")";
+            ALPACA_LOG_ERROR("SkyWatcher", why);
+            // Nothing confirms the stop, so Slewing must not read as a stopped mount; a newer motion command owns
+            // Slewing instead.
+            if (motion_generation_ == abort_generation) {
+                last_slew_error_ = why;
+            }
         }
     }
 
@@ -7041,6 +7060,8 @@ private:
     // board), so the next connect stops any axis it finds running. Survives reset_runtime_state_locked() on
     // purpose; adopt_surviving_motion_locked() consumes it.
     bool relink_stop_pending_ = false;
+    // open-astro#2407: a Sync of this session reached the board; later ones are bounded. Under mutex_.
+    bool sync_reference_set_ = false;
     // True from goto dispatch until the landing refinement finishes: Slewing
     // must not flicker false mid-refinement (the timed 3 s window this
     // replaced expired during a slow refine iteration, ConformU proceeded, and the
