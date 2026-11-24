@@ -492,7 +492,9 @@ public:
             target_ra_set_ = false;
             target_dec_set_ = false;
         };
-        auto apply_or_load_site_info = [&]() {
+        // `may_write` (the redundant refresh's) runs under the I/O lock just before each site or time write and
+        // returns false to send nothing (decision 0016 rule 6); the real connect passes none.
+        auto apply_or_load_site_info = [&](const std::function<bool()>& may_write = nullptr) {
             // Held across the whole send and read-back, so a setter's write lands before or after this
             // exchange and the read-back never overwrites it.
             std::lock_guard<std::mutex> site_write(site_write_mutex_);
@@ -535,7 +537,12 @@ public:
 
             if (preferred_site.has_value()) {
                 try {
-                    protocol.set_site_info(preferred_site.value());
+                    if (!protocol.set_site_info_if([&]() -> std::optional<SiteInfo> {
+                            if (may_write && !may_write()) return std::nullopt;
+                            return preferred_site;
+                        })) {
+                        return;
+                    }
                     std::lock_guard<std::mutex> lock(mutex_);
                     site_latitude_deg_ = preferred_site->latitude_degrees;
                     site_longitude_deg_ = preferred_site->longitude_degrees;
@@ -564,7 +571,7 @@ public:
             }
         };
         // `fresh_connect` is false for the redundant Connected=true refresh, which logs the untrusted skip at DEBUG.
-        auto sync_mount_time_if_configured = [&](bool fresh_connect) {
+        auto sync_mount_time_if_configured = [&](bool fresh_connect, const std::function<bool()>& may_write = nullptr) {
             if (!sync_time_on_connect_) {
                 return;
             }
@@ -587,8 +594,11 @@ public:
                         site->longitude_degrees = site_longitude_deg_;
                     }
                 }
-                if (site.has_value()) {
-                    protocol.set_site_info(site.value());
+                if (site.has_value() && !protocol.set_site_info_if([&]() -> std::optional<SiteInfo> {
+                        if (may_write && !may_write()) return std::nullopt;
+                        return site;
+                    })) {
+                    return;
                 }
             }
 
@@ -607,7 +617,12 @@ public:
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
-            protocol.set_time_info(info);
+            if (!protocol.set_time_info_if([&]() -> std::optional<TimeInfo> {
+                    if (may_write && !may_write()) return std::nullopt;
+                    return info;
+                })) {
+                return;
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             utc_offset_.set(now, clock_.now());
             timezone_offset_minutes_ = offset_minutes;
@@ -626,19 +641,19 @@ public:
             // pay live serial round-trips (~95 ms each on the AM5N's USB-ACM
             // link), which blows the ASCOM FAST 0.1 s target during ConformU.
             // #2408: the site and the clock feed the mount's limit and pier maths, so a refresh while this driver
-            // moves the mount writes neither, on the view the host clock re-sync also skips on.
-            bool moving = false;
-            {
+            // moves the mount writes neither, on the view the host clock re-sync also skips on. Each write decides
+            // under the I/O lock, so a motion that starts during the refresh's earlier exchanges is seen.
+            const auto idle = [this] {
                 std::lock_guard<std::mutex> lock(mutex_);
-                moving = driver_motion_active_locked();
-            }
+                return !driver_motion_active_locked();
+            };
             stop_poll_thread();
             poll_stop_.store(false);
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
-            if (!moving) apply_or_load_site_info();
+            apply_or_load_site_info(idle);
             apply_pending_elevation();
             try {
-                if (!moving) sync_mount_time_if_configured(false);
+                sync_mount_time_if_configured(false, idle);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
