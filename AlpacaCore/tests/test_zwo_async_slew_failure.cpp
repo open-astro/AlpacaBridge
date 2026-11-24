@@ -2166,6 +2166,40 @@ TEST_CASE("ZWO goto-safety - a redundant Connected=true keeps the Sync offset",
     CHECK(std::abs(rig.mount.dec_degrees() - 45.0) < 1e-6);  // the mount itself never moved
 }
 
+// #2408 review: a GOTO claimed while a redundant Connected=true has its site write on the wire gets no later site or
+// time write from that refresh; each write decides under the I/O lock (decision 0016 rule 6).
+TEST_CASE(
+    "ZWO goto-safety - a GOTO started during a redundant Connected=true's site write gets no site or time from it",
+    "[zwo][telescope][async][goto-safety]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);
+    Rig rig(5000);
+    std::atomic<std::size_t> mark{0};  // the ledger size when the GOTO body sends its first setup command
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view) {
+        std::size_t unset = 0;
+        mark.compare_exchange_strong(unset, rig.mount.commands().size());
+    });
+    rig.connect();
+    const int sites_before = rig.mount.count(":SMGE");
+    rig.mount.delay_next(":SMGE", std::chrono::milliseconds(300));
+    auto refresh = std::async(std::launch::async, [&] { rig.driver->set_connected(true); });  // redundant
+    const bool site_on_wire = rig.mount.wait_for_count(":SMGE", sites_before + 1, std::chrono::seconds(5));
+    if (site_on_wire) REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE_NOTHROW(refresh.get());
+    REQUIRE(site_on_wire);
+    REQUIRE(wait_until([&] { return mark.load() != 0; }, 5000));
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    const auto all = rig.mount.commands();
+    int sites = 0;
+    int times = 0;
+    for (auto i = mark.load(); i < all.size(); ++i) {
+        if (all[i].rfind(":SMGE", 0) == 0) ++sites;
+        if (all[i].rfind(":SMTI", 0) == 0) ++times;
+    }
+    CHECK(sites == 1);  // the GOTO's own setup write only
+    CHECK(times == 1);
+    rig.driver->abort_slew();
+}
+
 // The ZWO AM's FindHome is :hC#, a slew to the home position the mount stores.
 TEST_CASE("ZWO findhomeissensorsearch is false", "[zwo][telescope][findhome-sensor]") {
     Rig rig;
