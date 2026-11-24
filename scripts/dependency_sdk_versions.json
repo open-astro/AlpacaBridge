@@ -51,7 +51,7 @@
     {"name": "ascom-alpaca-device-api", "check": {"provider": "hash", "url": "https://ascom-standards.org/api/AlpacaDeviceAPI_v1.yaml"}, "baseline": "d08d4bfe1a01da637a9084d6a26043d669f665ecee438f6923d078539e4b8276", "path": "docs/AlpacaDeviceAPI_v1.yaml"},
     {"name": "ascom-alpaca-management-api", "check": {"provider": "hash", "url": "https://ascom-standards.org/api/AlpacaManagementAPI_v1.yaml"}, "baseline": "bafa24883572ad0b31efb31aa2e39aa81a945e0f4e449baab376f6c85d18aa84", "path": ".claude/skills/ascom-alpaca-protocol/references/version-and-sources.md"},
     {"name": "ascom-alpaca-api-reference", "check": {"provider": "hash", "url": "https://ascom-standards.org/AlpacaDeveloper/ASCOMAlpacaAPIReference.html"}, "baseline": "4e006dfd8956a2a4bf96eb63453adb70270a7b4278d2c166f37102018183299b", "path": ".claude/skills/ascom-alpaca-protocol/references/version-and-sources.md"},
-    {"name": "indi-onstep", "check": {"provider": "github-file", "repo": "indilib/indi", "file": "drivers/telescope/lx200_OnStep.cpp"}, "baseline": "dcc8d662d776a35f73000145ac11a13fc6254e8c"},
+    {"name": "indi-onstep", "check": {"provider": "github-file", "repo": "indilib/indi", "file": "drivers/telescope/lx200_OnStep.cpp"}, "baseline": "827e4cdf7369268e38ee8ac8965fc2c98173863c"},
     {"name": "onstepx-command-reference", "check": {"provider": "github-file", "repo": "hjd1964/OnStepX", "file": "docs/COMMAND_REFERENCE.md"}, "baseline": "66a4b3220371661d40d3df9f6e5e1203068842e4", "path": "AlpacaCore/external/OnStep/COMMAND_REFERENCE.md"},
     {"name": "gphoto2-cli", "check": {"provider": "github-release", "repo": "gphoto/gphoto2"}, "baseline": "2.5.32"}
   ],
