@@ -333,23 +333,24 @@ TEST_CASE("CGX GOTO planning reads the axes and in-flight getters serve the poll
     double target_ra = rig.driver->get_sidereal_time() - 1.0;
     if (target_ra < 0.0) target_ra += 24.0;
     rig.driver->slew_to_coordinates_async(target_ra, 85.0);
+    // The slew body reads each axis once on its first poll (the wrong-way watchdog, #2640) and then waits on the
+    // clock: count only once it waits, or that read races the count.
+    REQUIRE(rig.clock.wait_for_wait_count(1, 2s));
     const auto before = rig.driver->get_declination();
     rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 1);  // the planning read only
-    CHECK(rig.reads(0x11) == dec + 1);
+    CHECK(rig.reads(0x10) == ra + 2);  // the planning read and the watchdog's first read; the getters read nothing
+    CHECK(rig.reads(0x11) == dec + 2);
     // In flight the frame moves only with a poll.
     rig.mount.advance_motion(1s);
     CHECK(rig.driver->get_declination() == before);
     rig.poll_now();
     CHECK(rig.driver->get_declination() != before);
     // Completion samples a fresh pair; the motion waiter uses the same seam.
-    const bool waiting = rig.clock.wait_for_wait_count(1, 2s);
     rig.mount.complete_axis_slew(0x10);
     rig.mount.complete_axis_slew(0x11);
     rig.clock.advance(200ms);
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
-    CHECK(waiting);
     CHECK_FALSE(rig.driver->get_slewing());
     // The planning read, the wrong-way watchdog's read on the leg's first poll (#2640), the poll and the arrival read.
     CHECK(rig.reads(0x10) == ra + 4);
