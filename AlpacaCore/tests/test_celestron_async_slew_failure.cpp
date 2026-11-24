@@ -1029,8 +1029,12 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
         driver->slew_to_coordinates(6.0, 22.0);
         sync_done.store(true);
     });
+    // #2518: the blocking slew's own GOTO reaching the fake proves it claimed the slot. Before that, virtual time
+    // could let the async body land and restore tracking first, a legal order that writes a second T.
+    const bool claimed = wait_until([&] { return st->goto_count.load() > before + 1; }, 3000);
     const bool finished = advance_until(clock, [&] { return sync_done.load(); });
     syncer.join();
+    REQUIRE(claimed);
     REQUIRE(finished);
     const int tracking_writes_after_sync = st->command_count('T');
     // Virtual time past any stray tail of the reaped task.
