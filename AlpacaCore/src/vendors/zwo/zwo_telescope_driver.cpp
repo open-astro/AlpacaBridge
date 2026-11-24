@@ -420,17 +420,21 @@ public:
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
             std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point{};
+            // #2408: a redundant Connected=true (keep_telemetry_caches) keeps the bookkeeping of a motion still
+            // running and the Sync offset, so the MoveAxis cap, the relink stop and the reported position hold.
+            if (!keep_telemetry_caches) {
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point{};
+            }
             // A kept drain (#2095, below) still runs the task it popped: the pulse window and the next pulse's start
             // cover it, not the dropped queue.
             const bool drain_kept = keep_telemetry_caches && pulse_drain_active_;
             pulse_guiding_end_ =
                 drain_kept ? pulse_task_end_ + kPulseGuideHold : std::chrono::steady_clock::time_point{};
-            ra_offset_hours_ = 0.0;
-            dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
+                ra_offset_hours_ = 0.0;
+                dec_offset_deg_ = 0.0;
                 utc_offset_.clear();
                 ++utc_session_;
                 snapshot_.reset();
@@ -461,11 +465,15 @@ public:
             // has joined the drain (stop_pulse_drain()) and clears the flag.
             pulse_queue_.clear();
             pulse_queue_end_ = drain_kept ? pulse_task_end_ : std::chrono::steady_clock::time_point{};
-            if (!keep_telemetry_caches) pulse_drain_active_ = false;
-            park_command_active_ = false;
-            park_command_started_ = std::chrono::steady_clock::time_point{};
-            park_motion_seen_ = false;
-            unpark_in_progress_ = false;
+            if (!keep_telemetry_caches) {
+                pulse_drain_active_ = false;
+                park_command_active_ = false;
+                park_command_started_ = std::chrono::steady_clock::time_point{};
+                park_motion_seen_ = false;
+                unpark_in_progress_ = false;
+                manual_axis_tracking_restore_[0] = std::nullopt;
+                manual_axis_tracking_restore_[1] = std::nullopt;
+            }
             if (!keep_telemetry_caches) {
                 // parked_cached_ is the sticky "inferred parked" flag — only
                 // clear it on a full (fresh) connect, never on a no-op
@@ -479,8 +487,6 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             tracking_rate_valid_ = false;
-            manual_axis_tracking_restore_[0] = std::nullopt;
-            manual_axis_tracking_restore_[1] = std::nullopt;
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
             target_ra_set_ = false;
