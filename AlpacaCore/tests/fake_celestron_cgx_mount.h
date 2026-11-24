@@ -72,7 +72,9 @@ namespace alpacacore::test {
 // search runs (home_done=1 on a stopped axis, docs/failures/0014-cgx-stop-completion.md). Why the rig's homes after
 // an interrupted home route answered done in 2-3 s is not established; this is the shape the driver must not trust.
 // An auto-completed home reads searching on its first MC_LEVEL_DONE read and done after it (a real search reads
-// searching from its start); it is at the physical home from the start.
+// searching from its start for seconds); it is at the physical home from the start. set_auto_home_searching_reads()
+// widens that to more reads, for a case whose callers race one start (#2661): a superseded home body's supervision
+// read can come between a new start and that start's own check and take its one searching read.
 // Hardware qualification must replace assumptions before they become claims.
 
 /// Small stateful AUX endpoint for direct-USB protocol tests.
@@ -90,6 +92,8 @@ public:
     std::string slave_path() const { return pty_.slave_path(); }
     void corrupt_next_reply_checksum() { corrupt_next_checksum_.store(true); }
     void set_auto_complete_motions(bool enabled) { auto_complete_motions_.store(enabled); }
+    // An auto-completed home answers searching to this many MC_LEVEL_DONE reads (default 1), then done.
+    void set_auto_home_searching_reads(int reads) { auto_home_searching_reads_.store(reads); }
     void set_hold_guide_until_completed(bool hold) { hold_guide_until_completed_.store(hold); }
     void set_muted(bool muted) { muted_.store(muted); }
     void set_echo_requests(bool enabled) { echo_requests_.store(enabled); }
@@ -695,7 +699,7 @@ private:
                 axis.motion_remainder = 0;
                 if (!axis.homing) {
                     axis.physical_position = 0;
-                    axis.home_searching_reads = 1;
+                    axis.home_searching_reads = auto_home_searching_reads_.load();
                 }
                 break;
             }
@@ -778,6 +782,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> corrupt_next_checksum_{false};
     std::atomic<bool> auto_complete_motions_{false};
+    std::atomic<int> auto_home_searching_reads_{1};
     std::atomic<bool> hold_guide_until_completed_{false};
     std::atomic<bool> muted_{false};
     std::atomic<bool> echo_requests_{false};
