@@ -580,7 +580,8 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
-    st->drop_slew_status.store(1000);
+    // Exactly three: the stop after the failure is verified (#2412), and its reads must answer.
+    st->drop_slew_status.store(3);
     // The failed Park surfaces on the next Slewing read as its stored error.
     bool park_failed = false;
     REQUIRE(advance_until(clock, [&] {
@@ -593,7 +594,7 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
     }));
     CHECK(park_failed);
     CHECK_FALSE(driver->get_at_park());
-    CHECK(st->drop_slew_status.load() == 1000 - 3);  // exactly three polls before failing
+    CHECK(st->drop_slew_status.load() == 0);  // three dropped polls failed it
     driver->set_connected(false);
 }
 
@@ -796,7 +797,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 
     driver->park();
     REQUIRE(driver->get_slewing());
-    driver->unpark();
+    alpacacore::test::call_stepping(clock, [&] { driver->unpark(); });  // its park stop is verified (#2412)
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
@@ -940,7 +941,7 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
 
     REQUIRE_NOTHROW(driver->park());
     bool surfaced = false;
-    for (int i = 0; i < 48 && !surfaced; ++i) {
+    for (int i = 0; i < 120 && !surfaced; ++i) {
         clock.wait_for_waiters(1, std::chrono::milliseconds(100));
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -980,7 +981,7 @@ TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing
     REQUIRE_NOTHROW(driver->park());
     st->reject_tracking_stop.store(true);
     bool surfaced = false;
-    for (int i = 0; i < 48 && !surfaced; ++i) {
+    for (int i = 0; i < 120 && !surfaced; ++i) {
         clock.wait_for_waiters(1, std::chrono::milliseconds(100));
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(2));

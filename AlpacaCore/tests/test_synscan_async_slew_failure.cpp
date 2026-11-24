@@ -1388,7 +1388,13 @@ TEST_CASE("SynScan async - a GOTO past its deadline stops the mount and keeps th
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
-    REQUIRE(advance_virtual_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+    // 1 s steps to just short of the deadline, then 50 ms steps: the deadline's stop is verified (#2412), and its
+    // reads must land inside its rounds.
+    const auto started = clock.now();
+    REQUIRE(
+        advance_virtual_until(clock, [&] { return clock.now() - started >= kSlewDeadline - std::chrono::seconds(2); }));
+    REQUIRE(advance_until(
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(50), 400));
 
     std::string message;
     REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
@@ -1428,7 +1434,13 @@ TEST_CASE("SynScan SlewToCoordinates - a blocking GOTO past its deadline stops t
         done.store(true);
     });
     const bool began = wait_until([&] { return st->goto_count.load() > 0 || done.load(); }, 5000);
-    const bool finished = began && advance_virtual_until(clock, [&] { return done.load(); });
+    // 1 s steps to just short of the deadline, then 50 ms steps for the verified stop's reads (#2412).
+    const auto started = clock.now();
+    const bool finished =
+        began &&
+        advance_virtual_until(
+            clock, [&] { return done.load() || clock.now() - started >= kSlewDeadline - std::chrono::seconds(2); }) &&
+        advance_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(50), 400);
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2169,4 +2181,29 @@ TEST_CASE("SynScan MoveAxis - a 60 s bound stop the mount ignores fails after 3 
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
     CHECK(message.find(kStopNotVerified) != std::string::npos);
     rig.st->drift_counts.store(0);
+}
+
+// #2652 review: the 16-bit (V3) landing gate's settle budget. A mount that keeps moving after the handset reports the
+// GOTO done is never a far miss, and fails once it has not come to rest within 10 s.
+TEST_CASE("SynScan V3 - a 16-bit GOTO that never comes to rest after the handset reports it done fails",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_v3_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    st->drift_counts.store(4);  // about 79 arcsec per 16-bit read: the mount never holds still
+    REQUIRE(advance_until(
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(250), 200));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("did not come to rest after the handset reported it done") != std::string::npos);
+    st->drift_counts.store(0);
+    driver->set_connected(false);
 }

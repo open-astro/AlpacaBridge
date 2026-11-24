@@ -81,8 +81,9 @@ struct LandingOffsetHandset {
     std::atomic<bool> growing{false};
     std::atomic<int> goto_ms{300};
     // A real handset reports a GOTO it accepted in progress at the next `L`. Virtual time may run past goto_ms while
-    // the driver is still on the socket, so the first `L` after each GOTO answers in progress (#2412's start grace).
-    std::atomic<bool> goto_status_unread{false};
+    // the driver is still on the socket, so the first `L` reads after each GOTO answer in progress (#2412's start
+    // grace). Three, so the status poll reading one first cannot take the slew wait's.
+    std::atomic<int> goto_status_unread{0};
     // When set, GOTO n (1-based, up to the array size) lands dec_offset_script[n-1] counts off the commanded Dec:
     // the random per-GOTO Dec scatter a SynScan handset shows on a real mount (#1027).
     std::atomic<bool> dec_scripted{false};
@@ -267,7 +268,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 }
                 st->dec_raw.store(static_cast<uint32_t>(static_cast<int32_t>(dec) + dec_offset) & kCountsMask);
                 st->goto_started.store(st->now().time_since_epoch().count());
-                st->goto_status_unread.store(true);
+                st->goto_status_unread.store(3);
                 if (ordinal == 1) st->first_goto_at.store(st->goto_started.load());
                 if (ordinal == 2) st->second_goto_at.store(st->goto_started.load());
                 st->goto_stopped.store(false);
@@ -275,7 +276,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             }
             case 'L':
                 st->status_reads.fetch_add(1);
-                if (st->goto_status_unread.exchange(false) && !st->goto_stopped.load()) return "1#";
+                if (st->goto_status_unread.fetch_sub(1) > 0 && !st->goto_stopped.load()) return "1#";
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':
                 st->goto_stopped.store(true);

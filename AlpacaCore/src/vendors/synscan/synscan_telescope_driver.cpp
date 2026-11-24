@@ -1265,13 +1265,25 @@ public:
             return;
         }
         std::string stop_error;
-        if (!send_in_turn(
+        const auto send_stop = [&] {
+            return send_in_turn(
                 lock, [&ctx] { return ctx.stop_reason() != util::StopReason::Superseded; },
-                [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+                [&stop_error] { stop_error = stop_park_slew_wire(); });
+        };
+        if (!send_stop()) {
             return;
         }
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             return;
+        }
+        if (stop_error.empty()) {
+            // Verified, resent while unverified (#2412).
+            const auto verified = stop_verification_locked(
+                lock, [&] { return static_cast<bool>(connected_); }, [&] { (void)send_stop(); }, &ctx);
+            if (!verified) {
+                return;
+            }
+            stop_error = *verified;
         }
         parking_ = false;
         last_slew_error_ = message;
@@ -1898,11 +1910,18 @@ public:
                 const uint64_t owner_generation = bump_motion_generation();
                 // The stop goes out after anything the park body is committed to send, and the body sends nothing
                 // after the claim.
-                if (!send_in_turn(
-                        lock, [&] { return motion_generation_ == owner_generation && connected_; },
-                        [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+                const auto owns = [&] { return motion_generation_ == owner_generation && connected_; };
+                const auto send_stop = [&] {
+                    return send_in_turn(lock, owns, [&stop_error] { stop_error = stop_park_slew_wire(); });
+                };
+                if (!send_stop()) {
                     check_connected();
                     stop_error = "the stop was not sent";
+                }
+                if (stop_error.empty()) {
+                    // Verified, resent while unverified, as AbortSlew's (#2412).
+                    const auto verified = stop_verification_locked(lock, owns, [&] { (void)send_stop(); }, nullptr);
+                    stop_error = verified ? *verified : "the stop was not verified";
                 }
                 if (stop_error.empty()) {
                     set_slewing_locked(false);
@@ -2139,7 +2158,8 @@ public:
                 try {
                     if (!verify_stop_locked(lock, owns, resend, nullptr)) {
                         check_connected();
-                        stop_error = "the stops were not verified";
+                        stop_error = closing_.load() ? "a disconnect ended the check that the mount stopped"
+                                                     : "the stops were not verified";
                     }
                 } catch (const AlpacaException& ex) {
                     if (ex.error_code() == AlpacaError::DriverException) {
@@ -2265,19 +2285,41 @@ private:
                 if (stop_error.empty()) stop_error = ex.what();
             }
         };
-        try_stop([&] { protocol.cancel_goto(); });
-        try_stop([&] { protocol.move_axis_fixed_rate(0, 0); });
-        try_stop([&] { protocol.move_axis_fixed_rate(1, 0); });
-        // The RA stop also stops sidereal tracking: the mode the client had asked for goes back, as AbortSlew's,
-        // once every stop was answered.
-        if (stop_error.empty() && relink_tracking_mode_ > 0) {
-            try_stop([&] { protocol.set_tracking_mode(relink_tracking_mode_); });
+        const auto send_stops = [&] {
+            try_stop([&] { protocol.cancel_goto(); });
+            try_stop([&] { protocol.move_axis_fixed_rate(0, 0); });
+            try_stop([&] { protocol.move_axis_fixed_rate(1, 0); });
+            // The RA stop also stops sidereal tracking: the mode the client had asked for goes back, as AbortSlew's,
+            // once every stop was answered.
+            if (stop_error.empty() && relink_tracking_mode_ > 0) {
+                try_stop([&] { protocol.set_tracking_mode(relink_tracking_mode_); });
+            }
+        };
+        send_stops();
+        if (stop_error.empty()) {
+            // Verified, resent while unverified, as AbortSlew's (#2412). Connect owns the port: no lock, no turn.
+            try {
+                (void)run_stop_verifier(
+                    [&]() -> std::optional<StopReads> {
+                        clock_.sleep_for(util::kStopVerifyPollInterval);
+                        return read_stop_state();
+                    },
+                    [&] {
+                        send_stops();
+                        if (!stop_error.empty()) {
+                            ALPACA_LOG_WARN("SynScan", "relink stop resend failed: " + stop_error);
+                            stop_error.clear();
+                        }
+                    });
+            } catch (const AlpacaException& ex) {
+                stop_error = ex.what();
+            }
         }
         if (!stop_error.empty()) {
             protocol.disconnect();
             throw AlpacaException(
-                "Failed to connect to SynScan mount: the stop for the motion running when the link dropped could not "
-                "be sent: " +
+                "Failed to connect to SynScan mount: the stop for the motion running when the link dropped did not "
+                "take: " +
                 stop_error);
         }
         relink_stop_pending_ = false;
@@ -2657,7 +2699,7 @@ private:
             if (due >= 0) {
                 // It stops the axis, marks it capped, or finds that a newer command owns it; the loop then looks
                 // again, so it never acts twice on one move.
-                stop_capped_move_locked(lock, due);
+                stop_capped_move_locked(lock, due, ctx);
                 continue;
             }
             if (earliest == util::TaskClock::clock::time_point::max()) {
@@ -2680,7 +2722,7 @@ private:
     // be sent is a device failure (WARN): the axis keeps reading as moving, and over a lost link its flag is kept for
     // the relink stop (relink_stop_pending_). Either way the axis is marked capped: the bound never retries a stop and
     // never sends a start. `lock` (mutex_) held on entry and on return.
-    void stop_capped_move_locked(std::unique_lock<std::mutex>& lock, int axis) {
+    void stop_capped_move_locked(std::unique_lock<std::mutex>& lock, int axis, util::OperationContext& ctx) {
         auto& protocol = SynScanProtocolWrapper::instance();
         int restore_mode = 0;
         bool stopped = false;
@@ -2688,6 +2730,17 @@ private:
         std::string stop_error;
         bool sent = false;
         std::uint64_t move_id = manual_axis_move_id_[axis];
+        const auto send_axis_stop = [&] {
+            protocol.move_axis_variable_rate(axis, 0.0);
+            stopped = true;
+            if (restore_mode > 0) {
+                try {
+                    protocol.set_tracking_mode(restore_mode);
+                    restored = true;
+                } catch (...) {  // NOLINT(bugprone-empty-catch): reported as an unconfirmed RA stop below
+                }
+            }
+        };
         try {
             sent = send_in_turn(
                 lock,
@@ -2701,17 +2754,7 @@ private:
                     restore_mode = axis == 0 && tracking_mode_valid_ ? tracking_mode_cached_ : 0;
                     return true;
                 },
-                [&] {
-                    protocol.move_axis_variable_rate(axis, 0.0);
-                    stopped = true;
-                    if (restore_mode > 0) {
-                        try {
-                            protocol.set_tracking_mode(restore_mode);
-                            restored = true;
-                        } catch (...) {  // NOLINT(bugprone-empty-catch): reported as an unconfirmed RA stop below
-                        }
-                    }
-                });
+                send_axis_stop);
         } catch (const std::exception& ex) {
             stop_error = ex.what();
         } catch (...) {
@@ -2725,6 +2768,29 @@ private:
             // command follows this stop in the turn order, and its flags, deadline and capped state are its own: the
             // body keeps watching it and stops it at its own deadline.
             return;
+        }
+        if (stopped) {
+            // Verified, resent while unverified (#2412). A command on this axis meanwhile owns it from then on.
+            const auto owns = [&] {
+                return connected_.load() && manual_axis_move_id_[axis] == move_id && manual_axis_slewing_[axis];
+            };
+            const auto verified = stop_verification_locked(
+                lock, owns,
+                [&] {
+                    try {
+                        (void)send_in_turn(lock, owns, send_axis_stop);
+                    } catch (const std::exception& ex) {
+                        ALPACA_LOG_WARN("SynScan", std::string("MoveAxis bound resend failed: ") + ex.what());
+                    }
+                },
+                &ctx);
+            if (!verified) {
+                return;
+            }
+            if (!verified->empty()) {
+                stopped = false;
+                stop_error = *verified;
+            }
         }
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
         const std::string ran =
@@ -2918,43 +2984,46 @@ private:
     }
 
     // The verified stop (#2412, util::StopVerifier): after a stop went out, the handset's GOTO flag and its position
-    // are read every kStopVerifyPollInterval with mutex_ released, and `resend` sends the stop again (in its wire turn,
-    // mutex_ held) when a round ends unverified. "No GOTO" alone never verifies: the position must hold still too.
-    // True when verified; false when `owns` (under mutex_) no longer holds or the body behind `ctx` was stopped: the
-    // newer owner owns the mount. Throws AlpacaException(DriverException, kStopNotVerifiedText) when the third stop
-    // did not verify, and NotConnected on a disconnect. `lock` (mutex_) is held on entry and on return or throw.
-    template <typename Owns, typename Resend>
-    bool verify_stop_locked(std::unique_lock<std::mutex>& lock, Owns&& owns, Resend&& resend,
-                            util::OperationContext* ctx) {
-        const bool precise = use_precise_commands_;
+    // are read every kStopVerifyPollInterval and the stop is sent again when a round ends unverified. "No GOTO" alone
+    // never verifies: the position must hold still too. Every stop after a motion fault goes through it.
+    //
+    // One verified-stop read (#2412): the handset's GOTO flag and its position, each read nullopt when it failed.
+    // Takes no lock; the caller holds none of the driver's.
+    struct StopReads {
+        std::optional<util::MotionStatusReading> status;
+        std::optional<util::PositionReading> position;
+    };
+    StopReads read_stop_state() const {
+        const bool precise = use_precise_commands_;  // fixed at construction
         const int bits = precise ? 24 : 16;
+        auto& protocol = SynScanProtocolWrapper::instance();
+        StopReads reads;
+        try {
+            reads.status = util::MotionStatusReading{protocol.is_goto_in_progress(), clock_.now()};
+            if (closing_.load()) {
+                return reads;  // a disconnect: no second exchange
+            }
+            const auto raw = protocol.get_ra_dec_raw(precise);
+            reads.position =
+                util::PositionReading{{decode_ra_hours(raw.first, bits), decode_angle(raw.second, bits)}, clock_.now()};
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown read verifies nothing
+        }
+        return reads;
+    }
+
+    // The util::StopVerifier loop (#2412): `wait_and_read` waits one kStopVerifyPollInterval and reads
+    // (read_stop_state()), or returns nullopt once the caller no longer owns the mount; `resend` sends the stop again
+    // when a round ends unverified. True when verified, false when ownership was lost. Throws
+    // AlpacaException(DriverException, kStopNotVerifiedText) when the third stop did not verify.
+    template <typename WaitAndRead, typename Resend>
+    bool run_stop_verifier(WaitAndRead&& wait_and_read, Resend&& resend) {
         util::StopVerifier verifier(clock_.now());
         while (true) {
-            std::optional<util::MotionStatusReading> status;
-            std::optional<util::PositionReading> position;
-            const bool waited = without_lock(lock, [&] {
-                if (ctx != nullptr) {
-                    if (!ctx->wait_for(util::kStopVerifyPollInterval)) {
-                        return false;
-                    }
-                } else {
-                    clock_.sleep_for(util::kStopVerifyPollInterval);
-                }
-                auto& protocol = SynScanProtocolWrapper::instance();
-                try {
-                    status = util::MotionStatusReading{protocol.is_goto_in_progress(), clock_.now()};
-                    const auto raw = protocol.get_ra_dec_raw(precise);
-                    position = util::PositionReading{{decode_ra_hours(raw.first, bits), decode_angle(raw.second, bits)},
-                                                     clock_.now()};
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown read verifies nothing
-                }
-                return true;
-            });
-            check_connected();
-            if (!waited || !owns() || slot_stopped(ctx)) {
+            const std::optional<StopReads> reads = wait_and_read();
+            if (!reads) {
                 return false;
             }
-            switch (verifier.feed(clock_.now(), status, position)) {
+            switch (verifier.feed(clock_.now(), reads->status, reads->position)) {
                 case util::StopStep::Verified:
                     return true;
                 case util::StopStep::Failed:
@@ -2966,6 +3035,59 @@ private:
                 case util::StopStep::Wait:
                     break;
             }
+        }
+    }
+
+    // The verified stop under mutex_: the waits and reads run with `lock` released, `resend` runs with it held (it
+    // sends in its wire turn). False when `owns` (under mutex_) no longer holds or the body behind `ctx` was stopped:
+    // the newer owner owns the mount. Throws kStopNotVerifiedText as run_stop_verifier(), and NotConnected on a
+    // disconnect. `lock` (mutex_) is held on entry and on return or throw.
+    template <typename Owns, typename Resend>
+    bool verify_stop_locked(std::unique_lock<std::mutex>& lock, Owns&& owns, Resend&& resend,
+                            util::OperationContext* ctx) {
+        return run_stop_verifier(
+            [&]() -> std::optional<StopReads> {
+                StopReads reads;
+                const bool waited = without_lock(lock, [&] {
+                    if (ctx != nullptr) {
+                        if (!ctx->wait_for(util::kStopVerifyPollInterval)) {
+                            return false;
+                        }
+                    } else {
+                        clock_.sleep_for(util::kStopVerifyPollInterval);
+                    }
+                    // A disconnect is under way: stop at this exchange boundary, as the poll and the hunt do, so
+                    // set_connected(false) keeps its bound (#2652 review).
+                    if (closing_.load()) {
+                        return false;
+                    }
+                    reads = read_stop_state();
+                    return !closing_.load();
+                });
+                check_connected();
+                if (!waited || !owns() || slot_stopped(ctx)) {
+                    return std::nullopt;
+                }
+                return reads;
+            },
+            resend);
+    }
+
+    // verify_stop_locked() as an outcome for a stop after a motion fault: "" when verified, the error text when not,
+    // nullopt when a newer owner took the mount. NotConnected still throws.
+    template <typename Owns, typename Resend>
+    std::optional<std::string> stop_verification_locked(std::unique_lock<std::mutex>& lock, Owns&& owns,
+                                                        Resend&& resend, util::OperationContext* ctx) {
+        try {
+            if (!verify_stop_locked(lock, owns, resend, ctx)) {
+                return std::nullopt;
+            }
+            return std::string();
+        } catch (const AlpacaException& ex) {
+            if (ex.error_code() != AlpacaError::DriverException) {
+                throw;
+            }
+            return std::string(ex.what());
         }
     }
 
@@ -3032,19 +3154,22 @@ private:
     // took the mount (or a disconnect) owns the state: nothing is recorded, and this returns for the wait to report
     // the supersession (a disconnect throws NotConnected). `lock` (mutex_) is held on entry and on return or throw.
     void fail_slew_timeout_locked(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
-                                  const util::OperationContext* ctx) {
+                                  util::OperationContext* ctx) {
         const std::string message = "Slew timed out after " + std::to_string(kSlewTimeout.count()) + " s";
         const auto owns = [&] { return connected_ && !lost_ownership_locked(owner_generation, ctx); };
         std::string stop_error;
         std::string restore_error;
         int restore_mode = 0;
-        if (!send_in_turn(
+        const auto send_stop = [&] {
+            return send_in_turn(
                 lock,
                 [&] {
                     restore_mode = tracking_mode_cached_;  // read at the turn, as AbortSlew's restore
                     return owns();
                 },
-                [&] { stop_error = stop_and_restore_tracking_wire(restore_mode, restore_error); })) {
+                [&] { stop_error = stop_and_restore_tracking_wire(restore_mode, restore_error); });
+        };
+        if (!send_stop()) {
             check_connected();
             ALPACA_LOG_WARN("SynScan", "slew timeout dropped, the slew was taken over: " + message);
             return;
@@ -3054,6 +3179,14 @@ private:
             return;
         }
         note_tracking_restore_locked(stop_error, restore_error, restore_mode, "slew timeout");
+        if (stop_error.empty()) {
+            // Verified, resent while unverified (#2412): an answered stop alone does not prove the mount stopped.
+            const auto verified = stop_verification_locked(lock, owns, [&] { (void)send_stop(); }, ctx);
+            if (!verified) {
+                return;  // a newer operation took the mount meanwhile: it owns the state
+            }
+            stop_error = *verified;
+        }
         last_slew_error_ = message;
         if (stop_error.empty()) {
             set_slewing_locked(false);
@@ -3078,23 +3211,37 @@ private:
         std::string stop_error;
         std::string restore_error;
         int restore_mode = 0;
-        if (!send_in_turn(
+        const auto owns = [this] { return static_cast<bool>(connected_); };
+        const auto send_stop = [&] {
+            return send_in_turn(
                 lock,
-                [this, &restore_mode] {
+                [this, &restore_mode, &owns] {
                     restore_mode = tracking_mode_cached_;  // read at the turn, as AbortSlew's restore
-                    return static_cast<bool>(connected_);
+                    return owns();
                 },
                 [&stop_error, &restore_error, &restore_mode] {
                     stop_error = stop_and_restore_tracking_wire(restore_mode, restore_error);
-                })) {
+                });
+        };
+        if (!send_stop()) {
             return;
         }
         note_tracking_restore_locked(stop_error, restore_error, restore_mode, "refused slew start");
         if (stop_error.empty()) {
+            // Verified, resent while unverified (#2412).
+            const auto verified = stop_verification_locked(lock, owns, [&] { (void)send_stop(); }, nullptr);
+            if (!verified) {
+                return;
+            }
+            stop_error = *verified;
+        }
+        if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
-            ALPACA_LOG_ERROR("SynScan",
-                             "stop after refused slew start failed: " + stop_error + "; the mount may still be moving");
+            // The mount may still be moving: Slewing raises it until the next motion command or a reconnect.
+            last_slew_error_ =
+                "stop after refused slew start failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("SynScan", last_slew_error_);
         }
         parking_ = false;
         bump_motion_generation();

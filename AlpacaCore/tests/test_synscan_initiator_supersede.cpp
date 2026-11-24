@@ -314,7 +314,9 @@ TEST_CASE("SynScan initiator supersede - AbortSlew during a blocked goto exchang
 
 TEST_CASE("SynScan initiator supersede - Unpark during a Park whose goto exchange is blocked",
           "[synscan][initiator-supersede]") {
-    const auto timing = time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); });
+    // Unpark verifies its park stop on the task clock (#2412): stepped.
+    const auto timing =
+        time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); }, 50, true);
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
@@ -464,11 +466,30 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
     }
     REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
     const auto entered = Clock::time_point(Clock::duration(rig.st->gate_l_entered.load()));
-    std::thread unpark([&] { rig.driver->unpark(); });
+    std::atomic<bool> unparked{false};
+    std::atomic<std::thread::id> unpark_id{};
+    std::thread unpark([&] {
+        unpark_id = std::this_thread::get_id();
+        rig.driver->unpark();
+        unparked = true;
+    });
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     CHECK(ms_since(entered) < kHoldMs);  // Unpark claimed while the query was still held
+    // Unpark's stop then lands: the handset stops reporting the slew, so the verify after it sees the mount still
+    // (#2412).
+    rig.st->report_slewing.store(false);
+    rig.st->fail_l.store(false);
     // The Park body's thread exits once its query has failed.
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::milliseconds(kHoldMs + 5000)));
+    // Unpark verifies its park stop on the task clock (#2412): step it while its own thread waits on the clock, so no
+    // step lands while a read is on the socket.
+    const auto unpark_deadline = Clock::now() + std::chrono::seconds(60);
+    while (!unparked.load() && Clock::now() < unpark_deadline) {
+        if (rig.clock.wait_for_waiter_thread(unpark_id.load(), std::chrono::milliseconds(50))) {
+            rig.clock.advance(std::chrono::milliseconds(50));
+            rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
+    }
     unpark.join();
     CHECK(counted.load() == 0);
 }
