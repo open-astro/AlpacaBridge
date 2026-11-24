@@ -853,6 +853,62 @@ TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cance
     driver->set_connected(false);
 }
 
+// open-astro#2635: the goto form of the case above. AbortSlew stops both axes and ends the goto before the cancelled
+// body unwinds; the body's failure path used to send both ":L" stops again after AbortSlew had returned. The two
+// Target forms call the Coordinates ones, so the case runs SlewToCoordinatesAsync and SlewToTargetAsync.
+TEST_CASE("SkyWatcher async - a goto cancelled by AbortSlew sends no stop as its body unwinds (#2635)",
+          "[skywatcher][async][abort][goto-safety]") {
+    const bool to_target = GENERATE(false, true);
+    INFO((to_target ? "SlewToTargetAsync" : "SlewToCoordinatesAsync"));
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame answers for the flags
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    const double ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
+    if (to_target) {
+        driver->set_target_right_ascension(ra);
+        driver->set_target_declination(40.0);
+        REQUIRE_NOTHROW(driver->slew_to_target_async());
+    } else {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(ra, 40.0));
+    }
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    // The goto body polls the board between sleeps: AbortSlew must find it in a sleep, so the wake seam holds it.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    const std::size_t motion_before_abort = mount.motion_log().size();
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());  // the cancelled body woke and is held before it takes a driver lock
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(body_ended->load());
+    CHECK(mount.motion_log().size() > motion_before_abort);  // AbortSlew's own stops
+
+    const std::size_t motion_before = mount.motion_log().size();
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.motion_log().size() == motion_before);  // the body's tail sent no stop and no motion
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
 // open-astro#2604: a body cancelled in its landing settle wait reads nothing more from the board. The Park lands, its
 // body reads RA's position (`:j`) and sleeps the settle interval; AbortSlew cancels it there, and the wake seam holds
 // it until the reads AbortSlew makes itself are done. Released, the body ends with no status (`:f`) or position

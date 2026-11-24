@@ -6958,7 +6958,12 @@ private:
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Stop after async slew failure failed: " + stop_error + "; the mount may still be moving");
         }
-        stop_axes_if_cancelled_locked();
+        // open-astro#2635: an AbortSlew whose stops were answered starts a new epoch before the body it cancelled
+        // takes mutex_ back, so that goto's axes are AbortSlew's: nothing is left to send, as for Park and FindHome
+        // (abandon_slew_body_locked()). A disconnect cancels the body with the epoch unchanged and keeps this stop.
+        if (slew_error_epoch_ == slew_epoch) {
+            stop_axes_if_cancelled_locked();
+        }
     }
 
     // The one start path of the four goto initiators (SlewToCoordinates[Async],
