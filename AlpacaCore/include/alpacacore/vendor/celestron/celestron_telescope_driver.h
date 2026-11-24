@@ -46,6 +46,10 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Same for the status poll slot, so a case can make the poll's start at the end of a Connect fail (#2409).
+void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
+                                       std::function<std::thread(std::function<void()>)> spawn);
+
 /// Same for both pulse-guide slots (one per axis), so a case can make a chain start fail.
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 

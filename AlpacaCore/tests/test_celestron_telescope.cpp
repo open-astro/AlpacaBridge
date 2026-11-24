@@ -2318,6 +2318,37 @@ TEST_CASE("Celestron Link - a failed relink stop stays owed when the handshake t
     driver.set_connected(false);
 }
 
+// #2409: a Connect whose status poll cannot start is a failed Connect (no poll would run the MoveAxis cap or the
+// link-loss latch), and a relink stop the mount did not answer stays owed for the next Connect that completes.
+TEST_CASE("Celestron Link - a failed relink stop stays owed when the status poll cannot start",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    rig.replug();
+    rig.st->m_mute.store(true);  // the relink cancel goes unanswered
+    cel::set_status_poll_spawn_for_testing(driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS(driver.set_connected(true));
+    CHECK_FALSE(driver.get_connected());
+    cel::set_status_poll_spawn_for_testing(driver,
+                                           [](std::function<void()> body) { return std::thread(std::move(body)); });
+    rig.st->m_mute.store(false);
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.mount->received();
+    REQUIRE_FALSE(received.empty());
+    CHECK(received.front() == 'M');
+    CHECK(relink_stops_lead(received, 0x10));
+    CHECK(relink_stops_lead(received, 0x11));
+    driver.set_connected(false);
+}
+
 // A Connect that completes reports a failed relink stop through Slewing and owes no stop after it: a later
 // Disconnect and Connect over a healthy link sends no stops ahead of the handshake.
 TEST_CASE("Celestron Link - a completed Connect clears a failed relink stop",

@@ -3187,6 +3187,9 @@ public:
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_status_poll_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        status_poll_.set_spawn_for_testing(std::move(spawn));
+    }
 
     void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         pulse_ops_[0].set_spawn_for_testing(spawn);
@@ -4728,6 +4731,13 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
+                                       std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_spawn_for_testing(std::move(spawn));
     }
 }
 

@@ -1900,4 +1900,93 @@ TEST_CASE("Celestron site - site and time writes are refused during a Park and a
     driver->set_connected(false);
 }
 
+// #2409, the AbortSlew siblings: a MoveAxis(axis, 0) during a GOTO (#2458) and an Unpark during a Park send the same
+// stops as AbortSlew, so they go through the same verified stop. Takes the mount with `takeover` once the held GOTO
+// (a slew, or the park's) is on the wire and the mount ignores `ignored` cancels.
+namespace {
+void stop_sibling_after_held_goto(alpacacore::test::FakeTaskClock& clock, FakeCelestronState& st,
+                                  alpacacore::TelescopeDriver& driver, bool park, int ignored) {
+    st.hold_slew.store(true);
+    if (park) {
+        REQUIRE_NOTHROW(driver.park());
+    } else {
+        REQUIRE_NOTHROW(driver.slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    }
+    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5000));
+    st.ignore_cancels.store(ignored);
+    if (park) {
+        REQUIRE_NOTHROW(driver.unpark());
+    } else {
+        REQUIRE_NOTHROW(driver.move_axis(0, 0.0));
+    }
+    REQUIRE(advance_until(clock, [&] { return read_slewing(driver) != SlewingRead::True; }));
+}
+}  // namespace
+
+TEST_CASE("Celestron MoveAxis - a stop during a GOTO the mount ignores is sent three times and Slewing raises it",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    stop_sibling_after_held_goto(clock, *st, *driver, false, 1000);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == alpacacore::util::kStopNotVerifiedText);
+    CHECK(st->cancel_goto_count.load() == 3);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron MoveAxis - a lost stop during a GOTO is sent again and verifies",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    stop_sibling_after_held_goto(clock, *st, *driver, false, 1);
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(st->cancel_goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Unpark - a stop of a Park the mount ignores is sent three times and Slewing raises it",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    stop_sibling_after_held_goto(clock, *st, *driver, true, 1000);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == alpacacore::util::kStopNotVerifiedText);
+    CHECK(st->cancel_goto_count.load() == 3);
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Unpark - a lost stop of a Park is sent again and verifies",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    stop_sibling_after_held_goto(clock, *st, *driver, true, 1);
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(st->cancel_goto_count.load() == 2);
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
