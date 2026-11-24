@@ -1321,12 +1321,15 @@ TEST_CASE("SynScan Link - a cable pulled mid-slew loses the link and the slew bo
     driver.slew_to_coordinates_async(5.5, 20.0);
     // The body's first status read after the GOTO meets the pull: it reads the handset inside the forced-Slewing
     // window too, for the start grace (#2412).
-    for (int i = 0; i < 40 && (!rig.handset->unplugged() || driver.get_connected()); ++i) {
+    // Real time bounds the wait: the body runs on its own thread, so steps alone could pass before it even sends.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(10);
+    while ((!rig.handset->unplugged() || driver.get_connected() || rig.clock.waiter_count() > idle) &&
+           std::chrono::steady_clock::now() < deadline) {
         rig.advance(milliseconds(250));
+        std::this_thread::sleep_for(milliseconds(10));
     }
     REQUIRE(rig.handset->unplugged());
     check_lost(driver);
-    for (int i = 0; i < 40 && rig.clock.waiter_count() > idle; ++i) rig.advance(milliseconds(250));
     CHECK(rig.clock.waiter_count() == idle);  // the body ended on its connection check
 }
 
