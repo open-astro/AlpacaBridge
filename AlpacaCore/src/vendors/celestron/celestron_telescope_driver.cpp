@@ -2488,11 +2488,13 @@ public:
         bool was_parking = false;
         std::string stop_error;
         std::uint64_t mine = 0;
+        bool verify_stop = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             parked_ = false;
             was_parking = parking_;
+            verify_stop = was_parking && motion_to_verify_locked();
             if (was_parking) {
                 // Unpark during a park wins the race: drop the parking state and claim the slot, so the park body
                 // (which may be inside an exchange) finds itself Superseded and writes nothing. It is not joined: a
@@ -2525,7 +2527,7 @@ public:
                 last_home_error_.clear();
                 last_slew_error_ = "Unpark could not stop the park slew: " + stop_error;
             }
-            if (was_parking && stop_error.empty()) {
+            if (verify_stop && stop_error.empty()) {
                 start_stop_check(lock, mine, "Unpark");  // the park's stops, verified as AbortSlew's are (#2409)
             }
         }
@@ -2573,6 +2575,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
+        const bool verify_stop = stop_goto && motion_to_verify_locked();
         claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
         const std::uint64_t mine = motion_generation_;
         if (stop_goto) {
@@ -2609,7 +2612,7 @@ public:
                 [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
         }
         clear_motion_errors_locked();
-        if (stop_goto) {
+        if (verify_stop) {
             start_stop_check(lock, mine, "MoveAxis");  // the GOTO's stops, verified as AbortSlew's are (#2409)
         }
     }
@@ -2639,7 +2642,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may end a park in flight
-            was_moving = driver_motion_active_locked();
+            was_moving = motion_to_verify_locked();
             // The claim supersedes the slew or park body, which finds itself Superseded and writes nothing. It is
             // bumped before any stop goes out: a blocking slew that sees the mount stopped must also see that it
             // was superseded, so it cannot run its completion tail before slew_aborted_ is set. The park state
@@ -2688,6 +2691,14 @@ public:
             return;
         }
         start_stop_check(lock, mine, "AbortSlew");
+    }
+
+    // #2409: whether a stop sent now stops motion, so it is verified: a MoveAxis, or a GOTO, Park or FindHome in
+    // flight. A GOTO whose failure is stored never counts, even while its body is still inside its own failure stop
+    // (#575): a refused GOTO never moved the mount, and a failed one is stopped by that body. Under mutex_.
+    bool motion_to_verify_locked() const {
+        return manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
+               (last_slew_error_.empty() && driver_motion_active_locked());
     }
 
     // #2409: the verified stop after an acknowledged stop (AbortSlew, MoveAxis(axis, 0) during a GOTO, Unpark during a
