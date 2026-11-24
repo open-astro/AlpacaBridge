@@ -91,6 +91,8 @@ struct Handset {
     std::atomic<uint32_t> dec_counts{0xD001B9};
     // #2412: non-zero, each `e` moves RA on by this many counts first: a mount that keeps moving through any stop.
     std::atomic<uint32_t> ra_drift{0};
+    std::atomic<int> m_count{0};  // cancels ('M') received
+    std::atomic<int> l_count{0};  // GOTO status reads ('L') received
 };
 
 std::string position_reply(const Handset& st) {
@@ -122,8 +124,10 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'z':
             return "8A4FDA00,0D527400#";
         case 'L':
+            st.l_count.fetch_add(1);
             return st.slewing.load() ? "1#" : "0#";
         case 'M':  // the cancel ends a GOTO: AbortSlew verifies the mount stopped (#2412)
+            st.m_count.fetch_add(1);
             st.slewing.store(false);
             return "#";
         case 'm':  // mount model: an EQ mount
@@ -1509,7 +1513,7 @@ TEST_CASE("SynScan Link - a MoveAxis running when the cable is pulled is stopped
     check_lost(driver);
 
     rig.replug();
-    driver.set_connected(true);
+    alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });  // the relink stop is verified
     REQUIRE(driver.get_connected());
     const std::string received = rig.handset->received();
     CHECK(relink_stops_first(received));
@@ -1531,7 +1535,7 @@ TEST_CASE("SynScan Link - a bound stop the link loss refused is sent by the next
     rig.advance(seconds(61));
     CHECK(rig.handset->unplugged());
     rig.replug();
-    driver.set_connected(true);
+    alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });  // the relink stop is verified
     REQUIRE(driver.get_connected());
     CHECK(relink_stops_first(rig.handset->received()));
 }
@@ -1559,7 +1563,7 @@ TEST_CASE("SynScan Link - a Disconnect over a lost link keeps the relink stop fo
     require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
     driver.set_connected(false);  // the client disconnects first
     rig.replug();
-    driver.set_connected(true);
+    alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });  // the relink stop is verified
     REQUIRE(driver.get_connected());
     CHECK(relink_stops_first(rig.handset->received()));
 }
@@ -1611,4 +1615,51 @@ TEST_CASE("SynScan Link - a relink stop the mount ignores fails the Connect afte
     alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });
     REQUIRE(driver.get_connected());
     CHECK(relink_stops_first(rig.handset->received()));
+}
+
+// #2652 review: a disconnect during AbortSlew's verified stop keeps the 5 s bound. The verify stops at its next
+// exchange boundary once closing_ is set, as the poll and the hunt do, so the disconnect waits for the stops' own
+// replies (at most the documented 4 at 1.2 s), not for the verify's rounds of reads and resends.
+TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s while AbortSlew verifies its stop",
+          "[synscan][telescope][snapshot][connect][goto-safety]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = slow_link_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE(clock.wait_for_waiters(1, kSettle));
+    st->slewing = true;
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 30.0));
+
+    std::atomic<bool> abort_done{false};
+    std::thread aborter([&] {
+        try {
+            driver->abort_slew();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a disconnect may end it either way
+        }
+        abort_done = true;
+    });
+    std::thread stepper([&] {
+        while (!abort_done.load()) {
+            clock.advance(milliseconds(50));
+            clock.wait_for_woken_settled(milliseconds(100));
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+    });
+    // AbortSlew's cancel is on the wire: slow the replies down now, so the rest of its stops and its verify run on a
+    // slow link while the disconnect waits.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (st->m_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    st->latency_ms = 1200;
+    const bool stopping = st->m_count.load() > 0 && !abort_done.load();
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    st->latency_ms = 0;
+    aborter.join();
+    stepper.join();
+    REQUIRE(stopping);
+    CHECK(elapsed < seconds(5));
 }

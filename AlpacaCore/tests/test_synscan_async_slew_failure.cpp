@@ -141,6 +141,14 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
             case 'E':
             case 'z':
             case 'Z': {
+                if (chunk[0] == 'E' && st->drift_counts.load() != 0) {
+                    // 16-bit: the driver reads the last four digits before the comma and the first four after it.
+                    char moving[32];
+                    const auto ra = 0x0500u + static_cast<unsigned>(st->drift_reads.fetch_add(1) + 1) *
+                                                  static_cast<unsigned>(st->drift_counts.load());
+                    std::snprintf(moving, sizeof(moving), "0000%04X,20000000#", ra & 0xFFFFu);
+                    return moving;
+                }
                 if (chunk[0] == 'e' && st->drift_counts.load() != 0) {
                     char moving[32];
                     const auto ra = 0x12AB05u + static_cast<unsigned>(st->drift_reads.fetch_add(1) + 1) *
@@ -1540,11 +1548,13 @@ struct MoveAxisBoundRig {
         REQUIRE(clock.wait_for_waiter_thread(bound_thread.load(), std::chrono::seconds(5)));
     }
 
-    // In 5 s steps, polling the handset after each one: the status poll is paused, and a frame older than the
-    // snapshot bound would read as a lost link.
+    // In 250 ms steps, polling the handset after each one: the status poll is paused, and a frame older than the
+    // snapshot bound would read as a lost link. Steps that short let the bound's verified stop (#2412) read inside
+    // its rounds.
     void advance(std::chrono::seconds by) {
-        for (auto left = by; left.count() > 0; left -= std::chrono::seconds(5)) {
-            clock.advance(std::min(left, std::chrono::seconds(5)));
+        const auto step = std::chrono::milliseconds(250);
+        for (auto left = std::chrono::duration_cast<std::chrono::milliseconds>(by); left.count() > 0; left -= step) {
+            clock.advance(step);
             REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
             sc_bound::poll_status_now_for_testing(*driver);
         }
