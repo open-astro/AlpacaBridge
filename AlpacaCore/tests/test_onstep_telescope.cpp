@@ -396,8 +396,11 @@ TEST_CASE(
     driver->set_utc_date(written);
     CHECK(driver->get_utc_date() == written);  // the fake clock has not moved
 
-    clock.advance(std::chrono::seconds(60));
-    (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
+    // In steps, each tick settled: a getter that reads a frame 30 s old reads a lost link (#2495).
+    for (int i = 0; i < 4; ++i) {
+        clock.advance(std::chrono::seconds(15));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
     CHECK(driver->get_utc_date() == written + std::chrono::seconds(60));
 
     driver->set_connected(false);
@@ -482,8 +485,11 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
         REQUIRE_NOTHROW((void)driver->get_sidereal_time());  // computes LST from the host clock
         clock_answers = true;
-        clock.advance(std::chrono::seconds(60));
-        (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
+        // In steps, each tick settled: a getter that reads a frame 30 s old reads a lost link (#2495).
+        for (int i = 0; i < 4; ++i) {
+            clock.advance(std::chrono::seconds(15));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        }
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
         (void)driver->get_device_state();
         (void)driver->get_device_state();
