@@ -154,6 +154,11 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
 /// factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: replaces the thread factory of the driver's AbortSlew stop-check slot (open-astro#2407), so a case
+/// can make that check fail to start. `driver` must come from the factories above; anything else is ignored.
+void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
+                                        std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: while paused the driver's status poll (decision 0010) wakes and
 /// samples nothing, so a case can age the snapshot's frame on the task clock
 /// without the board going quiet. `driver` must come from the factories above;
