@@ -4304,6 +4304,107 @@ TEST_CASE("OnStep Telescope Driver - a stored motion failure does not outlive a 
     driver->set_connected(false);
 }
 
+// #2406 (#2396 AB-7): a GOTO the mount ends far from its target did not land. The scripted mount reads 12h +45.
+TEST_CASE("OnStep Telescope Driver - an async GOTO that ends far from its target is stopped and Slewing raises",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(2.0, 20.0));
+    rig.mount->set_status("pEW180#");  // the GOTO runs
+    observe_slewing(*rig.driver, *rig.mount, rig.clock);
+    rig.mount->set_status("NpEW180#");  // it ended, still at 12h +45
+    rig.poll_after(std::chrono::seconds(1));
+    CHECK(rig.mount->count(":Q#") == 1);
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+}
+
+TEST_CASE("OnStep Telescope Driver - a synchronous GOTO that ends far from its target fails",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*rig.driver, true);  // the wait reads :GU#
+    bool failed = false;
+    try {
+        run_synchronous_slew(
+            rig.clock, [&] { rig.driver->slew_to_coordinates(2.0, 20.0); },
+            [&] { rig.clock.advance(std::chrono::seconds(3)); });  // past the grace: the wait's :GU# ends it
+    } catch (const alpacacore::AlpacaException& ex) {
+        failed = ex.error_code() == alpacacore::AlpacaError::DriverException;
+    }
+    CHECK(failed);
+    CHECK(rig.mount->count(":Q#") == 1);
+}
+
+// #2406: a frame that shows no GOTO yet ends Slewing, but a GOTO the mount starts after it is still bounded.
+TEST_CASE("OnStep Telescope Driver - a GOTO the mount starts after a frame without it keeps its bound",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(12.0, 45.0));
+    REQUIRE(wait_slew_done(*rig.driver, rig.clock));  // the first frame shows no GOTO yet
+    rig.mount->set_status("pEW180#");                 // the mount starts it now, and it never ends
+    rig.poll_after(std::chrono::seconds(10));
+    CHECK(rig.mount->count(":Q#") == 0);
+    rig.poll_after(std::chrono::seconds(110));  // 120 s from the :MS#
+    CHECK(rig.mount->count(":Q#") == 1);
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+}
+
+// #2406: the 120 s bound fires on a poll tick whose :GU# fails too.
+TEST_CASE("OnStep Telescope Driver - a GOTO's bound stops the mount when the status poll fails",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(12.0, 45.0));
+    rig.mount->set_status("pEW180#");
+    observe_slewing(*rig.driver, *rig.mount, rig.clock);
+    rig.mount->set_status("");  // :GU# times out from here
+    rig.poll_after(std::chrono::seconds(120));
+    CHECK(rig.mount->count(":Q#") == 1);
+    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+}
+
+// #2406 (maintainer decision 2026-11-24): an OnStep mount has no reference at power-up, so the first sync after each
+// Connect sets it and is not bounded; every later sync in the session moves the pointing by 5 degrees at most.
+TEST_CASE("OnStep Telescope Driver - a sync after the first one of a session is bounded",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;  // the mount reads 12h +45
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(2.0, 20.0));  // the first sync: any distance
+    CHECK(rig.mount->count(":CM#") == 1);
+    require_alpaca_error([&] { rig.driver->sync_to_coordinates(12.0, 45.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(rig.mount->count(":CM#") == 1);
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(2.1, 21.0));  // about 1.8 degrees from 2h +20
+    CHECK(rig.mount->count(":CM#") == 2);
+
+    rig.driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*rig.driver, true, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(2.0, 20.0));  // a new session: the first sync again
+    CHECK(rig.mount->count(":CM#") == 3);
+}
+
+// #2406: AbortSlew during a home search (:GU# 'h', a guide move with home sensors) is checked like any other stop.
+TEST_CASE("OnStep Telescope Driver - an AbortSlew during a home search is checked",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    rig.mount->set_status("NphEW180#");  // homing
+    rig.poll_after(std::chrono::seconds(1));
+    rig.driver->abort_slew();
+    CHECK(rig.mount->count(":Q#") == 1);
+
+    SECTION("the mount ignores the stop: sent again, then Slewing raises") {
+        rig.poll_after(std::chrono::seconds(2));
+        CHECK(rig.mount->count(":Q#") == 2);
+        rig.poll_after(std::chrono::seconds(2));
+        CHECK(rig.mount->count(":Q#") == 3);
+        rig.poll_after(std::chrono::seconds(2));
+        CHECK(rig.mount->count(":Q#") == 3);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    }
+    SECTION("the home search stops: nothing is sent again") {
+        rig.mount->set_status("NpEW180#");
+        rig.poll_after(std::chrono::seconds(2));
+        rig.poll_after(std::chrono::seconds(2));
+        CHECK(rig.mount->count(":Q#") == 1);
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
 // OnStep's FindHome is :hC#, a slew to the stored home; the driver cannot see optional OnStepX home sensors.
 TEST_CASE("OnStep Telescope Driver - findhomeissensorsearch is false", "[onstep][telescope][unit][findhome-sensor]") {
     auto mount = std::make_shared<ParkHomeFake>();
