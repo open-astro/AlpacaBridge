@@ -218,7 +218,7 @@ TEST_CASE("SynScan superseded pulse estimate - a slew and AbortSlew over a pulse
     rig.wait_waiters(2);
     rig.advance(milliseconds(200));
     rig.driver->slew_to_coordinates_async(rig.start_ra_hours + 1.0, rig.start_dec_degrees);
-    rig.driver->abort_slew();
+    alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); });  // verified on the clock (#2412)
     rig.check_ra(rig.start_ra_hours + rig.guide_ra_hours(200));
 }
 

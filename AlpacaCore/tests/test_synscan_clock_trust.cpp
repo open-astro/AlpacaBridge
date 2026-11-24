@@ -540,8 +540,9 @@ TEST_CASE("SynScan host clock - a re-sync queued behind a PulseGuide's wire turn
     CHECK(near_host_now(rig.driver->get_utc_date()));
 }
 
-// On a V3 handset an async GOTO body ends once the `R` is out: nothing on the control path reads the landing, so the
-// driver's own slewing flag stays as the GOTO set it. The re-sync asks the handset at its turn instead.
+// On a V3 handset an async GOTO body waits for the GOTO's end and its landing gate (#2412), on the task clock. The
+// GOTO aims at where the fake already points ("1234,4000"), so it lands without the handset ever reporting it in
+// progress. The re-sync asks the handset at its turn.
 TEST_CASE("SynScan host clock - a re-sync after a landed V3 GOTO writes the mount clock", "[synscan][clock]") {
     TrustGuard trust(true);
     Rig rig(true, sc::SynScanVersion::V3);
@@ -550,10 +551,12 @@ TEST_CASE("SynScan host clock - a re-sync after a landed V3 GOTO writes the moun
         std::mutex mutex;
         std::condition_variable cv;
         bool ended = false;
+        std::atomic<std::thread::id> thread{};
     };
     const auto slew_end = std::make_shared<SlewEnd>();
     sc::set_slew_spawn_for_testing(*rig.driver, [slew_end](std::function<void()> body) {
         return std::thread([slew_end, body = std::move(body)] {
+            slew_end->thread.store(std::this_thread::get_id());
             body();
             {
                 std::lock_guard<std::mutex> lock(slew_end->mutex);
@@ -565,7 +568,19 @@ TEST_CASE("SynScan host clock - a re-sync after a landed V3 GOTO writes the moun
     rig.connect();
     REQUIRE(rig.handset.count('H') == 1);
 
-    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.driver->slew_to_coordinates_async(0x1234 / 65536.0 * 24.0, 90.0);
+    const auto ended = [&] {
+        std::lock_guard<std::mutex> lock(slew_end->mutex);
+        return slew_end->ended;
+    };
+    // Steps only while the body's own thread waits on the clock, so no step lands while it is on the socket.
+    const auto real_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!ended() && std::chrono::steady_clock::now() < real_deadline) {
+        const auto body = slew_end->thread.load();
+        if (body == std::thread::id{} || !rig.clock.wait_for_waiter_thread(body, milliseconds(50))) continue;
+        rig.clock.advance(milliseconds(250));
+        REQUIRE(rig.clock.wait_for_woken_settled(kBound));
+    }
     {
         std::unique_lock<std::mutex> lock(slew_end->mutex);
         REQUIRE(slew_end->cv.wait_for(lock, kBound, [&] { return slew_end->ended; }));

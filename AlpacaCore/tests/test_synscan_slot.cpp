@@ -35,6 +35,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -167,7 +168,9 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
     const int cancels_before = rig.st->command_count('M');
 
     refuse_slot_threads(*rig.driver);
-    CHECK_THROWS_AS(second(*rig.driver), alpacacore::AlpacaException);
+    // The stop is verified on the task clock (#2412).
+    CHECK_THROWS_AS(alpacacore::test::call_stepping(rig.clock, [&] { second(*rig.driver); }),
+                    alpacacore::AlpacaException);
 
     CHECK(rig.st->command_count('M') == cancels_before + 1);  // the GOTO was cancelled
     CHECK_FALSE(rig.driver->get_slewing());
@@ -252,7 +255,10 @@ TEST_CASE("SynScan slot - a refused goto-over-goto start restores tracking after
     const int tracking_before = rig.st->command_count('T');
 
     refuse_slot_threads(*rig.driver);
-    CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(6.5, 25.0), alpacacore::AlpacaException);
+    // The stop is verified on the task clock (#2412).
+    CHECK_THROWS_AS(
+        alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->slew_to_coordinates_async(6.5, 25.0); }),
+        alpacacore::AlpacaException);
 
     CHECK(rig.st->command_count('T') > tracking_before);  // the stop ended tracking; it is sent again
     CHECK(rig.driver->get_tracking());
