@@ -19,6 +19,7 @@
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/utc_offset.h>
@@ -618,13 +619,20 @@ public:
             // clearing them forces every first property read after connect to
             // pay live serial round-trips (~95 ms each on the AM5N's USB-ACM
             // link), which blows the ASCOM FAST 0.1 s target during ConformU.
+            // #2408: the site and the clock feed the mount's limit and pier maths, so a refresh while this driver
+            // moves the mount writes neither, on the view the host clock re-sync also skips on.
+            bool moving = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                moving = driver_motion_active_locked();
+            }
             stop_poll_thread();
             poll_stop_.store(false);
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
-            apply_or_load_site_info();
+            if (!moving) apply_or_load_site_info();
             apply_pending_elevation();
             try {
-                sync_mount_time_if_configured(false);
+                if (!moving) sync_mount_time_if_configured(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
@@ -672,8 +680,9 @@ public:
                     mount_info_ = is_zwo_mount_model(mount_info) ? mount_info : std::string();
                 }
                 protocol.finish_identity_check();
-                // #2408 (#2396 AB-9): a link that dropped while a GOTO or a MoveAxis ran is stopped before anything
-                // else is written, so the reconnect does not leave that motion running unwatched.
+                // #2408 (#2396 AB-9): a link that dropped while a GOTO, a MoveAxis, a Park or a FindHome ran is
+                // stopped before anything else is written, so the reconnect does not leave that motion running
+                // unwatched.
                 bool stop_first = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -2108,18 +2117,7 @@ public:
                         fail(ex.what());
                         return;
                     }
-                    // e3 (busy) keeps its bounded stop-and-retry for now (#2408 lists it).
-                    if (attempt < 2 && is_ms_mount_busy_error(ex)) {
-                        ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
-                        // A fenced body sends no ":Q" on top of the newer command, and a fence or a disconnect
-                        // wakes the backoff at once.
-                        if (!send(":Q", [&] { protocol.abort_motion(); }) ||
-                            !ctx.wait_for(std::chrono::milliseconds(300))) {
-                            abandon();
-                            return;
-                        }
-                        continue;
-                    }
+                    // #2408: e3 (busy) is a refusal too, never a stop-and-resend: nothing shows it is transient.
                     // #2408 (#2396 AB-13): e5 (target under the horizon) is a refusal: an error, never sent again
                     // after a site and time re-push (#2395, "Motion fails closed"). Only e7, the mount's own "time
                     // and position not synchronized", is answered once with the site and time it asked for.
@@ -2190,6 +2188,16 @@ public:
     void sync_to_pair(double target_ra, double target_dec, const char* operation) {
         check_connected();
         ensure_not_parked(operation);
+        // #2408: a handset mount keeps its reference across power-ups, so every Sync is bounded from the reported
+        // position, before anything is sent. Read from the mount: a GOTO start drops the polled position.
+        const EquatorialCoordinates before = protocol_.get_current_equatorial();
+        util::MountPosition reported{};
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            reported = {before.ra_hours + ra_offset_hours_,
+                        std::clamp(before.dec_degrees + dec_offset_deg_, -90.0, 90.0)};
+        }
+        util::check_sync_bound(operation, reported, {target_ra, target_dec}, util::kMaxSyncOffsetDegrees);
         // A pending setup/retry must not consume the target registers replaced by Sync.
         // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
         fence_goto();
@@ -2517,11 +2525,6 @@ private:
         return message.find(":MS") != std::string::npos && message.find("e5") != std::string::npos;
     }
 
-    bool is_ms_mount_busy_error(const AlpacaException& ex) const {
-        const std::string message = ex.what();
-        return message.find(":MS") != std::string::npos && message.find("e3") != std::string::npos;
-    }
-
     // ZWOMountProtocolWrapper::goto_target() on a ":MS" with no reply or "N/A" (#2408).
     static bool is_ms_unconfirmed_error(const AlpacaException& ex) {
         return std::string_view(ex.what()).find(kGotoNotConfirmed) != std::string_view::npos;
@@ -2689,12 +2692,17 @@ private:
         }
     }
 
+    // A GOTO, a MoveAxis, a Park or a FindHome this driver started is running. Under mutex_.
+    bool own_command_moving_locked() const {
+        return goto_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_command_active_ ||
+               home_command_active_;
+    }
+
     // #2408 (#2396 AB-10): the site and the clock feed the mount's limit and pier maths, so they are not changed under
     // a GOTO, a MoveAxis or a Park/FindHome this driver started.
     void refuse_while_moving(const char* property) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (goto_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_command_active_ ||
-            home_command_active_) {
+        if (own_command_moving_locked()) {
             throw AlpacaException(std::string(property) + " cannot be written while the mount is moving",
                                   AlpacaError::InvalidOperation);
         }
@@ -2733,7 +2741,7 @@ private:
         if (loss_reason_.empty())
             loss_reason_ = transport_lost ? "ZWO mount transport lost" : "ZWO mount telemetry stalled for 30 s";
         // #2408 (#2396 AB-9): motion that was running when the link dropped is stopped by the next connect.
-        if (goto_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1]) relink_stop_pending_ = true;
+        if (own_command_moving_locked()) relink_stop_pending_ = true;
         connected_.store(false);
         caches_ready_.store(false);
         mount_identity_.reset();
@@ -3251,6 +3259,9 @@ private:
                     protocol_.abort_motion();
                     std::lock_guard<std::mutex> lock(mutex_);
                     goto_accepted_at_.reset();  // this GOTO's bound is spent
+                    // Checked and sent again like AbortSlew's stop (#2408).
+                    abort_stops_sent_ = 1;
+                    abort_verify_at_ = clock_.now() + kAbortVerifyInterval;
                     last_slew_error_ =
                         "The slew did not end within " +
                         std::to_string(std::chrono::duration_cast<std::chrono::minutes>(kDefaultSlewTimeout).count()) +
