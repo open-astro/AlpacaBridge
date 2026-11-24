@@ -4364,7 +4364,7 @@ TEST_CASE("OnStep Telescope Driver - a GOTO's bound stops the mount when the sta
 // Connect sets it and is not bounded; every later sync in the session moves the pointing by 5 degrees at most.
 TEST_CASE("OnStep Telescope Driver - a sync after the first one of a session is bounded",
           "[onstep][telescope][unit][goto-safety]") {
-    BoundedOnStep rig;  // the mount reads 12h +45
+    BoundedOnStep rig;                                            // the mount reads 12h +45
     REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(2.0, 20.0));  // the first sync: any distance
     CHECK(rig.mount->count(":CM#") == 1);
     require_alpaca_error([&] { rig.driver->sync_to_coordinates(12.0, 45.0); }, alpacacore::AlpacaError::InvalidValue);
