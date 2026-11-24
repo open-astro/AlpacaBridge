@@ -1683,10 +1683,12 @@ TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
 // motion the driver started runs: a MoveAxis on either axis, or a GOTO.
 TEST_CASE("Celestron site - site and time writes are refused while the mount moves",
           "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;  // AbortSlew's verified stop waits on the task clock (decision 0005)
     auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     using alpacacore::test::require_alpaca_error;
     const auto writes_refused = [&] {
@@ -1711,8 +1713,14 @@ TEST_CASE("Celestron site - site and time writes are refused while the mount mov
         CHECK(writes_refused());
         REQUIRE_NOTHROW(driver->abort_slew());
         st->hold_slew.store(false);
-        // #2409: Slewing (and the refusal) holds until the verified stop sees the mount still.
-        REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 5000));
+        // #2409: Slewing (and the refusal) holds until the verified stop sees the mount still. Each step waits for the
+        // status poll and the stop check on the clock.
+        for (int i = 0; i < 100 && read_slewing(*driver) == SlewingRead::True; ++i) {
+            if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
+            clock.advance(std::chrono::milliseconds(100));
+            clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
+        REQUIRE(read_slewing(*driver) == SlewingRead::False);
     }
     // Stopped, the write goes out again.
     CHECK_NOTHROW(driver->set_site_latitude(10.0));

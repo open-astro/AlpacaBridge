@@ -738,7 +738,10 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    alpacacore::test::FakeTaskClock clock;  // the verified stop waits on the task clock (decision 0005)
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, conn, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     driver->move_axis(0, 1.0);
@@ -750,10 +753,12 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
             log->clear();
         }
         REQUIRE_NOTHROW(driver->abort_slew());
-        // #2409: Slewing stays true until the verified stop sees the mount still (two reads 500 ms apart).
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // #2409: Slewing stays true until the verified stop sees the mount still (two reads 500 ms apart). Each step
+        // waits for the status poll and the stop check on the clock.
+        for (int i = 0; i < 100 && driver->get_slewing(); ++i) {
+            if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
+            clock.advance(std::chrono::milliseconds(100));
+            clock.wait_for_woken_settled(std::chrono::seconds(2));
         }
         CHECK_FALSE(driver->get_slewing());
         std::lock_guard<std::mutex> lock(*log_mutex);
