@@ -14,11 +14,19 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace alpacacore::vendor::celestron {
 
 inline constexpr std::uint32_t kCgxEncoderStepsPerRevolution = 1U << 24;
+
+/// Dec counts either side of the home label that still read as the home pose, the Normal side (#2640). The pointing
+/// side flips at the Dec home, so a Dec resting one count short of it read BeyondPole, with RA 12 h off, on a mount
+/// standing at home (rig 2026-11-23: Dec 89.99997854 deg, SideOfPier 1, after a FindHome). Four counts (0.3") is
+/// twice the two-count label tolerance; a pose this close to the pole is the same sky point on either side.
+inline constexpr std::int32_t kCgxHomeSideBandCounts = 4;
 
 /// Encode degrees as a wrapped 24-bit fraction of one encoder revolution.
 std::uint32_t encode_cgx_encoder_degrees(double degrees);
@@ -50,5 +58,17 @@ std::pair<std::uint32_t, std::uint32_t> cgx_sky_position_to_encoders(
     CgxHemisphere hemisphere, CgxPointingSide pointing_side,
     std::uint32_t ra_home_encoder = kCgxEncoderStepsPerRevolution / 4,
     std::uint32_t dec_home_encoder = kCgxEncoderStepsPerRevolution / 2);
+
+/// The pre-GOTO pose guard (#2640): why an encoder target would put the telescope somewhere unsafe, or nullopt. It
+/// decodes the counts again on `pointing_side`, independent of how they were computed: the Dec axis must stay on that
+/// side of the pole (within kCgxHomeSideBandCounts), the RA axis within six hours of its counterweight-down home (the
+/// meridian limit of a side), and the pose at or above `minimum_altitude_degrees` at `latitude_degrees`. The pose
+/// does not depend on the time: the hour angle comes from the RA axis.
+std::optional<std::string> cgx_encoder_target_refusal(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                                      CgxHemisphere hemisphere, CgxPointingSide pointing_side,
+                                                      double latitude_degrees, double minimum_altitude_degrees = 0.0,
+                                                      std::uint32_t ra_home_encoder = kCgxEncoderStepsPerRevolution / 4,
+                                                      std::uint32_t dec_home_encoder = kCgxEncoderStepsPerRevolution /
+                                                                                       2);
 
 }  // namespace alpacacore::vendor::celestron

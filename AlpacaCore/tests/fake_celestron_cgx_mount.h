@@ -62,6 +62,12 @@ namespace alpacacore::test {
 // home, or drives its last leg forever (a switch never found); it has no acceleration, no limit sensor and no hard
 // stop, so a runaway turns the axis without bound until a stop. The leg shapes come from the #2213 rig capture and
 // the Oct-28 incident (docs/failures/0016-cgx-home-travel.md), not from the controller's search algorithm.
+// An inert home start (set_inert_home_starts()) is ACKed, ends any search the axis was running where it is and starts
+// none, so MC_LEVEL_DONE reads done at once with the axis off its home (#2640): MC_LEVEL_DONE reads done whenever no
+// search runs (home_done=1 on a stopped axis, docs/failures/0014-cgx-stop-completion.md). Why the rig's homes after
+// an interrupted home route answered done in 2-3 s is not established; this is the shape the driver must not trust.
+// An auto-completed home reads searching on its first MC_LEVEL_DONE read and done after it (a real search reads
+// searching from its start); it is at the physical home from the start.
 // Hardware qualification must replace assumptions before they become claims.
 
 /// Small stateful AUX endpoint for direct-USB protocol tests.
@@ -157,6 +163,12 @@ public:
         }
         std::lock_guard<std::mutex> lock(state_mutex_);
         axes_[axis_index(axis)].scripted_home_searches.emplace_back(legs.begin(), legs.end());
+    }
+    // The next `starts` MC_LEVEL_START on `axis` are inert: ACKed, they end a running search where it is, start none
+    // and move nothing, so MC_LEVEL_DONE reads done at once.
+    void set_inert_home_starts(std::uint8_t axis, int starts) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].inert_home_starts = starts;
     }
     void set_physical_position(std::uint8_t axis, std::uint32_t position) {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -331,6 +343,8 @@ private:
         int stop_reads_remaining = 0;
         int post_stop_drift_remaining = 0;
         int crawling_home_searches = 0;
+        int inert_home_starts = 0;
+        int home_searching_reads = 0;  // an auto-completed home's MC_LEVEL_DONE reads that still answer searching
         std::deque<std::deque<HomeLeg>> scripted_home_searches;
         std::deque<HomeLeg> home_legs;  // the running scripted search
         std::vector<int> stops_before_home_starts;
@@ -621,6 +635,7 @@ private:
                 }
                 axis.homing = false;
                 axis.home_legs.clear();
+                axis.home_searching_reads = 0;
                 break;
             case 0x13:
                 if (axis.stop_reads_remaining > 0) {
@@ -634,6 +649,16 @@ private:
                 axis.post_stop_drift_remaining = 0;
                 axis.stops_before_home_starts.push_back(axis.command_counts[0x24]);
                 axis.home_legs.clear();
+                axis.home_searching_reads = 0;
+                if (axis.inert_home_starts > 0) {
+                    --axis.inert_home_starts;
+                    axis.homing = false;
+                    axis.slewing = false;
+                    axis.manual_motion = false;
+                    axis.tracking = false;
+                    axis.motion_remainder = 0;
+                    break;
+                }
                 if (!axis.scripted_home_searches.empty()) {
                     axis.home_legs = std::move(axis.scripted_home_searches.front());
                     axis.scripted_home_searches.pop_front();
@@ -645,15 +670,24 @@ private:
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
-                if (!axis.homing) axis.physical_position = 0;
+                if (!axis.homing) {
+                    axis.physical_position = 0;
+                    axis.home_searching_reads = 1;
+                }
                 break;
             }
             case 0x12:
+                if (!axis.homing && axis.home_searching_reads > 0) {
+                    --axis.home_searching_reads;
+                    payload = {0x00};
+                    break;
+                }
                 payload = {static_cast<std::uint8_t>(axis.homing ? 0x00 : 0xff)};
                 break;
             case 0x24:
             case 0x25:
                 if (request.payload.size() != 1) return std::nullopt;
+                axis.home_searching_reads = 0;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
                 if (request.payload[0] == 0) {

@@ -13,7 +13,9 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <numbers>
 #include <stdexcept>
 
@@ -107,7 +109,9 @@ CgxSkyPosition cgx_encoder_position_to_sky(std::uint32_t ra_encoder, std::uint32
     const auto dec_axis_counts = signed_cgx_encoder_delta(dec_encoder, dec_home_encoder);
     const double dec_axis_degrees =
         static_cast<double>(dec_axis_counts) * 360.0 / static_cast<double>(kCgxEncoderStepsPerRevolution);
-    const CgxPointingSide side = dec_axis_counts < 0 ? CgxPointingSide::BeyondPole : CgxPointingSide::Normal;
+    // A few counts short of the Dec home is still the home pose (#2640): the side used to flip at one count.
+    const CgxPointingSide side =
+        dec_axis_counts < -kCgxHomeSideBandCounts ? CgxPointingSide::BeyondPole : CgxPointingSide::Normal;
     const double hour_angle = 6.0 + ra_axis_hours + (side == CgxPointingSide::BeyondPole ? 12.0 : 0.0);
     const double declination = h * (90.0 - std::abs(dec_axis_degrees));
     return {util::wrap_hours(local_sidereal_time_hours - hour_angle), declination, side};
@@ -136,6 +140,47 @@ std::pair<std::uint32_t, std::uint32_t> cgx_sky_position_to_encoders(
 
     return {wrap_encoder_count(static_cast<std::int64_t>(ra_home_encoder) + ra_delta_counts),
             wrap_encoder_count(static_cast<std::int64_t>(dec_home_encoder) + dec_delta_counts)};
+}
+
+std::optional<std::string> cgx_encoder_target_refusal(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                                      CgxHemisphere hemisphere, CgxPointingSide pointing_side,
+                                                      double latitude_degrees, double minimum_altitude_degrees,
+                                                      std::uint32_t ra_home_encoder, std::uint32_t dec_home_encoder) {
+    if (!std::isfinite(latitude_degrees) || latitude_degrees < -90.0 || latitude_degrees > 90.0 ||
+        !std::isfinite(minimum_altitude_degrees)) {
+        throw std::invalid_argument("Celestron CGX latitude or altitude floor is invalid");
+    }
+    const bool beyond_pole = pointing_side == CgxPointingSide::BeyondPole;
+    const auto dec_axis_counts = signed_cgx_encoder_delta(dec_encoder, dec_home_encoder);
+    if (beyond_pole ? dec_axis_counts > kCgxHomeSideBandCounts : dec_axis_counts < -kCgxHomeSideBandCounts) {
+        return std::string("the Dec axis target is past the pole for the ") + (beyond_pole ? "BeyondPole" : "Normal") +
+               " pointing side";
+    }
+    constexpr double kHoursPerCount = 24.0 / static_cast<double>(kCgxEncoderStepsPerRevolution);
+    // The RA axis offset from home in hours, the sign as cgx_encoder_position_to_sky() reads it; one count of slack.
+    const double ra_axis_hours = hemisphere_sign(hemisphere) *
+                                 static_cast<double>(signed_cgx_encoder_delta(ra_encoder, ra_home_encoder)) *
+                                 kHoursPerCount;
+    if (std::abs(ra_axis_hours) > 6.0 + kHoursPerCount) {
+        return "the RA axis target is past the meridian limit (" + std::to_string(ra_axis_hours) +
+               " h from the counterweight-down home)";
+    }
+    const double hour_angle = 6.0 + ra_axis_hours + (beyond_pole ? 12.0 : 0.0);
+    const double dec_axis_degrees =
+        static_cast<double>(dec_axis_counts) * 360.0 / static_cast<double>(kCgxEncoderStepsPerRevolution);
+    const double declination = hemisphere_sign(hemisphere) * (90.0 - std::abs(dec_axis_degrees));
+    constexpr double kRadians = std::numbers::pi / 180.0;
+    const double sine = std::sin(declination * kRadians) * std::sin(latitude_degrees * kRadians) +
+                        std::cos(declination * kRadians) * std::cos(latitude_degrees * kRadians) *
+                            std::cos(hour_angle * 15.0 * kRadians);
+    const double altitude = std::asin(std::clamp(sine, -1.0, 1.0)) / kRadians;
+    if (altitude < minimum_altitude_degrees) {
+        char text[96];
+        std::snprintf(text, sizeof text, "the target pose is at altitude %.1f deg, below the %.1f deg floor", altitude,
+                      minimum_altitude_degrees);
+        return std::string(text);
+    }
+    return std::nullopt;
 }
 
 }  // namespace alpacacore::vendor::celestron
