@@ -89,6 +89,8 @@ struct Handset {
     std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
+    // #2412: non-zero, each `e` moves RA on by this many counts first: a mount that keeps moving through any stop.
+    std::atomic<uint32_t> ra_drift{0};
 };
 
 std::string position_reply(const Handset& st) {
@@ -110,6 +112,7 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'V':
             return "042A00#";
         case 'e':
+            st.ra_counts.fetch_add(st.ra_drift.load());
             return position_reply(st);
         case 'r':  // "r" + 6 hex + "00" + "," + 6 hex + "00": the handset lands exactly on the aim
             if (chunk.size() < 18) return "";
@@ -1578,4 +1581,34 @@ TEST_CASE("SynScan findhomeissensorsearch is false", "[synscan][telescope][findh
     CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
     require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
                          alpacacore::AlpacaError::NotConnected);
+}
+
+// #2412 (#2652 review): the relink stop is verified like AbortSlew's: a mount still moving after 3 stops fails the
+// Connect, and the record stays for the next one.
+TEST_CASE("SynScan Link - a relink stop the mount ignores fails the Connect after 3 stops",
+          "[synscan][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.handset->unplug();
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    rig.st->ra_drift.store(1000);  // about 77 arcsec per read: never still
+    rig.replug();
+    std::string thrown;
+    try {
+        alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });
+    } catch (const alpacacore::AlpacaException& ex) {
+        thrown = ex.what();
+    }
+    CHECK(thrown.find("AbortSlew: the mount still reports motion after 3 stops") != std::string::npos);
+    CHECK_FALSE(driver.get_connected());
+    const std::string received = rig.handset->received();
+    CHECK(std::count(received.begin(), received.end(), 'M') == 3);
+    // The record stays: a later Connect to a mount that is still sends the stops first again.
+    rig.st->ra_drift.store(0);
+    rig.replug();
+    alpacacore::test::call_stepping(rig.clock, [&] { driver.set_connected(true); });
+    REQUIRE(driver.get_connected());
+    CHECK(relink_stops_first(rig.handset->received()));
 }
