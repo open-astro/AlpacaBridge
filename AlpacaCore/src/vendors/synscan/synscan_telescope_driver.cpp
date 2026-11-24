@@ -3062,7 +3062,7 @@ private:
                         return false;
                     }
                     reads = read_stop_state();
-                    return !closing_.load();
+                    return true;
                 });
                 check_connected();
                 if (!waited || !owns() || slot_stopped(ctx)) {
