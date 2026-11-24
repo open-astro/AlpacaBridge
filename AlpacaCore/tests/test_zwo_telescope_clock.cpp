@@ -282,8 +282,8 @@ TEST_CASE("ZWO telescope clock - a synchronous slew that never settles is stoppe
         rig.advance(std::min<std::chrono::nanoseconds>(4s, left));
     }
     CHECK_FALSE(ready(slew));
-    rig.advance(1s);
-    rig.advance(1s);
+    // The poll's own 250 ms step, so the bound's stop is verified (two still reads 500 ms apart) in its first round.
+    rig.advance_until([&] { return ready(slew); }, 250ms, 3s);
     REQUIRE(ready(slew, kReal));
     try {
         slew.get();

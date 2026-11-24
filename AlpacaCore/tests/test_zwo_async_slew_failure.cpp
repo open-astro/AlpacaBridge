@@ -1800,7 +1800,8 @@ TEST_CASE("ZWO goto-safety - an async GOTO still running at the slew bound is st
     run_polls(rig, std::chrono::minutes(14) + std::chrono::seconds(56));
     CHECK(count_exact(rig.mount, ":Q") == 0);
     CHECK(read_slewing(*rig.driver) == SlewingRead::True);
-    run_polls(rig, std::chrono::seconds(8));
+    // The poll's own 250 ms step, so the stop is verified (two still reads 500 ms apart) inside its first round.
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
     REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
     std::string message;
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
@@ -2000,7 +2001,8 @@ TEST_CASE("ZWO goto-safety - the slew bound's :Q is checked and sent again while
     rig.mount.ignore_stops(ignored);
     run_polls(rig, std::chrono::minutes(15) + std::chrono::seconds(4));
     REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") >= 1; }, 5000));
-    run_polls(rig, std::chrono::seconds(4), std::chrono::seconds(1));
+    // The poll's own 250 ms step: the shared verifier needs two still reads 500 ms apart within a 1 s round.
+    run_polls(rig, std::chrono::seconds(4), std::chrono::milliseconds(250));
     std::string message;
     if (ignored == 1) {
         CHECK(count_exact(rig.mount, ":Q") == 2);

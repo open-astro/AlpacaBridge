@@ -3135,6 +3135,7 @@ private:
         last_slew_error_.clear();
         park_failed_ = false;
         abort_stops_sent_ = 0;  // a newer command or a connect owns the motion: no AbortSlew is verified any more
+        bound_stop_.reset();    // nor the slew bound's stop
         home_command_active_ = false;  // FindHome sets it again after its own clear
         ++slew_error_epoch_;
         write_frame_locked();
@@ -3207,13 +3208,42 @@ private:
     // #2408 (#2396 AB-4, AB-8, AB-9): run by the poll loop after each poll, so each bound holds while no client polls.
     // It decides under mutex_, then acts under initiator_mutex_ (try_lock: a held lock waits for the next poll), the
     // lock every motion initiator holds, after deciding again: a command that came in between owns the motion.
-    enum class BoundAction : std::uint8_t { None, GotoOverdue, AxisOverdue, AbortResend, AbortFailed };
+    enum class BoundAction : std::uint8_t {
+        None,
+        GotoOverdue,
+        AxisOverdue,
+        AbortResend,
+        AbortFailed,
+        BoundStopResend,
+        BoundStopFailed
+    };
 
     BoundAction decide_bound_locked(int& axis) {
         const auto now = clock_.now();
         if (goto_active_ && !goto_setup_pending_ && goto_claim_ != 0 && goto_bound_claim_ == goto_claim_ &&
             goto_accepted_at_ && now - *goto_accepted_at_ >= kDefaultSlewTimeout) {
             return BoundAction::GotoOverdue;
+        }
+        if (bound_stop_) {
+            std::optional<util::MotionStatusReading> status;
+            if (cached_status_)
+                status = util::MotionStatusReading{!cached_status_->stop_or_tracking, last_mandatory_at_};
+            std::optional<util::PositionReading> position;
+            if (cached_equatorial_) {
+                position = util::PositionReading{{cached_equatorial_->ra_hours, cached_equatorial_->dec_degrees},
+                                                 cached_equatorial_at_};
+            }
+            switch (bound_stop_->feed(now, status, position)) {
+                case util::StopStep::Verified:
+                    bound_stop_.reset();
+                    break;
+                case util::StopStep::Resend:
+                    return BoundAction::BoundStopResend;
+                case util::StopStep::Failed:
+                    return BoundAction::BoundStopFailed;
+                case util::StopStep::Wait:
+                    break;
+            }
         }
         for (int a = 0; a < 2; ++a) {
             if (manual_axis_slewing_[a] && now - axis_move_renewed_at_[a] >= kMaxMoveAxisDuration) {
@@ -3259,9 +3289,7 @@ private:
                     protocol_.abort_motion();
                     std::lock_guard<std::mutex> lock(mutex_);
                     goto_accepted_at_.reset();  // this GOTO's bound is spent
-                    // Checked and sent again like AbortSlew's stop (#2408).
-                    abort_stops_sent_ = 1;
-                    abort_verify_at_ = clock_.now() + kAbortVerifyInterval;
+                    bound_stop_.emplace(clock_.now());  // #2408: checked and sent again (util::StopVerifier)
                     last_slew_error_ =
                         "The slew did not end within " +
                         std::to_string(std::chrono::duration_cast<std::chrono::minutes>(kDefaultSlewTimeout).count()) +
@@ -3302,6 +3330,21 @@ private:
                     ++abort_stops_sent_;
                     abort_verify_at_ = clock_.now() + kAbortVerifyInterval;
                     ALPACA_LOG_WARN("ZWO", "AbortSlew: the mount still reports motion; sending :Q again");
+                    return;
+                }
+                case BoundAction::BoundStopResend: {
+                    protocol_.abort_motion();
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (bound_stop_) bound_stop_->stop_resent(clock_.now());
+                    ALPACA_LOG_WARN("ZWO", "Slew bound: the mount still reports motion; sending :Q again");
+                    return;
+                }
+                case BoundAction::BoundStopFailed: {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    bound_stop_.reset();
+                    last_slew_error_ = util::kStopNotVerifiedText;
+                    write_frame_locked();
+                    ALPACA_LOG_ERROR("ZWO", last_slew_error_);
                     return;
                 }
                 case BoundAction::AbortFailed: {
@@ -3603,6 +3646,8 @@ private:
     std::array<std::chrono::steady_clock::time_point, 2> axis_move_renewed_at_{};
     // The ":Q" sent by the AbortSlew being verified (0 while none is) and when the next check is due.
     int abort_stops_sent_ = 0;
+    // The slew bound's ":Q", checked and resent on the poll (#2408); empty when none is being verified.
+    std::optional<util::StopVerifier> bound_stop_;
     std::chrono::steady_clock::time_point abort_verify_at_{};
     // A link that dropped while a GOTO or a MoveAxis ran: the next connect stops the mount first (#2396 AB-9).
     mutable bool relink_stop_pending_ = false;
