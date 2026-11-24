@@ -76,6 +76,10 @@ struct FakeSynScanState {
     std::atomic<bool> goto_hangs{false};
     std::atomic<bool> goto_cancelled{false};
     std::atomic<int> cancel_count{0};
+    // #2412: this many cancels ('M') are answered but ignored, so a GOTO keeps running through them.
+    std::atomic<int> ignore_cancels{0};
+    // #2412: a GOTO is answered but never starts: the handset never reports it in progress.
+    std::atomic<bool> goto_ignored{false};
     std::mutex landed_mutex;
     std::string landed;
     // Runs on the server thread before each reply (unset: nothing), so a case can act while a command is in flight.
@@ -99,7 +103,7 @@ struct FakeSynScanState {
     }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
-        if (goto_count.load() == 0) return false;
+        if (goto_count.load() == 0 || goto_ignored.load()) return false;
         if (goto_hangs.load()) return !goto_cancelled.load();
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return !goto_stopped.load() && now() - started < kGotoDuration;
@@ -120,7 +124,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R' || chunk[0] == 'W' ||
-            chunk[0] == 'H') {
+            chunk[0] == 'H' || chunk[0] == 's' || chunk[0] == 'S') {
             st->record(chunk);
         }
         if (chunk[0] == 'T' && st->reject_tracking.load()) return "";
@@ -147,6 +151,12 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                     std::lock_guard<std::mutex> lock(st->landed_mutex);
                     st->landed = chunk.substr(1, 17) + "#";
                 }
+                if (chunk[0] == 'R' && chunk.size() >= 10 && st->land_on_goto.load()) {
+                    // A 16-bit GOTO lands on its aim too; 'E' reads the last four digits before the comma and the
+                    // first four after it.
+                    std::lock_guard<std::mutex> lock(st->landed_mutex);
+                    st->landed = "0000" + chunk.substr(1, 4) + "," + chunk.substr(6, 4) + "0000#";
+                }
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_stopped.store(false);
                 st->goto_cancelled.store(false);
@@ -160,8 +170,12 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 }
                 return "#";
             case 'M':  // cancel goto
-                st->goto_cancelled.store(true);
                 st->cancel_count.fetch_add(1);
+                if (st->ignore_cancels.load() > 0) {
+                    st->ignore_cancels.fetch_sub(1);
+                    return "#";
+                }
+                st->goto_cancelled.store(true);
                 return "#";
             case 'P':  // passthrough
                 // A variable-rate move on the RA motor replaces tracking on the handset, and so does its stop.
@@ -1794,4 +1808,139 @@ TEST_CASE("SynScan MoveAxis - a renewal that lands while the bound's stop is on 
     rig.advance(std::chrono::seconds(61));  // the renewal's own 60 s
     CHECK(rig.stops(kRaMotor) == stops + kStopCommands);
     CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
+}
+
+// #2412 follow-up: the verified AbortSlew, the GOTO that never starts, the 16-bit (V3) landing check and the Sync
+// bound (util/motion_guards.h, #2405).
+namespace {
+
+constexpr const char* kStopNotVerified = "AbortSlew: the mount still reports motion after 3 stops";
+
+// A GOTO under way on the fake clock: the handset reports it in progress until a cancel it does not ignore.
+std::unique_ptr<alpacacore::TelescopeDriver> start_hanging_goto(const std::shared_ptr<FakeSynScanState>& st,
+                                                                alpacacore::test::FakeMountServer& server,
+                                                                alpacacore::test::FakeTaskClock& clock) {
+    auto driver = connect_with_hanging_goto(st, server, clock);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    return driver;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> make_v3_driver(int port, alpacacore::util::TaskClock& clock) {
+    return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V3, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan AbortSlew - a stop the mount ignores is resent and fails after 3 stops",
+          "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(st, server, clock);
+    st->ignore_cancels.store(100);
+
+    std::string thrown;
+    int thrown_code = 0;
+    try {
+        run_virtual(clock, [&] { driver->abort_slew(); });
+    } catch (const alpacacore::AlpacaException& ex) {
+        thrown = ex.what();
+        thrown_code = ex.error_code();
+    }
+    CHECK(thrown_code == alpacacore::AlpacaError::DriverException);
+    CHECK(thrown == kStopNotVerified);
+    CHECK(st->cancel_count.load() == 3);  // the stop and two resends, then no more
+    CHECK(st->goto_in_progress());
+    // Slewing raises it: the mount may still be moving.
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == kStopNotVerified);
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan AbortSlew - a stop lost on the wire is resent and verifies", "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(st, server, clock);
+    st->ignore_cancels.store(1);
+
+    run_virtual(clock, [&] { driver->abort_slew(); });
+    CHECK(st->cancel_count.load() == 2);  // the first stop did not take; the resend did
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a GOTO the mount never starts fails with a stop and no repeat GOTO",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    st->goto_ignored.store(true);
+    st->land_on_goto.store(false);
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("the mount never started") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);    // not repeated as a far miss (#1105): it never ran
+    CHECK(st->cancel_count.load() >= 1);  // and stopped all the same
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan V3 - a 16-bit GOTO that comes to rest far from its target fails",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    st->land_on_goto.store(false);  // the GOTO runs its 1.5 s and the position never moves
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_v3_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("from the target") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan Sync - a Sync more than 5 degrees from the mount's position is refused",
+          "[synscan][telescope][goto-safety]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const double ra = driver->get_right_ascension();
+    const double dec = driver->get_declination();
+    REQUIRE(dec < 80.0);
+
+    require_alpaca_error([&] { driver->sync_to_coordinates(ra, dec + 6.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(st->command_count('s') == 0);  // nothing sent
+    CHECK(std::abs(driver->get_declination() - dec) < 0.01);
+
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(ra, dec + 4.0));  // within the bound
+    CHECK(st->command_count('s') == 1);
+    driver->set_connected(false);
 }
