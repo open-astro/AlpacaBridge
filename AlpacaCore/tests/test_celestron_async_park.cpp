@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "celestron_landing_model.h"
 #include "concurrency_stress.h"
 #include "driver_rig.h"
 #include "fake_mount_server.h"
@@ -114,6 +115,7 @@ struct FakeCelestronState {
     }
     std::mutex goto_text_m;
     std::string last_goto_text;
+    alpacacore::test::CelestronLanding landing;
     void note_goto(const std::string& text) {
         goto_requests.fetch_add(1);
         std::lock_guard<std::mutex> lock(goto_text_m);
@@ -174,7 +176,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 if (const int hold = st->e_hold_ms.exchange(0); hold > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
                 }
-                return st->pos_variant.load() == 0 ? "12AB0500,20000500#"
+                return st->pos_variant.load() == 0 ? st->landing.position() + "#"
                                                    : "32AB0500,20000500#";  // parseable 16/24-bit position pair
             case 'r':
             case 'R':
@@ -186,6 +188,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                     return "";
                 }
                 if (st->reject_goto.load()) return "";
+                st->landing.land(chunk);  // #2409: the reported position moves to the accepted GOTO's target
                 st->hold_goto();
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_seen.store(true);
@@ -246,6 +249,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                         return "";
                     }
                     if (st->reject_goto.load()) return "";
+                    st->landing.land(chunk);  // #2409: a flip's motor GOTO pair moves the reported position too
                     st->hold_goto();
                     st->goto_started.store(st->now().time_since_epoch().count());
                     st->goto_seen.store(true);
@@ -319,6 +323,22 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
     return pred();
 }
 
+// #2409: after AbortSlew of a moving mount, Slewing holds true while the verified stop runs on the task clock; steps
+// the clock, each step waiting for the status poll and the stop check on it, until Slewing reads false or throws (the
+// case then checks which).
+bool abort_verified(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
+    return advance_until(
+        clock,
+        [&] {
+            try {
+                return !driver.get_slewing();
+            } catch (const std::exception&) {
+                return true;
+            }
+        },
+        2, std::chrono::milliseconds(100));
+}
+
 }  // namespace
 
 TEST_CASE("Celestron async - Park returns immediately, AtPark flips when the slew ends",
@@ -375,7 +395,8 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE(driver->get_slewing());
     driver->unpark();
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(abort_verified(clock, *driver));  // #2409: Slewing holds until the Unpark's stop verifies
+    REQUIRE_FALSE(driver->get_slewing());
     // The cancelled park task must never flip AtPark afterwards.
     // Virtual time well past the GOTO and the start grace.
     CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, 1, std::chrono::milliseconds(250), 12));
@@ -402,7 +423,8 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE(driver->get_slewing());  // the park is still in flight
     driver->abort_slew();            // ...but AbortSlew may cancel it
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(abort_verified(clock, *driver));
+    REQUIRE_FALSE(driver->get_slewing());
 
     // Disconnect with a park in flight joins the task cleanly.
     driver->park();
@@ -1111,6 +1133,7 @@ void park_dispatch_held_then(const std::function<void(alpacacore::TelescopeDrive
     REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
     CHECK(rig.st->goto_count.load() == 0);
     CHECK_FALSE(rig.driver->get_at_park());
+    (void)abort_verified(rig.clock, *rig.driver);  // an AbortSlew takeover holds Slewing until its stop verifies
     bool slewing = true;
     CHECK_NOTHROW(slewing = rig.driver->get_slewing());  // a stored error would make this throw
     CHECK_FALSE(slewing);
@@ -1216,6 +1239,7 @@ JHeldOutcome park_held_in_j_read_then(const std::function<void(alpacacore::Teles
     REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
     out.goto_count = rig.st->goto_count.load();
     out.at_park = rig.driver->get_at_park();
+    (void)abort_verified(rig.clock, *rig.driver);  // an AbortSlew takeover holds Slewing until its stop verifies
     try {
         out.slewing = rig.driver->get_slewing();
     } catch (const std::exception& ex) {
@@ -1273,6 +1297,7 @@ TEST_CASE("Celestron initiator supersede - AbortSlew over a Park body in its pie
         REQUIRE_NOTHROW(rig.driver->abort_slew());
         REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
         CHECK(rig.st->goto_count.load() == 0);
+        REQUIRE(abort_verified(rig.clock, *rig.driver));  // the verified stop's reads end before the counts below
         cel::set_status_poll_paused_for_testing(*rig.driver, false);
         const int slew_done_before = rig.st->slew_done_count.load();
         const int l_before = rig.st->l_count.load();
@@ -1316,6 +1341,7 @@ void superseded_body_fails_then(const std::function<void(alpacacore::TelescopeDr
     REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 1; }, 5000));
     REQUIRE_NOTHROW(takeover(*rig.driver));  // the claim lands while the swallowed GOTO times out
     REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 8000));
+    if (expected_cancels > 0) (void)abort_verified(rig.clock, *rig.driver);  // AbortSlew's stop verifies (#2409)
     CHECK(rig.st->cancel_goto_count.load() == expected_cancels);
     bool slewing = true;
     CHECK_NOTHROW(slewing = rig.driver->get_slewing());  // a stored failure would make this throw
@@ -1434,6 +1460,7 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during an async slew stops both 
     CHECK(rig.st->cancel_goto_count.load() == cancels + 1);
     CHECK(zero_rate_stops(*rig.st, 0) > ra_stops);
     CHECK(zero_rate_stops(*rig.st, 1) > dec_stops);
+    CHECK(abort_verified(rig.clock, *rig.driver));  // #2409: Slewing holds until the stop verifies
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1476,6 +1503,7 @@ TEST_CASE("Celestron MoveAxis - a one-axis stop during a blocking slew stops bot
     slewer.join();
     REQUIRE(finished);
     CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+    CHECK(abort_verified(clock, *driver));  // #2409: Slewing holds until the stop verifies
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
