@@ -1283,7 +1283,7 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
     auto first = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
     CHECK(advance_until(clock, [&] { return ready(first); }));
     CHECK_NOTHROW(first.get());
-    CHECK(polls->load() == 2);
+    CHECK(polls->load() == 3);  // the failure, the completion, and the one asked with the landing's second read
     CHECK(clock.now() - start == std::chrono::seconds(2));
 
     // Persistent failure: the error names the poll failure, not the timeout, and

@@ -1360,8 +1360,7 @@ private:
         slew_stop_reason_ =
             "The slew did not end within " +
             std::to_string(std::chrono::duration_cast<std::chrono::seconds>(kMaxAsyncSlewDuration).count()) + " s";
-        landing_started_ = false;
-        slew_lands_ = true;
+        landing_ = util::LandingGate(slew_target_, clock_.now());  // each slew lands on its own target
         drop_poll_in_flight_locked();
     }
 
@@ -1553,12 +1552,11 @@ private:
                 slew_poll_error_code_ = slew_error_code;
             } else {
                 slew_poll_error_.clear();
-                if (slew_complete && slew_lands_) {
+                // A slew the driver had to stop (a stored failure) ends where the stop left it: no landing to check.
+                if (slew_complete && motion_error_.empty()) {
                     land_async_slew_locked(frame);
                 } else if (slew_complete) {
-                    slewing_cached_ = false;  // a stopped slew ends where the stop left it: no landing to check
-                } else {
-                    landing_started_ = false;  // moving again: the landing starts over at the next slew end
+                    slewing_cached_ = false;
                 }
             }
         }
@@ -1569,18 +1567,12 @@ private:
     // slew end. A mount at rest more than kLandingFarMissArcsec from its target did not land: Slewing raises it.
     // Called by the poll under mutex_, with the frame sampled after the IsSlewComplete that read true.
     void land_async_slew_locked(const PolledFrame& frame) {
-        const auto now = clock_.now();
-        if (!landing_started_) {
-            landing_ = util::LandingGate(slew_target_, now);
-            landing_started_ = true;
-        }
         const util::MountPosition at{frame.ra_hours, frame.dec_degrees};
-        const auto landing = landing_.feed(util::PositionReading{at, now});
+        const auto landing = landing_.feed(util::PositionReading{at, clock_.now()});
         if (landing == util::Landing::Settling) {
             return;
         }
         slewing_cached_ = false;
-        landing_started_ = false;
         if (landing == util::Landing::FarMiss) {
             motion_error_ = far_miss_text("SlewToCoordinatesAsync", at, slew_target_);
             ALPACA_LOG_WARN("Bisque", motion_error_);
@@ -1769,8 +1761,7 @@ private:
         constexpr int kMaxConsecutivePollFailures = 3;
         int consecutive_failures = 0;
         auto start = clock_.now();
-        bool slew_ended = false;
-        util::LandingGate landing(target, start);
+        util::LandingGate landing(target, start);  // fed only the reads that follow TheSkyX's slew end
         while (true) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
@@ -1778,12 +1769,10 @@ private:
             }
             int failure_code = AlpacaError::DriverException;
             std::string failure_what;
-            bool complete = slew_ended;
+            bool complete = false;
             lock.unlock();
             try {
-                if (!slew_ended) {
-                    complete = BisqueProtocolWrapper::instance().is_slew_complete();
-                }
+                complete = BisqueProtocolWrapper::instance().is_slew_complete();
                 consecutive_failures = 0;
             } catch (const AlpacaException& ex) {
                 // A racing disconnect stays NotConnected.
@@ -1801,10 +1790,6 @@ private:
                 ++consecutive_failures;
             }
             if (complete) {
-                if (!slew_ended) {
-                    slew_ended = true;
-                    landing = util::LandingGate(target, clock_.now());
-                }
                 // The position read after the stop is published first; Slewing clears in the next mutex_ hold.
                 const auto reading = publish_measurement();
                 const auto outcome = landing.feed(reading);
@@ -1812,11 +1797,7 @@ private:
                     clock_.sleep_for(util::kStillSampleSpacing);
                     lock.lock();
                     check_connected();
-                    if (epoch == slew_epoch_) {
-                        continue;
-                    }
-                    // A retarget or an abort owns the mount now; fall through to its outcome below.
-                    lock.unlock();
+                    continue;
                 }
                 run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
                 lock.lock();
@@ -1919,7 +1900,6 @@ private:
     void restore_motion_after_failed_stop_locked(bool slew_active, const bool (&axes_active)[2]) {
         if (slew_active) {
             slewing_cached_ = true;
-            slew_lands_ = false;
         }
         for (int axis = 0; axis < 2; ++axis) {
             if (axes_active[axis]) {
@@ -2044,19 +2024,18 @@ private:
     // moving, so Slewing keeps reporting it. Under mutex_.
     void retry_failed_slew_stop_locked(const std::string& reason) {
         slewing_cached_ = true;
-        slew_lands_ = false;
         slew_deadline_ = clock_.now() + kFailedStopRetry;
         slew_stop_reason_ = reason;
     }
 
     // Park's 120 s deadline (#2410): sends the verified Abort() (TheSkyX's Park docs monitor a park with
-    // IsSlewComplete) and throws. A newer Park, an AbortSlew or an Unpark since (`epoch`, parking_) owns the mount
-    // and is left alone. Call with no driver lock held.
+    // IsSlewComplete) and throws. A newer Park, an AbortSlew, an Unpark or a disconnect since (`epoch`, parking_)
+    // owns the mount and is left alone. Call with no driver lock held.
     [[noreturn]] void stop_timed_out_park(uint64_t epoch) {
         static const std::string kTimedOut = "Park timed out after 120 seconds";
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // order: initiator_mutex_, the wrapper, mutex_
         std::unique_lock<std::mutex> lock(mutex_);
-        if (epoch != park_epoch_ || !parking_ || !connected_) {
+        if (epoch != park_epoch_ || !parking_) {
             throw AlpacaException(kTimedOut);
         }
         const uint64_t session = session_;
@@ -2117,7 +2096,6 @@ private:
                 ALPACA_LOG_INFO("Bisque", motion_error_);
             } else {
                 slew_deadline_ = now + kFailedStopRetry;
-                slew_lands_ = false;
                 motion_error_ = what + ", and stopping it failed: " + failure;
                 ALPACA_LOG_WARN("Bisque", motion_error_);
             }
@@ -2253,13 +2231,10 @@ private:
                                                                    util::TaskClock::clock::time_point::max()};
     std::string motion_error_;
     // #2410, under mutex_: the target of the slew in flight, why its stop is owed (the poll's slew bound names it),
-    // and the async slew's landing gate, started at the first IsSlewComplete that reads true.
+    // and the async slew's landing gate, armed by each slew start and fed after IsSlewComplete reads true.
     util::MountPosition slew_target_{0.0, 0.0};
     std::string slew_stop_reason_;
     util::LandingGate landing_{{0.0, 0.0}, util::MotionTime{}};
-    bool landing_started_ = false;
-    // False once the driver had to stop the slew: its end is not a landing.
-    bool slew_lands_ = false;
     uint64_t session_ = 0;  // bumped by every connect and disconnect: a stop's late write checks it
     bool relink_abort_pending_ = false;
     bool relink_move_stop_pending_ = false;
