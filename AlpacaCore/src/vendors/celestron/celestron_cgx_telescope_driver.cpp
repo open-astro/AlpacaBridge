@@ -1591,10 +1591,14 @@ bool CelestronCgxTelescopeDriver::wait_for_slew_completion(util::OperationContex
             const bool done = protocol_.is_axis_slew_done(axis);
             all_done = all_done && done;
             if (done || !target.has_value()) continue;
-            const std::int32_t distance =
-                std::abs(signed_cgx_encoder_delta(protocol_.get_axis_position(axis), target.value()));
+            const std::uint32_t position = protocol_.get_axis_position(axis);
+            const std::int32_t distance = std::abs(signed_cgx_encoder_delta(position, target.value()));
             Watch& axis_watch = watch[index];
             if (!axis_watch.first.has_value()) {
+                ALPACA_LOG_DEBUG("Celestron CGX", std::string("GOTO leg ") + (index == 0 ? "RA" : "Dec") +
+                                                      " first read: position=" + std::to_string(position) +
+                                                      " target=" + std::to_string(target.value()) +
+                                                      " shorter-way distance=" + std::to_string(distance));
                 axis_watch.first = distance;
                 axis_watch.base = distance;
                 axis_watch.closing = !may_coast;
@@ -2558,6 +2562,10 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                     return;
                 }
                 if (!run_motion_stage(context, claim, [this, park_after] {
+                        // #2640: the controller's own counts at the sensor, before the labels overwrite them. Where
+                        // its GOTO planner wraps may be fixed in this native frame. DEBUG only: two extra reads.
+                        if (logging::get_log_level() <= logging::LogLevel::Debug)
+                            ALPACA_LOG_DEBUG("Celestron CGX", "Home search done, native counts: " + home_axes_status());
                         const auto reference_generation = protocol_.session_generation();
                         protocol_.set_axis_position(CgxAxis::RightAscension, kRaHomeEncoder);
                         protocol_.set_axis_position(CgxAxis::Declination, kDecHomeEncoder);
