@@ -106,7 +106,10 @@ jobs:
     needs: check
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    # The Release compile of AlpacaHTTP/tests/test_routing.cpp is the critical
+    # path: 16-20 min through 2026-11-22, 28 min on 2026-11-23, when the job
+    # hit the old 40 min bound with 4242 of 5775 tests passed (run 45176256685).
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
