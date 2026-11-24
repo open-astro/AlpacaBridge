@@ -2431,11 +2431,28 @@ public:
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
-        // #2409: a handset mount bounds every Sync (the #2409 Decisions (2026-11-24)): one that would move the pointing
-        // more than util::kMaxSyncOffsetDegrees from where the mount reports it is refused before anything is sent.
-        const auto [current_ra, current_dec] = measure_equatorial(lock);
-        check_connected();
-        util::check_sync_bound("SyncToCoordinates", {current_ra, current_dec}, {ra, dec}, util::kMaxSyncOffsetDegrees);
+        // #2409: a Sync that would move the pointing more than util::kMaxSyncOffsetDegrees from where the mount reports
+        // it is refused before anything is sent. Exception (the #2409 Decisions (2026-11-24)): a mount with no
+        // reference (no hand controller, so arbitrary motor counts, or a hand controller that reports itself unaligned)
+        // cannot slew until a Sync opens check_slew_safety(), so its first Sync of the session sets the reference and
+        // is not bounded. A failed alignment query bounds the Sync.
+        bool sets_reference = false;
+        if (!sync_completed_this_session_) {
+            sets_reference = !hc_available_ || without_lock(lock, [] {
+                try {
+                    return !CelestronProtocolWrapper::instance().is_aligned();
+                } catch (const std::exception&) {
+                    return false;
+                }
+            });
+            check_connected();
+        }
+        if (!sets_reference) {
+            const auto [current_ra, current_dec] = measure_equatorial(lock);
+            check_connected();
+            util::check_sync_bound("SyncToCoordinates", {current_ra, current_dec}, {ra, dec},
+                                   util::kMaxSyncOffsetDegrees);
+        }
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {
