@@ -3769,7 +3769,6 @@ private:
     // Call without mutex_ held: the poll body takes mutex_.
     void stop_status_poller() { status_poll_.cancel_all_and_join(); }
 
-
 public:
     // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
     // without a tick started before the pause adding to them. The pause survives a relink: set_connected(true) does
