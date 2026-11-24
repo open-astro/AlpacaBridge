@@ -109,19 +109,18 @@ TEST_CASE("Celestron CGX geometry - encoder tracking sign keeps RA fixed in both
     using alpacacore::vendor::celestron::CgxHemisphere;
     using alpacacore::vendor::celestron::kCgxEncoderStepsPerRevolution;
 
-    constexpr auto home = kCgxEncoderStepsPerRevolution / 4;
+    constexpr auto home = alpacacore::vendor::celestron::kCgxRaHomeEncoder;
+    constexpr auto dec_home = alpacacore::vendor::celestron::kCgxDecHomeEncoder;
     constexpr double lst_before = 8.0;
     constexpr double elapsed_hours = 0.01;
     const auto encoder_delta = static_cast<std::uint32_t>(
         std::llround(elapsed_hours * static_cast<double>(kCgxEncoderStepsPerRevolution) / 24.0));
-    const auto north_before =
-        cgx_encoder_position_to_sky(home, kCgxEncoderStepsPerRevolution / 2, lst_before, CgxHemisphere::North);
-    const auto north_after = cgx_encoder_position_to_sky(home + encoder_delta, kCgxEncoderStepsPerRevolution / 2,
-                                                         lst_before + elapsed_hours, CgxHemisphere::North);
-    const auto south_before =
-        cgx_encoder_position_to_sky(home, kCgxEncoderStepsPerRevolution / 2, lst_before, CgxHemisphere::South);
-    const auto south_after = cgx_encoder_position_to_sky(home - encoder_delta, kCgxEncoderStepsPerRevolution / 2,
-                                                         lst_before + elapsed_hours, CgxHemisphere::South);
+    const auto north_before = cgx_encoder_position_to_sky(home, dec_home, lst_before, CgxHemisphere::North);
+    const auto north_after =
+        cgx_encoder_position_to_sky(home + encoder_delta, dec_home, lst_before + elapsed_hours, CgxHemisphere::North);
+    const auto south_before = cgx_encoder_position_to_sky(home, dec_home, lst_before, CgxHemisphere::South);
+    const auto south_after =
+        cgx_encoder_position_to_sky(home - encoder_delta, dec_home, lst_before + elapsed_hours, CgxHemisphere::South);
 
     ALPACA_REQUIRE_APPROX(north_after.right_ascension_hours, north_before.right_ascension_hours);
     ALPACA_REQUIRE_APPROX(south_after.right_ascension_hours, south_before.right_ascension_hours);

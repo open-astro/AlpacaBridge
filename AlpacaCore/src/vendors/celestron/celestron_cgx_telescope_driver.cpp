@@ -2560,11 +2560,13 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                     return;
                 }
                 if (!run_motion_stage(context, claim, [this, park_after] {
-                        // #2640: the controller's own counts at the sensor, before the labels overwrite them. Where
-                        // its GOTO planner wraps may be fixed in this native frame. DEBUG only: two extra reads.
+                        // The generation comes first: a failed DEBUG read below changes it, and the check after
+                        // the label writes then refuses the reference (decision 0011 rule 2).
+                        const auto reference_generation = protocol_.session_generation();
+                        // #2640: the controller's counts at the sensor, before the labels overwrite them (the search
+                        // does not reset them). DEBUG only: six extra reads.
                         if (logging::get_log_level() <= logging::LogLevel::Debug)
                             ALPACA_LOG_DEBUG("Celestron CGX", "Home search done, native counts: " + home_axes_status());
-                        const auto reference_generation = protocol_.session_generation();
                         protocol_.set_axis_position(CgxAxis::RightAscension, kCgxRaHomeEncoder);
                         protocol_.set_axis_position(CgxAxis::Declination, kCgxDecHomeEncoder);
                         std::unique_lock<std::mutex> lock(mutex_);

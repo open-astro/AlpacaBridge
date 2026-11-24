@@ -255,6 +255,8 @@ public:
         pty_.sever();
     }
 
+    // A label set here keeps the Dec GOTO seam at 0xC00000 (set_goto_seam()): a GOTO from it across that label goes
+    // the long way round.
     void set_encoder_position(std::uint8_t axis, std::uint32_t position) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         AxisState& state = axes_[axis_index(axis)];

@@ -96,10 +96,11 @@ double cgx_local_sidereal_time_hours(std::chrono::system_clock::time_point utc, 
 CgxSkyPosition cgx_encoder_position_to_sky(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
                                            double local_sidereal_time_hours, CgxHemisphere hemisphere,
                                            std::uint32_t ra_home_encoder, std::uint32_t dec_home_encoder) {
-    // The quarter-turn RA and half-turn Dec home references match the
-    // reference driver's northern model. Southern geometry is its polar
-    // mirror; confirm encoder direction and switch orientation on a southern
-    // CGX before claiming hardware support there.
+    // Both home references are a quarter turn (kCgxRaHomeEncoder,
+    // kCgxDecHomeEncoder): with Dec at a half turn no GOTO on the Normal side
+    // crossed the equator (#2640). Southern geometry is the northern model's
+    // polar mirror; confirm encoder direction and switch orientation on a
+    // southern CGX before claiming hardware support there.
     if (!std::isfinite(local_sidereal_time_hours)) {
         throw std::invalid_argument("Celestron CGX local sidereal time must be finite");
     }
