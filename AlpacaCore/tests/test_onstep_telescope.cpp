@@ -1631,11 +1631,20 @@ struct ScriptedOnStep {
     std::string hr_reply = "1";     // :hR# unpark accepted
     std::string cm_reply = "N/A#";  // :CM# synced
     std::string ge_reply = "00#";   // :GE# last command error
+    std::string ra_reply = "12:00:00.0000#";
+    std::string dec_reply = "+45*00:00.000#";
+    int goto_reads = 0;  // :GU# shows a GOTO (tracking) on this many reads after each :MS#, then `status` again
+    int goto_reads_left = 0;
     std::vector<std::string> log;
 
     void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(mutex);
         status = s;
+    }
+    void set_position(const std::string& ra, const std::string& dec) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ra_reply = ra;
+        dec_reply = dec;
     }
     void set_ms_reply(const std::string& r) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1664,17 +1673,26 @@ struct ScriptedOnStep {
     std::string reply(const std::string& chunk) {
         std::lock_guard<std::mutex> lock(mutex);
         log.push_back(chunk);
-        if (chunk.rfind(":GU", 0) == 0) return status;
+        if (chunk.rfind(":GU", 0) == 0) {
+            if (goto_reads_left > 0) {
+                --goto_reads_left;
+                return "pEW180#";
+            }
+            return status;
+        }
         if (chunk.rfind(":ST", 0) == 0) return st_reply;
         if (chunk.rfind(":S", 0) == 0) return "1";        // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG)
-        if (chunk.rfind(":MS", 0) == 0) return ms_reply;  // bare digit, no '#'
+        if (chunk.rfind(":MS", 0) == 0) {
+            goto_reads_left = goto_reads;
+            return ms_reply;  // bare digit, no '#'
+        }
         if (chunk.rfind(":hP", 0) == 0) return "1";  // park accepted (bare digit, #1430)
         if (chunk.rfind(":hQ", 0) == 0) return hq_reply;
         if (chunk.rfind(":hR", 0) == 0) return hr_reply;
         if (chunk.rfind(":CM", 0) == 0) return cm_reply;
         if (chunk.rfind(":GE", 0) == 0) return ge_reply;
-        if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
-        if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        if (chunk.rfind(":GRa", 0) == 0) return ra_reply;
+        if (chunk.rfind(":GDe", 0) == 0) return dec_reply;
         return "0#";
     }
 };
@@ -4321,11 +4339,12 @@ TEST_CASE("OnStep Telescope Driver - a synchronous GOTO that ends far from its t
           "[onstep][telescope][unit][goto-safety]") {
     BoundedOnStep rig;
     alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*rig.driver, true);  // the wait reads :GU#
+    rig.mount->goto_reads = 4;  // the wait sees the GOTO run, then end, still at 12h +45
     bool failed = false;
     try {
         run_synchronous_slew(
             rig.clock, [&] { rig.driver->slew_to_coordinates(2.0, 20.0); },
-            [&] { rig.clock.advance(std::chrono::seconds(3)); });  // past the grace: the wait's :GU# ends it
+            [&] { rig.clock.advance(std::chrono::seconds(3)); });  // past the grace
     } catch (const alpacacore::AlpacaException& ex) {
         failed = ex.error_code() == alpacacore::AlpacaError::DriverException;
     }
@@ -4334,17 +4353,40 @@ TEST_CASE("OnStep Telescope Driver - a synchronous GOTO that ends far from its t
 }
 
 // #2406: a frame that shows no GOTO yet ends Slewing, but a GOTO the mount starts after it is still bounded.
+// The target is far from where the mount is (12h +45): a frame taken before the GOTO started is no far miss.
 TEST_CASE("OnStep Telescope Driver - a GOTO the mount starts after a frame without it keeps its bound",
           "[onstep][telescope][unit][goto-safety]") {
     BoundedOnStep rig;
-    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(12.0, 45.0));
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(2.0, 20.0));
     REQUIRE(wait_slew_done(*rig.driver, rig.clock));  // the first frame shows no GOTO yet
-    rig.mount->set_status("pEW180#");                 // the mount starts it now, and it never ends
+    CHECK(rig.mount->count(":Q#") == 0);
+    rig.mount->set_status("pEW180#");  // the mount starts it now
     rig.poll_after(std::chrono::seconds(10));
     CHECK(rig.mount->count(":Q#") == 0);
-    rig.poll_after(std::chrono::seconds(110));  // 120 s from the :MS#
-    CHECK(rig.mount->count(":Q#") == 1);
-    require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.driver->get_slewing());
+
+    SECTION("it lands on its target: nothing is stopped") {
+        rig.mount->set_position("02:00:00.0000#", "+20*00:00.000#");
+        rig.mount->set_status("NpEW180#");
+        rig.poll_after(std::chrono::seconds(1));
+        CHECK_FALSE(rig.driver->get_slewing());
+        CHECK(rig.mount->count(":Q#") == 0);
+    }
+    SECTION("it never ends: stopped at the bound") {
+        rig.poll_after(std::chrono::seconds(110));  // 120 s from the :MS#
+        CHECK(rig.mount->count(":Q#") == 1);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    }
+}
+
+TEST_CASE("OnStep Telescope Driver - a synchronous GOTO the mount has not started yet is no far miss",
+          "[onstep][telescope][unit][goto-safety]") {
+    BoundedOnStep rig;
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*rig.driver, true);  // the wait reads :GU#
+    REQUIRE_NOTHROW(run_synchronous_slew(
+        rig.clock, [&] { rig.driver->slew_to_coordinates(2.0, 20.0); },
+        [&] { rig.clock.advance(std::chrono::seconds(3)); }));  // past the grace: no GOTO shown yet
+    CHECK(rig.mount->count(":Q#") == 0);
 }
 
 // #2406: the 120 s bound fires on a poll tick whose :GU# fails too.
