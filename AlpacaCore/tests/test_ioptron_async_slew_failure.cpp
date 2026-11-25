@@ -82,6 +82,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
+using alpacacore::test::advance_polling;
 using alpacacore::test::age_past_connect_grace;
 using alpacacore::test::require_alpaca_error;
 
@@ -204,7 +205,7 @@ bool advance_until_not_slewing(alpacacore::TelescopeDriver& driver, alpacacore::
     const auto deadline = clock.now() + std::chrono::seconds(20);
     while (read_slewing(driver) != SlewingRead::False) {
         if (clock.now() >= deadline) return false;
-        clock.advance(std::chrono::milliseconds(100));
+        advance_polling(clock, std::chrono::milliseconds(100));
     }
     return true;
 }
@@ -266,6 +267,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
         0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, 45.0, -122.0, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -512,8 +514,11 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
 namespace {
 
 // Runs `call` on another thread and steps the fake clock until it returns, so a synchronous slew (which waits on the
-// task clock) ends instead of hanging. Returns what it threw, or null.
-std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& call) {
+// task clock) ends instead of hanging. Each step lets the poll finish its tick, and `on_step` (if any) sees the virtual
+// time stepped so far. Returns what it threw, or null.
+std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& call,
+                                      const std::function<void(std::chrono::nanoseconds)>& on_step = {}) {
+    const auto began = clock.now();
     auto done = std::async(std::launch::async, [&]() -> std::exception_ptr {
         try {
             call();
@@ -523,7 +528,8 @@ std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, co
         return nullptr;
     });
     for (int i = 0; i < 2000 && done.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready; ++i) {
-        clock.advance(std::chrono::milliseconds(500));
+        advance_polling(clock, std::chrono::milliseconds(500));
+        if (on_step) on_step(clock.now() - began);
     }
     return done.get();
 }
@@ -623,6 +629,7 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         if (initiator.alt_az) {
             mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
             age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
@@ -706,6 +713,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
     alpacacore::test::FakeTaskClock clock;
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
     mount.set_goto_reply("", /*moves=*/true);
     const int stops_before = mount.count(":Q#");
     const int status_reads = mount.count(":GLS#");
@@ -713,7 +721,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // One :GLS# before the :MS1# (was the mount already moving?) and one after it (is it moving now?).
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1 && mount.count(":GLS#") > status_reads + 1; }, 10000));
-    clock.advance(std::chrono::seconds(6));  // past the dispatch window: the mount's status decides
+    advance_polling(clock, std::chrono::seconds(6));  // past the dispatch window: the mount's status decides
     CHECK(read_slewing(*driver) == SlewingRead::True);
     CHECK(mount.count(":Q#") == stops_before);
     driver->abort_slew();
@@ -733,6 +741,7 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         mount.set_system_status(2);  // earlier motion still running
         mount.set_goto_reply("", /*moves=*/false);
         const int stops_before = mount.count(":Q#");
@@ -751,7 +760,7 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
             mount.set_system_status(1);  // the old motion ends
             REQUIRE(wait_until(
                 [&] {
-                    clock.advance(std::chrono::milliseconds(100));
+                    advance_polling(clock, std::chrono::milliseconds(100));
                     return read_slewing(*driver, &message) == SlewingRead::Threw;
                 },
                 10000));
@@ -871,10 +880,23 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO whose landing position canno
     alpacacore::test::FakeTaskClock clock;
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    mount.fail_position_reads_after_goto(3);
     const int stops_before = mount.count(":Q#");
 
-    const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    // The poll reads the position too, and three failed polls would latch a fault that Slewing reports before the wait
+    // reaches its landing reads. So the poll is paused and ticked by hand: once the 5 s hold is over, one tick samples
+    // the stopped mount (Slewing ends), and only then do the position reads start to fail, for the wait's own three
+    // direct reads alone.
+    alpacacore::vendor::ioptron::set_state_poll_paused_for_testing(*driver, true);
+    bool armed = false;
+    const std::exception_ptr error = run_stepping_clock(
+        clock, [&] { driver->slew_to_coordinates(5.5, 20.0); },
+        [&](std::chrono::nanoseconds stepped) {
+            if (!armed && stepped >= std::chrono::seconds(6)) {
+                armed = true;
+                alpacacore::vendor::ioptron::poll_state_now_for_testing(*driver);
+                mount.fail_next_position_reads(3);
+            }
+        });
     int code = 0;
     const std::string message = message_of(error, &code);
     CHECK(code == alpacacore::AlpacaError::DriverException);

@@ -202,6 +202,8 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_clock_sync_slot.cpp)
     # Connected takes no lock the connect holds (issue #910).
     list(APPEND TEST_SOURCES test_ioptron_getter_locks.cpp)
+    # The mount's position, Alt/Az and status are served from one polled frame (issue #2491).
+    list(APPEND TEST_SOURCES test_ioptron_polled_state.cpp)
     # AbortSlew fences the async dispatch thread (issue #768).
     list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.

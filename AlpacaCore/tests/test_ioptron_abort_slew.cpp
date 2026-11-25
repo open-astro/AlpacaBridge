@@ -147,6 +147,7 @@ TEST_CASE("iOptron AbortSlew - an aborted equatorial GOTO finishes with Tracking
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     driver->set_tracking(true);
 
     driver->slew_to_coordinates_async(6.0, 45.0);
@@ -178,6 +179,7 @@ TEST_CASE("iOptron AbortSlew - an aborted MoveAxis returns Tracking to its state
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     for (const bool before : {true, false}) {
         INFO("Tracking before MoveAxis: " << before);
@@ -207,6 +209,7 @@ TEST_CASE("iOptron AbortSlew - with no equatorial motion Tracking is not changed
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     driver->set_tracking(false);
     const int on_before = mount.count(":ST1#");
     const int off_before = mount.count(":ST0#");
@@ -230,6 +233,7 @@ TEST_CASE("iOptron AbortSlew - an aborted Alt/Az slew after an equatorial GOTO s
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     driver->set_tracking(true);
 
     // An equatorial GOTO that lands (the default fake lands at once) and is seen landing.

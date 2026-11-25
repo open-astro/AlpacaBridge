@@ -5580,6 +5580,38 @@ std::unique_ptr<SnapshotRig> snapshot_rig_synscan_telescope() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_IOPTRON
+// Recipe of test_ioptron_polled_state.cpp (make_tcp_rig): no site and no time sync on connect, so the poll is the
+// only reader the clock wakes; the loss is a mount whose reads fail, with the poll running on.
+std::unique_ptr<SnapshotRig> snapshot_rig_ioptron_telescope() {
+    namespace iop = alpacacore::vendor::ioptron;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
+    REQUIRE(mount->ok());
+    mount->set_alt_az(45.0, 180.0);
+    iop::ConnectionInfo info;
+    info.type = iop::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = mount->port();
+    rig.fake = mount;
+    rig.driver =
+        iop::create_ioptron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        iop::set_state_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, mount] {
+        mount->set_fail_reads(true);
+        iop::set_state_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    rig.tick = [driver] { iop::poll_state_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    return rig_owner;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_ONSTEP
 // The idle OnStepX of test_onstep_telescope_snapshot.cpp (SnapshotMount): tracking, no GOTO, not parked.
 std::string snapshot_onstep_reply(const std::atomic<bool>& mute, const std::string& chunk) {
@@ -5950,6 +5982,11 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #else
 #define CS3_SYNSCAN(X)
 #endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+#define CS3_IOPTRON(X) X(ioptron_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_IOPTRON(X)
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true)) X(onstep_focuser, snapshot_focuser_getters()) X(onstep_rotator, snapshot_rotator_getters()) X(onstep_switch, snapshot_switch_getters())
 #else
@@ -5976,7 +6013,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_REMOTEALPACA(X)
 #endif
 #define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
-    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_ONSTEP(X) CS3_GEMINI(X) CS3_QHY(X) \
+    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_IOPTRON(X) CS3_ONSTEP(X) CS3_GEMINI(X) CS3_QHY(X) \
         CS3_ASTROASIS(X) CS3_REMOTEALPACA(X)
 // clang-format on
 

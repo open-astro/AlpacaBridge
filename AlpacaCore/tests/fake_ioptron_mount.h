@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,6 +57,8 @@ class FakeIoptronMount {
 public:
     /// @param model_code 4-digit :MountInfo reply, e.g. "0012" (HAE16 EQ), "0025" (HEM27)
     /// @param landing_ra_error_arcsec RA offset (east positive) the mount settles at after a GOTO
+    FakeIoptronMount() : FakeIoptronMount("0036", 0.0) {}  // HAE29C; PolledRig default-constructs its fake
+
     FakeIoptronMount(std::string model_code, double landing_ra_error_arcsec)
         : model_code_(std::move(model_code)),
           landing_error_arcsec_(landing_ra_error_arcsec),
@@ -91,6 +94,35 @@ public:
 
     bool ok() const { return server_.ok(); }
     int port() const { return server_.port(); }
+
+    /// The ":MountInfo" reply for a connect that comes after this call (a rig builds its fake before the case picks a
+    /// model). Not for a mount that is already connected.
+    void set_model_code(std::string model_code) { model_code_ = std::move(model_code); }
+
+    /// The RA offset (arcsec, east positive) the next GOTO lands at, as the constructor's landing_ra_error_arcsec.
+    void set_landing_ra_error(double arcsec) { landing_error_arcsec_.store(arcsec); }
+
+    /// Every reply is held for @p delay (real time) from now on, 0 to stop. Unlike hold_next_reply() it is not spent
+    /// by one chunk and it never waits on a ConnectHoldGate, so a mount that answers slowly stays slow: a getter that
+    /// sends an exchange pays the delay, and the poll's three reads pay it three times. A reply held by
+    /// hold_next_reply() when this is called keeps its hold alone; the replies after it pay the delay.
+    void set_reply_delay(std::chrono::milliseconds delay) { reply_delay_ms_.store(static_cast<int>(delay.count())); }
+
+    /// Every reply to the command @p cmd (exactly, "#" included) is held for @p delay (real time) from now on, 0 to
+    /// stop: a mount that answers one read slowly (a ":GAC#" the driver's poll waits more than a period for) while it
+    /// answers the others at once. Replaces an earlier delay for the same command.
+    void set_command_reply_delay(std::string cmd, std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        command_delay_ms_[std::move(cmd)] = static_cast<int>(delay.count());
+    }
+
+    /// When the command @p cmd (exactly, "#" included) is received the ":GLS" system status becomes @p status, as a
+    /// firmware that reacts to it: ":ST0#" ends a wedged park at 6 (parked), ":Q#" ends a slew. The command is
+    /// still handled as before. Replaces an earlier rule for the same command.
+    void set_status_on_command(std::string cmd, int status) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status_on_command_[std::move(cmd)] = status;
+    }
 
     /// open-astro#575: answer ":MS1"/":MS2" with "0" (GOTO rejected, as the
     /// firmware does for a target below the altitude limit) instead of "1".
@@ -267,9 +299,14 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
+        // Read before the hold, so a delay set while a reply is held applies to the replies after it only.
+        const int delay_ms = reply_delay_ms_.load();
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
             holding_.store(true);
             alpacacore::test::connect_hold(std::chrono::milliseconds(hold_ms));  // connect_hold_gate.h
+        }
+        if (delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
         std::string out;
         std::string cmd;
@@ -287,9 +324,19 @@ private:
     }
 
     std::string handle(const std::string& cmd) {
+        int command_delay_ms = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
+            if (const auto rule = status_on_command_.find(cmd); rule != status_on_command_.end()) {
+                system_status_.store(rule->second);
+            }
+            if (const auto delay = command_delay_ms_.find(cmd); delay != command_delay_ms_.end()) {
+                command_delay_ms = delay->second;
+            }
+        }
+        if (command_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(command_delay_ms));
         }
         if (cmd == ":MountInfo#") {
             return model_code_;  // 4 bytes, no '#', as the real firmware
@@ -391,7 +438,7 @@ private:
                 return reply;
             }
             // Land at the target plus the firmware's final-approach error.
-            ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
+            ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_.load() * 100.0));
             dec_units_.store(pending_dec_);
             if (goto_tracks_off_.load()) system_status_.store(2);
             return reply;
@@ -605,9 +652,12 @@ private:
     std::atomic<long long> longitude_units_{0};
     std::atomic<long long> latitude_field_{0};
     std::string model_code_;
-    double landing_error_arcsec_;
+    std::atomic<double> landing_error_arcsec_;
     std::string position_reply_;  // under mutex_
     std::atomic<int> hold_ms_{0};
+    std::atomic<int> reply_delay_ms_{0};
+    std::map<std::string, int> status_on_command_;  // under mutex_
+    std::map<std::string, int> command_delay_ms_;   // under mutex_
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
     std::string utc_reply_ = "+00000000000000000#";

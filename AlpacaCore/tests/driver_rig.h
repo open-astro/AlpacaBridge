@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -154,14 +155,22 @@ inline void tick(FakeTaskClock& clock, std::chrono::nanoseconds period, std::chr
     REQUIRE(clock.wait_for_waiters(1, bound));
 }
 
+// A driver's poll thread may not have parked on the clock yet when a case advances it right after the connect, and an
+// advance that lands before the thread registers its wait is lost to it (its first tick is then a period after the
+// later time). So the first advance waits, up to a second of real time, for any waiter to be there. Only a driver whose
+// poll has ended (a lost link) pays the second, and nothing is lost by it.
+inline void wait_for_a_parked_waiter(FakeTaskClock& clock) {
+    static_cast<void>(clock.wait_for_waiters(1, std::chrono::seconds(1)));
+}
+
 // Ages the clock past a driver's 30 s post-connect grace (31 s after `connected_at`, the clock's current time by
-// default) in steps of at most 5 s, waiting after each for what it woke to park again. A driver with no poll wakes
-// nothing and each wait returns at once; a driver with one polls at each step, so no getter reads a frame older
-// than util::kLinkStalenessBound, which one 31 s jump would leave it.
+// default) in steps of at most 5 s, waiting after each for what it woke to park again: a driver with a poll samples at
+// each step, so no getter reads a frame older than util::kLinkStalenessBound, which one 31 s jump would leave it.
 inline void age_past_connect_grace(FakeTaskClock& clock, FakeTaskClock::clock::time_point connected_at,
                                    std::chrono::milliseconds bound = std::chrono::seconds(5)) {
     constexpr auto kStep = std::chrono::seconds(5);
     const auto target = connected_at + std::chrono::seconds(31);
+    wait_for_a_parked_waiter(clock);
     while (clock.now() < target) {
         clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
         static_cast<void>(clock.wait_for_woken_settled(bound));
@@ -170,17 +179,45 @@ inline void age_past_connect_grace(FakeTaskClock& clock, FakeTaskClock::clock::t
 
 inline void age_past_connect_grace(FakeTaskClock& clock) { age_past_connect_grace(clock, clock.now()); }
 
-// Connects the driver, then waits (up to `bound` of real time) for its poll body to park on the clock.
-// Returns whether it parked; a caller that must fail on a missed rendezvous wraps the call in REQUIRE.
-inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound) {
+// A connected iOptron telescope parks two tasks on its clock: the state poll and the clock-sync body.
+// wait_for_a_parked_waiter() returns on the first, so a step taken before the poll has parked is lost to it, and its
+// connect frame then ages past util::kLinkStalenessBound (a getter reads "link lost"). Call it after the connect and
+// before the first step.
+inline constexpr std::size_t kIoptronConnectWaiters = 2;
+inline void wait_for_ioptron_connect_parked(FakeTaskClock& clock,
+                                            std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    REQUIRE(clock.wait_for_waiters(kIoptronConnectWaiters, bound));
+}
+
+// Advances the clock by `d` in steps of at most 5 s, waiting after each for what it woke to park again: a driver with
+// a poll samples at each step, so a getter that reads afterwards serves a frame measured at the end of `d`, and none
+// is older than util::kLinkStalenessBound (one long jump would leave it so). Each step of 250 ms or more is one poll
+// cycle (the poll sleeps one period per wake and skips the ticks a step spans, with no catch-up).
+inline void advance_polling(FakeTaskClock& clock, std::chrono::nanoseconds d,
+                            std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    constexpr auto kStep = std::chrono::seconds(5);
+    const auto target = clock.now() + d;
+    wait_for_a_parked_waiter(clock);
+    while (clock.now() < target) {
+        clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
+        static_cast<void>(clock.wait_for_woken_settled(bound));
+    }
+}
+
+// Connects the driver, then waits (up to `bound` of real time) for its poll body, and the `waiters` - 1 other tasks its
+// connect starts on the clock, to park. Returns whether they parked; a caller that must fail on a missed rendezvous
+// wraps the call in REQUIRE.
+inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound,
+                             std::size_t waiters = 1) {
     driver.set_connected(true);
-    return clock.wait_for_waiters(1, bound);
+    return clock.wait_for_waiters(waiters, bound);
 }
 
 // The poll period and the real-time bound a PolledRig ticks and parks with.
 struct RigTiming {
     std::chrono::nanoseconds period;
     std::chrono::milliseconds bound;
+    std::size_t waiters = 1;  // the tasks a connect parks on the clock (kIoptronConnectWaiters for iOptron)
 };
 
 // A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
@@ -209,7 +246,7 @@ public:
     }
 
     // connect_and_park(): whether the poll body parked on the clock. REQUIRE(rig.connect()) to fail on a miss.
-    bool connect() { return connect_and_park(*driver_, clock_, timing_.bound); }
+    bool connect() { return connect_and_park(*driver_, clock_, timing_.bound, timing_.waiters); }
 
     void tick(int n = 1) {
         for (int i = 0; i < n; ++i) alpacacore::test::tick(clock_, timing_.period, timing_.bound);
