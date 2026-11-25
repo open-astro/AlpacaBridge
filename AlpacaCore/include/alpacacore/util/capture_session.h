@@ -100,7 +100,12 @@ public:
     inline void reading_out();
     /// Publishes the frame. False, and the frame dropped, when this body no
     /// longer owns the session (aborted, timed out, disconnected).
-    inline bool image_ready(std::shared_ptr<const ImageArray> image);
+    /// `actual_duration_seconds`, when given, is what LastExposureDuration
+    /// reads: the length the camera really exposed (a shutter speed it set, a
+    /// held bulb time; decision 0020 rule 7). Without it, the requested
+    /// duration. PercentCompleted always runs against the request.
+    inline bool image_ready(std::shared_ptr<const ImageArray> image,
+                            std::optional<double> actual_duration_seconds = std::nullopt);
 
 private:
     friend class CaptureSession;
@@ -727,7 +732,8 @@ inline void CaptureControl::reading_out() {
     }
 }
 
-inline bool CaptureControl::image_ready(std::shared_ptr<const ImageArray> image) {
+inline bool CaptureControl::image_ready(std::shared_ptr<const ImageArray> image,
+                                        std::optional<double> actual_duration_seconds) {
     std::unique_lock<std::mutex> lock(session_.mutex_);
     session_.apply_watchdog(lock);
     if (!session_.owns_locked(token_)) {
@@ -737,7 +743,7 @@ inline bool CaptureControl::image_ready(std::shared_ptr<const ImageArray> image)
     session_.state_ = CaptureSession::State::Ready;
     session_.owner_ = 0;
     session_.published_ = true;
-    session_.last_.commit(session_.duration_, session_.start_time_);
+    session_.last_.commit(actual_duration_seconds.value_or(session_.duration_), session_.start_time_);
     return true;
 }
 

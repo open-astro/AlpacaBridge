@@ -1729,3 +1729,26 @@ TEST_CASE("CaptureSession - a body that no longer owns the session cannot extend
     h.clock.advance(4s);
     CHECK(h.session->failure().has_value());
 }
+
+// Decision 0020 rule 7 (#1982): a camera that knows its actual exposure length (the shutter speed it set, a held bulb
+// time) passes it to image_ready, and LastExposureDuration reads it. PercentCompleted still runs against the request.
+TEST_CASE("CaptureSession - image_ready with an actual duration commits it", "[util][capture-session]") {
+    Harness h;
+    auto gate = h.gate();
+    std::atomic<bool> held{false};
+    std::atomic<int> accepted{-1};
+    h.session->start(1.0, [&, gate](CaptureControl& c) {
+        c.exposure_started();
+        held = true;
+        gate->wait();
+        accepted = c.image_ready(frame(3), 0.25) ? 1 : 0;
+    });
+    REQUIRE(eventually([&] { return held.load(); }));
+    h.clock.advance(250ms);
+    CHECK(h.session->percent_completed() == Catch::Approx(25.0));  // a quarter of the 1 s request, not all of 0.25 s
+    gate->open();
+    REQUIRE(eventually([&] { return accepted.load() != -1; }));
+    CHECK(accepted == 1);
+    CHECK(h.session->image_ready());
+    CHECK(h.session->last_exposure_duration() == Catch::Approx(0.25));
+}
