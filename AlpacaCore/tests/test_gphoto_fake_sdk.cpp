@@ -24,6 +24,7 @@
 #include <cctype>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -175,6 +176,18 @@ void require_exposure_failure_reported(const alpacacore::CameraDriver& driver, c
             CHECK(std::string(e.what()).find(sdk_text) != std::string::npos);
         }
     }
+}
+
+// Starts an exposure once a body a stop or the watchdog ended has returned: StartExposure refuses with
+// InvalidOperation until then, rather than read the camera beside it (libgphoto2 serves one caller per handle).
+void start_once_body_returns(alpacacore::CameraDriver& driver, double duration) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    int code = alpacacore::AlpacaError::InvalidOperation;
+    while (code == alpacacore::AlpacaError::InvalidOperation && std::chrono::steady_clock::now() < deadline) {
+        code = alpacacore::test::error_code_of([&] { driver.start_exposure(duration, true); });
+        if (code == alpacacore::AlpacaError::InvalidOperation) std::this_thread::yield();
+    }
+    REQUIRE(code == 0);
 }
 
 }  // namespace
@@ -737,7 +750,13 @@ TEST_CASE("GPhoto camera fake - late decoded frames retain a deadline failure wi
     REQUIRE(saw_decode);
     REQUIRE(completed);
     if (poll_watchdog) CHECK(watchdog_idle);
-    require_exposure_failure_reported(*driver, "Exposure deadline exceeded");
+    const std::function<void()> calls[] = {[&] { (void)driver->get_image_ready(); },
+                                           [&] { (void)driver->get_image_array(); }};
+    for (const auto& call : calls) {
+        std::string message;
+        CHECK(alpacacore::test::error_code_of(call, &message) == alpacacore::AlpacaError::DriverException);
+        CHECK(message.find("did not complete before its deadline") != std::string::npos);
+    }
     if (prior_image) {
         CHECK(driver->get_last_exposure_duration() == 1.0);
         CHECK(driver->get_last_exposure_start_time() == prior_start);
@@ -745,8 +764,8 @@ TEST_CASE("GPhoto camera fake - late decoded frames retain a deadline failure wi
         alpacacore::test::require_last_exposure_unset(*driver);
     }
 
-    // Joining the expired worker precedes recovery and keeps the hook's captures alive on every exit.
-    driver->start_exposure(0.1, true);
+    // The expired body may still be returning from its decode. The disconnect below joins it on every exit.
+    start_once_body_returns(*driver, 0.1);
     await_exposure_worker(*driver);
     REQUIRE(driver->get_image_ready());
     CHECK_FALSE(decode_timed_out.load());
@@ -1421,8 +1440,11 @@ TEST_CASE("GPhoto camera fake - failed bulb press reports the SDK error through 
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - abort after a failed exposure clears the reported failure",
-          "[gphoto][camera][unit][fakesdk]") {
+// Decision 0020 rule 3 (#1982): a failed exposure is kept until the next StartExposure or a reconnect. An idle
+// AbortExposure or StopExposure has nothing to stop, so it keeps it (it used to clear it, issue #979).
+TEST_CASE(
+    "GPhoto camera fake - a failed exposure is kept until the next StartExposure and an idle abort or stop keeps it",
+    "[gphoto][camera][unit][fakesdk][capture-session]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_camera());
@@ -1435,18 +1457,164 @@ TEST_CASE("GPhoto camera fake - abort after a failed exposure clears the reporte
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
     require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
 
     driver->abort_exposure();
+    require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+    driver->stop_exposure();
+    require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(driver->get_image_ready() == false);
-    try {
-        (void)driver->get_image_array();
-        FAIL("ImageArray must throw with no image");
-    } catch (const AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
-        CHECK(std::string(e.what()).find("Exposure failed") == std::string::npos);
-    }
 
+    fake.throw_from.clear();
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_image_ready());
+
+    driver->set_connected(false);
+}
+
+// Decision 0020 rule 6 (#1982): with nothing exposing, AbortExposure and StopExposure stop nothing, so a Ready frame
+// and LastExposure* stay until the next StartExposure.
+TEST_CASE("GPhoto camera fake - an idle AbortExposure and StopExposure keep a finished frame and LastExposure",
+          "[gphoto][camera][unit][fakesdk][capture-session]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    driver->start_exposure(0.6, true);  // the "1" shutter choice
+    await_exposure_worker(*driver);
+    REQUIRE(driver->get_image_ready());
+    const auto start = driver->get_last_exposure_start_time();
+
+    const std::function<void()> stops[] = {[&] { driver->abort_exposure(); }, [&] { driver->stop_exposure(); }};
+    for (const auto& stop : stops) {
+        stop();
+        CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+        CHECK(driver->get_image_ready());
+        CHECK(driver->get_image_array().width == decoder.canned_frame.width);
+        CHECK(driver->get_last_exposure_duration() == 1.0);
+        CHECK(driver->get_last_exposure_start_time() == start);
+    }
+    driver->set_connected(false);
+}
+
+// Decision 0020 rule 2 (#1982 rule 10): a StartExposure while one exposes is InvalidOperation; it no longer stops
+// the running exposure and starts over. The first hold runs on until the abort, with one press and one release.
+TEST_CASE("GPhoto camera fake - StartExposure during an exposure is refused and the first exposure runs on",
+          "[gphoto][camera][unit][fakesdk][capture-session][canon]") {
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    AbortOnlyHold hold;
+    hold.install(fake, clock);
+    fake.cameras.push_back(make_canon_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+
+    driver->start_exposure(5.0, true);
+    await_flag(hold.holding);
+    require_alpaca_error([&] { driver->start_exposure(5.0, true); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+
+    driver->abort_exposure();  // joins the body
+    CHECK_FALSE(hold.past_cap);
+    CHECK(fake.remote_release_history == std::vector<std::string>{"Press Full", "Release Full"});
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+
+    driver->set_connected(false);
+}
+
+// Rule 8 of #1982: ISO is a camera setting, refused while an exposure runs and while a body the watchdog failed is
+// still inside libgphoto2 (one caller per handle), and written once the body has returned.
+TEST_CASE(
+    "GPhoto camera fake - SetGain is refused while exposing and while the body is returning, and allowed once "
+    "the frame is Ready",
+    "[gphoto][camera][unit][fakesdk][capture-session][taskclock]") {
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    std::atomic<bool> armed{false};  // the connect's priming capture is not held
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != "capture_and_download" || !armed.load()) return;
+        entered.store(true);
+        for (int i = 0; i < 5000 && !release.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+
+    armed.store(true);
+    driver->start_exposure(1.0, true);  // a native shutter choice
+    await_flag(entered);
+    require_alpaca_error([&] { driver->set_gain(1); }, alpacacore::AlpacaError::InvalidOperation);
+
+    clock.advance(std::chrono::seconds(62));  // past 1 s + 60 s: the watchdog fails it, the body stays in the SDK
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&] { driver->set_gain(1); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(fake.cameras[0].choice_value.at("iso") == "200");
+
+    armed.store(false);
+    release.store(true);
+    start_once_body_returns(*driver, 0.01);
+    await_exposure_worker(*driver);
+    REQUIRE(driver->get_image_ready());
+    driver->set_gain(2);
+    CHECK(driver->get_gain() == 2);
+    CHECK(fake.cameras[0].choice_value.at("iso") == "400");
+
+    driver->set_connected(false);
+}
+
+// libgphoto2 serves one caller per handle, and StartExposure reads the mirror lock-up state from the camera. A body
+// the watchdog failed is still inside gp_camera_capture (no cancel), so the start is refused at once and reads nothing
+// beside it; it neither waits for the body nor joins it.
+TEST_CASE("GPhoto camera fake - StartExposure beside a body the watchdog left in the SDK is refused and reads nothing",
+          "[gphoto][camera][unit][fakesdk][capture-session][taskclock]") {
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    std::atomic<bool> armed{false};  // the connect's priming capture is not held
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != "capture_and_download" || !armed.load()) return;
+        entered.store(true);
+        for (int i = 0; i < 5000 && !release.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+
+    armed.store(true);
+    driver->start_exposure(1.0, true);  // a native shutter choice
+    await_flag(entered);
+    clock.advance(std::chrono::seconds(62));  // past 1 s + 60 s: the watchdog fails it, the body stays in the SDK
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    const auto reads = std::count(fake.call_log.begin(), fake.call_log.end(), "has_widget");
+
+    auto second = std::async(std::launch::async, [&] {
+        return alpacacore::test::error_code_of([&] { driver->start_exposure(0.01, true); });
+    });
+    const bool returned = second.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const auto reads_beside_body = std::count(fake.call_log.begin(), fake.call_log.end(), "has_widget");
+    armed.store(false);
+    release.store(true);
+    CHECK(returned);
+    CHECK(second.get() == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(reads_beside_body == reads);
+
+    start_once_body_returns(*driver, 0.01);
+    await_exposure_worker(*driver);
+    CHECK(driver->get_image_ready());
     driver->set_connected(false);
 }
 
