@@ -103,6 +103,11 @@ AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
 }
 
 std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config) {
+    return create_zwo_asiair_plus_switch(device_number, config, kSysfsDevChar);
+}
+
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config,
+                                                            const std::string& sysfs_dev_char_root) {
     if (config.ports.size() > 4) {
         throw AlpacaException("ASIAIR Plus exposes 4 DC ports; configuration lists more", AlpacaError::InvalidValue);
     }
@@ -117,7 +122,7 @@ std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, c
         ports.ports.push_back({config.ports[i].name, static_cast<unsigned int>(i), true, config.ports[i].pwm_enabled});
     }
     return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<PwmGpioMiscBackend>>>(
-        device_number, std::move(profile), std::move(ports));
+        device_number, std::move(profile), std::move(ports), sysfs_dev_char_root);
 }
 
 } // namespace alpacacore::vendor::zwo
