@@ -15,15 +15,21 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -46,19 +52,59 @@ int kernel_index_for(std::size_t wrapper_index) {
     return kKernelIndexDcPortBase + static_cast<int>(wrapper_index);
 }
 
+// Which ioctl numbering the kernel module behind /dev/pwm-gpio-misc speaks (pwm_gpio.h).
+enum class PwmGpioAbi : std::uint8_t {
+    // ZWO's stock pwm_gpio.ko (kernel 4.19.219), driven with the legacy decode: the field-validated stock path.
+    Legacy,
+    // The OpenAstro mainline image's clean-room pwm_gpio_compat module, driven with the corrected numbering.
+    Compat,
+};
+
+// The basename of /sys/dev/char/<major>:<minor>/device/driver for the OpenAstro mainline image's module.
+constexpr const char* kPwmGpioCompatDriver = "pwm_gpio_compat";
+
+// Picks the ABI for the open @p fd: Compat only when @p fd is a character device whose sysfs driver link under
+// @p sysfs_dev_char_root ends in exactly kPwmGpioCompatDriver. Anything else (not a character device, no sysfs entry,
+// an unreadable or truncated link, any other driver name) is Legacy, the stock behaviour. Reads only; writes nothing
+// to the device. @p driver_name receives the link's basename (empty when none was read).
+PwmGpioAbi detect_pwm_gpio_abi(int fd, const std::string& sysfs_dev_char_root, std::string& driver_name) {
+    driver_name.clear();
+    // Every early return is Legacy: a doubt about the module keeps the stock-firmware path.
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+        return PwmGpioAbi::Legacy;
+    }
+    const std::string link = sysfs_dev_char_root + "/" + std::to_string(major(st.st_rdev)) + ":" +
+                             std::to_string(minor(st.st_rdev)) + "/device/driver";
+    std::array<char, PATH_MAX> target{};
+    const ssize_t n = ::readlink(link.c_str(), target.data(), target.size());
+    if (n <= 0 || static_cast<std::size_t>(n) >= target.size()) {
+        return PwmGpioAbi::Legacy;  // no link, or one too long to have been read whole
+    }
+    const std::string path(target.data(), static_cast<std::size_t>(n));
+    const std::size_t slash = path.find_last_of('/');
+    driver_name = slash == std::string::npos ? path : path.substr(slash + 1);
+    return driver_name == kPwmGpioCompatDriver ? PwmGpioAbi::Compat : PwmGpioAbi::Legacy;
+}
+
+// An ioctl that failed: its name for the message, and its errno.
+struct IoctlFailure {
+    const char* call;
+    int err;
+};
+
 } // namespace
 
 class AsiairPlusProtocolWrapper::Impl {
 public:
-    Impl(std::string device_path,
-         std::vector<AsiairPlusPortConfig> ports,
-         std::uint32_t pwm_frequency_hz)
-        : device_path_(std::move(device_path))
-        , ports_(std::move(ports))
-        , pwm_frequency_hz_(pwm_frequency_hz)
-        , fd_(-1)
-        , open_(false)
-    {
+    Impl(std::string device_path, std::vector<AsiairPlusPortConfig> ports, std::uint32_t pwm_frequency_hz,
+         std::string sysfs_dev_char_root)
+        : device_path_(std::move(device_path)),
+          ports_(std::move(ports)),
+          pwm_frequency_hz_(pwm_frequency_hz),
+          sysfs_dev_char_root_(std::move(sysfs_dev_char_root)),
+          fd_(-1),
+          open_(false) {
         if (ports_.empty()) {
             throw AlpacaException("ASIAIR Plus port configuration is empty",
                                   AlpacaError::InvalidValue);
@@ -147,6 +193,22 @@ public:
             // physically off, the first reconnect will briefly show those
             // ports as ON in the UI until the user toggles them. That's
             // accepted — the alternative is a worse first-impression bug.
+            //
+            // Which ioctl numbering the module speaks (pwm_gpio.h) is read
+            // from sysfs, never from the device, so this writes nothing
+            // either: pwm_gpio_compat (the OpenAstro mainline image) gets the
+            // corrected numbering, anything else the legacy one.
+            std::string driver;
+            abi_ = detect_pwm_gpio_abi(fd_, sysfs_dev_char_root_, driver);
+            compat_mode_sent_.assign(ports_.size(), false);
+            const std::string driver_text = driver.empty() ? "no driver link" : "driver " + driver;
+            if (abi_ == PwmGpioAbi::Compat) {
+                ALPACA_LOG_INFO(kLogCategory, "'" + device_path_ + "' (" + driver_text +
+                                                  "): corrected ioctl numbering (OpenAstro mainline pwm_gpio_compat)");
+            } else {
+                ALPACA_LOG_INFO(kLogCategory, "'" + device_path_ + "' (" + driver_text +
+                                                  "): legacy ioctl numbering (stock ZWO pwm_gpio.ko)");
+            }
         } catch (...) {
             ::close(fd_);
             fd_ = -1;
@@ -211,10 +273,23 @@ public:
             // cycle, so a partial-duty line may be left in either level. Drive
             // each PWM line to the steady level of its duty (duty > 0 ON,
             // duty 0 OFF) before the fd goes. Boolean ports already hold
-            // their commanded level. Raw polarity is inverted: 0 = ON.
+            // their commanded level. Legacy raw polarity is inverted: 0 = ON;
+            // on pwm_gpio_compat SET_LEVEL is 1 = ON.
             for (std::size_t i = 0; i < ports_.size(); ++i) {
                 // A port no client armed was never written; settling it would drive the cached 100 (decision 0021).
                 if (!ports_[i].pwm_enabled || !port_states_[i]->armed.exchange(false)) {
+                    continue;
+                }
+                if (abi_ == PwmGpioAbi::Compat) {
+                    const bool on = port_states_[i]->value.load() > 0;
+                    if (const auto failure = compat_write_locked(i, on)) {
+                        ALPACA_LOG_WARN(kLogCategory, "ASIAIR Plus: failed to settle PWM port " + std::to_string(i) +
+                                                          " before close: " + failure->call + ": " +
+                                                          util::errno_string(failure->err));
+                    } else {
+                        // Same as the legacy branch below: the cache reports the steady level the line holds.
+                        port_states_[i]->value.store(on ? 100 : 0);
+                    }
                     continue;
                 }
                 gpio_level_t lvl{};
@@ -233,6 +308,7 @@ public:
             ::close(fd_);
             fd_ = -1;
         }
+        abi_ = PwmGpioAbi::Legacy;  // the next open() detects again
     }
 
     // Lock-free on purpose (issue #382): the driver answers get_connected()
@@ -289,7 +365,8 @@ public:
             return;
         }
 
-        // Boolean port: synchronous SET_MODE + ENABLE + SET_LEVEL.
+        // Boolean port: synchronous SET_MODE + ENABLE + SET_LEVEL (legacy), or
+        // SET_MODE once + SET_LEVEL (pwm_gpio_compat); see apply_port_locked().
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) {
             throw AlpacaException("ASIAIR Plus device is not open",
@@ -341,8 +418,9 @@ private:
         const auto period_ns = std::chrono::nanoseconds(
             1000000000ULL / static_cast<unsigned long long>(pwm_frequency_hz_));
 
-        // Track whether the kernel-side port has had its initial SET_MODE +
-        // ENABLE pair sent. We only need to do that once per connect — every
+        // Legacy only (pwm_gpio_compat tracks its SET_MODE in
+        // compat_mode_sent_): track whether the kernel-side port has had its
+        // initial SET_MODE + ENABLE pair sent. We only need to do that once per connect — every
         // subsequent SET_LEVEL works without re-sending mode/enable. Doing
         // them on every toggle would triple the ioctl count and add jitter.
         bool initialized = false;
@@ -361,6 +439,13 @@ private:
             if (!open_ || fd_ < 0) {
                 return false;
             }
+            if (abi_ == PwmGpioAbi::Compat) {
+                // pwm_gpio_compat: SET_MODE(GPIO) once per port since open(),
+                // then SET_LEVEL(1 = ON); never ENABLE (compat_write_locked).
+                return !compat_write_locked(index, logical_on).has_value();
+            }
+            // Legacy (stock pwm_gpio.ko): the field-validated stream below,
+            // unchanged; its names are the legacy decode (pwm_gpio.h).
             if (!initialized) {
                 work_mode_t mode{};
                 mode.index = kernel_idx;
@@ -438,10 +523,57 @@ private:
         }
     }
 
+    // pwm_gpio_compat (the corrected numbering, pwm_gpio.h): PWM_GPIO_ABI_SET_MODE(GPIO)
+    // the first time a port is written since open(), then PWM_GPIO_ABI_SET_LEVEL with
+    // normal polarity (1 = ON, 0 = OFF), which drives the pad. SET_MODE only records
+    // the mode (and, after a PWM mode, stops the module's PWM); it never touches the
+    // pad, so sending it before the first level glitches nothing. Never
+    // PWM_GPIO_ABI_PWM_ENABLE: it would start the module's own soft-PWM. Every path that
+    // writes a port on this module comes here: apply_port_locked() (boolean ports and
+    // the server-start pass), pwm_loop()'s edges and close()'s settle.
+    // Caller must hold mutex_ and have verified fd_ is valid. Returns the failed
+    // ioctl, or nothing on success.
+    std::optional<IoctlFailure> compat_write_locked(std::size_t index, bool on) {
+        const int kernel_idx = kernel_index_for(index);
+        if (!compat_mode_sent_[index]) {
+            work_mode_t mode{};
+            mode.index = kernel_idx;
+            mode.mode = PWM_GPIO_MODE_GPIO;
+            if (::ioctl(fd_, PWM_GPIO_ABI_SET_MODE, &mode) != 0) {
+                return IoctlFailure{"PWM_GPIO_ABI_SET_MODE(GPIO)", errno};
+            }
+            compat_mode_sent_[index] = true;
+        }
+        gpio_level_t level{};
+        level.index = kernel_idx;
+        level.level = on ? 1 : 0;
+        if (::ioctl(fd_, PWM_GPIO_ABI_SET_LEVEL, &level) != 0) {
+            return IoctlFailure{"PWM_GPIO_ABI_SET_LEVEL", errno};
+        }
+        return std::nullopt;
+    }
+
     // Caller must hold mutex_ and have verified fd_ is valid.
     void apply_port_locked(std::size_t index, int value) {
         const int kernel_idx = kernel_index_for(index);
         const auto& cfg = ports_[index];
+
+        if (abi_ == PwmGpioAbi::Compat) {
+            if (const auto failure = compat_write_locked(index, value != 0)) {
+                throw AlpacaException(std::string(failure->call) + " failed on kernel index " +
+                                          std::to_string(kernel_idx) + ": " + util::errno_string(failure->err),
+                                      AlpacaError::DriverException);
+            }
+            return;
+        }
+
+        // Legacy (stock pwm_gpio.ko, kernel 4.19.219): everything below is the
+        // field-validated ioctl stream and must not change. Its command names are
+        // the legacy decode of pwm_gpio.h, which is shifted from the module's real
+        // numbering; the header's "LEGACY decode" table says what each one really
+        // does on stock, and so what the observations below are artifacts of.
+        // TODO: re-validate the corrected numbering on stock pwm_gpio.ko, then
+        // retire this path.
 
         // The kernel module reverse-engineering yielded a non-obvious required
         // sequence (proved empirically: /sys/kernel/debug/gpio direction stayed
@@ -528,20 +660,21 @@ private:
     const std::string device_path_;
     const std::vector<AsiairPlusPortConfig> ports_;
     const std::uint32_t pwm_frequency_hz_;
+    const std::string sysfs_dev_char_root_;  // where open() looks the device's driver up
 
     mutable std::mutex mutex_;
     int fd_;
     std::atomic<bool> open_;  // see is_open()
+    PwmGpioAbi abi_ = PwmGpioAbi::Legacy;  // chosen at open(); guarded by mutex_
+    // Compat only: PWM_GPIO_ABI_SET_MODE(GPIO) already sent for the port since open(); guarded by mutex_.
+    std::vector<bool> compat_mode_sent_;
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 
-AsiairPlusProtocolWrapper::AsiairPlusProtocolWrapper(std::string device_path,
-                                                     std::vector<AsiairPlusPortConfig> ports,
-                                                     std::uint32_t pwm_frequency_hz)
-    : impl_(std::make_unique<Impl>(std::move(device_path),
-                                   std::move(ports),
-                                   pwm_frequency_hz))
-{}
+AsiairPlusProtocolWrapper::AsiairPlusProtocolWrapper(std::string device_path, std::vector<AsiairPlusPortConfig> ports,
+                                                     std::uint32_t pwm_frequency_hz, std::string sysfs_dev_char_root)
+    : impl_(std::make_unique<Impl>(std::move(device_path), std::move(ports), pwm_frequency_hz,
+                                   std::move(sysfs_dev_char_root))) {}
 
 AsiairPlusProtocolWrapper::~AsiairPlusProtocolWrapper() = default;
 

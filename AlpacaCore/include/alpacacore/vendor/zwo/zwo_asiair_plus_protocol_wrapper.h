@@ -25,6 +25,9 @@ struct AsiairPlusPortConfig {
     bool pwm_enabled;
 };
 
+// The sysfs directory that maps a character device number to its device ("<major>:<minor>").
+inline constexpr const char* kSysfsDevChar = "/sys/dev/char";
+
 // Protocol wrapper for the ZWO ASIAIR Plus (Rockchip RK3568 variant).
 //
 // The ASIAIR Plus ships with a custom ZWO kernel module (pwm_gpio.ko) that
@@ -45,11 +48,19 @@ struct AsiairPlusPortConfig {
 // port in its last-set state and sets each PWM port to the steady level of
 // its duty (on above 0, off at 0) — same disconnect policy as the Pi 4
 // ASIAIR Pro driver, but with a strict read-only connect contract on top.
+//
+// Two kernel modules provide /dev/pwm-gpio-misc, with two ioctl numberings
+// (pwm_gpio.h): ZWO's stock pwm_gpio.ko, driven with the legacy decode, and
+// the OpenAstro mainline image's clean-room pwm_gpio_compat, driven with the
+// corrected one. open() picks the numbering once from the opened fd, by the
+// device's driver under /sys/dev/char, and logs it; anything it cannot
+// identify as pwm_gpio_compat keeps the legacy one. That lookup only reads.
 class AsiairPlusProtocolWrapper {
 public:
-    AsiairPlusProtocolWrapper(std::string device_path,
-                              std::vector<AsiairPlusPortConfig> ports,
-                              std::uint32_t pwm_frequency_hz);
+    // @p sysfs_dev_char_root is where open() looks the device's driver up
+    // (kSysfsDevChar; a test points it at a fake tree).
+    AsiairPlusProtocolWrapper(std::string device_path, std::vector<AsiairPlusPortConfig> ports,
+                              std::uint32_t pwm_frequency_hz, std::string sysfs_dev_char_root = kSysfsDevChar);
     ~AsiairPlusProtocolWrapper();
 
     AsiairPlusProtocolWrapper(const AsiairPlusProtocolWrapper&) = delete;

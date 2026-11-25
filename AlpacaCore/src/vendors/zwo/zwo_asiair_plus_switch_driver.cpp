@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
@@ -85,11 +86,11 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOAsiairPlusSwitchDriver(int device_number, AsiairPlusSwitchConfig config)
+    ZWOAsiairPlusSwitchDriver(int device_number, AsiairPlusSwitchConfig config, std::string sysfs_dev_char_root)
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),
           config_(std::move(config)),
-          wrapper_(config_.device_path, config_.ports, config_.pwm_frequency_hz) {
+          wrapper_(config_.device_path, config_.ports, config_.pwm_frequency_hz, std::move(sysfs_dev_char_root)) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -378,7 +379,12 @@ private:
 
 std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
                                                             AsiairPlusSwitchConfig config) {
-    return std::make_unique<ZWOAsiairPlusSwitchDriver>(device_number, std::move(config));
+    return create_zwo_asiair_plus_switch(device_number, std::move(config), kSysfsDevChar);
+}
+
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, AsiairPlusSwitchConfig config,
+                                                            const std::string& sysfs_dev_char_root) {
+    return std::make_unique<ZWOAsiairPlusSwitchDriver>(device_number, std::move(config), sysfs_dev_char_root);
 }
 
 } // namespace alpacacore::vendor::zwo

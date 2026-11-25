@@ -310,7 +310,9 @@ notes carry only the pin map and per-board deltas.
   through `util::claim_outputs_at_current_level()` (request as-is, read, reconfigure
   to outputs at the read levels) and its cache follows the line through
   `util::reconcile_cached_value()`; never request a line with an initial value. The
-  RK3568 cannot read its pads (`GET_LEVEL` lies), so it keeps its "on" cache.
+  RK3568 cannot read its pads on stock `pwm_gpio.ko` (`GET_LEVEL` lies), so it keeps
+  its "on" cache on both of its ioctl numberings (stock, and the mainline image's
+  `pwm_gpio_compat`; see zwo.instructions.md).
 - **Power-on state is applied once per server start, never at connect**
   ([decision 0021](../../docs/decisions/0021-power-port-power-on-state.md)):
   `powerOnState` = `leave` (default) / `restore` / `off`, applied by

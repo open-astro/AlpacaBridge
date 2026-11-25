@@ -37,7 +37,14 @@ struct AsiairPlusSwitchConfig {
 // DC-port ioctl indices (4..7).
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config();
 
+// The kernel module behind config.device_path picks the ioctl numbering at each connect: the OpenAstro mainline
+// image's pwm_gpio_compat gets the corrected one, anything else (ZWO's stock pwm_gpio.ko) the legacy one.
 std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
                                                             AsiairPlusSwitchConfig config);
+
+// The same driver, looking the device's kernel driver up under @p sysfs_dev_char_root instead of /sys/dev/char. A test
+// seam: a fake tree there selects the pwm_gpio_compat numbering for a stub device.
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, AsiairPlusSwitchConfig config,
+                                                            const std::string& sysfs_dev_char_root);
 
 } // namespace alpacacore::vendor::zwo

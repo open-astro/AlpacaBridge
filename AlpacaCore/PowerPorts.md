@@ -8,7 +8,7 @@ Pick the section that matches your hardware.
 |----|----|----|----|
 | [ZWO ASIair Pro](#zwo-asiair-pro-raspberry-pi-4) | Available | Raspberry Pi 4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
-| [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
+| [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | `/dev/pwm-gpio-misc` ioctl (ZWO `pwm_gpio.ko` or `pwm_gpio_compat`) |
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [iOptron iMate](#ioptron-imate) | Available — ConformU pending | OrangePi 3 LTS (Allwinner H6) | libgpiod v2 |
 
@@ -270,9 +270,9 @@ All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-
 
 ## ZWO ASIair Plus (Rockchip RK3568)
 
-Four 12V DC outputs controlled through ZWO's custom `pwm_gpio.ko` kernel module, which registers a misc-device character node at `/dev/pwm-gpio-misc` and exposes per-port boolean and PWM control through a small set of ioctls. This is fundamentally different from the Pi 4 ASIair Pro — there is no `gpiochip` involved on the user-facing side.
+Four 12V DC outputs controlled through a kernel module that registers a misc-device character node at `/dev/pwm-gpio-misc` and exposes per-port boolean and PWM control through a small set of ioctls: ZWO's custom `pwm_gpio.ko` on the stock firmware, or the clean-room `pwm_gpio_compat` on the OpenAstro mainline image. This is fundamentally different from the Pi 4 ASIair Pro — there is no `gpiochip` involved on the user-facing side. The driver tells the two modules apart when it opens the device (from the device's kernel driver in sysfs) and logs which one it found; nothing needs configuring.
 
-> **PWM is implemented as userspace soft-PWM** — not as the kernel module's native `SET_MODE(PWM)` path. We attempted that path first and found it dead end: the kernel module accepts every `SET_MODE(PWM) + ENABLE + SET_CONFIG` call (`GET_CONFIG` even echoes back the exact period/duty we wrote), but the load shows no visible duty-cycle response at any frequency. The kernel module's hrtimer dispatch is unreachable from any documented ioctl ordering, and the RK3568's hardware PWM peripherals can't mux to the airplus-gpios pins anyway (they sit on GPIO bank 4, which the RK3568 PWM controllers don't reach). So the AlpacaBridge driver bypasses `SET_MODE(PWM)` entirely and instead spawns a per-port worker thread that uses `SET_MODE(GPIO) + ENABLE + SET_LEVEL` ioctls at the configured frequency to generate the PWM waveform itself. This is the same approach the stock ZWO `zwoair_imager` daemon takes (confirmed by extracting and analyzing the binary). Verified end-to-end against real hardware — both boolean toggle AND duty-cycle dimming produce the expected physical behavior on a 12 V flat-panel load. Tick the PWM checkbox freely; PWM works.
+> **PWM is implemented as userspace soft-PWM** — not as the kernel module's native `SET_MODE(PWM)` path. We attempted that path first and found it dead end: the kernel module accepts every `SET_MODE(PWM) + ENABLE + SET_CONFIG` call (`GET_CONFIG` even echoes back the exact period/duty we wrote), but the load shows no visible duty-cycle response at any frequency. The kernel module's hrtimer dispatch is unreachable from any documented ioctl ordering, and the RK3568's hardware PWM peripherals can't mux to the airplus-gpios pins anyway (they sit on GPIO bank 4, which the RK3568 PWM controllers don't reach). So the AlpacaBridge driver bypasses `SET_MODE(PWM)` entirely and instead spawns a per-port worker thread that toggles the port with GPIO ioctls at the configured frequency to generate the PWM waveform itself (on stock firmware the field-validated `SET_MODE(GPIO) + ENABLE + SET_LEVEL` sequence of the original ioctl decode; on `pwm_gpio_compat`, `SET_MODE(GPIO)` once and then `SET_LEVEL`). The original decode of ZWO's ioctl numbers turned out to be shifted, which is what made the module's own PWM look unreachable; the stock path keeps that decode until the corrected numbering is re-validated there. This is the same approach the stock ZWO `zwoair_imager` daemon takes (confirmed by extracting and analyzing the binary). Verified end-to-end against real hardware — both boolean toggle AND duty-cycle dimming produce the expected physical behavior on a 12 V flat-panel load. Tick the PWM checkbox freely; PWM works.
 
 | Port label | Kernel ioctl index | Default mode |
 |----|----|----|
@@ -283,9 +283,12 @@ Four 12V DC outputs controlled through ZWO's custom `pwm_gpio.ko` kernel module,
 
 ### 1. Use a compatible OS image
 
-The ASIair Plus RK3568 ships with ZWO's heavily customised stock OS. AlpacaBridge requires **Debian 13 (Trixie) on aarch64** with the original ZWO kernel (4.19.219) — specifically, the `pwm_gpio.ko` module **must** remain loaded, because it owns the device-tree `airplus-gpios` node and is the only way to drive the four DC ports.
+The ASIair Plus RK3568 ships with ZWO's heavily customised stock OS. AlpacaBridge requires **Debian 13 (Trixie) on aarch64** and a kernel module that owns the device-tree `airplus-gpios` node and provides `/dev/pwm-gpio-misc` — it is the only way to drive the four DC ports. Two images provide one:
 
-If you've reflashed the device, do it with a tool that preserves the kernel + ZWO kernel modules (e.g. the project tracked at `rk-flashtool`). Standard mainline RK3568 distros do **not** ship `pwm_gpio.ko` and will leave the ports unmanageable.
+- **Stock-kernel image** (the original ZWO kernel 4.19.219): ZWO's `pwm_gpio.ko` **must** remain loaded. This is the field-validated path.
+- **OpenAstro mainline image** (Armbian, kernel 6.18, built by `rk-flashtool`): ships the clean-room `pwm_gpio_compat` module in place of `pwm_gpio.ko`. The driver detects it and uses its corrected ioctl numbering. This image is new and not yet validated in the field.
+
+Standard mainline RK3568 distros ship neither module and will leave the ports unmanageable.
 
 ### 2. Install runtime dependencies and the gpio-group rule
 
@@ -367,11 +370,11 @@ The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the pra
 
 ### Disconnect behavior
 
-Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets a PWM port that a client or the server-start power-on pass set (since the device node was opened) to the steady level of its duty (`PWM_GPIO_SET_LEVEL`: on for any duty above 0, off at 0%); a PWM port neither of them set is left alone (no request is sent), and boolean ports keep their commanded level. Then it releases our fd. The next connect reports the settled level (100 or 0) and writes nothing. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
+Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets a PWM port that a client or the server-start power-on pass set (since the device node was opened) to the steady level of its duty (a `SET_LEVEL` in the numbering the module speaks: on for any duty above 0, off at 0%); a PWM port neither of them set is left alone (no request is sent), and boolean ports keep their commanded level. Then it releases our fd. The next connect reports the settled level (100 or 0) and writes nothing. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
 
 ### What about the USB power ports and the button?
 
-The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, the two status LEDs, and the physical button (ioctl indices 0, 1, 2, 8, 9, 10, 11). They are **not** exposed by the v1 AlpacaBridge Switch driver — the v1 surface is 4 DC ports only, matching the four-channel ASCOM Switch interface most clients expect. Extending the driver to control them is straightforward (the kernel ioctls are identical) — track interest in `.github/instructions/zwo.instructions.md`.
+The same kernel module (`pwm_gpio.ko` or `pwm_gpio_compat`) also controls the two USB2 ports, two USB3 ports, the two status LEDs, and the physical button (ioctl indices 0, 1, 2, 8, 9, 10, 11). They are **not** exposed by the v1 AlpacaBridge Switch driver — the v1 surface is 4 DC ports only, matching the four-channel ASCOM Switch interface most clients expect. Extending the driver to control them is straightforward (the kernel ioctls are identical) — track interest in `.github/instructions/zwo.instructions.md`.
 
 ---
 
