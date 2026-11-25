@@ -5526,8 +5526,29 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+// Issue #1764 item 6: the header's night theme toggle. The <head> script has
+// already applied a stored choice; this keeps the button in step and saves a change.
+function initThemeToggle() {
+    const button = document.getElementById('theme-toggle');
+    if (!button) {
+        return;
+    }
+    const root = document.documentElement;
+    let storage = null;
+    try {
+        storage = window.localStorage;
+    } catch (e) {
+        // Blocked site data: the toggle still works for this page.
+    }
+    button.setAttribute('aria-pressed', root.getAttribute('data-theme') === 'night' ? 'true' : 'false');
+    button.addEventListener('click', () => {
+        setNightTheme(root, button, storage, root.getAttribute('data-theme') !== 'night');
+    });
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    initThemeToggle();
     initTabs();
     ensureCatalog();
     loadDevices();
