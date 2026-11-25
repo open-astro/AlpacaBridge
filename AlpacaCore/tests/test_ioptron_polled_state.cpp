@@ -178,8 +178,9 @@ void require_all_members_not_connected(TelescopeDriver& driver) {
 }  // namespace
 
 // Issue #2491 test group 1, the reproduction: with the mount holding every reply, a getter that has to ask the mount
-// pays for it. Today every cache lapses past the 30 s connect grace and its 1 s TTL, so each getter of the table sends
-// an exchange and waits 200 ms for it; served from the polled frame it answers from memory (decision 0010 rule 1).
+// pays for it. Before this change every cache lapsed past the 30 s connect grace and its 1 s TTL, so each getter of the
+// table sent an exchange and waited 200 ms for it; served from the polled frame it answers from memory (decision 0010
+// rule 1).
 TEST_CASE(
     "iOptron polled state - every getter answers in under 20 ms and sends nothing while the mount holds each reply",
     "[ioptron][telescope][polled][getter-locks]") {
@@ -195,9 +196,9 @@ TEST_CASE(
     rig.fake().set_reply_delay(milliseconds(0));
 }
 
-// Ticket ALP-3351, "Added scope": a raw CommandString holds the operation lock for its exchange and nothing else; a
+// Issue #2491, "Added scope": a raw CommandString holds the operation lock for its exchange and nothing else; a
 // getter must not wait for it. (command_blind, command_bool and command_string already run under the I/O lock with
-// mutex_ released since #1829/#2036; what keeps a getter behind them today is a lapsed cache.)
+// mutex_ released since #1829/#2036; what kept a getter behind them before this change was a lapsed cache.)
 TEST_CASE("iOptron polled state - a getter answers in under 20 ms while a raw CommandString exchange is held",
           "[ioptron][telescope][polled][getter-locks]") {
     auto rig = make_tcp_rig();
