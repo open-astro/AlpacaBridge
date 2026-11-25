@@ -133,6 +133,15 @@ struct ClockedBisque {
     ~ClockedBisque() { driver->set_connected(false); }
 };
 
+// A SlewToCoordinates that TheSkyX reports complete at its first poll still waits for the landing gate (#2410): the
+// position read after the slew end is checked again kStillSampleSpacing later, a sleep on the task clock, so the
+// clock has to move for the call to return.
+void slew_to_coordinates_landing(ClockedBisque& rig, double ra, double dec) {
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(ra, dec); });
+    REQUIRE(advance_until(rig.clock, [&] { return ready(slewed); }));
+    REQUIRE_NOTHROW(slewed.get());
+}
+
 } // namespace
 
 TEST_CASE("Bisque UTCDate - disconnected reads and writes are refused", "[bisque][telescope][utcdate]") {
@@ -828,6 +837,8 @@ TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid rep
     CHECK(driver->get_slewing());
     completion_state->store(3);
     poll_now(*driver);
+    clock.advance(std::chrono::seconds(1));
+    poll_now(*driver);  // #2410: the landing gate's second read shows the mount still
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -1424,13 +1435,14 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
     REQUIRE_NOTHROW(driver->set_connected(true));
     pause_poll(*driver);
 
-    // One failure, then success: the slew completes after one 1 s poll sleep on the clock.
+    // One failure, then success: one 1 s poll sleep, then the landing gate's 500 ms sleep (#2410), which the
+    // helper's 1 s step wakes.
     const auto start = clock.now();
     auto first = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
     CHECK(advance_until(clock, [&] { return ready(first); }));
     CHECK_NOTHROW(first.get());
-    CHECK(polls->load() == 2);
-    CHECK(clock.now() - start == std::chrono::seconds(1));
+    CHECK(polls->load() == 3);  // the failure, the completion, and the one asked with the landing's second read
+    CHECK(clock.now() - start == std::chrono::seconds(2));
 
     // Persistent failure: the error names the poll failure, not the timeout, and
     // the slew is not reported complete.
@@ -1487,7 +1499,8 @@ TEST_CASE("Bisque sync slew - the poll sleep and completion run on the task cloc
     CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
     CHECK_NOTHROW(slewed.get());
     CHECK(rig.mount.slew_polls.load() == 4);
-    CHECK(rig.virtual_elapsed() == std::chrono::seconds(3));
+    // Three 1 s poll sleeps, then the landing gate's 500 ms sleep (#2410), which the helper's 1 s step wakes.
+    CHECK(rig.virtual_elapsed() == std::chrono::seconds(4));
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1515,7 +1528,11 @@ TEST_CASE("Bisque sync slew - the settle time is a task-clock sleep after comple
     ClockedBisque rig;
     rig.driver->set_slew_settle_time(5);
     auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
-    // The first poll reports completion, so the only wait is the 5 s settle.
+    // The first poll reports completion; the landing gate's second read follows 500 ms later (#2410), and the
+    // 5 s settle comes after it.
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.clock.advance(std::chrono::milliseconds(500));
+    rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
     REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::seconds(4));
     rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -1561,8 +1578,12 @@ TEST_CASE("Bisque async slew - Slewing is held for 8 task-clock seconds without 
     rig.clock.advance(std::chrono::seconds(1));
     poll_now(*rig.driver);
     CHECK(rig.mount.slew_polls.load() == 1);
+    // #2410: the slew end starts the landing gate; the next tick's read shows the mount still on its target.
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.mount.slew_polls.load() == 1);
+    CHECK(rig.mount.slew_polls.load() == 1);  // the fake counts only the polls of a slew in flight
 }
 
 // Decision 0022: the 8 s Slewing hold is a util::HoldWindow armed by every slew command. Inside it the status poll
@@ -1611,7 +1632,7 @@ TEST_CASE("Bisque hold window - Slewing reads true while SlewToRaDec is on the w
     if (async) {
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     } else {
-        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // TheSkyX reports it complete at the first poll
+        slew_to_coordinates_landing(rig, 5.5, 20.0);  // TheSkyX reports it complete at the first poll
     }
     CHECK(seen.load() == 1);
 }
@@ -1710,7 +1731,7 @@ TEST_CASE("Bisque hold window - a disconnect, an AbortSlew or a landing inside t
         CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
     }
     SECTION("a SlewToCoordinates landing") {
-        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // TheSkyX reports it complete at the first poll
+        slew_to_coordinates_landing(rig, 5.5, 20.0);  // TheSkyX reports it complete at the first poll
         CHECK(rig.virtual_elapsed() < std::chrono::seconds(8));
         CHECK_FALSE(rig.driver->get_slewing());
         CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
@@ -2071,6 +2092,8 @@ TEST_CASE("Bisque park - a retired Park's exit leaves a newer Park refusing slew
     REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 5));
     REQUIRE_NOTHROW(park1.get());
     REQUIRE_FALSE(ready(park2));
+    // #2410: the retired Park sends no Abort() of its own: Park 2 owns the mount.
+    CHECK(rig.mount.abort_commands.load() == 0);
 
     require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
                          alpacacore::AlpacaError::InvalidWhileParked);
@@ -2568,6 +2591,199 @@ TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session end
     rig.mount.ignore_aborts = 0;
 }
 
+// ── #2410 still-open items. Fake-only: no TheSkyX here. ─────────────────────────────────────────────────────────
+
+TEST_CASE("Bisque park - a park that times out at 120 s gets a verified Abort(), and Slewing raises it",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    rig.mount.abort_ends_park = true;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount.abort_commands.load() == 1);
+    const auto ledger = rig.mount.ledger();
+    REQUIRE_FALSE(ledger.empty());
+    CHECK(ledger.back() == "Abort");
+    CHECK(contains(slewing_failure(*rig.driver), "Park timed out after 120 seconds; the driver stopped the mount"));
+}
+
+TEST_CASE("Bisque park - a timed-out park whose stop failed is stopped again 10 s later by the poll",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    rig.mount.ignore_aborts = 100;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount.abort_commands.load() == 3);
+    CHECK(contains(slewing_failure(*rig.driver), "and stopping it failed"));
+    rig.clock.advance(std::chrono::seconds(11));
+    poll_now(*rig.driver);
+    CHECK(rig.mount.abort_commands.load() == 6);
+    rig.mount.ignore_aborts = 0;
+}
+
+TEST_CASE("Bisque sync slew - a timed-out slew whose stop failed is stopped again 10 s later by the poll",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.ignore_aborts = 100;
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    require_alpaca_error([&] { slewed.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount.abort_commands.load() == 3);
+    rig.clock.advance(std::chrono::seconds(11));
+    poll_now(*rig.driver);
+    CHECK(rig.mount.abort_commands.load() == 6);
+    CHECK(contains(slewing_failure(*rig.driver), "Slew timed out after 120 seconds"));
+    CHECK(rig.mount.slew_commands.load() == 1);  // never a new start
+    rig.mount.ignore_aborts = 0;
+}
+
+TEST_CASE("Bisque slew - an unconfirmed slew whose stop failed is stopped again 10 s later by the poll",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.drop_slew_reply = true;
+    rig.mount.ignore_aborts = 100;
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::DriverException);
+    rig.mount.drop_slew_reply = false;
+    CHECK(rig.mount.abort_commands.load() == 3);
+    rig.clock.advance(std::chrono::seconds(11));
+    poll_now(*rig.driver);
+    CHECK(rig.mount.abort_commands.load() == 6);
+    CHECK(contains(slewing_failure(*rig.driver), "TheSkyX did not confirm the slew"));
+    CHECK(rig.mount.slew_commands.load() == 1);  // never a new start
+    rig.mount.ignore_aborts = 0;
+}
+
+TEST_CASE("Bisque sync slew - a slew that comes to rest far from its target fails, and Slewing raises it",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;  // the fake stays at RA 5.5 h, Dec 20 deg
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(6.0, 21.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    try {
+        slewed.get();
+        FAIL("Expected the far miss");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "came to rest"));
+    }
+    CHECK(contains(slewing_failure(*rig.driver), "came to rest"));
+
+    rig.mount.land_on_target = true;
+    auto landed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(6.0, 21.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(landed); }));
+    CHECK_NOTHROW(landed.get());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("Bisque async slew - a slew that comes to rest far from its target fails, and Slewing raises it",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;  // the fake stays at RA 5.5 h, Dec 20 deg
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 21.0));
+    rig.clock.advance(std::chrono::seconds(8));
+    poll_now(*rig.driver);  // IsSlewComplete reads true: the landing gate takes its first read
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);  // the second read agrees: the mount is still, 1 deg from its target
+    CHECK(contains(slewing_failure(*rig.driver), "came to rest"));
+
+    // A new slew to another target lands on it: each slew start arms its own landing gate.
+    rig.mount.land_on_target = true;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.2, 21.5));
+    rig.clock.advance(std::chrono::seconds(8));
+    poll_now(*rig.driver);
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("Bisque SyncToCoordinates - a sync more than 5 degrees from the mount's position is InvalidValue",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;  // the fake stays at RA 5.5 h, Dec 20 deg
+    require_alpaca_error([&] { rig.driver->sync_to_coordinates(5.5, 26.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(rig.mount.dec_degrees.load() == 20.0);  // no Sync() reached TheSkyX
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(5.5, 24.9));
+    CHECK(rig.mount.dec_degrees.load() == 24.9);
+}
+
+TEST_CASE("Bisque protocol wrapper - a refusal is told by its type, not by its message text",
+          "[bisque][telescope][goto-safety][unit]") {
+    const alpacacore::AlpacaException look_alike("TheSkyX command failed: Timeout reading response from TheSkyX");
+    CHECK_FALSE(alpacacore::vendor::bisque::is_theskyx_refusal(look_alike));
+}
+
+TEST_CASE("Bisque sync slew - a MoveAxis cap stop during the slew does not fail the slew",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(61); }, 70);
+    poll_now(*rig.driver);
+    CHECK(rig.mount.move_stops.load() == 1);
+    CHECK(contains(slewing_failure(*rig.driver), "MoveAxis on axis 0"));
+    rig.mount.slew_polls_needed = 0;
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    CHECK_NOTHROW(slewed.get());
+}
+
+TEST_CASE("Bisque park - a Park whose poll outlives an AbortSlew sends no Abort() at its 120 s timeout",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;  // the fake keeps parking after the Abort(): the poll runs on to 120 s
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    REQUIRE(rig.mount.abort_commands.load() == 1);
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    CHECK_NOTHROW(parked.get());  // the AbortSlew retired this Park: it returns quietly at its next poll boundary (#2062)
+    CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew owns the mount: no second stop
+    CHECK(slewing_failure(*rig.driver).empty());
+}
+
+TEST_CASE("Bisque park - a park stop whose session ended meanwhile writes nothing into the new session",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    rig.mount.ignore_aborts = 1000;  // the stop fails, so the old session would store a failure and a retry
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
+        rig.driver->set_connected(false);
+        rig.driver->set_connected(true);
+        pause_poll(*rig.driver);
+    });
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
+    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+    rig.mount.ignore_aborts = 0;
+}
+
+TEST_CASE("Bisque sync slew - a slew whose stop failed is not landing-checked when it ends",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;  // the fake stays at RA 5.5 h, Dec 20 deg
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.ignore_aborts = 3;  // the timeout's three Abort() rounds are all ignored
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(6.0, 21.0); });
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    require_alpaca_error([&] { slewed.get(); }, alpacacore::AlpacaError::DriverException);
+    rig.mount.slewing = false;  // the mount ends the slew where the failed stop left it, 1 deg from its target
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);
+    rig.clock.advance(std::chrono::seconds(1));
+    poll_now(*rig.driver);
+    const auto failure = slewing_failure(*rig.driver);
+    CHECK(contains(failure, "Slew timed out after 120 seconds"));
+    CHECK_FALSE(contains(failure, "came to rest"));
+    CHECK(rig.mount.abort_commands.load() == 3);  // the retry is 10 s away: no stop yet
+}
+
 // TheSkyX runs its own Find Home. A Paramount's is a homing-sensor search, but the driver cannot tell which mount
 // TheSkyX drives, so it reports false.
 TEST_CASE("Bisque Telescope Driver - findhomeissensorsearch is false", "[bisque][telescope][unit][findhome-sensor]") {
@@ -2817,11 +3033,13 @@ TEST_CASE("Bisque motion owner - a refused slew, a landing or a failed FindHome 
         rig.mount.fail_slew_commands = 1;
         CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(5.5, 20.0), alpacacore::AlpacaException);
     } else if (leg == 1) {
-        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // the first IsSlewComplete reports landed
+        slew_to_coordinates_landing(rig, 5.5, 20.0);  // the first IsSlewComplete reports landed
     } else if (leg == 2) {
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
         rig.clock.advance(std::chrono::seconds(9));  // past the 8 s hold, so the poll asks TheSkyX
-        REQUIRE(poll_now(*rig.driver));
+        REQUIRE(poll_now(*rig.driver));  // IsSlewComplete reads true: the landing gate takes its first read
+        rig.clock.advance(std::chrono::seconds(1));
+        REQUIRE(poll_now(*rig.driver));  // the second read agrees: the mount is still, so the slew has landed
     } else {
         rig.mount.fail_find_home = 1;
         CHECK_THROWS_AS(rig.driver->find_home(), alpacacore::AlpacaException);

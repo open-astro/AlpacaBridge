@@ -162,6 +162,15 @@ datagrams before each send so replies cannot get off-by-one.
 - The driver's blocking `slew_to_coordinates()` is not reachable over HTTP (the router serves the synchronous forms through the async calls, #1660). Called directly, one superseded by a newer motion claim (a goto, Park, FindHome, MoveAxis or pulse that takes its axes) can throw `InvalidOperation` while the hardware GOTO continues to its target; the error reports that the synchronous wait lost ownership and does not prove the mount stopped.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
+- **Sync is bounded (#2407, maintainer decision 2026-11-24).** A Sync more than `util::kMaxSyncOffsetDegrees`
+  (5 deg, on the sky, `util::check_sync_bound()`) from where the mount points is refused with InvalidValue and
+  writes nothing, checked before any pulse is cancelled. The board has no sky reference at power-up, so the first
+  Sync after each Connect is exempt: it sets the reference (`sync_reference_set_`, cleared by
+  `reset_runtime_state_locked()`). Every later Sync in that session is bounded. The 5 deg bound is a constant;
+  per-device limits are a separate cross-driver issue.
+- **AbortSlew's stop check** (`run_abort_verify()`) is what confirms an acked `:L`. When the check cannot start
+  (its thread is refused), the next Slewing read raises "the stop could not be confirmed" and the next connect still
+  owes the stop.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
   in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
   the axis never stops. Dec pulses (and RA while not tracking) are software-timed

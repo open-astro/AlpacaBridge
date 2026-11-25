@@ -530,7 +530,7 @@ TEST_CASE("OnStep snapshot - a write is read back at once and a poll that sample
     // A GOTO start reads as Slewing past its grace, though the fake still answers no GOTO, until a tick says so.
     rig.driver->set_tracking(true);
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.clock.advance(seconds(3));  // past the 2 s slew grace; the poll is paused, so no tick runs
     CHECK(rig.driver->get_slewing());
     REQUIRE(rig.tick());
@@ -667,9 +667,9 @@ TEST_CASE(
     Rig rig;
     rig.connect();
     rig.pause();
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
-    rig.mount->set_status("nNpEW180#");                // the GOTO ended with tracking off
-    rig.clock.advance(seconds(3));                     // past the slew grace
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);  // starts with tracking on: a restore is owed
+    rig.mount->set_status("nNpEW180#");                 // the GOTO ended with tracking off
+    rig.clock.advance(seconds(3));                      // past the slew grace
 
     SECTION("the tick that reads the end restores it") {
         REQUIRE(rig.tick());
@@ -709,7 +709,7 @@ TEST_CASE("OnStep snapshot - a poll body cancelled mid-sample sends no tracking 
     Rig rig(/*with_site=*/true, /*response_timeout_ms=*/20000);  // the held :GU# must not time out
     rig.connect();
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));  // the poll body parks for its first tick
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);    // starts with tracking on: a restore is owed
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);   // starts with tracking on: a restore is owed
     rig.mount->set_status("nNpEW180#");                  // the GOTO ended with tracking off
     const auto polls = rig.mount->count(":GU#");
     rig.mount->block_status = true;
@@ -962,7 +962,7 @@ TEST_CASE("OnStep snapshot - Slewing is true as soon as SlewToCoordinatesAsync r
     rig.mount->set_on_command([&](const std::string& chunk) {
         if (chunk.rfind(":MS", 0) == 0) during = rig.driver->get_slewing() ? 1 : 0;
     });
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.mount->set_on_command(nullptr);
     CHECK(during.load() == 1);
     CHECK(rig.driver->get_slewing());
@@ -988,7 +988,7 @@ TEST_CASE("OnStep snapshot - a synchronous slew that lands inside the grace retu
         }
     });
     const auto start = rig.clock.now();
-    REQUIRE_NOTHROW(synchronous_slew(rig, 2.0, 20.0));
+    REQUIRE_NOTHROW(synchronous_slew(rig, 12.0, 45.0));
     const auto elapsed = rig.clock.now() - start;
     CHECK(elapsed < seconds(2));
     CHECK_FALSE(rig.driver->get_slewing());
@@ -1001,7 +1001,7 @@ TEST_CASE("OnStep snapshot - AbortSlew inside the hold clears Slewing at once",
     rig.connect();
     rig.pause();
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.driver->get_slewing());
     rig.driver->abort_slew();
     CHECK_FALSE(rig.driver->get_slewing());
@@ -1016,7 +1016,7 @@ TEST_CASE("OnStep snapshot - a reconnect inside the hold leaves Slewing false",
     rig.connect();
     rig.pause();
     rig.mount->set_status("NpEW180#");
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.driver->get_slewing());
     rig.driver->set_connected(false);
     rig.connect();
@@ -1070,7 +1070,7 @@ TEST_CASE("OnStep snapshot - a reading taken before the :MS# answer does not end
     std::atomic<int> calls{0};
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
         if (calls.fetch_add(1) != 0) return;
-        rig.driver->slew_to_coordinates_async(2.0, 20.0);  // tracking on: a restore is owed at the end
+        rig.driver->slew_to_coordinates_async(12.0, 45.0);  // tracking on: a restore is owed at the end
     });
     REQUIRE(rig.tick());  // sampled "no GOTO" before the :MS#
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
@@ -1091,7 +1091,7 @@ TEST_CASE("OnStep snapshot - a short goto reports landed before the 2 s hold end
     Rig rig;
     rig.connect();
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     rig.mount->set_status("npEW180#");  // the GOTO runs
     REQUIRE(rig.driver->get_slewing());
     rig.clock.advance(milliseconds(500));
@@ -3417,19 +3417,6 @@ TEST_CASE("OnStep limit stop - an AbortSlew that is first to read a GOTO the mou
 
 namespace {
 
-// Sets the #521 relink preserve window for one case and puts the default back.
-struct PreserveWindow {
-    explicit PreserveWindow(std::chrono::milliseconds window) {
-        onstep::detail::set_relink_motion_preserve_window(window);
-    }
-    ~PreserveWindow() {
-        onstep::detail::set_relink_motion_preserve_window(
-            std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kRelinkMotionPreserveWindow));
-    }
-    PreserveWindow(const PreserveWindow&) = delete;
-    PreserveWindow& operator=(const PreserveWindow&) = delete;
-};
-
 // The controller hangs up (a lost link, decision 0009) and the client's Connect relinks at once.
 void lose_and_relink(Rig& rig) {
     REQUIRE(rig.server.drop_connections());
@@ -3440,27 +3427,13 @@ void lose_and_relink(Rig& rig) {
 
 }  // namespace
 
-// #2296 with #521: a relink inside the preserve window leaves the mount's GOTO running (and a park, which it never
-// stops), so the watch on that motion carries over and a limit stop after the relink still fails it. A relink past
-// the window sends AbortSlew's stops: the motion is the driver's own stop then, and its end is not checked.
-TEST_CASE("OnStep limit stop - a GOTO or park a relink leaves running still fails when the mount stops it",
+// #2296 with #521, #2406: a relink sends AbortSlew's stops whatever the outage length, so a GOTO is the driver's own
+// stop then and its end is not checked; a park, which a relink never stops (#1289), keeps its watch, so a limit stop
+// after the relink still fails it.
+TEST_CASE("OnStep limit stop - a park a relink leaves running still fails when the mount stops it, a GOTO is stopped",
           "[onstep][telescope][snapshot][limit-stop]") {
     Rig rig;
-    SECTION("a GOTO, relinked inside the window, stopped at the meridian limit (7)") {
-        PreserveWindow window(std::chrono::hours(1));
-        goto_started(rig);
-        rig.mount->set_status("npEW180#");  // the GOTO runs through the outage
-        lose_and_relink(rig);
-        CHECK(rig.mount->count(":Q") == 0);  // motion left alone
-        show(rig, "nNpEW187#");
-        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
-        CHECK(code == alpacacore::AlpacaError::DriverException);
-        CHECK(contains(message, "SlewToCoordinatesAsync"));
-        CHECK(contains(message, "meridian limit"));
-        CHECK(rig.mount->count(":Te#") == 0);
-    }
-    SECTION("a park, relinked inside the window, stopped at the horizon limit (2)") {
-        PreserveWindow window(std::chrono::hours(1));
+    SECTION("a park, relinked while it parks, stopped at the horizon limit (2)") {
         connect_rates(rig);
         show(rig, "NpEW180#");
         rig.driver->park();
@@ -3471,8 +3444,7 @@ TEST_CASE("OnStep limit stop - a GOTO or park a relink leaves running still fail
         CHECK(code == alpacacore::AlpacaError::DriverException);
         CHECK(contains(message, "horizon limit"));
     }
-    SECTION("a park, relinked past the window while it parks, that the mount reports failed ('F')") {
-        PreserveWindow window(std::chrono::milliseconds(0));  // the #1289 rule leaves a park running anyway
+    SECTION("a park, relinked while it parks, that the mount reports failed ('F')") {
         connect_rates(rig);
         show(rig, "NpEW180#");
         rig.driver->park();
@@ -3482,8 +3454,7 @@ TEST_CASE("OnStep limit stop - a GOTO or park a relink leaves running still fail
         show(rig, "nNFEW180#");
         CHECK(thrown_by([&] { (void)rig.driver->get_at_park(); }).first == alpacacore::AlpacaError::DriverException);
     }
-    SECTION("a GOTO the relink stops past the window is not checked") {
-        PreserveWindow window(std::chrono::milliseconds(0));
+    SECTION("a GOTO the relink stops is not checked") {
         goto_started(rig);
         rig.mount->set_status("npEW180#");
         lose_and_relink(rig);
@@ -3492,10 +3463,8 @@ TEST_CASE("OnStep limit stop - a GOTO or park a relink leaves running still fail
         CHECK_NOTHROW(rig.driver->get_slewing());
         CHECK(rig.mount->count(":Te#") == 0);
     }
-    // Item 9: past the window the relink stops a GOTO but leaves a park running (#1289), so the park's watch carries
-    // over there too. Its bound still runs from the Park command (the outage counts: it is part of the park's time).
-    SECTION("a park the relink past the window leaves running") {
-        PreserveWindow window(std::chrono::milliseconds(0));
+    // Item 9: the relink stops a GOTO but leaves a park running (#1289), so the park's watch carries over. Its bound still runs from the Park command (the outage counts: it is part of the park's time).
+    SECTION("a park the relink leaves running") {
         connect_rates(rig);
         show(rig, "NpEW180#");
         rig.driver->park();
@@ -3568,37 +3537,6 @@ TEST_CASE("OnStep limit stop - an OnStep 4.x GOTO whose end frame shows a latche
         show(rig, "nNpEW187#");
         CHECK_NOTHROW(rig.driver->get_slewing());
         CHECK(rig.mount->count(":ST60.164275#") == 1);
-    }
-}
-
-// Item 8 (#2296): a 4.x GOTO carried over a relink inside the preserve window is judged by the same end rules from
-// the relink's first :GU#: the latched code can change while the link is down, and only where the mount ends counts.
-TEST_CASE("OnStep limit stop - an OnStep 4.x GOTO carried over a relink is judged by where it ends",
-          "[onstep][telescope][snapshot][limit-stop]") {
-    PreserveWindow window(std::chrono::hours(1));
-    Rig rig;
-    SECTION("the latched code changes while it runs, then it lands") {
-        goto_started(rig, "4.24s");
-        rig.mount->set_status("pEW187#");  // still running; a code latched during the outage
-        lose_and_relink(rig);
-        rig.mount->set_position(2.0, 20.0);
-        show(rig, "NpEW187#");
-        CHECK_NOTHROW(rig.driver->get_slewing());
-        CHECK_FALSE(rig.driver->get_slewing());
-    }
-    SECTION("stopped during the outage: the relink's first status ends it") {
-        goto_started(rig, "4.24s");
-        rig.mount->set_status("nNpEW182#");
-        lose_and_relink(rig);
-        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "horizon limit"));
-        CHECK(rig.mount->count(":ST60") == 0);
-    }
-    SECTION("the latch cleared during the outage, then a stop with the old code") {
-        goto_started(rig, "4.24s", "NpEW187#");
-        rig.mount->set_status("pEW180#");
-        lose_and_relink(rig);
-        show(rig, "nNpEW187#");
-        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "meridian limit"));
     }
 }
 
@@ -3785,33 +3723,6 @@ TEST_CASE("OnStep limit stop - a flip a limit stops part-way fails even when the
         show(rig, "NpET187#");  // the position is unchanged
         CHECK_NOTHROW(rig.driver->get_slewing());
     }
-}
-
-// Review round 2, item 6 (#2296): a relink that judges a carried-over GOTO on its seed frame, with no position in that
-// frame, reads :GRa# itself; a link lost on that read fails the Connect as any lost seed read does, rather than
-// escaping set_connected() as NotConnected.
-TEST_CASE("OnStep limit stop - a relink whose end check loses the link fails the Connect",
-          "[onstep][telescope][snapshot][limit-stop]") {
-    PreserveWindow window(std::chrono::hours(1));
-    Rig rig;
-    goto_started(rig);
-    rig.mount->set_status("nNpEW182#");  // stopped during the outage
-    REQUIRE(rig.server.drop_connections());
-    REQUIRE_FALSE(rig.driver->get_connected());
-    std::atomic<int> position_reads{0};
-    rig.mount->set_on_command([&](const std::string& chunk) {
-        if (chunk.rfind(":GRa", 0) == 0 && position_reads.fetch_add(1) == 0) {
-            rig.mount->garble_position = true;  // the seed's read: no position in the frame
-            rig.server.hang_up_on(":GRa");      // the next one, the end check's, loses the link
-        } else {
-            rig.mount->garble_position = false;
-        }
-    });
-    const auto [code, message] = thrown_by([&] { rig.driver->set_connected(true); });
-    rig.mount->set_on_command(nullptr);
-    INFO(message);
-    CHECK(contains(message, "Failed to connect to OnStep mount: the link was lost during the connect"));
-    CHECK_FALSE(rig.driver->get_connected());
 }
 
 // The kept stop is raised until the next motion command or a reconnect clears it (the shared rule "A failed async
@@ -4177,7 +4088,6 @@ TEST_CASE("OnStep park watch - the park and home bound follows a slow mount's ba
         CHECK_NOTHROW(rig.driver->get_at_home());
     }
     SECTION("a park a relink carries over keeps its bound") {
-        PreserveWindow window(milliseconds(0));  // the #1289 rule leaves a park running
         base_rate(rig, "1000.000", "4000");
         connect_rates(rig);
         show(rig, "NpEW180#");

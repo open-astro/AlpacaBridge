@@ -25,6 +25,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/polled_state.h>
@@ -923,7 +924,7 @@ public:
         run_connect_before_state_lock_hook();  // test seam: transition_mutex_ alone held
         StateLock lock(lock_gate_);
         // #2296: the watch on a GOTO, park or home the driver started, kept through a relink that leaves the motion
-        // running (stop_motion_after_long_outage_locked()), so its end is still checked. Its kept failure is not.
+        // running (stop_motion_after_link_loss_locked()), so its end is still checked. Its kept failure is not.
         std::optional<WatchedMotion> relink_watch;
         // A Connected=true against a lost link must reconnect, not return as
         // already connected (decision 0009 point 4, #1241).
@@ -984,7 +985,7 @@ public:
                     "OnStep");
             });
             connected_ = true;
-            if (stop_motion_after_long_outage_locked()) {
+            if (stop_motion_after_link_loss_locked()) {
                 relink_watch.reset();  // the driver stopped the motion: its end is the driver's own
             }
             polled_.reset();
@@ -1002,6 +1003,7 @@ public:
             tracking_before_slew_ = false;
             status_read_since_move_ = false;
             begin_motion_command_locked();  // no stored motion failure or stop check outlives a session (#2406)
+            synced_this_session_ = false;   // the first sync of a session is not bounded (#2406)
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             site_read_warned_ = false;
 
@@ -1761,6 +1763,9 @@ public:
         abort_stop_rounds_ = 0;
         if (!keep_goto_bound) {
             goto_deadline_.reset();
+            goto_target_.reset();
+            goto_running_ = false;
+            goto_seen_slewing_ = false;
         }
     }
 
@@ -1769,7 +1774,7 @@ public:
     // driver's own state is read, so a :GU# the driver cannot parse refuses nothing; a motion from a hand
     // controller is not seen. A pulse guide does not count.
     void refuse_while_moving_locked(const char* who) const {
-        const bool moving = slew_hold_.active(clock_.now()) || goto_deadline_.has_value() || manual_axis_slewing_[0] ||
+        const bool moving = slew_hold_.active(clock_.now()) || goto_unlanded_locked() || manual_axis_slewing_[0] ||
                             manual_axis_slewing_[1] || park_home_request_;
         if (moving) {
             throw AlpacaException(std::string(who) + " is not allowed while the mount is moving",
@@ -2116,6 +2121,14 @@ public:
     // The sync itself, after the caller's checks (SyncToCoordinates, SyncToTarget, SyncToAltAz).
     void sync_to_mount_locked(double ra, double dec, const char* who, TargetWrites targets) {
         refuse_while_goto_running_locked(who);
+        // The #2406 Decisions (2026-11-24): an OnStep mount has no reference at power-up, so the first sync
+        // after each Connect sets it and is not bounded. Every later one may move the pointing by
+        // util::kMaxSyncOffsetDegrees at most, from the position the frame holds.
+        if (synced_this_session_) {
+            const Position current = served_position_locked();
+            util::check_sync_bound(who, {current.ra_hours, current.dec_degrees}, {ra, dec},
+                                   util::kMaxSyncOffsetDegrees);
+        }
         const Wire protocol = wire();
         // Use the mount's own sync command — do NOT maintain a driver-level
         // offset, which would cause coordinate divergence during subsequent
@@ -2126,6 +2139,7 @@ public:
         if (reply.size() >= 2 && reply[0] == 'E' && std::isdigit(static_cast<unsigned char>(reply[1]))) {
             throw digit_refused(who, RefusedCommand::Sync, reply[1], reply);
         }
+        synced_this_session_ = true;
         store_target_locked(ra, dec, targets);
         // Write-through (decision 0010): the mount now reports the synced position; a tick that sampled before
         // the sync is dropped.
@@ -2258,7 +2272,7 @@ public:
     }
 
     // The stops this driver sends, from AbortSlew, MoveAxis(axis, 0) (stop_axis_locked()), the stops before
-    // a Park or FindHome, a refused MoveAxis re-send and the relink after a long outage: :Q# when
+    // a Park or FindHome, a refused MoveAxis re-send and the relink after a link loss: :Q# when
     // `abort_goto`, then :Qn#/:Qs#/:Qe#/:Qw# for each direction in `directions`. Each is tried on its own,
     // so one lost command cannot skip the others (#781). They go through Wire: the operation lock keeps
     // them together, and mutex_ is free while they are on the wire (decision 0016, #1449). Returns the
@@ -3624,35 +3638,22 @@ private:
         mount_clock_unreadable_.reset();
     }
 
-    // open-astro#521: OnStepX keeps running a GOTO while the serial link is
-    // out (on the HM-17 a GOTO pulled mid-slew stopped only when this sent
-    // the stops, #1241), and a MoveAxis for up to about 10 s before the
-    // firmware ends it by itself (#1098). On the connect that follows a
-    // loss, an outage at least as long as the preserve window means nobody
-    // was in control of that motion, so stop it with the same commands
-    // AbortSlew sends. A shorter outage is a glitch the client rides out,
-    // and no recorded loss (e.g. a fresh start) preserves motion: no stamp
-    // is not evidence that anything ran unattended. The outage runs from the
-    // last time the link was seen alive to the end of this reconnect (an
-    // auto-detect re-scan counts): rounds toward stopping. Tracking is kept.
-    // True when it sent the stops; false when it left the motion running (no loss, a short outage, a park).
-    bool stop_motion_after_long_outage_locked() {
+    // open-astro#521, #2406: OnStepX keeps running a GOTO while the serial link is out (on the HM-17 a GOTO pulled
+    // mid-slew stopped only when this sent the stops, #1241), and a MoveAxis for up to about 10 s before the
+    // firmware ends it by itself (#1098). Nobody was in control of that motion, however short the outage, so the
+    // connect that follows a loss stops it with the same commands AbortSlew sends, before anything else. No recorded
+    // loss (e.g. a fresh start) stops nothing: no stamp is not evidence that anything ran unattended. The outage,
+    // from the last time the link was seen alive (an auto-detect re-scan counts), is only logged. Tracking is kept.
+    // True when it sent the stops; false when it left the motion running (no loss, a park).
+    bool stop_motion_after_link_loss_locked() {
         // The loss stamps of the link this driver last let go of (release_link()), read and cleared: no I/O.
         const auto lost_at = std::exchange(carried_lost_at_, std::nullopt);
         const auto alive_at = std::exchange(carried_alive_at_, std::nullopt);
         if (!lost_at) {
             return false;
         }
-        // Timed from the last moment the link was known to be there, not from
-        // when the loss was noticed: the status poll checks the link once a
-        // second, but the first to notice may be the reconnect itself (the
-        // router reads Connected before every Connect), which would make a
-        // long unattended outage look like 0 s.
         // The wrapper stamped both times on clock_ (set at connect).
         const auto outage = clock_.now() - (alive_at ? *alive_at : *lost_at);
-        if (outage < detail::relink_motion_preserve_window()) {
-            return false;
-        }
         char seconds[32];
         std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
         // A park still running is left to finish (#1289 item 5): :Q# would
@@ -3668,11 +3669,11 @@ private:
             // unknown state: stop, as before
         }
         ALPACA_LOG_WARN("OnStep", std::string("The link to the mount was last seen alive ") + seconds +
-                                      " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
+                                      " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521, #2406)");
         // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
         // not skip the per-axis stops that end a MoveAxis.
         (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {
-            ALPACA_LOG_ERROR("OnStep", std::string("Stop after a long outage failed (") + what + "): " + error);
+            ALPACA_LOG_ERROR("OnStep", std::string("Stop after a link loss failed (") + what + "): " + error);
         });
         return true;
     }
@@ -4111,6 +4112,9 @@ private:
                 protocol.set_target_dec(dec);
             },
             [](const Wire& protocol) { return protocol.slew_to_target(); });
+        goto_target_ = util::MountPosition{ra, dec};  // #2406: its landing is judged against this
+        goto_running_ = true;
+        goto_seen_slewing_ = false;
         if (watched_motion_) {
             watched_motion_->target = std::make_pair(ra, dec);  // #2296: a stop code at the end is judged against it
         }
@@ -4214,12 +4218,24 @@ private:
     void wait_for_slew_complete_locked(StateLock& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
         goto_deadline_.reset();  // landed on the wait's own :GU#, before the next poll tick sees it (#2406)
-        // Decide the restore here; the status was just read (#1230). A slew the mount stopped owes none (#2296).
-        finish_slew_tracking_from_frame_locked();
+        goto_running_ = false;   // the wait's own :GU# showed no GOTO
         // The control path ends the motion: publish where the mount stopped, so the position read right after
         // Slewing goes false is not one the poll took during the GOTO (decision 0010).
+        const auto ended_at = clock_.now();
         publish_measurement_locked();
         raise_motion_error_locked(MotionKind::Slew);  // #2296: the read that saw the end, or a poll tick, kept it
+        // #2406: that frame judges the landing, before the next poll tick sees it. A failed read leaves it to the
+        // next tick's frame. A stop the mount made itself (above) is the reason, not a far miss.
+        const auto measured = polled_.read();
+        if (measured && measured->value.sampled_at >= ended_at) {
+            judge_landing_locked(measured->value);
+        }
+        if (!bound_error_.empty()) {
+            throw AlpacaException(bound_error_, AlpacaError::DriverException);
+        }
+        // Decide the restore here; the status was just read (#1230). A slew the mount stopped owes none (#2296), and
+        // one the driver stopped for a far miss gave it up (#2406).
+        finish_slew_tracking_from_frame_locked();
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
@@ -4339,6 +4355,8 @@ private:
             const MountStatus status = wire().get_status();
             if (!status.is_slewing) {
                 slew_hold_.clear();  // landed: a reading with no GOTO (decision 0022 rules 2, 3)
+            } else if (goto_target_) {
+                goto_seen_slewing_ = true;  // the GOTO ran: its end is judged (#2406)
             }
             note_status_read_locked(status, true);
         } catch (const std::exception& ex) {
@@ -4673,6 +4691,8 @@ private:
                 }
                 if (is_link_lost(ex)) {
                     polled_.lose_link();
+                } else {
+                    check_goto_bound_unread_locked();  // #2406: a failed :GU# still enforces the GOTO's bound
                 }
                 throw;
             }
@@ -4755,10 +4775,12 @@ private:
                                                  ? std::optional<Position>(Position{frame.ra_hours, frame.dec_degrees})
                                                  : std::nullopt);
         if (frame.status.is_slewing) {
+            goto_seen_slewing_ = goto_seen_slewing_ || goto_target_.has_value();  // its end is judged (#2406)
             return;
         }
         slew_hold_.clear();  // landed: a frame with no GOTO (decision 0022 rules 2, 3)
-        goto_deadline_.reset();
+        goto_running_ = false;
+        judge_landing_locked(frame);  // a far miss stops the mount and gives up the restore (#2406)
         if (!tracking_before_slew_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_home_request_) {
             return;
         }
@@ -4768,12 +4790,53 @@ private:
     }
 
     // #2406: the bounds the status poll enforces on each frame, under the operation lock its :GU# took: a GOTO past
-    // kGotoTimeout is stopped, and an AbortSlew the mount did not obey is sent again.
+    // kGotoTimeout is stopped, and an AbortSlew the mount did not obey is sent again. The bound outlives a frame
+    // that shows no GOTO: the mount may start the GOTO only after that frame. It ends at its deadline, or with the
+    // next motion command.
     void check_motion_bounds_locked(const MountStatus& status) const {
-        if (goto_deadline_ && status.is_slewing && clock_.now() >= *goto_deadline_) {
-            stop_overdue_goto_locked();
+        if (goto_deadline_ && clock_.now() >= *goto_deadline_) {
+            if (status.is_slewing) {
+                stop_overdue_goto_locked();
+            } else {
+                goto_deadline_.reset();
+                goto_target_.reset();  // a GOTO never seen running is no longer judged
+            }
         }
         check_abort_stop_locked(status);
+    }
+
+    // #2406: a GOTO of this driver has not landed: no frame has shown it end yet, or a :GU# showed it running and
+    // its end is not judged yet.
+    bool goto_unlanded_locked() const { return goto_running_ || goto_seen_slewing_; }
+
+    // #2406: a tick whose :GU# failed still enforces the bound of a GOTO not judged landed (one no frame has seen
+    // run may start late): the mount may still be running it, so the stops go out.
+    void check_goto_bound_unread_locked() const {
+        if ((goto_target_ || goto_unlanded_locked()) && goto_deadline_ && clock_.now() >= *goto_deadline_) {
+            stop_overdue_goto_locked();
+        }
+    }
+
+    // #2406 (#2396 AB-7): `frame` shows no GOTO, and its position was read after that :GU#. A GOTO that ended more
+    // than util::kLandingFarMissArcsec from its target on either axis did not land: it is stopped, and Slewing
+    // raises it. One frame is taken as still, without util::LandingGate's stillness pair.
+    // Only a GOTO a :GU# has shown running is judged: a frame from before the mount started it holds the position
+    // before the slew. A GOTO never seen running is left to the kGotoTimeout bound.
+    // TODO(#2406): check on a rig that :GU# shows no GOTO only once both axes have stopped.
+    void judge_landing_locked(const PolledFrame& frame) const {
+        if (!goto_target_ || !goto_seen_slewing_ || frame.status.is_slewing || !frame.equatorial_known) {
+            return;
+        }
+        const util::MountPosition target = *goto_target_;
+        goto_target_.reset();
+        goto_seen_slewing_ = false;
+        const double miss = util::axis_miss_arcsec({frame.ra_hours, frame.dec_degrees}, target);
+        if (miss <= util::kLandingFarMissArcsec) {
+            return;
+        }
+        char text[160];
+        std::snprintf(text, sizeof(text), "The GOTO ended %.0f arcsec from its target; the driver stopped it", miss);
+        stop_goto_locked(text);
     }
 
     // #2406 (#2396 AB-4): `status` from a :GU# after the AbortSlew. No motion ends the check. Motion when a round is
@@ -4812,14 +4875,22 @@ private:
     // #2406: a GOTO past kGotoTimeout. AbortSlew's stops go out, the stop is checked as after an AbortSlew, and
     // Slewing raises the failure.
     void stop_overdue_goto_locked() const {
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kGotoTimeout).count();
+        stop_goto_locked("The GOTO did not end within " + std::to_string(seconds) + " s; the driver stopped it");
+    }
+
+    // #2406: a GOTO the driver stops itself (its bound, a far miss): `text` is stored for Slewing.
+    void stop_goto_locked(std::string text) const {
         goto_deadline_.reset();
+        goto_target_.reset();
+        goto_running_ = false;
+        goto_seen_slewing_ = false;
         slew_hold_.clear();
         tracking_before_slew_ = false;
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kGotoTimeout).count();
-        bound_error_ = "The GOTO did not end within " + std::to_string(seconds) + " s; the driver stopped it";
+        bound_error_ = std::move(text);
         ALPACA_LOG_ERROR("OnStep", bound_error_);
         (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {
-            ALPACA_LOG_ERROR("OnStep", std::string("Stop of an overdue GOTO failed (") + what + "): " + error);
+            ALPACA_LOG_ERROR("OnStep", std::string("Stop of a GOTO failed (") + what + "): " + error);
         });
         abort_stop_rounds_ = 1;
         abort_next_round_ = clock_.now() + kAbortStopRound;
@@ -5269,10 +5340,20 @@ private:
     mutable bool status_read_since_move_ = false;
     // Set only by a coordinate slew; consumed when that slew completes (#1218).
     mutable bool tracking_before_slew_ = false;
-    // #2406: kGotoTimeout from the running GOTO's :MS#; cleared when it lands, by the next motion command, an
-    // AbortSlew and a connect. A fail-safe timeout, not a hold window: Slewing's hold stays slew_hold_ (decision 0022
-    // rule 1). Under mutex_.
+    // #2406: kGotoTimeout from the last GOTO's :MS#; kept after it lands, since the mount may start a GOTO only after
+    // a frame that shows none, and cleared at the deadline, by the next motion command, an AbortSlew and a connect. A
+    // fail-safe timeout, not a hold window: Slewing's hold stays slew_hold_ (decision 0022 rule 1). Under mutex_.
     mutable std::optional<std::chrono::steady_clock::time_point> goto_deadline_;
+    // #2406: the last GOTO's target, until a frame with no GOTO after one that showed it running judges its landing
+    // (judge_landing_locked()); cleared like goto_deadline_ otherwise. Under mutex_.
+    mutable std::optional<util::MountPosition> goto_target_;
+    // #2406: no frame has shown the GOTO end since its :MS#. Under mutex_.
+    mutable bool goto_running_ = false;
+    // #2406: a :GU# showed the GOTO running since its :MS# (not the write-through), so its end is judged. Under
+    // mutex_.
+    mutable bool goto_seen_slewing_ = false;
+    // #2406: a sync went out since the connect, so the next one is bounded (sync_locked()). Under mutex_.
+    bool synced_this_session_ = false;
     // #2406: kMaxMoveAxisDuration from each axis's MoveAxis start. Under mutex_.
     std::chrono::steady_clock::time_point manual_axis_deadline_[2]{};
     // #2406: a motion the driver had to stop itself (a GOTO past kGotoTimeout, a MoveAxis past its cap, a mount
@@ -5605,23 +5686,5 @@ void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
         onstep->set_status_poll_spawn_for_testing(std::move(spawn));
     }
 }
-
-namespace detail {
-
-namespace {
-std::atomic<std::chrono::milliseconds::rep>& relink_window_ms() {
-    static std::atomic<std::chrono::milliseconds::rep> window{
-        std::chrono::duration_cast<std::chrono::milliseconds>(util::kRelinkMotionPreserveWindow).count()};
-    return window;
-}
-}  // namespace
-
-void set_relink_motion_preserve_window(std::chrono::milliseconds window) { relink_window_ms() = window.count(); }
-
-std::chrono::milliseconds relink_motion_preserve_window() {
-    return std::chrono::milliseconds(relink_window_ms().load());
-}
-
-}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

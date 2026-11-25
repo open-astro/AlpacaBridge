@@ -114,6 +114,13 @@ public:
     std::atomic<bool> no_motion{false};
     /// While set, a GOTO that started never ends, so a test controls exactly when L sees it end.
     std::atomic<bool> goto_never_ends{false};
+    /// The next N cancels (M) are answered and logged but ignored, so a GOTO keeps running through them (#2412).
+    std::atomic<int> ignore_cancels{0};
+    /// Non-zero: each position read of the equatorial pair moves RA by this many counts, a mount that keeps moving
+    /// through any stop (#2412). A precise ('e') read moves it 24-bit counts (about 77 arcsec per 1000); a 16-bit ('E')
+    /// read moves it 16-bit counts (about 79 arcsec per 4). drift_reads counts the reads that drifted.
+    std::atomic<int> drift_counts{0};
+    std::atomic<int> drift_reads{0};
     /// The next N precise GOTOs land kMissCounts RA counts past their aim.
     std::atomic<int> miss_gotos{0};
     /// Every GOTO goes unanswered (the wrapper times out and throws) and sets goto_held (#742: the test's cue).
@@ -286,6 +293,18 @@ private:
             case 'z':
             case 'Z': {
                 if (silent_position.load() && goto_seen.load()) return "";
+                if ((chunk[0] == 'e' || chunk[0] == 'E') && drift_counts.load() != 0) {
+                    char moving[32];
+                    const auto reads = static_cast<unsigned>(drift_reads.fetch_add(1) + 1);
+                    const auto counts = static_cast<unsigned>(drift_counts.load());
+                    if (chunk[0] == 'E') {
+                        // 16-bit: the driver reads the last four digits before the comma and the first four after it.
+                        std::snprintf(moving, sizeof(moving), "0000%04X,20000000#", (0x0500u + reads * counts) & 0xFFFFu);
+                    } else {
+                        std::snprintf(moving, sizeof(moving), "%06X00,20000500#", (0x12AB05u + reads * counts) & 0xFFFFFFu);
+                    }
+                    return moving;
+                }
                 std::lock_guard<std::mutex> lock(mutex_);
                 return position_;
             }
@@ -320,6 +339,10 @@ private:
                 return report_slewing.load() || goto_in_progress() ? "1#" : "0#";
             }
             case 'M':  // cancel GOTO (protocol v3.3): the GOTO ends at once
+                if (ignore_cancels.load() > 0) {
+                    ignore_cancels.fetch_sub(1);
+                    return "#";
+                }
                 goto_seen.store(false);
                 return "#";
             case 't':  // tracking mode: chr(mode) & "#"

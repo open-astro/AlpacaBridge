@@ -457,7 +457,8 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
-    st->drop_slew_status.store(1000);
+    // Exactly three: the stop after the failure is verified (#2412), and its reads must answer.
+    st->drop_slew_status.store(3);
     // The failed Park surfaces on the next Slewing read as its stored error.
     bool park_failed = false;
     REQUIRE(advance_until(clock, [&] {
@@ -470,7 +471,7 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
     }));
     CHECK(park_failed);
     CHECK_FALSE(driver->get_at_park());
-    CHECK(st->drop_slew_status.load() == 1000 - 3);  // exactly three polls before failing
+    CHECK(st->drop_slew_status.load() == 0);  // three dropped polls failed it
     driver->set_connected(false);
 }
 
@@ -665,7 +666,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 
     driver->park();
     REQUIRE(driver->get_slewing());
-    driver->unpark();
+    alpacacore::test::call_stepping(clock, [&] { driver->unpark(); });  // its park stop is verified (#2412)
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
@@ -689,7 +690,8 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
     REQUIRE(driver->get_slewing());  // the park is still in flight
-    driver->abort_slew();            // ...but AbortSlew may cancel it
+    // ...but AbortSlew may cancel it (its stop verified on the task clock, #2412)
+    alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
 
@@ -824,7 +826,8 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
 
     REQUIRE_NOTHROW(driver->park());
     bool surfaced = false;
-    for (int i = 0; i < 48 && !surfaced; ++i) {
+    // 120 steps: the stop after the failed Park is verified on the task clock (#2412).
+    for (int i = 0; i < 120 && !surfaced; ++i) {
         REQUIRE((park_ended->load() || clock.wait_for_waiter_thread(park_thread.load(), std::chrono::seconds(5))));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
@@ -866,7 +869,7 @@ TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing
     REQUIRE_NOTHROW(driver->park());
     st->reject_tracking_stop.store(true);
     bool surfaced = false;
-    for (int i = 0; i < 48 && !surfaced; ++i) {
+    for (int i = 0; i < 120 && !surfaced; ++i) {
         clock.wait_for_waiters(1, std::chrono::milliseconds(100));
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -893,16 +896,22 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
     using alpacacore::AlpacaException;
     struct Case {
         const char* name;
-        std::function<void(alpacacore::TelescopeDriver&)> supersede;
+        std::function<void(alpacacore::TelescopeDriver&, alpacacore::test::FakeTaskClock&)> supersede;
     };
     const Case cases[] = {
-        {"AbortSlew", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
-        {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }},
-        {"MoveAxis", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); }},
+        // AbortSlew verifies its stop on the task clock (#2412).
+        {"AbortSlew",
+         [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock& clock) {
+             alpacacore::test::call_stepping(clock, [&] { d.abort_slew(); });
+         }},
+        {"Park", [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.park(); }},
+        {"MoveAxis", [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.move_axis(0, 0.5); }},
         // #2263: a MoveAxis claims (or, stopping, cancels) its own axis only; the slew owns both, so either ends it.
-        {"MoveAxis Dec", [](alpacacore::TelescopeDriver& d) { d.move_axis(1, 0.5); }},
-        {"MoveAxis RA stop", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.0); }},
-        {"MoveAxis Dec stop", [](alpacacore::TelescopeDriver& d) { d.move_axis(1, 0.0); }},
+        {"MoveAxis Dec", [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.move_axis(1, 0.5); }},
+        {"MoveAxis RA stop",
+         [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.move_axis(0, 0.0); }},
+        {"MoveAxis Dec stop",
+         [](alpacacore::TelescopeDriver& d, alpacacore::test::FakeTaskClock&) { d.move_axis(1, 0.0); }},
     };
     for (const auto& c : cases) {
         INFO(c.name);
@@ -927,7 +936,7 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
             done.store(true);
         });
         REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
-        c.supersede(*driver);
+        c.supersede(*driver, clock);
         // The slewer sleeps on the task clock between polls; step it until it has noticed.
         const bool finished = advance_until(clock, [&] { return done.load(); });
         slewer.join();

@@ -677,8 +677,8 @@ TEST_CASE("ZWO telescope clock - a synchronous slew that never settles is stoppe
         rig.advance(std::min<std::chrono::nanoseconds>(4s, left));
     }
     CHECK_FALSE(ready(slew));
-    rig.advance(1s);
-    rig.advance(1s);
+    // The poll's own 250 ms step, so the bound's stop is verified (two still reads 500 ms apart) in its first round.
+    rig.advance_until([&] { return ready(slew); }, 250ms, 3s);
     REQUIRE(ready(slew, kReal));
     try {
         slew.get();
@@ -690,41 +690,12 @@ TEST_CASE("ZWO telescope clock - a synchronous slew that never settles is stoppe
     CHECK(rig.mount.count(":Q") == 1);
 }
 
-TEST_CASE("ZWO telescope clock - a GOTO refused as busy backs off 300 ms on the task clock",
-          "[zwo][telescope][unit][clock]") {
-    Rig rig;
-    rig.connect();
-    rig.mount.reject_goto("e3", 1);
-    rig.driver->slew_to_coordinates_async(6.0, 30.0);
-    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
-    rig.wait_for_blocked_caller();
-    rig.advance(299ms);
-    CHECK(rig.mount.count(":MS") == 1);
-    rig.advance(1ms);
-    CHECK(rig.mount.wait_for_count(":MS", 2, kReal));
-    CHECK(rig.mount.count(":Q") >= 1);  // the busy mount was told to stop first
-}
-
-TEST_CASE("ZWO telescope clock - disconnect cancels the busy back-off without advancing the clock",
-          "[zwo][telescope][unit][clock]") {
-    Rig rig;
-    rig.connect();
-    rig.mount.reject_goto("e3");
-    rig.driver->slew_to_coordinates_async(6.0, 30.0);
-    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
-    rig.wait_for_blocked_caller();
-    auto& disconnect = rig.call([&] { rig.driver->set_connected(false); });
-    REQUIRE(ready(disconnect, kReal));
-    disconnect.get();
-    CHECK(rig.mount.count(":MS") == 1);
-}
-
 TEST_CASE("ZWO telescope clock - a sync refused while the mount settles retries after 200 ms",
           "[zwo][telescope][unit][clock]") {
     Rig rig;
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 1);
-    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, 30.0); });
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(12.0, 46.0); });
     REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
     rig.wait_for_blocked_caller();
     rig.advance(199ms);
@@ -740,7 +711,7 @@ TEST_CASE("ZWO telescope clock - a sync refused twice falls back to :CM after a 
     Rig rig;
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
-    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, 30.0); });
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(12.0, 46.0); });
     REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
     rig.wait_for_blocked_caller();
     rig.advance(200ms);
@@ -757,16 +728,14 @@ TEST_CASE("ZWO telescope clock - a sync refused twice falls back to :CM after a 
 TEST_CASE("ZWO last-resort Sync fences an older GOTO and serializes its target writes",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
-    rig.mount.reject_goto("e3", 1);
+    rig.mount.reject_goto("e3", 1);  // a refusal since #2408: the GOTO fails with no stop and no retry
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
-    REQUIRE(rig.mount.wait_for_count(":Q", 1, kReal));
-    REQUIRE(rig.clock.wait_for_waiters(2, kReal));
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
     rig.mount.override_reply(":SMMC", "e4", 2);
-    // The Sync's fence cancels the GOTO's back-off, but that body can still hold its clock registration while it
-    // leaves the wait, so a waiter count cannot tell it from the Sync's own park: with the Sync still on the wire
-    // (the e4 reply, then ":Q"), the step budget below ran out in microseconds and the second ":SMMC" never came
-    // (#2051). The Sync's 200 ms settle sleep is the next registration after the GOTO's; wait for that one.
+    // The Sync's 200 ms settle sleep is the next clock registration; wait for that one, since a waiter count cannot
+    // tell it from a body still leaving a wait (#2051).
     const auto waits = rig.clock.wait_count();
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
     REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
@@ -792,7 +761,15 @@ TEST_CASE("ZWO last-resort Sync fences an older GOTO and serializes its target w
 
 TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a retry",
           "[zwo][telescope][unit][clock][sync-fence]") {
+    // #2408: e3 is a refusal now, so the retry is e7's; the GOTO's site re-sync (its second ":SMGE") is held until
+    // the Sync's last-resort ":CM" has gone out.
+    alpacacore::test::Latch latch;
     Rig rig;
+    std::atomic<int> sites{0};
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view label) {
+        if (label == ":SMGE" && ++sites == 2) latch.block();
+    });
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
@@ -801,17 +778,18 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
     rig.advance(200ms);
     REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
     rig.wait_for_blocked_caller();
-    rig.advance(100ms);  // Sync's last-resort deadline is 200 ms away; the new GOTO's retry will be later.
-    rig.mount.reject_goto("e3", 1);
+    rig.advance(100ms);  // Sync's last-resort deadline is 200 ms away
+    rig.mount.reject_goto("e7", 1);
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
-    REQUIRE(rig.mount.wait_for_count(":Q", 3, kReal));
-    REQUIRE(rig.clock.wait_for_waiters(3, kReal));
-    rig.advance(200ms);
-    REQUIRE(ready(sync, kReal));
+    REQUIRE(latch.wait_entered());
+    rig.clock.advance(200ms);
+    const bool synced = ready(sync, kReal);
+    const int gotos = rig.mount.count(":MS");
+    latch.release();
+    REQUIRE(synced);
     sync.get();
-    CHECK(rig.mount.count(":MS") == 1);
-    rig.advance(100ms);
+    CHECK(gotos == 1);
     REQUIRE(rig.mount.wait_for_count(":MS", 2, kReal));
     rig.driver->abort_slew();
     std::string ra, dec;
@@ -833,6 +811,7 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
 TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
@@ -854,6 +833,7 @@ TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
 TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accepted",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
@@ -879,6 +859,7 @@ TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accep
 TEST_CASE("ZWO an older Sync never stops a newer PulseGuide (#2093)", "[zwo][telescope][unit][clock][sync-fence]") {
     const bool last_resort = GENERATE(false, true);  // the pulse lands in the 200 ms settle, or the 300 ms one
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
@@ -925,6 +906,7 @@ TEST_CASE("ZWO a Sync whose reset runs before a PulseGuide queues never stops th
             (void)go_future.wait_for(kReal);
         }
     });
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto pulse = std::async(std::launch::async, [&] { rig.driver->pulse_guide(0, 1000); });
@@ -1037,6 +1019,7 @@ TEST_CASE("ZWO an older Sync superseded by AbortSlew says so without claiming mo
 TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.driver->set_target_right_ascension(3.0);
     rig.driver->set_target_declination(10.0);
@@ -1826,7 +1809,7 @@ TEST_CASE("ZWO telescope clock - a GuideRate the mount does not take fails and r
 // taken before it. On a mount that applies ":SMMC" to its own coordinates, RA/Dec read the sync position after the
 // next poll instead of the sync correction counted twice.
 // Falsified by: zwo_telescope_driver.cpp sync_to_pair() taking `raw` from cached_equatorial_ when set instead of
-// protocol.get_current_equatorial() (RA reads 14.0, Dec 47.0).
+// protocol.get_current_equatorial() (RA reads 12.5, Dec 47.0).
 TEST_CASE("ZWO telescope clock - Sync ignores a position sampled before the sync (2492)",
           "[zwo][telescope][unit][clock][sync]") {
     Rig rig;
@@ -1834,12 +1817,12 @@ TEST_CASE("ZWO telescope clock - Sync ignores a position sampled before the sync
     rig.connect();
     rig.advance(250ms);  // a poll publishes the pre-sync position (12h, +45)
     REQUIRE(rig.driver->get_right_ascension() == Catch::Approx(12.0).margin(1e-3));
-    rig.driver->sync_to_coordinates(13.0, 46.0);
-    REQUIRE(rig.mount.ra_hours() == Catch::Approx(13.0).margin(1e-3));
+    rig.driver->sync_to_coordinates(12.25, 46.0);
+    REQUIRE(rig.mount.ra_hours() == Catch::Approx(12.25).margin(1e-3));
     const int polls = rig.mount.count(":GD");
     rig.advance_until([&] { return rig.mount.count(":GD") > polls + 1; }, 250ms, 5s);
     REQUIRE(rig.mount.count(":GD") > polls + 1);
-    CHECK(rig.driver->get_right_ascension() == Catch::Approx(13.0).margin(1e-3));
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(12.25).margin(1e-3));
     CHECK(rig.driver->get_declination() == Catch::Approx(46.0).margin(1e-3));
 }
 

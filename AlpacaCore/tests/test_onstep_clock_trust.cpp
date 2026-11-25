@@ -295,7 +295,7 @@ TEST_CASE("OnStep host clock - a re-sync waits out a GOTO before it writes the m
     OnStepLog log;
     Rig rig;
     rig.connect();
-    rig.driver->slew_to_coordinates_async(12.0, 85.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.mount->goto_running.load());
 
     alpacacore::util::HostClockTrust::mark_set("test step");
@@ -421,7 +421,7 @@ TEST_CASE("OnStep host clock - a re-sync gives up after the shared motion bound"
     OnStepLog log;
     Rig rig;
     rig.connect();
-    rig.driver->slew_to_coordinates_async(12.0, 85.0);
+    rig.driver->slew_to_coordinates_async(12.0, 45.0);
     REQUIRE(rig.mount->goto_running.load());
 
     alpacacore::util::HostClockTrust::mark_set("test step");
