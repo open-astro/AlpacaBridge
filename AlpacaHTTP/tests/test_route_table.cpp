@@ -564,7 +564,6 @@ constexpr unsigned kVerbPost = alpacahttp::ManagementRoute::kVerbPost;
 constexpr unsigned kVerbPut = alpacahttp::ManagementRoute::kVerbPut;
 constexpr unsigned kVerbDelete = alpacahttp::ManagementRoute::kVerbDelete;
 constexpr unsigned kVerbOther = alpacahttp::ManagementRoute::kVerbOther;  // PATCH, which parse_method does not know
-constexpr unsigned kEveryVerb = alpacahttp::ManagementRoute::kEveryVerb;
 
 struct ManagementRow {
     const char* path;   // a tail is written {name}; the probe replaces it with `tail`
@@ -578,20 +577,23 @@ struct ManagementRow {
     unsigned safe_verbs;  // verbs the probe may send without an Origin: they change nothing here
     // open-astro#674: the wrong-verb 405 echoes a ClientTransactionID sent only in the JSON body.
     bool body_transaction_id = false;
+    // The verbs differ per sub-path: kSubFixture holds them.
+    bool sub_routed = false;
 };
 
 constexpr const char* kPostPut = "Method not allowed. Use POST or PUT.";
 
 // clang-format off
 const std::vector<ManagementRow> kManagementFixture = {
-    {"/api", "/api/", nullptr, kEveryVerb, Guard::None, "", WrongVerb::None, "", kEveryVerb},
+    {"/api", "/api/", nullptr, kVerbGet, Guard::None, "", WrongVerb::MethodNotAllowed,
+     "Unsupported HTTP method for api endpoint", kVerbGet},
     {"/management/v1/description", "/management/description", nullptr, kVerbGet | kVerbPost | kVerbPut,
      Guard::BeforeVerbCheck, "server description", WrongVerb::AlpacaText,
      "Unsupported HTTP method for description endpoint", kVerbGet | kVerbPost | kVerbPut},
     {"/management/v1/apiversions", "/management/apiversions", nullptr, kVerbGet, Guard::None, "",
      WrongVerb::AlpacaText, "Unsupported HTTP method for apiversions endpoint", kVerbGet},
-    {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kEveryVerb, Guard::None, "", WrongVerb::None, "",
-     kEveryVerb},
+    {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kVerbGet, Guard::None, "",
+     WrongVerb::MethodNotAllowed, "Unsupported HTTP method for buildinfo endpoint", kVerbGet},
     {"/management/v1/configureddevices", "/management/configureddevices", nullptr, kVerbGet, Guard::None, "",
      WrongVerb::AlpacaText, "Unsupported HTTP method for configureddevices endpoint", kVerbGet},
     {"/management/v1/faileddevices", "/management/faileddevices", nullptr, kVerbGet, Guard::None, "",
@@ -632,11 +634,14 @@ const std::vector<ManagementRow> kManagementFixture = {
     {"/management/v1/synctime", "/management/synctime", nullptr, kVerbGet | kVerbPost | kVerbPut,
      Guard::BeforeVerbCheck, "time synchronisation", WrongVerb::MethodNotAllowed,
      "Method not allowed. GET reads the server time; POST or PUT sets it.", kVerbGet | kVerbPost | kVerbPut, true},
-    // Sub-routed: the handler checks the verb per sub-path (test_routing covers them). Only the guard is probed.
+    // Sub-routed: the row's verbs are the union of its sub-paths' (kSubFixture), whose wrong-verb answers
+    // check_management_subroutes() probes; the table walk skips these rows.
     {"/management/v1/wifi/{sub}", "/management/wifi/{sub}", "status", kVerbGet | kVerbPost | kVerbPut | kVerbDelete,
-     Guard::BeforeVerbCheck, "WiFi management", WrongVerb::Handler, "", 0},
+     Guard::BeforeVerbCheck, "WiFi management", WrongVerb::MethodNotAllowed,
+     "Unsupported HTTP method for wifi endpoint", 0, false, true},
     {"/management/v1/update/{sub}", "/management/update/{sub}", "check", kVerbGet | kVerbPost | kVerbPut,
-     Guard::BeforeVerbCheck, "software update", WrongVerb::Handler, "", 0},
+     Guard::BeforeVerbCheck, "software update", WrongVerb::MethodNotAllowed,
+     "Unsupported HTTP method for update endpoint", 0, false, true},
 };
 // clang-format on
 
@@ -689,10 +694,12 @@ void check_management_routes(alpacahttp::Router& router) {
     const std::vector<std::pair<std::string, unsigned>> verbs = {
         {"GET", kVerbGet}, {"POST", kVerbPost}, {"PUT", kVerbPut}, {"DELETE", kVerbDelete}, {"PATCH", kVerbOther}};
     for (const ManagementRow& row : kManagementFixture) {
-        // A route that accepts a verb other than GET changes state, so it is guarded. The WrongVerb::None rows
-        // (/api and buildinfo) answer every verb alike and change nothing.
-        if (row.wrong_verb != WrongVerb::None && (row.verbs & ~kVerbGet) != 0 && row.guard == Guard::None) {
+        // A route that accepts a verb other than GET changes state, so it is guarded.
+        if ((row.verbs & ~kVerbGet) != 0 && row.guard == Guard::None) {
             failures.push_back(std::string(row.path) + ": accepts a state-changing verb with no origin guard");
+        }
+        if (row.sub_routed) {
+            continue;  // check_management_subroutes()
         }
         const std::string guard_message = "Cross-origin " + std::string(row.guard_what) + " requests are not allowed";
         for (const char* spelling : {row.path, row.alias}) {
@@ -706,7 +713,7 @@ void check_management_routes(alpacahttp::Router& router) {
                 const std::string where = verb + " " + path;
 
                 // No Origin: a wrong verb gets the family's answer, an accepted one reaches the handler.
-                if (row.wrong_verb != WrongVerb::Handler && (!accepted || safe)) {
+                if (!accepted || safe) {
                     // A wrong verb carries a body ID, which only a body_transaction_id row echoes.
                     const Answer a = send(router, verb, path, accepted ? "" : R"({"ClientTransactionID": 4242})");
                     ++probes;
@@ -727,7 +734,7 @@ void check_management_routes(alpacahttp::Router& router) {
                 // A foreign Origin. The guard passes every GET.
                 const bool guarded = bit != kVerbGet && (row.guard == Guard::BeforeVerbCheck ||
                                                          (row.guard == Guard::AfterVerbCheck && accepted));
-                if (!guarded && (row.wrong_verb == WrongVerb::Handler || (accepted && !safe))) {
+                if (!guarded && accepted && !safe) {
                     continue;
                 }
                 const Answer a = send(router, verb, path, std::string(), true);
@@ -751,6 +758,114 @@ void check_management_routes(alpacahttp::Router& router) {
     report("G management routes", failures);
 }
 
+// open-astro#2648: each known sub-path of a sub-routed row and the verbs it accepts. A tail written
+// "prefix/{arg}" is every tail starting "prefix/"; the probe sends "x" for the argument.
+struct SubRow {
+    const char* base;  // "wifi" or "update": the row's /management/v1/<base>/{sub}
+    const char* sub;
+    unsigned verbs;
+};
+
+// clang-format off
+const std::vector<SubRow> kSubFixture = {
+    {"wifi", "status", kVerbGet},
+    {"wifi", "radio", kVerbPost | kVerbPut},
+    {"wifi", "scan", kVerbGet},
+    {"wifi", "profiles", kVerbGet | kVerbPost | kVerbPut},
+    {"wifi", "profiles/{arg}", kVerbDelete},
+    {"wifi", "connect", kVerbPost | kVerbPut},
+    {"wifi", "ap", kVerbGet | kVerbPost | kVerbPut},
+    {"wifi", "adapter", kVerbPost | kVerbPut},
+    {"wifi", "country", kVerbGet | kVerbPost | kVerbPut},
+    {"update", "status", kVerbGet},
+    {"update", "check", kVerbPost | kVerbPut},
+    {"update", "install", kVerbPost | kVerbPut},
+    {"update", "channel", kVerbPost | kVerbPut},
+};
+// clang-format on
+
+const ManagementRow& sub_routed_row(const std::string& base) {
+    for (const ManagementRow& row : kManagementFixture) {
+        if (row.sub_routed && std::string(row.path).find("/" + base + "/") != std::string::npos) {
+            return row;
+        }
+    }
+    EXPECT(false);
+    return kManagementFixture.front();
+}
+
+// A known sub-path answers a verb it does not take like any AlpacaBridge-only path (405, its own Allow,
+// InvalidOperation); the origin guard still runs first for every verb but GET; an unknown sub-path keeps the
+// handler's unknown-path answer for every verb. Accepted verbs are not sent: they would reach NetworkManager
+// and the update helper.
+void check_management_subroutes(alpacahttp::Router& router) {
+    std::vector<std::string> failures;
+    std::size_t probes = 0;
+    const std::vector<std::pair<std::string, unsigned>> verbs = {
+        {"GET", kVerbGet}, {"POST", kVerbPost}, {"PUT", kVerbPut}, {"DELETE", kVerbDelete}, {"PATCH", kVerbOther}};
+    auto probe_spellings = [&](const std::string& base, const std::string& tail, auto&& check) {
+        for (const char* prefix : {"/management/v1/", "/management/"}) {
+            check(std::string(prefix) + base + "/" + tail);
+        }
+    };
+    for (const SubRow& sub : kSubFixture) {
+        const ManagementRow& row = sub_routed_row(sub.base);
+        std::string tail = sub.sub;
+        if (const auto brace = tail.find('{'); brace != std::string::npos) {
+            tail = tail.substr(0, brace) + "x";
+        }
+        const std::string guard_message = "Cross-origin " + std::string(row.guard_what) + " requests are not allowed";
+        probe_spellings(sub.base, tail, [&](const std::string& path) {
+            for (const auto& [verb, bit] : verbs) {
+                const bool accepted = (sub.verbs & bit) != 0;
+                const std::string where = verb + " " + path;
+                if (!accepted) {
+                    const Answer a = send(router, verb, path, R"({"ClientTransactionID": 4242})");
+                    ++probes;
+                    const bool right = a.status == 405 && a.error_number == alpacacore::AlpacaError::InvalidOperation &&
+                                       a.content_type.find("application/json") == 0 &&
+                                       a.message == row.wrong_verb_message && a.allow == allow_list(sub.verbs) &&
+                                       a.client_tx_id == 0;
+                    if (!right) {
+                        failures.push_back(where + ": " + describe(a) + ", want 405 Allow '" + allow_list(sub.verbs) +
+                                           "' InvalidOperation '" + row.wrong_verb_message + "'");
+                    }
+                }
+                if (bit == kVerbGet && accepted) {
+                    continue;
+                }
+                const Answer a = send(router, verb, path, std::string(), true);
+                ++probes;
+                if (bit != kVerbGet) {
+                    if (a.status != 403 || a.error_number != kInvalidValue || a.message != guard_message) {
+                        failures.push_back(where + " cross-origin: " + describe(a) + ", want 403 '" + guard_message +
+                                           "'");
+                    }
+                } else if (a.status != 405 || a.allow != allow_list(sub.verbs)) {
+                    failures.push_back(where + " cross-origin: " + describe(a) + ", want 405 Allow '" +
+                                       allow_list(sub.verbs) + "'");
+                }
+            }
+        });
+    }
+    // An unknown sub-path, and a known one with an extra segment, are not wrong-verb answers, whatever the verb.
+    for (const char* base : {"wifi", "update"}) {
+        for (const char* tail : {"bogus", "status/extra"}) {
+            probe_spellings(base, tail, [&](const std::string& path) {
+                for (const auto& [verb, bit] : verbs) {
+                    const Answer a = send(router, verb, path, R"({"ClientTransactionID": 4242})");
+                    ++probes;
+                    if (a.status == 405 || !a.allow.empty()) {
+                        failures.push_back(verb + " " + path + ": " + describe(a) + ", want the unknown-path answer");
+                    }
+                }
+            });
+        }
+    }
+    std::cout << "G: " << probes << " sub-path probes over " << kSubFixture.size() << " sub-paths\n";
+    report("G management sub-paths", failures);
+}
+
 // G. The router's own table vs the fixture, row by row, so a row the probes cannot name (a new route) fails too.
 // The table is a C++ value, read through Router::management_routes(); no source scan is needed.
 void check_management_table() {
@@ -771,6 +886,43 @@ void check_management_table() {
             failures.push_back("row " + std::to_string(i) + " (" + route.path + ") differs from the fixture (" +
                                row.path + ")");
         }
+        if (route.subs.empty() == row.sub_routed) {
+            failures.push_back(std::string(route.path) + ": sub-routed in the table is " +
+                               (route.subs.empty() ? "no" : "yes") + ", in the fixture " +
+                               (row.sub_routed ? "yes" : "no"));
+            continue;
+        }
+        // The sub-paths, both directions, and the row's verbs are their union.
+        unsigned all = 0;
+        for (const alpacahttp::ManagementSubRoute& sub : route.subs) {
+            all |= sub.verbs;
+            const std::string base = std::string(route.path).substr(std::string("/management/v1/").size());
+            const auto found = std::find_if(kSubFixture.begin(), kSubFixture.end(), [&](const SubRow& f) {
+                return base.rfind(std::string(f.base) + "/", 0) == 0 && std::string(f.sub) == sub.sub &&
+                       f.verbs == sub.verbs;
+            });
+            if (found == kSubFixture.end()) {
+                failures.push_back(std::string(route.path) + ": sub-path '" + sub.sub + "' is not in kSubFixture");
+            }
+        }
+        if (!route.subs.empty() && all != route.verbs) {
+            failures.push_back(std::string(route.path) + ": verbs differ from the union of its sub-paths");
+        }
+    }
+    for (const SubRow& f : kSubFixture) {
+        std::size_t n = 0;
+        for (const alpacahttp::ManagementRoute& route : table) {
+            for (const alpacahttp::ManagementSubRoute& sub : route.subs) {
+                n += std::string(sub.sub) == f.sub && sub.verbs == f.verbs &&
+                             std::string(route.path).find(std::string("/") + f.base + "/") != std::string::npos
+                         ? 1
+                         : 0;
+            }
+        }
+        if (n != 1) {
+            failures.push_back(std::string("kSubFixture ") + f.base + "/" + f.sub + " is in the table " +
+                               std::to_string(n) + " times");
+        }
     }
     report("G management table", failures);
 }
@@ -785,8 +937,9 @@ int main() {
     check_source_tables();
     {
         // case: every management route answers a wrong verb per its family and refuses a cross-origin write (#2485)
-        check_management_table();
         check_management_routes(router);
+        check_management_subroutes(router);
+        check_management_table();
     }
 
     auto& registry = alpacacore::management::DeviceRegistry::instance();

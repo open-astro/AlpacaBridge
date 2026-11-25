@@ -20,6 +20,10 @@ guard: see "Cross-origin protection" below.
 
 ## Endpoints
 
+A verb a known sub-path does not take (a `PUT` on `status`, a `GET` on `connect`) is answered HTTP 405 with
+`Allow` and `ErrorNumber` 1036 (`InvalidOperation`), after the cross-origin guard below; an unknown sub-path is
+HTTP 200 with `ErrorNumber` 1025 and "Unknown wifi endpoint or method: <sub>".
+
 ### GET /management/v1/wifi/status
 
 The one call a client needs for its WiFi UI state.
@@ -414,7 +418,8 @@ restart.
 - `GET /management/v1/buildinfo` (3.6.0) — `Value` carries `Version` plus the
   git state captured when the binary was configured: `GitBranch`,
   `GitCommit`, `GitDirty`, `GitIsRelease` and `GitRemoteUrl`. Read-only, same
-  envelope and trusted-LAN model as the calls above. It is kept out of
+  envelope and trusted-LAN model as the calls above. Any other verb is HTTP 405
+  with `Allow: GET`, as on `/api`. It is kept out of
   `description`, whose payload the ASCOM spec fixes; the web UI reads it to
   badge a build that did not come from a release tag. A detached checkout
   reports `GitBranch` as the literal `HEAD`, which says nothing about whether
