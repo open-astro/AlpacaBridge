@@ -58,6 +58,8 @@ using std::chrono::steady_clock;
 constexpr milliseconds kPollPeriod{250};
 // Real-time bound a rig waits for the poll to park on the clock (and for a woken poll to settle).
 constexpr milliseconds kRigBound{3000};
+// The poll and the clock-sync body both park on the clock after a connect; the rig waits for both.
+constexpr alpacacore::test::RigTiming kRigTiming{kPollPeriod, kRigBound, alpacacore::test::kIoptronConnectWaiters};
 // Issue #2491 test 1: a getter answers within this while the mount holds every reply for kReplyDelay.
 constexpr milliseconds kGetterBudget{20};
 constexpr milliseconds kReplyDelay{200};
@@ -88,7 +90,7 @@ using TcpRig = alpacacore::test::PolledRig<FakeIoptronMount, TelescopeDriver>;
 using PtyRig = alpacacore::test::PolledRig<PtyIoptronMount, TelescopeDriver>;
 
 TcpRig make_tcp_rig() {
-    return TcpRig({kPollPeriod, kRigBound}, [](FakeIoptronMount& mount, FakeTaskClock& clock) {
+    return TcpRig(kRigTiming, [](FakeIoptronMount& mount, FakeTaskClock& clock) {
         return make_driver(tcp_endpoint(mount.port()), clock);
     });
 }
@@ -508,7 +510,7 @@ TEST_CASE("iOptron polled state - a fault that stands for the staleness bound dr
 // by the next poll's exchange; Connected drops at once and no getter had to meet the pull.
 TEST_CASE("iOptron polled state - a cable pulled between polls loses the link at the next poll",
           "[ioptron][telescope][polled][link-lost]") {
-    PtyRig rig({kPollPeriod, kRigBound}, [](PtyIoptronMount& mount, FakeTaskClock& clock) {
+    PtyRig rig(kRigTiming, [](PtyIoptronMount& mount, FakeTaskClock& clock) {
         return make_driver(serial_endpoint(mount.slave_path()), clock);
     });
     static_cast<void>(rig.connect());

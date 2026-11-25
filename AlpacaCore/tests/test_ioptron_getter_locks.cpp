@@ -206,6 +206,7 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
                                                               std::nullopt, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     // The connect primes the site cache for 30 s of task-clock time and then 60 s; past that SiderealTime asks the
     // mount.
@@ -317,6 +318,7 @@ TEST_CASE("iOptron telescope - a frame sampled inside the slew hold does not end
                                                               std::nullopt, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
 
     const int sent_before = mount.count(":MS1#");

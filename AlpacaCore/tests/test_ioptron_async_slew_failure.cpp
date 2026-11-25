@@ -267,6 +267,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
         0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, 45.0, -122.0, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -628,6 +629,7 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         if (initiator.alt_az) {
             mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
             age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
@@ -711,6 +713,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
     alpacacore::test::FakeTaskClock clock;
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
     mount.set_goto_reply("", /*moves=*/true);
     const int stops_before = mount.count(":Q#");
     const int status_reads = mount.count(":GLS#");
@@ -738,6 +741,7 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         mount.set_system_status(2);  // earlier motion still running
         mount.set_goto_reply("", /*moves=*/false);
         const int stops_before = mount.count(":Q#");
