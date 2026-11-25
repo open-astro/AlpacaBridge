@@ -46,6 +46,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -64,6 +65,13 @@ class PersistedConfigStore;  // src/http/persisted_config_store.h: config/regist
 class ClientConnectionLedger;  // src/http/client_connection_ledger.h: per-client Connected bookkeeping
 class Router;
 struct ManagementRoute;
+
+// open-astro#2648: one known sub-path of a sub-routed management row (wifi/{sub}, update/{sub}) and the verbs it
+// accepts. `sub` is the tail; a tail written "prefix/{arg}" is every tail that starts "prefix/".
+struct ManagementSubRoute {
+    const char* sub;
+    unsigned verbs;
+};
 
 struct RouteMatch {
     std::string device_type;
@@ -90,7 +98,6 @@ struct ManagementRoute {
     static constexpr unsigned kVerbPut = 1U << 2;
     static constexpr unsigned kVerbDelete = 1U << 3;
     static constexpr unsigned kVerbOther = 1U << 4;  // a verb Request::parse_method does not know
-    static constexpr unsigned kEveryVerb = kVerbGet | kVerbPost | kVerbPut | kVerbDelete | kVerbOther;
 
     // reject_cross_origin_request() (decision 0007). It passes every GET.
     enum class Guard : std::uint8_t {
@@ -100,10 +107,8 @@ struct ManagementRoute {
     };
     // The answer to a verb the route does not accept (decision 0007 rule 13).
     enum class WrongVerb : std::uint8_t {
-        None,              // every verb reaches the handler (/api, buildinfo)
         AlpacaText,        // an Alpaca-defined path: 400 with a text/plain message (#1508)
         MethodNotAllowed,  // an AlpacaBridge-only path: 405, Allow and InvalidOperation (#2484)
-        Handler,           // sub-routed (wifi/*, update/*): the handler checks the verb per sub-path
     };
     using Handler = Response (*)(Router&, const Request&, const RouteMatch&, std::uint32_t server_tx_id);
     // Matches a path with a tail and stores the tail; null for an exact path.
@@ -120,6 +125,9 @@ struct ManagementRoute {
     // open-astro#674: synctime echoes a ClientTransactionID sent only in the JSON body on every reply.
     bool body_transaction_id;
     Handler handler;
+    // open-astro#2648: a sub-routed row lists its known sub-paths. Their verbs replace `verbs` in the verb check
+    // and the Allow header; a tail not listed reaches the handler, which answers the unknown path.
+    std::span<const ManagementSubRoute> subs = {};
 };
 
 class Router {

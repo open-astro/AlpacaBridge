@@ -143,6 +143,9 @@ The state-changing endpoints (`check`, `install`, `channel`) carry the cross-ori
 [wifi-api.md](wifi-api.md): a browser request whose `Origin` does not match
 `Host` gets HTTP 403 with `ErrorMessage` "Cross-origin software update requests
 are not allowed". `GET status` is exempt, like every other GET.
+A verb a known sub-path does not take (a `GET` on `check`, a `POST` on `status`) is answered HTTP 405 with
+`Allow` and `ErrorNumber` 1036 (`InvalidOperation`), after the guard; an unknown sub-path is HTTP 200 with
+`ErrorNumber` 1025 and "Unknown update endpoint or method: <sub>".
 
 - `GET /management/v1/update/status` returns the last check result and the
   installer state without any network fetch (it reads the unit's state over

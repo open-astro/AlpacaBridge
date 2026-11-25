@@ -8225,16 +8225,24 @@ int main() {
         const auto status_json = nlohmann::json::parse(status_response.body(), nullptr, false);
         EXPECT(!status_json.is_discarded() && status_json.contains("ErrorNumber"));
 
-        // Unknown sub-endpoint and wrong methods are rejected.
+        // An unknown sub-endpoint is rejected with an error envelope, HTTP 200.
+        {
+            const auto response = route_request(router, "GET", "/management/v1/wifi/bogus");
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(response.status_code() == 200);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+        // A wrong verb on a known sub-endpoint is a 405 with Allow (#2648, test_route_table section G).
         for (const auto& [method, path] : {
-                 std::pair{"GET", "/management/v1/wifi/bogus"},
                  std::pair{"PUT", "/management/v1/wifi/status"},
                  std::pair{"GET", "/management/v1/wifi/connect"},
                  std::pair{"DELETE", "/management/v1/wifi/profiles"},
              }) {
             const auto response = route_request(router, method, path);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(response.status_code() == 405);
+            EXPECT(!response.get_header("Allow").empty());
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == alpacacore::AlpacaError::InvalidOperation);
         }
 
         // CSRF guard: a cross-origin mutating request (browser-attached
@@ -8298,9 +8306,9 @@ int main() {
             EXPECT(message.find("Mac") != std::string::npos || message.find("JSON object") != std::string::npos);
         }
         // GET is not a route for it: a state change is never a GET (decision 0007 rule 1).
-        const auto get =
-            nlohmann::json::parse(route_request(router, "GET", "/management/v1/wifi/adapter").body(), nullptr, false);
-        EXPECT(!get.is_discarded() && get.value("ErrorMessage", "").find("Unknown wifi endpoint") != std::string::npos);
+        const auto get = route_request(router, "GET", "/management/v1/wifi/adapter");
+        EXPECT(get.status_code() == 405);
+        EXPECT(get.get_header("Allow") == "POST, PUT");
 
         alpacahttp::Request cross_origin;
         const std::string body = "{\"Mac\": \"aa:bb:cc:dd:ee:ff\"}";
@@ -9226,16 +9234,19 @@ int main() {
         EXPECT(scripted->starts == 1);
         EXPECT(json["Value"]["Installer"]["State"] == "running");
 
-        // Wrong verb or unknown sub-endpoint: INVALID_VALUE, still HTTP 200.
+        // A known sub-endpoint with the wrong verb is a 405 with Allow (#2648, test_route_table section G).
         const auto wrong_verb = route_request(router, "GET", "/management/v1/update/install");
-        EXPECT(wrong_verb.status_code() == 200);
+        EXPECT(wrong_verb.status_code() == 405);
+        EXPECT(wrong_verb.get_header("Allow") == "POST, PUT");
         json = nlohmann::json::parse(wrong_verb.body(), nullptr, false);
-        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
-        json = nlohmann::json::parse(route_request(router, "POST", "/management/v1/update/status", "{}").body(),
-                                     nullptr, false);
-        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
-        json =
-            nlohmann::json::parse(route_request(router, "GET", "/management/v1/update/bogus").body(), nullptr, false);
+        EXPECT(json.value("ErrorNumber", 0) == alpacacore::AlpacaError::InvalidOperation);
+        const auto wrong_status = route_request(router, "POST", "/management/v1/update/status", "{}");
+        EXPECT(wrong_status.status_code() == 405);
+        EXPECT(wrong_status.get_header("Allow") == "GET");
+        // An unknown sub-endpoint: INVALID_VALUE, still HTTP 200.
+        const auto unknown = route_request(router, "GET", "/management/v1/update/bogus");
+        EXPECT(unknown.status_code() == 200);
+        json = nlohmann::json::parse(unknown.body(), nullptr, false);
         EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
         {
             // case: update channel route
@@ -9266,7 +9277,7 @@ int main() {
             const auto refused = route_request(router, "PUT", "/management/v1/update/channel", R"({"Channel":"nope"})");
             EXPECT(refused.status_code() == 400);
             EXPECT(refused.get_header("Content-Type").find("application/json") == 0);
-            EXPECT(route_request(router, "GET", "/management/v1/update/channel").status_code() == 200);
+            EXPECT(route_request(router, "GET", "/management/v1/update/channel").status_code() == 405);
             EXPECT(scripted->switches.empty());
             {
                 const auto [status, reply] = channel_json("POST", R"({"Channel":"beta"})");

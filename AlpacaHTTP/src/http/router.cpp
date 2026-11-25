@@ -1520,6 +1520,18 @@ unsigned verb_bit(HttpMethod method) {
     return ManagementRoute::kVerbOther;
 }
 
+// The known sub-path `tail` of a sub-routed row, null when it lists none or does not list the tail.
+const ManagementSubRoute* find_sub_route(const ManagementRoute& route, const std::string& tail) {
+    for (const ManagementSubRoute& sub : route.subs) {
+        const std::string_view key = sub.sub;
+        const auto brace = key.find('{');
+        if (brace == std::string_view::npos ? tail == key : tail.rfind(key.substr(0, brace), 0) == 0) {
+            return &sub;
+        }
+    }
+    return nullptr;
+}
+
 // The Allow header of a 405: the accepted verbs.
 std::string allow_header(unsigned verbs) {
     std::string allow;
@@ -1541,15 +1553,33 @@ const std::vector<ManagementRoute>& Router::management_routes() {
     constexpr unsigned kGet = ManagementRoute::kVerbGet;
     constexpr unsigned kWrite = ManagementRoute::kVerbPost | ManagementRoute::kVerbPut;
     constexpr unsigned kDelete = ManagementRoute::kVerbDelete;
-    constexpr unsigned kAny = ManagementRoute::kEveryVerb;
     constexpr const char* kPostPut = "Method not allowed. Use POST or PUT.";
     // Decision 0007 surface 2: a route that accepts a verb other than GET changes state and is guarded.
     // Issue #348: a POST with Content-Type text/plain is not preflighted, so nothing on the browser side
     // stops a drive-by page from reaching these; the guard does. test_route_table section G walks this table.
+    // open-astro#2648: the verbs of each known wifi and update sub-path. The row's `verbs` is their union.
+    static const ManagementSubRoute kWifiSubs[] = {
+        {"status", kGet},
+        {"radio", kWrite},
+        {"scan", kGet},
+        {"profiles", kGet | kWrite},
+        {"profiles/{arg}", kDelete},
+        {"connect", kWrite},
+        {"ap", kGet | kWrite},
+        {"adapter", kWrite},
+        {"country", kGet | kWrite},
+    };
+    static const ManagementSubRoute kUpdateSubs[] = {
+        {"status", kGet},
+        {"check", kWrite},
+        {"install", kWrite},
+        {"channel", kWrite},
+    };
     // clang-format off
     static const std::vector<ManagementRoute> kRoutes = {
-        // Root endpoint: server information (JSON API). Reads only, whatever the verb.
-        {"/api", "/api/", nullptr, kAny, G::None, "", W::None, "", false, &call<&Router::handle_root>},
+        // Root endpoint: server information (JSON API). Reads only.
+        {"/api", "/api/", nullptr, kGet, G::None, "", W::MethodNotAllowed, "Unsupported HTTP method for api endpoint",
+         false, &call<&Router::handle_root>},
         // PUT/POST rewrite the server description and the SyncSystemClockFromClients opt-out, which keeps a
         // cross-origin clock step from being accepted at all.
         {"/management/v1/description", "/management/description", nullptr, kGet | kWrite, G::BeforeVerbCheck,
@@ -1557,8 +1587,8 @@ const std::vector<ManagementRoute>& Router::management_routes() {
          &call<&Router::handle_description>},
         {"/management/v1/apiversions", "/management/apiversions", nullptr, kGet, G::None, "", W::AlpacaText,
          "Unsupported HTTP method for apiversions endpoint", false, &call<&Router::handle_api_versions>},
-        {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kAny, G::None, "", W::None, "", false,
-         &call<&Router::handle_build_info>},
+        {"/management/v1/buildinfo", "/management/buildinfo", nullptr, kGet, G::None, "", W::MethodNotAllowed,
+         "Unsupported HTTP method for buildinfo endpoint", false, &call<&Router::handle_build_info>},
         {"/management/v1/configureddevices", "/management/configureddevices", nullptr, kGet, G::None, "",
          W::AlpacaText, "Unsupported HTTP method for configureddevices endpoint", false,
          &call<&Router::handle_configured_devices>},
@@ -1618,11 +1648,12 @@ const std::vector<ManagementRoute>& Router::management_routes() {
          &call<&Router::handle_sync_time>},
         // PR #198: the first guarded routes.
         {"/management/v1/wifi/{sub}", "/management/wifi/{sub}", &match_wifi_tail, kGet | kWrite | kDelete,
-         G::BeforeVerbCheck, "WiFi management", W::Handler, "", false, &call_with_match<&Router::handle_wifi>},
+         G::BeforeVerbCheck, "WiFi management", W::MethodNotAllowed, "Unsupported HTTP method for wifi endpoint",
+         false, &call_with_match<&Router::handle_wifi>, kWifiSubs},
         // check fetches from the network, install starts the helper, channel switches the apt source.
         {"/management/v1/update/{sub}", "/management/update/{sub}", &match_update_tail, kGet | kWrite,
-         G::BeforeVerbCheck, "software update", W::Handler, "", false,
-         &call_with_match<&Router::handle_software_update>},
+         G::BeforeVerbCheck, "software update", W::MethodNotAllowed, "Unsupported HTTP method for update endpoint",
+         false, &call_with_match<&Router::handle_software_update>, kUpdateSubs},
     };
     // clang-format on
     return kRoutes;
@@ -1635,9 +1666,15 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    const bool accepted = route.wrong_verb == ManagementRoute::WrongVerb::None ||
-                          route.wrong_verb == ManagementRoute::WrongVerb::Handler ||
-                          (route.verbs & verb_bit(request.method())) != 0;
+    // A known sub-path of a sub-routed row answers for its own verbs; an unknown one reaches the handler, which
+    // answers the unknown path whatever the verb (open-astro#2648).
+    unsigned verbs = route.verbs;
+    bool accepted = (verbs & verb_bit(request.method())) != 0;
+    if (!route.subs.empty()) {
+        const ManagementSubRoute* sub = find_sub_route(route, match.method_name);
+        verbs = sub != nullptr ? sub->verbs : verbs;
+        accepted = sub == nullptr || (verbs & verb_bit(request.method())) != 0;
+    }
     if (route.guard == ManagementRoute::Guard::BeforeVerbCheck ||
         (route.guard == ManagementRoute::Guard::AfterVerbCheck && accepted)) {
         if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, route.guard_what)) {
@@ -1664,7 +1701,7 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
     response.set_body(
         make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION, route.wrong_verb_message));
     response.set_status(405, "Method Not Allowed");
-    response.set_header("Allow", allow_header(route.verbs));
+    response.set_header("Allow", allow_header(verbs));
     return response;
 }
 
