@@ -938,8 +938,11 @@ int main() {
     {
         // case: every management route answers a wrong verb per its family and refuses a cross-origin write (#2485)
         check_management_routes(router);
-        check_management_subroutes(router);
         check_management_table();
+    }
+    {
+        // case: a known wifi or update sub-path answers a wrong verb 405 and an unknown one keeps its answer (#2648)
+        check_management_subroutes(router);
     }
 
     auto& registry = alpacacore::management::DeviceRegistry::instance();
