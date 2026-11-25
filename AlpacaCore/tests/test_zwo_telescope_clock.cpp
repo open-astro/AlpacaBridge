@@ -952,6 +952,7 @@ TEST_CASE("ZWO an older Sync never stops a newer MoveAxis, FindHome, Park or Unp
     alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
         if (name == label + " sent") latch.block();
     });
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
@@ -998,6 +999,7 @@ TEST_CASE("ZWO an older Sync never stops a newer MoveAxis, FindHome, Park or Unp
 TEST_CASE("ZWO an older Sync superseded by AbortSlew says so without claiming motion (#1925)",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
+    rig.mount.set_position(6.0, -15.0);  // a Sync is bounded to 5 degrees (#2408)
     rig.connect();
     rig.mount.override_reply(":SMMC", "e4", 2);
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
