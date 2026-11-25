@@ -70,8 +70,8 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO, SVBONY, ToupTek and QHY are;
-  decision 0020) and the GPIO soft-PWM workers; the list is a sample, not a roster.
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO, SVBONY, ToupTek, QHY and gphoto
+  are; decision 0020) and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
     freed memory (UB). Make it a joinable member thread with a cancel flag +
@@ -207,15 +207,15 @@ vendor-agnostic; do them in the driver from the start.
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
   an exposure-in-progress state, checked **under the same lock that publishes it**.
-  GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
-  under the same lock. A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
+  A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
   under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
   lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
   or a failed body still returning), and an AbortExposure that finds only a reservation calls
   `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
   exposure starts
   ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260): ZWO, SVBONY,
-  Player One and ToupTek do (ZWO for its geometry setters only); Player One adds its own SDK term. Checking the
+  Player One, ToupTek and gphoto do (ZWO for its geometry setters only); Player One adds its own SDK term, and
+  gphoto also refuses a StartExposure while a stopped body is still inside libgphoto2 (#1982). Checking the
   state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
@@ -297,7 +297,7 @@ the previous round's fix**, not new bugs. Before pushing any fix:
   router can dispatch) and fix or dismiss each **before** the push, naming them in the
   writeup so the sweep is auditable.
 - **A new invariant must be applied everywhere it is read/written, at once.** If a fix
-  establishes "X only changes under lock L" (e.g. GPhoto's `exposure_active_`
+  establishes "X only changes under lock L" (e.g. a camera's exposure state
   under its lock), grep every read and write of X and bring them all under L in the
   same change — a partially-applied invariant is worse than none.
 - **Re-run the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver)

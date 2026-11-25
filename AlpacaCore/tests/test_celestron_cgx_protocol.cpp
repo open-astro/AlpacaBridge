@@ -650,6 +650,28 @@ TEST_CASE("Fake Celestron CGX mount - reports home completion independently per 
     CHECK(transact(0x11, 0x12).payload == std::vector<std::uint8_t>{0xff});
 }
 
+TEST_CASE("Fake Celestron CGX mount - an auto-completed home answers searching to as many reads as asked",
+          "[celestron][cgx][protocol][integration]") {
+    // #2661: a raced case widens the searching reads so that every reader of one home start sees the search.
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    const auto transact = [&protocol](std::uint8_t command) {
+        return protocol.exchange(AuxFrame{.source = 0x00, .destination = 0x11, .command = command, .payload = {}},
+                                 std::chrono::milliseconds(500));
+    };
+    for (const int reads : {1, 3}) {
+        INFO("searching reads " << reads);
+        mount.set_auto_home_searching_reads(reads);
+        CHECK(transact(0x0b).payload.empty());
+        for (int read = 0; read < reads; ++read) CHECK(transact(0x12).payload == std::vector<std::uint8_t>{0x00});
+        CHECK(transact(0x12).payload == std::vector<std::uint8_t>{0xff});
+    }
+}
+
 TEST_CASE("Fake Celestron CGX mount - a scripted home search drives its legs, and a runaway drives until stopped",
           "[celestron][cgx][protocol][integration]") {
     using namespace std::chrono_literals;

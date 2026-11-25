@@ -373,6 +373,49 @@ TEST_CASE("iOptron - MoveAxis clears a superseded dispatch before its stale work
     CHECK(mount.count(":Z") == 0);  // a ghost GOTO must not trigger the HAE16 RA trim
 }
 
+// Issue #2522 (the #2263 policy): an async GOTO claims both axes, so a MoveAxis on either axis, a jog or a stop, ends
+// a dispatch body that has not sent its :MS1# yet. The case waits for the body to return on its own before it stops
+// the jog or disconnects, so neither of those is what ends it.
+// Falsified by: ioptron_telescope_driver.cpp move_axis_under_lock() claiming nothing for a non-zero rate (the jog
+// legs fail), or cancelling nothing for a zero rate (the stop legs fail).
+TEST_CASE("iOptron motion owner - a MoveAxis on either axis supersedes an async GOTO not yet dispatched (#2522)",
+          "[ioptron][telescope][async][motion-owner]") {
+    for (const int axis : {0, 1}) {
+        for (const bool jog : {false, true}) {
+            CAPTURE(axis, jog);
+            alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+            REQUIRE(mount.ok());
+            WorkerGate gate;
+            gate.arm();
+            std::atomic<bool> body_returned{false};  // before the driver, whose slot joins the thread that sets it
+            alpacacore::test::FakeTaskClock clock;
+            auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
+                0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {},
+                clock);
+            alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, [&](std::function<void()> run) {
+                return std::thread([run = std::move(run), &body_returned] {
+                    run();
+                    body_returned.store(true);
+                });
+            });
+            REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+            REQUIRE_NOTHROW(driver->slew_to_coordinates_async(0.001, 0.0));
+            const bool worker_paused = gate.wait_until_entered();
+            if (!worker_paused) gate.release();
+            REQUIRE(worker_paused);
+
+            REQUIRE_NOTHROW(driver->move_axis(axis, jog ? driver->get_axis_rate_range(axis).first : 0.0));
+            gate.release();
+            REQUIRE(wait_until([&] { return body_returned.load(); }, 5000));
+            CHECK(mount.count(":MS1#") == 0);
+            CHECK(mount.count(":Z") == 0);  // no ghost GOTO, so no HAE16 RA trim either
+            if (jog) driver->move_axis(axis, 0.0);
+            driver->set_connected(false);
+        }
+    }
+}
+
 TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handoff",
           "[ioptron][telescope][async][slewfailure]") {
     alpacacore::test::FakeIoptronMount mount("0012", 0.0);

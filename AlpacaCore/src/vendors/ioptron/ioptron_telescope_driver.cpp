@@ -26,6 +26,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
@@ -654,6 +655,7 @@ public:
             target_dec_degrees_ = 0.0;
             sync_offset_ra_hours_ = 0.0;
             sync_offset_dec_degrees_ = 0.0;
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);
             invalidate_slew_error_locked();
             // The mount clock is sampled once, before Connected is published (the getter makes no exchange). The
             // one :GUT# reply also gives the site's timezone and DST to the prefetch below, so the connect sends
@@ -790,6 +792,7 @@ public:
         target_dec_set_ = false;
         target_ra_hours_ = 0.0;
         target_dec_degrees_ = 0.0;
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
         invalidate_slew_error_locked();
         protocol.disconnect();
         ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
@@ -1462,6 +1465,13 @@ public:
         // goto failed.
         // A GOTO a status refresh already saw stopped is finished (issue #2063), not driver motion.
         const DriverMotion motion = (slew_in_progress_ && !goto_seen_stopped_) ? DriverMotion::Goto : driver_motion_;
+        // Issue #2522: a moving MoveAxis claims its own axis and a stop cancels it, so a slew, Park or FindHome body,
+        // which owns both axes, stands down either way; a PulseGuide claims nothing (see motion_owner_).
+        if (rate == 0.0) {
+            motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+        } else {
+            motion_owner_.claim(util::MotionCommand::MoveAxis, axis);
+        }
         supersede_slew_dispatch_locked();
         clear_slew_hold_locked();  // MoveAxis starts no GOTO: Slewing follows the axis flags and the mount
         // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
@@ -1601,8 +1611,8 @@ public:
             }
         }
         // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
-        if (slew_in_progress_ && equatorial_slew_ && landing_gate_generation_ != 0 &&
-            landing_gate_generation_ == slew_operation_generation_) {
+        if (slew_in_progress_ && equatorial_slew_ && landing_gate_claim_.has_value() &&
+            owns_locked(*landing_gate_claim_)) {
             if (!async_goto_landed_locked(frame, sampled_at)) {
                 return true;
             }
@@ -1634,12 +1644,12 @@ public:
         // reads stopped away from its target).
         if (const auto [ra_miss, dec_miss] = target_miss_arcsec(ra, dec);
             ra_miss <= kLandingOnTargetArcsec && dec_miss <= kLandingOnTargetArcsec) {
-            landing_gate_generation_ = 0;
+            landing_gate_claim_.reset();
             return true;
         }
         // The gate is bounded too: a mount still not settled at the GOTO's kSlewTimeout bound is stopped.
         if (now >= slew_bound_deadline_) {
-            landing_gate_generation_ = 0;
+            landing_gate_claim_.reset();
             if (!stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) +
                                             " s")) {
                 throw_if_link_lost();  // NotConnected; the relink stop is recorded from the flags kept
@@ -1665,7 +1675,7 @@ public:
         if (ra_delta >= kLandingStableArcsec || dec_delta >= kLandingStableArcsec) {
             return false;
         }
-        landing_gate_generation_ = 0;
+        landing_gate_claim_.reset();
         const auto [ra_sky_arcsec, dec_arcsec] = target_miss_arcsec(ra, dec);
         if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
             slew_in_progress_ = false;
@@ -1816,7 +1826,7 @@ public:
                     protocol.go_to_home();
                 }
             });
-            supersede_slew_dispatch_locked();
+            claim_slew_locked();
             driver_motion_ = zero_search ? DriverMotion::HomeSearch : DriverMotion::Home;
             if (zero_search) {
                 home_search_deadline_ = clock_.now() + kZeroSearchTimeout;  // only a search has a bound (#2432)
@@ -1853,7 +1863,7 @@ public:
             throw AlpacaException(std::string("Failed to park mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
-        supersede_slew_dispatch_locked();
+        claim_slew_locked();
         driver_motion_ = DriverMotion::Park;
         park_override_until_ = std::chrono::steady_clock::time_point{};
         write_motion_started_locked();
@@ -1898,6 +1908,7 @@ public:
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again. Clear unconditionally (a
         // soft-failed goto never set is_slewing).
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
         invalidate_slew_error_locked();
         end_fast_cache_grace_locked();
         // open-astro#768: the stop is sent even when the frame says the
@@ -2086,7 +2097,7 @@ public:
     
     void slew_to_coordinates(double ra, double dec) override {
         util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
@@ -2095,9 +2106,9 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
-            generation = slew_operation_generation_;
+            claim = slew_claim_;
         }
-        wait_for_slew_completion("SlewToCoordinates", generation);
+        wait_for_slew_completion("SlewToCoordinates", claim);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -2106,7 +2117,7 @@ public:
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
         double phys_dec = 0.0;
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         std::string previous_slew_error;
         {
             StateLock lock(lock_gate_);
@@ -2116,12 +2127,12 @@ public:
             util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             equatorial_slew_ = true;
-            generation = slew_operation_generation_;
-            arm_slew_bound_locked(generation);
+            claim = slew_claim_;
+            arm_slew_bound_locked(claim);
         }
-        start_slew_body(generation, previous_slew_error, "Failed to start async slew",
-                        [this, phys_ra, phys_dec, generation](util::OperationContext& ctx) {
-                            run_slew_body(ctx, generation, "SlewToCoordinatesAsync", [&] {
+        start_slew_body(claim, previous_slew_error, "Failed to start async slew",
+                        [this, phys_ra, phys_dec, claim](util::OperationContext& ctx) {
+                            run_slew_body(ctx, claim, "SlewToCoordinatesAsync", [&] {
                                 dispatch_slew_command_locked(phys_ra, phys_dec, &ctx, "SlewToCoordinatesAsync");
                             });
                         });
@@ -2194,32 +2205,32 @@ public:
         util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAzAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         std::string previous_slew_error;
         {
             StateLock lock(lock_gate_);
             util::check_alt_az_slew_state(
                 kCommandLimits, GateChecks{*this, "SlewToAltAzAsync", /*fast_parked=*/false, /*refresh_site=*/false});
             previous_slew_error = last_slew_error_;
-            supersede_slew_dispatch_locked();
-            generation = slew_operation_generation_;
+            claim_slew_locked();
+            claim = slew_claim_;
             slew_in_progress_ = true;
             goto_seen_stopped_ = false;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
-            arm_slew_bound_locked(generation);
+            arm_slew_bound_locked(claim);
         }
 
-        start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
-                        [this, altitude, azimuth, generation](util::OperationContext& ctx) {
-                            run_slew_body(ctx, generation, "SlewToAltAzAsync", [&] {
+        start_slew_body(claim, previous_slew_error, "Failed to start async Alt/Az slew",
+                        [this, altitude, azimuth, claim](util::OperationContext& ctx) {
+                            run_slew_body(ctx, claim, "SlewToAltAzAsync", [&] {
                                 auto converted = alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_,
                                                                   site_longitude_cached_, current_utc_time_locked());
                                 double ra_hours = converted.first;
                                 double dec_degrees = converted.second;
-                                // The initiator already claimed and published this generation.
+                                // The initiator already claimed both axes and published the state.
                                 prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees,
                                                           "SlewToAltAzAsync", false);
                                 dispatch_slew_command_locked(ra_hours, dec_degrees, &ctx, "SlewToAltAzAsync");
@@ -2231,7 +2242,7 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAz");
         {
             StateLock lock(lock_gate_);
@@ -2241,9 +2252,9 @@ public:
             ra_hours = converted.first;
             dec_degrees = converted.second;
             start_slew_to_coordinates_locked(ra_hours, dec_degrees);
-            generation = slew_operation_generation_;
+            claim = slew_claim_;
         }
-        wait_for_slew_completion("SlewToAltAz", generation);
+        wait_for_slew_completion("SlewToAltAz", claim);
     }
     
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -2269,6 +2280,7 @@ public:
             throw AlpacaException(std::string("Failed to unpark mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);  // ends a Park's claim, as a stop
         supersede_slew_dispatch_locked();
         write_motion_started_locked();
         park_override_until_ = clock_.now() + kUnparkGrace;
@@ -2834,7 +2846,7 @@ private:
                                    const char* label, bool supersede = true) {
         check_connected();
         ensure_not_parked_locked(label);
-        if (supersede) supersede_slew_dispatch_locked();
+        if (supersede) claim_slew_locked();
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
@@ -2855,23 +2867,33 @@ private:
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
     }
 
-    // Issue #2396 (AB-8): an async GOTO of @p generation that still moves kSlewTimeout after its start is stopped by
+    // Issue #2396 (AB-8): an async GOTO of @p claim that still moves kSlewTimeout after its start is stopped by
     // the motion bound watchdog (the synchronous waiter has its own bound).
-    void arm_slew_bound_locked(std::uint64_t generation) {
+    void arm_slew_bound_locked(const util::MotionClaim& claim) {
         slew_bound_deadline_ = clock_.now() + kSlewTimeout;
-        slew_bound_generation_ = generation;
-        landing_gate_generation_ = generation;  // AB-7: the Slewing read waits for a confirmed landing
+        slew_bound_claim_ = claim;
+        landing_gate_claim_ = claim;  // AB-7: the Slewing read waits for a confirmed landing
         landing_prev_valid_ = false;
     }
 
-    void invalidate_slew_error_locked() {
-        ++slew_operation_generation_;
-        last_slew_error_.clear();
+    // Issue #2522: true while @p claim still owns its axes: no newer claim and no stop (MoveAxis, AbortSlew, Unpark,
+    // a connect or a disconnect) reached them.
+    bool owns_locked(const util::MotionClaim& claim) const {
+        return motion_owner_.stop_reason(claim) == util::StopReason::None;
     }
 
+    // A slew, Park or FindHome (#2263, #2522): claims both axes before the command sets its flags (decision 0006
+    // rule 3), so every older slew body and waiter stands down, and clears the GOTO state it supersedes.
+    void claim_slew_locked() {
+        slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
+        supersede_slew_dispatch_locked();
+    }
+
+    void invalidate_slew_error_locked() { last_slew_error_.clear(); }
+
     void supersede_slew_dispatch_locked() {
-        // Clear an unsent GOTO's state before a stale worker observes its
-        // generation mismatch, preventing a ghost slew/trim after newer motion.
+        // Clear an unsent GOTO's state before a stale worker finds its claim lost (the caller claimed or cancelled
+        // first), preventing a ghost slew/trim after newer motion.
         // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
         end_fast_cache_grace_locked();
@@ -3044,13 +3066,12 @@ private:
 
     // Issue #2396: a synchronous GOTO that fails after its dispatch (the 300 s bound, a far miss, failed position
     // reads) ends the slew state, hold included, and sends :Q# (best effort), as an unconfirmed GOTO does, so a
-    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p generation is
-    // slew_operation_generation_ after this GOTO's dispatch: when a newer motion (another client's GOTO, a MoveAxis,
-    // Park, AbortSlew or a reconnect) has bumped it, the mount is that motion's, and neither the stop nor the state
-    // clear runs.
-    [[noreturn]] void fail_synchronous_slew(std::string failure, std::uint64_t generation) {
+    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p claim is this
+    // GOTO's both-axes claim: when a newer motion (another client's GOTO, a MoveAxis, Park, AbortSlew or a reconnect)
+    // has taken or stopped an axis, the mount is that motion's, and neither the stop nor the state clear runs.
+    [[noreturn]] void fail_synchronous_slew(std::string failure, const util::MotionClaim& claim) {
         StateLock lock(lock_gate_);
-        if (generation != slew_operation_generation_) {
+        if (!owns_locked(claim)) {
             throw AlpacaException(failure + "; a newer motion owns the mount, so no stop was sent");
         }
         slew_in_progress_ = false;
@@ -3067,11 +3088,11 @@ private:
         throw AlpacaException(failure);
     }
 
-    void wait_for_slew_completion(const char* label, std::uint64_t generation) {
+    void wait_for_slew_completion(const char* label, const util::MotionClaim& claim) {
         const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
             if (clock_.now() > deadline) {
-                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", generation);
+                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", claim);
             }
             clock_.sleep_for(kSlewPollInterval);
         }
@@ -3118,7 +3139,7 @@ private:
                     if (++failed_reads >= kSlewLandingFailedReads) {
                         fail_synchronous_slew(
                             std::string(label) + " failed: the mount position could not be read to confirm the landing",
-                            generation);
+                            claim);
                     }
                     prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
                     stable_count = 0;
@@ -3152,7 +3173,7 @@ private:
                                                   " arcsec (RA) and " +
                                                   std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
                                                   " arcsec (Dec) from the target",
-                                              generation);
+                                              claim);
                     }
                     ALPACA_LOG_INFO("iOptron", std::string(label) +
                                     ": position stabilized but target not reached");
@@ -3164,7 +3185,7 @@ private:
             }
             if (!landed) {
                 fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target",
-                                      generation);
+                                      claim);
             }
         }
 
@@ -3172,7 +3193,7 @@ private:
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         StateLock lock(lock_gate_, StateLock::Mode::State);
-        if (generation == slew_operation_generation_) {
+        if (owns_locked(claim)) {
             slew_in_progress_ = false;  // a newer motion owns slew_in_progress_ otherwise
         }
     }
@@ -3388,7 +3409,8 @@ private:
                 // Connect or Disconnect): send nothing and leave the flags for it.
                 if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None) return;
                 const bool axis_moving = axis_move_active_primary_ || axis_move_active_secondary_;
-                const bool slew_bounded = slew_in_progress_ && slew_bound_generation_ == slew_operation_generation_;
+                const bool slew_bounded =
+                    slew_in_progress_ && slew_bound_claim_.has_value() && owns_locked(*slew_bound_claim_);
                 if (!axis_moving && !slew_bounded) return;
                 const auto now = clock_.now();
                 if (axis_moving && now >= move_axis_deadline_) {
@@ -3410,12 +3432,12 @@ private:
                                                    ")");
                         return;
                     }
-                    slew_bound_generation_ = 0;  // checked once: the Slewing read lands it
+                    slew_bound_claim_.reset();  // checked once: the Slewing read lands it
                     if (!axis_moving) return;
                 }
                 remaining = std::chrono::steady_clock::duration::max();
                 if (axis_moving) remaining = move_axis_deadline_ - now;
-                if (slew_bounded && slew_bound_generation_ != 0) {
+                if (slew_bounded && slew_bound_claim_.has_value()) {
                     remaining = std::min(remaining, slew_bound_deadline_ - now);
                 }
             }
@@ -3449,7 +3471,7 @@ private:
         axis_move_active_secondary_ = false;
         tracking_state_before_move_.reset();
         driver_motion_ = DriverMotion::None;
-        slew_bound_generation_ = 0;
+        slew_bound_claim_.reset();
         clear_slew_hold_locked();
         if (stop_failed) {
             ALPACA_LOG_WARN("iOptron", last_slew_error_);
@@ -4026,10 +4048,10 @@ private:
     void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
 
     // Starts `body` on the slew slot after the initiator published its state
-    // and bumped slew_operation_generation_. Call without mutex_ held, under
+    // and claimed both axes (`claim`). Call without mutex_ held, under
     // slew_handoff_mutex_. A refused start (no thread) undoes the published
     // state and restores the error the initiator cleared.
-    void start_slew_body(std::uint64_t generation, std::string& previous_slew_error, const char* failure_prefix,
+    void start_slew_body(const util::MotionClaim& claim, std::string& previous_slew_error, const char* failure_prefix,
                          std::function<void(util::OperationContext&)> body) {
         try {
             if (before_slew_reap_) before_slew_reap_();
@@ -4039,7 +4061,7 @@ private:
             slew_.start(std::move(body));
         } catch (const std::exception& e) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
-            if (generation == slew_operation_generation_) {
+            if (owns_locked(claim)) {
                 slew_in_progress_ = false;
                 clear_slew_hold_locked();
                 last_slew_error_ = std::move(previous_slew_error);
@@ -4053,13 +4075,13 @@ private:
     // records a real failure in last_slew_error_ (never one caused by its own
     // cancellation). `dispatch` runs under mutex_.
     template <typename Dispatch>
-    void run_slew_body(util::OperationContext& ctx, std::uint64_t generation, const char* label, Dispatch&& dispatch) {
+    void run_slew_body(util::OperationContext& ctx, const util::MotionClaim& claim, const char* label,
+                       Dispatch&& dispatch) {
         if (before_slew_worker_lock_) before_slew_worker_lock_();
         StateLock lock(lock_gate_);
-        // A superseding initiator already cleared/replaced the GOTO state
-        // before bumping this generation; never publish or clear state owned
-        // by that newer operation.
-        if (generation != slew_operation_generation_) return;
+        // A newer motion command claimed or a stop cancelled one of this GOTO's axes, and already cleared or replaced
+        // the GOTO state; never publish or clear state owned by that newer operation.
+        if (!owns_locked(claim)) return;
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             slew_in_progress_ = false;
             clear_slew_hold_locked();
@@ -4342,14 +4364,14 @@ private:
     // search watchdog), so the sites that end the motion need not reset it.
     std::chrono::steady_clock::time_point home_search_deadline_{};
     // Issue #2396 (AB-8, AB-9): the motion bound watchdog's deadlines, task clock, under mutex_. A MoveAxis that runs
-    // past move_axis_deadline_ (refreshed by every MoveAxis with a non-zero rate) is stopped; an async GOTO of
-    // generation slew_bound_generation_ that still moves at slew_bound_deadline_ is stopped.
+    // past move_axis_deadline_ (refreshed by every MoveAxis with a non-zero rate) is stopped; an async GOTO whose
+    // claim slew_bound_claim_ still owns its axes and still moves at slew_bound_deadline_ is stopped.
     std::chrono::steady_clock::time_point move_axis_deadline_{};
     std::chrono::steady_clock::time_point slew_bound_deadline_{};
-    mutable std::uint64_t slew_bound_generation_ = 0;
+    mutable std::optional<util::MotionClaim> slew_bound_claim_;
     // Issue #2396 (AB-7): the async landing gate (async_goto_landed_locked()), under mutex_. The gate runs for the
-    // GOTO of landing_gate_generation_ (0: none) and keeps its last position sample.
-    mutable std::uint64_t landing_gate_generation_ = 0;
+    // GOTO of landing_gate_claim_ (empty: none) while that claim owns its axes, and keeps its last position sample.
+    mutable std::optional<util::MotionClaim> landing_gate_claim_;
     mutable bool landing_prev_valid_ = false;
     mutable double landing_prev_ra_hours_ = 0.0;
     mutable double landing_prev_dec_degrees_ = 0.0;
@@ -4384,7 +4406,12 @@ private:
     // cancellation), cleared by the next slew initiator and by AbortSlew.
     // Consulted by get_slewing() before the cached status.
     mutable std::string last_slew_error_;
-    std::uint64_t slew_operation_generation_ = 0;
+    // The per-axis motion owner (#2263, #2522), under mutex_. A slew, Park or FindHome claims both axes
+    // (claim_slew_locked(), kept in slew_claim_), a moving MoveAxis its own axis; MoveAxis(axis, 0) cancels its axis,
+    // and AbortSlew, Unpark, a connect and a disconnect cancel both. The mount runs every motion itself, so no body
+    // calls finished() and a PulseGuide claims nothing (the "Motion claims" bullet in ioptron.instructions.md).
+    util::MotionOwner motion_owner_;
+    util::MotionClaim slew_claim_;
     static constexpr int kMaxSlewRefines = 3;
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
@@ -4452,8 +4479,7 @@ private:
     std::mutex slew_handoff_mutex_;
     // The async slew dispatch (decision 0006), declared last so the slot is destroyed, and its body
     // joined, before any member the body touches. Private generation: only start() bumps it, while the
-    // driver's own slew_operation_generation_ stays the supersede guard (MoveAxis, Park and FindHome bump
-    // it without the handoff lock).
+    // motion owner's claims stay the supersede guard (MoveAxis, Park and FindHome claim without the handoff lock).
     // The state poll (decision 0010, #2491): every member its probe touches is declared above, and the slots below,
     // whose bodies call polled_.write() and link_lost(), are destroyed before it. The destructor stops it with the
     // other bodies.

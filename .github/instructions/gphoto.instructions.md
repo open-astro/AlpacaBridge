@@ -98,20 +98,22 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   the handle in that window. `with_handle()` (mirroring ToupTek's helper of the same name) takes
   `mutex_` for the whole validate-then-call sequence; `handle_value()` no longer exists; if a
   future property setter needs the SDK handle, go through `with_handle()`, not a bare handle copy.
-- **`with_handle()`/`mutex_` alone does not serialize against the exposure worker thread** (review
-  PR #485 round 3) — `run_exposure()` (the `exposure_thread_` body) makes its libgphoto2 calls
-  (`gp_camera_capture()`/bulb loop) *without* holding `mutex_`, and `exposure_active_` is cleared
-  to `false` *before* the thread has actually left the SDK in two places: `stop_exposure()` stores
-  `false` then joins, and the `get_camera_state()` watchdog force-clears it with no join at all
-  (a truly wedged capture has no cancel primitive in libgphoto2, so that one stays a documented,
-  accepted gap). A setter like `set_gain()` that only checked `exposure_active_.load()` under
-  `with_handle()`'s `mutex_` could still slip an SDK call in during the narrow window after
-  `stop_exposure()` clears the flag but before `exposure_thread_.join()` returns, corrupting the
-  shared PTP session. Fix: `set_gain()` now takes `exposure_lifecycle_mutex_` (same mutex
-  `start_exposure()`/`stop_exposure()` hold for their setup-or-join duration, same lock order as
-  everywhere else in this class — lifecycle mutex first, then `mutex_`) before its `with_handle()`
-  call, so it blocks until any in-flight `exposure_thread_` has actually been joined. Any future
-  SDK-touching setter needs the same `exposure_lifecycle_mutex_` guard, not just `with_handle()`.
+- **The exposure runs in a `util::CaptureSession`** ([decision 0020](../../docs/decisions/0020-capture-session.md),
+  issue #1982; row `partial`). The body (`run_exposure()`) makes its libgphoto2 calls
+  (`gp_camera_capture()`, the bulb and mirror lock-up pumps) *without* holding `mutex_`, and libgphoto2
+  serves one caller per handle, so `with_handle()`/`mutex_` alone does not keep a setter off the handle
+  the body is using (review PR #485 round 3). The session's settings lock does: `set_gain()` refuses with
+  `InvalidOperation` while `session_.settings_locked()` (a start reserved, Exposing, or a body a stop or
+  the watchdog ended that is still returning with no frame), checked under `mutex_`, the lock
+  `start_exposure()` reserves its start under; the ROI and bin setters call
+  `session_.ensure_settings_unlocked()` there too. `start_exposure()` refuses the same way before its
+  mirror lock-up read, so that SDK call never runs beside a body still inside libgphoto2. libgphoto2 has
+  no capture-cancel primitive: a body the watchdog failed inside a native `gp_camera_capture()` stays
+  there until the call returns, AbortExposure and a disconnect join it (at most the longest native
+  shutter), and the pumps wait inside bounded SDK calls, not `CaptureControl::wait_for` (rule 4, the
+  reason the row is `partial`). Any future SDK-touching setter checks the settings lock the same way, not
+  just `with_handle()`. LastExposureDuration is the actual length (rule 7): the native shutter speed
+  set, or the held open-to-close time, passed to `CaptureControl::image_ready()`.
 - **`fallback_unique_id()` keys on `device_number_`, not the libgphoto2 USB port string** (review PR
   #485 round 4). Since [decision 0018](../../docs/decisions/0018-persisted-unique-id.md) the
   `UniqueID` a client sees is the ID the router stores for the configured device; this fallback
