@@ -5639,7 +5639,7 @@ function wifiMessage(text, isError) {
     const el = wifiEl('wifi-message');
     if (!el) return;
     el.textContent = text || '';
-    el.style.color = isError ? '#f08a7a' : '';
+    el.style.color = isError ? 'var(--danger-text)' : '';
 }
 
 async function wifiApi(path, method, body) {
