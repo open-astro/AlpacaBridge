@@ -19,12 +19,15 @@
 #include <gpiod.h>
 #include <stdarg.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 namespace alpacacore::test {
 
@@ -93,11 +96,79 @@ bool fd_is_stub(int fd) {
     return n > 0 && st.path == std::string(buf, static_cast<std::size_t>(n));
 }
 
-constexpr unsigned long kSetLevel = 0x40084302UL;  // PWM_GPIO_SET_LEVEL
-constexpr unsigned long kSetMode = 0x40084307UL;   // PWM_GPIO_SET_MODE
-constexpr unsigned long kEnable = 0x40044306UL;    // PWM_GPIO_ENABLE
+// The ioctl type byte of every pwm_gpio command ('C').
+bool is_pwm_gpio_request(unsigned long request) { return ((request >> 8) & 0xffUL) == 0x43UL; }
+
+bool is_legacy_request(unsigned long request) {
+    return request == kLegacySetLevel || request == kLegacySetMode || request == kLegacyEnable;
+}
+
+// The stock module as the legacy decode sees it: every one of its three commands is accepted.
+int legacy_ioctl_locked(IoctlStub& st, unsigned long request, const std::int32_t* arg) {
+    IoctlCall call{request, arg[0], 0, false};
+    if (request == kLegacySetMode) {
+        st.set_modes.push_back(arg[0]);  // work_mode_t {index, mode}
+        call.value = arg[1];
+    } else if (request == kLegacyEnable) {
+        st.enables.push_back(arg[0]);
+    } else {
+        // gpio_level_t {index, level}
+        call.value = arg[1];
+        st.levels.push_back(arg[1]);
+        st.last_level[arg[0]] = arg[1];
+        if (arg[1] == 1) {
+            ++st.off_writes;
+        }
+    }
+    st.calls.push_back(call);
+    return 0;
+}
+
+// pwm_gpio_compat (pg_ioctl in its disassembly): SET_MODE and SET_LEVEL only; see the header for what is refused.
+int compat_ioctl_locked(IoctlStub& st, unsigned long request, const std::int32_t* arg) {
+    constexpr std::int32_t kLines = 12;  // the airplus-gpios node's 12 lines
+    IoctlCall call{request, arg != nullptr ? arg[0] : -1, 0, false};
+    bool ok = false;
+    if (request == kAbiSetMode && arg != nullptr) {
+        call.value = arg[1];
+        ok = arg[0] >= 0 && arg[0] < kLines && (arg[1] == 1 || arg[1] == 2);
+    } else if (request == kAbiSetLevel && arg != nullptr) {
+        call.value = arg[1];
+        ok = arg[0] >= 0 && arg[0] < kLines;
+        if (ok) {
+            st.levels.push_back(arg[1]);
+            st.last_level[arg[0]] = arg[1];
+            if (arg[1] == 0) {
+                ++st.off_writes;
+            }
+        }
+    }
+    call.refused = !ok;
+    st.calls.push_back(call);
+    if (!ok) {
+        st.refused.push_back(request);
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+std::string mkdtemp_or_empty(const char* pattern) {
+    char buf[64];
+    std::strncpy(buf, pattern, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    return ::mkdtemp(buf) != nullptr ? std::string(buf) : std::string();
+}
 
 }  // namespace
+
+StubDeviceOptions compat_device() {
+    StubDeviceOptions options;
+    options.module = StubModule::Compat;
+    options.char_device = true;
+    options.sysfs_driver = "pwm_gpio_compat";
+    return options;
+}
 
 int stub_level_at_release(unsigned int offset) {
     std::lock_guard<std::mutex> lock(stub().m);
@@ -145,18 +216,39 @@ IoctlStub& ioctl_stub() {
     return s;
 }
 
-StubDeviceFile::StubDeviceFile() {
-    const int fd = ::mkstemp(path);
-    if (fd >= 0) ::close(fd);
-    auto& st = ioctl_stub();
-    std::lock_guard<std::mutex> lock(st.m);
-    st.path = path;
-    st.levels.clear();
-    st.last_level.clear();
-    st.set_modes.clear();
-    st.enables.clear();
-    st.off_writes = 0;
-    st.requests = 0;
+StubDeviceFile::StubDeviceFile() : StubDeviceFile(StubDeviceOptions{}) {}
+
+StubDeviceFile::StubDeviceFile(const StubDeviceOptions& options) : char_device_(options.char_device) {
+    if (char_device_) {
+        std::strncpy(path, "/dev/null", sizeof(path) - 1);
+        baseline_fds_ = count_fds();
+    } else {
+        const int fd = ::mkstemp(path);
+        if (fd >= 0) ::close(fd);
+    }
+    // The fake /sys/dev/char: <major>:<minor>/device/driver -> .../drivers/<sysfs_driver>, the shape of the real link.
+    sysfs_root_ = mkdtemp_or_empty("/tmp/asiair-plus-sysfs-XXXXXX");
+    struct stat st {};
+    if (!sysfs_root_.empty() && !options.sysfs_driver.empty() && ::stat(path, &st) == 0) {
+        const std::filesystem::path dev =
+            std::filesystem::path(sysfs_root_) /
+            (std::to_string(major(st.st_rdev)) + ":" + std::to_string(minor(st.st_rdev))) / "device";
+        std::error_code ec;
+        std::filesystem::create_directories(dev, ec);
+        std::filesystem::create_symlink("../../../../bus/platform/drivers/" + options.sysfs_driver, dev / "driver", ec);
+    }
+    auto& stub = ioctl_stub();
+    std::lock_guard<std::mutex> lock(stub.m);
+    stub.path = path;
+    stub.module = options.module;
+    stub.levels.clear();
+    stub.last_level.clear();
+    stub.set_modes.clear();
+    stub.enables.clear();
+    stub.calls.clear();
+    stub.refused.clear();
+    stub.off_writes = 0;
+    stub.requests = 0;
 }
 
 StubDeviceFile::~StubDeviceFile() {
@@ -164,11 +256,18 @@ StubDeviceFile::~StubDeviceFile() {
     {
         std::lock_guard<std::mutex> lock(st.m);
         st.path.clear();
+        st.module = StubModule::Legacy;
     }
-    ::unlink(path);
+    if (!char_device_) {
+        ::unlink(path);
+    }
+    if (!sysfs_root_.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(sysfs_root_, ec);
+    }
 }
 
-int StubDeviceFile::open_fds() const {
+int StubDeviceFile::count_fds() const {
     int n = 0;
     for (int fd = 0; fd < 1024; ++fd) {
         char buf[256];
@@ -178,6 +277,8 @@ int StubDeviceFile::open_fds() const {
     }
     return n;
 }
+
+int StubDeviceFile::open_fds() const { return count_fds() - baseline_fds_; }
 
 }  // namespace alpacacore::test
 
@@ -306,27 +407,22 @@ int ioctl(int fd, unsigned long request, ...) {
     va_start(ap, request);
     void* arg = va_arg(ap, void*);
     va_end(ap);
-    if ((request == alpacacore::test::kSetLevel || request == alpacacore::test::kSetMode ||
-         request == alpacacore::test::kEnable) &&
-        alpacacore::test::fd_is_stub(fd)) {
+    if (alpacacore::test::is_pwm_gpio_request(request) && alpacacore::test::fd_is_stub(fd)) {
         auto& st = alpacacore::test::ioctl_stub();
         std::lock_guard<std::mutex> lock(st.m);
-        ++st.requests;
-        if (request == alpacacore::test::kSetMode) {
-            st.set_modes.push_back(*static_cast<const std::int32_t*>(arg));  // work_mode_t {index, mode}
-        } else if (request == alpacacore::test::kEnable) {
-            st.enables.push_back(*static_cast<const std::int32_t*>(arg));
+        const auto* words = static_cast<const std::int32_t*>(arg);
+        if (st.module == alpacacore::test::StubModule::Compat) {
+            ++st.requests;
+            const int rc = alpacacore::test::compat_ioctl_locked(st, request, words);
+            st.cv.notify_all();
+            return rc;
         }
-        if (request == alpacacore::test::kSetLevel) {
-            const auto* level = static_cast<const std::int32_t*>(arg);  // gpio_level_t {index, level}
-            st.levels.push_back(level[1]);
-            st.last_level[level[0]] = level[1];
-            if (level[1] == 1) {
-                ++st.off_writes;
-            }
+        if (alpacacore::test::is_legacy_request(request)) {
+            ++st.requests;
+            const int rc = alpacacore::test::legacy_ioctl_locked(st, request, words);
+            st.cv.notify_all();
+            return rc;
         }
-        st.cv.notify_all();
-        return 0;
     }
     using Fn = int (*)(int, unsigned long, void*);
     static const auto real = real_symbol<Fn>("ioctl");
