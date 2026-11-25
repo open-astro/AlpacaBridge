@@ -19,13 +19,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=39">
+    <script>
+        // Issue #1764 item 6: a stored night theme is set before the first paint, so the page never flashes
+        // the default colours. The key is THEME_STORAGE_KEY in format.js. Blocked storage leaves the default.
+        try {
+            if (localStorage.getItem('alpacabridge.theme') === 'night') {
+                document.documentElement.setAttribute('data-theme', 'night');
+            }
+        } catch (e) {
+            // No storage: the default theme.
+        }
+    </script>
+    <link rel="stylesheet" href="/web/style.css?v=40">
 </head>
 <body>
     <div class="container">
         <header>
             <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><a id="header-build-badge" class="build-badge" hidden title="" href="#" target="_blank" rel="noopener"></a><span id="header-profile" class="profile-name"></span></h1>
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
+            <button type="button" id="theme-toggle" class="btn btn-small theme-toggle" aria-pressed="false" title="Red night theme, to keep your eyes dark-adapted">Night</button>
         </header>
 
         <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
@@ -2408,8 +2420,8 @@
     </dialog>
     <div id="toast-region" class="toast-region"></div>
 
-    <script src="/web/format.js?v=22"></script>
+    <script src="/web/format.js?v=23"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=57"></script>
+    <script src="/web/app.js?v=58"></script>
 </body>
 </html>

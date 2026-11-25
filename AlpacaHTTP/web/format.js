@@ -1057,6 +1057,29 @@ function skyPortalAdapterOptions(adapters, error) {
     return { options, fill: '', status: adapters.length + ' adapters answered; pick the one on this mount.' };
 }
 
+// Issue #1764 item 6: the night theme. The choice is kept in local storage
+// under this key; the inline script in index.html's <head> reads the same key
+// to set the theme before the first paint.
+const THEME_STORAGE_KEY = 'alpacabridge.theme';
+
+// Sets or clears the night theme on `root` (document.documentElement), marks
+// the toggle `button` pressed or not, and stores the choice. `storage` may be
+// null or throw (private mode, blocked site data): the theme still changes,
+// and lasts until the page reloads.
+function setNightTheme(root, button, storage, night) {
+    if (night) {
+        root.setAttribute('data-theme', 'night');
+    } else {
+        root.removeAttribute('data-theme');
+    }
+    button.setAttribute('aria-pressed', night ? 'true' : 'false');
+    try {
+        storage.setItem(THEME_STORAGE_KEY, night ? 'night' : 'default');
+    } catch (e) {
+        // No storage: the choice is not remembered.
+    }
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -1075,5 +1098,6 @@ if (typeof module !== 'undefined' && module.exports) {
                        mayStartCalibration, calibrationStatusText, calibrationHint,
                         calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth,
                         HOST_CHECK_LOCKOUT_NOTE, CLIENT_REQUEST_FRESH_MS, WEB_UI_CLIENT_HEADER, headerClockText,
-                        nextTabIndex, CGX_SKYPORTAL_DEFAULT_HOST, cgxConnectionType, skyPortalAdapterOptions };
+                        nextTabIndex, CGX_SKYPORTAL_DEFAULT_HOST, cgxConnectionType, skyPortalAdapterOptions,
+                        THEME_STORAGE_KEY, setNightTheme };
 }

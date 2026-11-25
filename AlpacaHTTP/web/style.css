@@ -46,6 +46,15 @@
     --form-table-text: #333;
     --form-note-text: #666;
     --form-muted-text: #999;
+    /* The controls' own fill and edge, and the filled controls (primary
+       buttons, the active WiFi segment, a switch that is on). The night theme
+       outlines them instead. */
+    --control-bg: var(--panel-2);
+    --control-line: var(--line);
+    --primary-bg: var(--accent);
+    --primary-text: var(--on-accent);
+    --primary-hover: var(--accent-hover);
+    --switch-on: var(--accent);
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     /* Issue #1764 item 3: the touch target and the type scale. Tabs, buttons,
        info buttons and toggles are at least --tap high (or have a --tap hit
@@ -55,6 +64,50 @@
     --fs-small: 13px;
     --fs-body: 14px;
     --fs-large: 17px;
+}
+
+/* Issue #1764 item 6: the red night theme, set by the header toggle. The whole
+   palette is this block: palette D of the issue's evidence comment (red
+   #f3170b on black, 4.94:1), built with one text colour, no green, blue or
+   amber, outlined controls whose edge is 3:1 on the background, and dim card
+   outlines. tests/web/night_theme.test.js computes the contrast and the hue
+   from it. The night rules at the end of this file add shapes, not colours. */
+:root[data-theme="night"] {
+    color-scheme: dark;
+    --bg: #000000;
+    --panel: #080000;
+    --panel-2: #080000;
+    --line: #4a0000;
+    --text: #f3170b;
+    --dim: #f3170b;
+    --accent: #f3170b;
+    --accent-2: #f3170b;
+    --ok: #f3170b;
+    --warn: #f3170b;
+    --panel-hover: #1a0000;
+    --line-hover: #f3170b;
+    --accent-hover: #f3170b;
+    --on-accent: #f3170b;
+    --danger-text: #f3170b;
+    --danger-line: #b80000;
+    --danger-hover: #1a0000;
+    --focus-glow: rgba(243, 23, 11, 0.35);
+    --inset: #000000;
+    --code-bg: #000000;
+    --backdrop: rgba(0, 0, 0, 0.8);
+    --shadow: rgba(0, 0, 0, 0.6);
+    --status-connected: #f3170b;
+    --status-idle: #f3170b;
+    --status-error: #f3170b;
+    --form-table-text: #f3170b;
+    --form-note-text: #f3170b;
+    --form-muted-text: #f3170b;
+    --control-bg: transparent;
+    --control-line: #b80000;
+    --primary-bg: transparent;
+    --primary-text: #f3170b;
+    --primary-hover: #1a0000;
+    --switch-on: #4a0000;
 }
 
 * {
@@ -349,8 +402,8 @@ h2 {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    border: 1px solid var(--line);
-    background: var(--panel-2);
+    border: 1px solid var(--control-line);
+    background: var(--control-bg);
     color: var(--dim);
     padding: 3px 12px;
     border-radius: 999px;
@@ -461,8 +514,8 @@ h2 {
     appearance: none;
     font: inherit;
     color: var(--text);
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     min-height: var(--tap);
     padding: 7px 14px;
@@ -486,19 +539,19 @@ h2 {
 }
 
 .btn-primary {
-    background: var(--accent);
+    background: var(--primary-bg);
     border-color: var(--accent);
-    color: var(--on-accent);
+    color: var(--primary-text);
 }
 
 .btn-primary:hover {
-    background: var(--accent-hover);
+    background: var(--primary-hover);
     border-color: var(--accent-hover);
 }
 
 .btn-secondary {
-    background: var(--panel-2);
-    border-color: var(--line);
+    background: var(--control-bg);
+    border-color: var(--control-line);
     color: var(--dim);
 }
 
@@ -507,7 +560,7 @@ h2 {
 }
 
 .btn-danger {
-    background: var(--panel-2);
+    background: var(--control-bg);
     border-color: var(--danger-line);
     color: var(--danger-text);
 }
@@ -566,8 +619,8 @@ h2 {
     width: 100%;
     font: inherit;
     color: var(--text);
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     padding: 6px 10px;
     transition: border-color 0.12s;
@@ -633,8 +686,8 @@ input[type="range"] {
     width: 100%;
     font: inherit;
     color: var(--text);
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     padding: 6px 10px;
     transition: border-color 0.12s;
@@ -800,8 +853,8 @@ input[type="range"] {
     flex: 1;
     font: inherit;
     color: var(--text);
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     padding: 6px 10px;
 }
@@ -890,8 +943,8 @@ header > .server-clock {
     position: absolute;
     cursor: pointer;
     inset: 0;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     transition: 0.2s;
     border-radius: 24px;
 }
@@ -909,7 +962,7 @@ header > .server-clock {
 }
 
 .switch input:checked + .slider {
-    background: var(--accent);
+    background: var(--switch-on);
     border-color: var(--accent);
 }
 
@@ -969,9 +1022,9 @@ header > .server-clock {
     align-items: center;
     gap: 8px;
     padding: 6px 10px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
-    background: var(--panel-2);
+    background: var(--control-bg);
     color: var(--dim);
     font-size: var(--fs-small);
 }
@@ -1246,8 +1299,8 @@ header > .server-clock {
 .ui-dialog-field input {
     padding: 10px;
     color: var(--text);
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     font: inherit;
 }
@@ -1495,8 +1548,8 @@ header > .server-clock {
 .oa-switch input { opacity: 0; width: 0; height: 0; }
 .oa-slider {
     position: absolute; inset: 0;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 999px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
@@ -1510,7 +1563,7 @@ header > .server-clock {
     background: var(--dim);
     transition: transform 0.15s, background 0.15s;
 }
-.oa-switch input:checked + .oa-slider { background: var(--accent); border-color: var(--accent); }
+.oa-switch input:checked + .oa-slider { background: var(--switch-on); border-color: var(--accent); }
 .oa-switch input:checked + .oa-slider::before { transform: translateX(18px); background: var(--on-accent); }
 
 /* Network list */
@@ -1542,8 +1595,8 @@ header > .server-clock {
 .wifi-field > label { flex: 0 0 90px; color: var(--dim); }
 .wifi-field input {
     flex: 1;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     color: var(--text);
     font: inherit;
@@ -1551,20 +1604,20 @@ header > .server-clock {
 }
 .wifi-field input:focus { outline: none; border-color: var(--accent-2); }
 .wifi-country-select {
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: var(--control-bg);
+    border: 1px solid var(--control-line);
     border-radius: 7px;
     color: var(--text);
     font: inherit;
     padding: 7px 10px;
 }
-.wifi-segment { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.wifi-segment { display: inline-flex; border: 1px solid var(--control-line); border-radius: 8px; overflow: hidden; }
 .wifi-segment button {
     appearance: none; font: inherit; border: none; cursor: pointer;
-    background: var(--panel-2); color: var(--dim);
+    background: var(--control-bg); color: var(--dim);
     padding: 6px 14px;
 }
-.wifi-segment button.active { background: var(--accent); color: var(--on-accent); }
+.wifi-segment button.active { background: var(--primary-bg); color: var(--primary-text); }
 .wifi-country-select { max-width: 140px; }
 
 /* Software update card (docs/software-update.md) */
@@ -1592,4 +1645,50 @@ header > .server-clock {
     margin-top: 4px;
     font-size: var(--fs-small);
     opacity: 0.75;
+}
+
+/* ---- night theme (issue #1764 item 6) ---- */
+/* The header toggle; .btn gives it the --tap height. */
+.theme-toggle {
+    flex: none;
+}
+
+/* With one text colour, the active tab is marked by its underline and weight. */
+:root[data-theme="night"] .tab.active {
+    font-weight: 700;
+}
+
+:root[data-theme="night"] .btn-primary {
+    font-weight: 600;
+}
+
+/* Status is a shape as well as a colour: connected stays a solid dot, idle and
+   quiet are a hollow ring, an error is a square. The label and tooltip stay,
+   and a stale dot (from the last good poll) is drawn hollow in every theme. */
+:root[data-theme="night"] .status-dot.status-idle,
+:root[data-theme="night"] .status-dot.status-quiet {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--status-dot-color);
+}
+
+:root[data-theme="night"] .status-dot.status-error {
+    border-radius: 1px;
+}
+
+/* Form controls the rules above leave to the browser (the filter-name
+   textareas, for one) are outlined in the theme colours too. */
+:root[data-theme="night"] :where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea) {
+    background-color: var(--control-bg);
+    color: var(--text);
+    border-color: var(--control-line);
+}
+
+/* The colour logo becomes a red silhouette: the image is moved out of its box
+   and its shape masks a fill of the text colour. The favicon is drawn by the
+   browser outside the page and is not themed. */
+:root[data-theme="night"] .logo {
+    object-position: -9999px 0;
+    background: var(--text);
+    -webkit-mask: url("/web/assets/oa512.png") center / contain no-repeat;
+    mask: url("/web/assets/oa512.png") center / contain no-repeat;
 }
