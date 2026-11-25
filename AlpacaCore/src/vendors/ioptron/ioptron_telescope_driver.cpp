@@ -128,8 +128,8 @@ class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::Asy
     // Decision 0016 (#1829): getters never wait on device I/O. Two driver locks, in this order:
     //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
     // io_mutex_ keeps one command's exchanges and state writes together: every member that reaches the mount
-    // (a command, a getter whose TTL cache has lapsed, the connect and the close) holds it for the whole call.
-    // Some sequences must not be split: :SRA#/:Sd# set the target the :MS1# after them uses, and a
+    // (a command, a site getter whose TTL cache has lapsed, the poll's probe, the connect and the close) holds it for
+    // the whole call. Some sequences must not be split: :SRA#/:Sd# set the target the :MS1# after them uses, and a
     // Park's :MP1# is followed by its park-position read. mutex_ is never held ACROSS an exchange: every call
     // through Wire drops it for the exchange and takes it back after. The protocol wrapper's own lock
     // serialises the wire itself; the slew and clock-sync bodies take the two locks like a command does.
@@ -2882,8 +2882,8 @@ private:
     }
 
     // Issue #2562: the post-connect grace serves the connect's reads to the getter burst after Connect. A motion the
-    // driver starts (every initiator supersedes, and AbortSlew) ends it: the caches then follow the mount on their
-    // TTLs, so AtPark, AtHome, Slewing and the position no longer serve a value written or read before the motion.
+    // driver starts (every initiator supersedes, and AbortSlew) ends it: the site caches then follow the mount on their
+    // TTLs. (The frame has no grace: the poll keeps it at most one tick old.)
     void end_fast_cache_grace_locked() const { fast_cache_until_ = std::chrono::steady_clock::time_point{}; }
 
     void clear_slew_hold_locked() const { slew_hold_.clear(); }
@@ -4325,7 +4325,7 @@ private:
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
     // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by
-    // refresh_status_cache_locked() once a fresh status reports at home after a FindHome, or no motion
+    // ingest_status_locked() once a fresh status reports at home after a FindHome, or no motion
     // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     // HomeSearch (issue #2420) is a FindHome running the :MSH# zero sensor search: MoveAxis keeps it like the others,
