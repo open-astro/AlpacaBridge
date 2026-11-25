@@ -699,4 +699,170 @@ TEST_CASE("iOptron polled state - Disconnect returns within 5 s while a raw Comm
     CHECK_FALSE(rig.driver().get_connected());
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The cases below came with the implementation (they need its seams or its adopted row); the cases above are the plan's
+// RED cases, unchanged.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// Issue #2491 rule 7: :GAC# is optional. A mount that answers the status and the position but never the Alt/Az (the
+// fake answers an unparseable `0#` until set_alt_az()) is alive: the Alt/Az getters say "not available", every other
+// getter answers, no fault latches, and the Alt/Az shows up once the mount answers.
+TEST_CASE("iOptron polled state - an Alt/Az read that fails alone is not a failed poll",
+          "[ioptron][telescope][polled]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_position(12.0, 20.0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+
+    for (int i = 0; i < 10; ++i) tick_and_require_a_poll(clock, mount);
+    CHECK(driver.get_link_fault().empty());  // ten failed :GAC# reads, no latch
+    CHECK(driver.get_connected());
+    for (const auto* getter : {"Altitude", "Azimuth"}) {
+        INFO(getter);
+        std::string message;
+        const auto code = alpacacore::test::error_code_of(
+            [&] {
+                if (std::string(getter) == "Altitude") {
+                    static_cast<void>(driver.get_altitude());
+                } else {
+                    static_cast<void>(driver.get_azimuth());
+                }
+            },
+            &message);
+        CHECK(code == AlpacaError::DriverException);
+        CHECK(contains(message, "Alt/Az is not available"));
+    }
+    CHECK(driver.get_right_ascension() == Catch::Approx(12.0).margin(1e-6));
+    CHECK_NOTHROW(driver.get_tracking());
+    CHECK_NOTHROW(driver.get_slewing());
+
+    mount.set_alt_az(45.0, 180.0);
+    const auto altitude_known = [&] {
+        return alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_altitude()); }) == 0;
+    };
+    for (int i = 0; i < 4 && !altitude_known(); ++i) tick(clock);
+    CHECK(driver.get_altitude() == Catch::Approx(45.0).margin(1e-6));
+    CHECK(driver.get_azimuth() == Catch::Approx(180.0).margin(1e-6));
+}
+
+// Issue #2491 rule 7, REV 2: a :GAC# that took longer than a period to fail is a timeout, and the read then runs on
+// every fourth tick until it answers, so a mount that times out on it adds one reply timeout per four probes instead
+// of one per probe. The fake answers it with an unparseable reply after 300 ms; the status and the position stay fast.
+TEST_CASE("iOptron polled state - a :GAC# that times out is read every 4th tick until it answers",
+          "[ioptron][telescope][polled]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_position(12.0, 20.0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+
+    mount.set_command_reply_delay(":GAC#", milliseconds(300));
+    const int altaz = mount.count(":GAC#");
+    const int status = mount.count(":GLS#");
+    for (int i = 0; i < 12; ++i) tick(clock);
+    CHECK(mount.count(":GAC#") == altaz + 3);    // ticks 1, 5 and 9 of 12
+    CHECK(mount.count(":GLS#") == status + 12);  // the status is read on every tick, back-off or not
+    CHECK(driver.get_link_fault().empty());
+
+    // It answers again (and quickly): the next read tick finds it, and from then on every tick reads it.
+    mount.set_command_reply_delay(":GAC#", milliseconds(0));
+    mount.set_alt_az(45.0, 180.0);
+    for (int i = 0; i < 4; ++i) tick(clock);
+    CHECK(driver.get_altitude() == Catch::Approx(45.0).margin(1e-6));
+    const int reads = mount.count(":GAC#");
+    tick(clock);
+    tick(clock);
+    CHECK(mount.count(":GAC#") == reads + 2);
+}
+
+// Issue #2491 rule 9 and open choice 7: SideOfPier with no site cached serves the mount's own pier digit, normalized,
+// and sends nothing (the site is not part of the frame, and the getter does not read it). The one :GLS# the connect's
+// site read gets is failed, so no site is cached; the pier digit 2 (indeterminate) is not what the hour angle gives.
+TEST_CASE("iOptron polled state - SideOfPier with no site cached serves the raw pier digit and sends nothing",
+          "[ioptron][telescope][polled]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_alt_az(45.0, 180.0);
+    mount.set_pier_side(2);
+    mount.fail_next_reads(1);  // the connect's site read; the seed's reads after it answer
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    tick(rig.clock());
+
+    const auto before = sent(mount);
+    CHECK(driver.get_side_of_pier() == 2);
+    CHECK(sent(mount) == before);
+}
+
+// Issue #2491 rule 4 and INVARIANT 14: a client's Tracking or TrackingRate write holds for its 2 s read-back window
+// over any status a poll samples meanwhile, and the poll's own sample serves once the window has closed. At +1.3 s the
+// poll has read the mount's old status (the fake does not model the write); the getter still says what the client
+// wrote.
+TEST_CASE("iOptron polled state - a status read inside the Tracking read-back window does not undo the written value",
+          "[ioptron][telescope][polled]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_alt_az(45.0, 180.0);
+    mount.set_tracking_rate_digit(0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+    tick(clock);
+    REQUIRE(driver.get_tracking());
+    REQUIRE(driver.get_tracking_rate() == 0);
+
+    driver.set_tracking(false);
+    driver.set_tracking_rate(2);
+    mount.set_tracking_rate_digit(0);  // the mount's read-back lags the write: it still reports the sidereal rate
+    step(clock, milliseconds(1300));   // a poll samples tracking and the sidereal rate, inside the window
+    CHECK_FALSE(driver.get_tracking());
+    CHECK(driver.get_tracking_rate() == 2);
+
+    step(clock, milliseconds(1000));  // +2.3 s: the window has closed, the mount's own status is served
+    CHECK(driver.get_tracking());
+    CHECK(driver.get_tracking_rate() == 0);
+}
+
+// Decision 0010 rule 8 and open choice 4: a connect whose first status, position and Alt/Az reads all fail still
+// connects (the seed publishes a frame with nothing known), and the getters say "not available" with DriverException,
+// never InvalidOperation, until a poll answers.
+TEST_CASE("iOptron polled state - a connect whose first reads fail still connects and the getters say so",
+          "[ioptron][telescope][polled]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_alt_az(45.0, 180.0);
+    mount.set_fail_reads(true);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+
+    for (const auto& getter : served_getters()) {
+        if (std::string(getter.label) == "DeviceState" || std::string(getter.label) == "SideOfPier") continue;
+        INFO(getter.label);
+        CHECK(alpacacore::test::error_code_of([&] { getter.read(driver); }) == AlpacaError::DriverException);
+    }
+    CHECK(alpacacore::test::error_code_of([&] { static_cast<void>(driver.get_side_of_pier()); }) ==
+          AlpacaError::DriverException);
+    CHECK(driver.get_link_fault().empty());  // the seed is a good probe: nothing is latched
+
+    mount.set_fail_reads(false);
+    tick_and_require_a_poll(rig.clock(), mount);
+    // The frame answers now. (DeviceState is left out: SiderealTime refills the site cache the failed connect read left
+    // empty, which is the site's business and not the frame's.)
+    for (const auto& getter : served_getters()) {
+        if (std::string(getter.label) == "DeviceState") continue;
+        INFO(getter.label);
+        const auto before = sent(mount);
+        CHECK_NOTHROW(getter.read(driver));
+        CHECK(sent(mount) == before);
+    }
+}
+
 #endif  // _WIN32

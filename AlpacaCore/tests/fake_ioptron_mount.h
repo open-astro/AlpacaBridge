@@ -108,6 +108,14 @@ public:
     /// hold_next_reply() when this is called keeps its hold alone; the replies after it pay the delay.
     void set_reply_delay(std::chrono::milliseconds delay) { reply_delay_ms_.store(static_cast<int>(delay.count())); }
 
+    /// Every reply to the command @p cmd (exactly, "#" included) is held for @p delay (real time) from now on, 0 to
+    /// stop: a mount that answers one read slowly (a ":GAC#" the driver's poll waits more than a period for) while it
+    /// answers the others at once. Replaces an earlier delay for the same command.
+    void set_command_reply_delay(std::string cmd, std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        command_delay_ms_[std::move(cmd)] = static_cast<int>(delay.count());
+    }
+
     /// When the command @p cmd (exactly, "#" included) is received the ":GLS" system status becomes @p status, as a
     /// firmware that reacts to it: ":ST0#" ends a wedged park at 6 (parked), ":Q#" ends a slew. The command is
     /// still handled as before. Replaces an earlier rule for the same command.
@@ -316,12 +324,19 @@ private:
     }
 
     std::string handle(const std::string& cmd) {
+        int command_delay_ms = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
             if (const auto rule = status_on_command_.find(cmd); rule != status_on_command_.end()) {
                 system_status_.store(rule->second);
             }
+            if (const auto delay = command_delay_ms_.find(cmd); delay != command_delay_ms_.end()) {
+                command_delay_ms = delay->second;
+            }
+        }
+        if (command_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(command_delay_ms));
         }
         if (cmd == ":MountInfo#") {
             return model_code_;  // 4 bytes, no '#', as the real firmware
@@ -642,6 +657,7 @@ private:
     std::atomic<int> hold_ms_{0};
     std::atomic<int> reply_delay_ms_{0};
     std::map<std::string, int> status_on_command_;  // under mutex_
+    std::map<std::string, int> command_delay_ms_;   // under mutex_
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
     std::string utc_reply_ = "+00000000000000000#";
