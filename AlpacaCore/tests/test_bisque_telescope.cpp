@@ -2732,10 +2732,10 @@ TEST_CASE("Bisque sync slew - a MoveAxis cap stop during the slew does not fail 
     CHECK_NOTHROW(slewed.get());
 }
 
-TEST_CASE("Bisque park - a Park whose poll outlives an AbortSlew sends no Abort() at its 120 s timeout",
+TEST_CASE("Bisque park - a Park whose poll outlives an AbortSlew sends no Abort()",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
-    rig.mount.park_polls_needed = 100000;  // the fake keeps parking after the Abort(): the poll runs on to 120 s
+    rig.mount.park_polls_needed = 100000;  // the fake keeps parking after the Abort()
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
     REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
     REQUIRE_NOTHROW(rig.driver->abort_slew());

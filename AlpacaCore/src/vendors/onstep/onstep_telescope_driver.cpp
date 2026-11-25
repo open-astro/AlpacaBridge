@@ -1141,9 +1141,10 @@ public:
             // config did not set both coordinates.
             seed_snapshot_locked();
             if (relink_watch) {
-                // #2296: the relink left the watched motion running. Its first status since the outage decides at
-                // once, by the same end rules as any other (a stop during the outage still fails it), else the watch
-                // goes on. The park and home bound still runs from the command.
+                // #2296, #2406: the relink left the watched motion running, which only a park still running gets
+                // (stop_motion_after_link_loss_locked()). Its first status since the outage decides at once, by the
+                // same end rules as any other, else the watch goes on. The park and home bound still runs from the
+                // command.
                 watched_motion_ = relink_watch;
                 const auto seeded = polled_.read();
                 if (seeded && seeded->value.status_known) {
@@ -2374,7 +2375,8 @@ public:
         // then drains, and a hangup in the drain fails a :Q# the controller took), so a kept watch could judge a GOTO
         // the mount did abort, and on OnStep 4.x an older held stop code would report the client's own abort as a
         // limit stop. A link lost before the call fails check_connected() above, before the watch is touched, so that
-        // watch is kept and a relink inside the preserve window judges it.
+        // watch is kept for the relink, which stops the motion and drops the watch unless a park is still running
+        // (#2406).
         const std::optional<WatchedMotion> watched_slew =
             watched_motion_ && watched_motion_->motion == MotionKind::Slew ? watched_motion_ : std::nullopt;
         struct DropWatch {  // runs while `lock` (declared first) still holds mutex_

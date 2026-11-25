@@ -784,7 +784,7 @@ command channel. Nothing scans the network; the host is typed in.
   - **Across a relink** (#521, #2406): a relink sends AbortSlew's stops whatever the outage length, so a GOTO it finds
     running is the driver's own stop then, and its watch is dropped, as is any kept failure. Only a park the relink
     leaves running (#1289) keeps the watch, and the relink's first `:GU#` (the connect's seed frame, with its position)
-    judges it at once by the rules above, so a stop during the outage still fails it. When that frame has no position
+    judges it at once by the rules above. When that frame has no position
     the check reads `:GRa#`/`:GDe#` itself; a link lost there fails the Connect through the connect's own lost-link
     check, as any lost seed read does. The park and home bound runs on from the command: the outage is part
     of the park's time. No baseline code is kept: the end position decides a slew, so a 4.x code that changed or was
