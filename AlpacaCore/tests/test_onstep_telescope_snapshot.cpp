@@ -3463,7 +3463,8 @@ TEST_CASE("OnStep limit stop - a park a relink leaves running still fails when t
         CHECK_NOTHROW(rig.driver->get_slewing());
         CHECK(rig.mount->count(":Te#") == 0);
     }
-    // Item 9: the relink stops a GOTO but leaves a park running (#1289), so the park's watch carries over. Its bound still runs from the Park command (the outage counts: it is part of the park's time).
+    // Item 9: the relink stops a GOTO but leaves a park running (#1289), so the park's watch carries over. Its bound
+    // still runs from the Park command (the outage counts: it is part of the park's time).
     SECTION("a park the relink leaves running") {
         connect_rates(rig);
         show(rig, "NpEW180#");

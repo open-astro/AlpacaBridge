@@ -4489,7 +4489,8 @@ struct BoundedOnStep {
         if (driver) driver->set_connected(false);
     }
     // Moves virtual time and takes one status-poll tick.
-    // `tick_fails`: the tick's :GU# is meant to fail, so the tick reports no healthy link (the loss latch may close it).
+    // `tick_fails`: the tick's :GU# is meant to fail, so the tick reports no healthy link (the loss latch may close
+    // it).
     void poll_after(std::chrono::milliseconds d, bool tick_fails = false) {
         clock.advance(d);
         (void)clock.wait_for_woken_settled(std::chrono::seconds(5));

@@ -4769,8 +4769,8 @@ private:
     // kStopVerifyPollInterval until the mount is still (util::LandingGate); a still mount more than
     // kLandingFarMissArcsec from the target throws. Settling past kLandingSettleBudget throws too. False when a newer
     // operation took the mount. `lock` (mutex_) is held on entry and on return or throw.
-    bool check_v3_landing_locked(std::unique_lock<std::mutex>& lock, double ra, double dec, const util::MotionClaim& claim,
-                                 util::OperationContext* ctx) {
+    bool check_v3_landing_locked(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                                 const util::MotionClaim& claim, util::OperationContext* ctx) {
         const auto started = clock_.now();
         util::LandingGate gate({ra, dec}, started);
         while (true) {

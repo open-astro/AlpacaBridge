@@ -1916,8 +1916,8 @@ private:
                 run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
                 lock.lock();
                 // A failure an AbortSlew stored meanwhile (its stop failed) is checked before "complete": the slew
-                // may have ended short of its target, not on it. Only an AbortSlew or a retarget takes the slew's claim,
-                // so a failure of a MoveAxis started during the wait does not fail this slew (#2410).
+                // may have ended short of its target, not on it. Only an AbortSlew or a retarget takes the slew's
+                // claim, so a failure of a MoveAxis started during the wait does not fail this slew (#2410).
                 if (!owns_slewing_locked(claim) && !motion_error_.empty()) {
                     throw AlpacaException(motion_error_, AlpacaError::DriverException);
                 }

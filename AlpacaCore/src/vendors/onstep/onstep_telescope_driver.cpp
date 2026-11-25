@@ -3668,8 +3668,9 @@ private:
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unread status stops anyway
             // unknown state: stop, as before
         }
-        ALPACA_LOG_WARN("OnStep", std::string("The link to the mount was last seen alive ") + seconds +
-                                      " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521, #2406)");
+        ALPACA_LOG_WARN("OnStep",
+                        std::string("The link to the mount was last seen alive ") + seconds +
+                            " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521, #2406)");
         // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
         // not skip the per-axis stops that end a MoveAxis.
         (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {

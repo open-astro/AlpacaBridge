@@ -2836,7 +2836,7 @@ TEST_CASE("SynScan async - a GOTO the mount never starts fails with a stop and n
     std::string message;
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("the mount never started") != std::string::npos);
-    CHECK(st->goto_count.load() == 1);    // not repeated as a far miss (#1105): it never ran
+    CHECK(st->goto_count.load() == 1);   // not repeated as a far miss (#1105): it never ran
     CHECK(st->command_count('M') >= 1);  // and stopped all the same
     driver->set_connected(false);
 }

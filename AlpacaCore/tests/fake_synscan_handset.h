@@ -299,9 +299,11 @@ private:
                     const auto counts = static_cast<unsigned>(drift_counts.load());
                     if (chunk[0] == 'E') {
                         // 16-bit: the driver reads the last four digits before the comma and the first four after it.
-                        std::snprintf(moving, sizeof(moving), "0000%04X,20000000#", (0x0500u + reads * counts) & 0xFFFFu);
+                        std::snprintf(moving, sizeof(moving), "0000%04X,20000000#",
+                                      (0x0500u + reads * counts) & 0xFFFFu);
                     } else {
-                        std::snprintf(moving, sizeof(moving), "%06X00,20000500#", (0x12AB05u + reads * counts) & 0xFFFFFFu);
+                        std::snprintf(moving, sizeof(moving), "%06X00,20000500#",
+                                      (0x12AB05u + reads * counts) & 0xFFFFFFu);
                     }
                     return moving;
                 }

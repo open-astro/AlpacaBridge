@@ -2741,7 +2741,8 @@ TEST_CASE("Bisque park - a Park whose poll outlives an AbortSlew sends no Abort(
     REQUIRE_NOTHROW(rig.driver->abort_slew());
     REQUIRE(rig.mount.abort_commands.load() == 1);
     CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
-    CHECK_NOTHROW(parked.get());  // the AbortSlew retired this Park: it returns quietly at its next poll boundary (#2062)
+    CHECK_NOTHROW(
+        parked.get());  // the AbortSlew retired this Park: it returns quietly at its next poll boundary (#2062)
     CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew owns the mount: no second stop
     CHECK(slewing_failure(*rig.driver).empty());
 }
@@ -3037,7 +3038,7 @@ TEST_CASE("Bisque motion owner - a refused slew, a landing or a failed FindHome 
     } else if (leg == 2) {
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
         rig.clock.advance(std::chrono::seconds(9));  // past the 8 s hold, so the poll asks TheSkyX
-        REQUIRE(poll_now(*rig.driver));  // IsSlewComplete reads true: the landing gate takes its first read
+        REQUIRE(poll_now(*rig.driver));              // IsSlewComplete reads true: the landing gate takes its first read
         rig.clock.advance(std::chrono::seconds(1));
         REQUIRE(poll_now(*rig.driver));  // the second read agrees: the mount is still, so the slew has landed
     } else {
