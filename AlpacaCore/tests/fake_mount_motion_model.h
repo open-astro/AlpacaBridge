@@ -265,6 +265,12 @@ public:
         advance_locked();
         return pulse_[0].until > stamp_ || pulse_[1].until > stamp_;
     }
+    /// A pulse is running on @p axis.
+    bool pulse_active(Axis axis) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
+        return pulse_[index(axis)].until > stamp_;
+    }
     double slew_deg_per_s() const { return config_.slew_deg_per_s; }
     double site_latitude_degrees() const {
         std::lock_guard<std::mutex> lock(mutex_);
