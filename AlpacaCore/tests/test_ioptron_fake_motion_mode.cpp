@@ -321,4 +321,50 @@ TEST_CASE("FakeIoptronMount ConformU mode: the driver reads AtPark after Park ov
     driver->set_connected(false);
 }
 
+// Issue #2522 (the #2263 policy): a moving MoveAxis owns only its own axis, so a guide pulse on the other axis keeps
+// running. The model still runs the pulse, no stop goes out and IsPulseGuiding stays true, through the jog and after.
+// Falsified by: ioptron_telescope_driver.cpp move_axis_under_lock() calling clear_pulse_windows_locked() beside
+// clear_slew_hold_locked() (IsPulseGuiding reads false), or sending :Q# in place of the arrow command.
+TEST_CASE("iOptron motion owner - MoveAxis on one axis leaves a guide pulse on the other axis running (#2522)",
+          "[ioptron][telescope][fake][mount-model][unit][motion-owner]") {
+    using Axis = FakeMountMotionModel::Axis;
+    struct Leg {
+        int direction;  // ASCOM: 0 North, 1 South (Dec), 2 East, 3 West (RA)
+        Axis pulsed;
+        int jog_axis;  // the other axis
+        Axis jogged;
+    };
+    for (const Leg leg : {Leg{0, Axis::Dec, 0, Axis::Ra}, Leg{1, Axis::Dec, 0, Axis::Ra},
+                          Leg{2, Axis::Ra, 1, Axis::Dec}, Leg{3, Axis::Ra, 1, Axis::Dec}}) {
+        CAPTURE(leg.direction);
+        ModelledMount rig;
+        REQUIRE(rig.mount.ok());
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(rig.mount.port()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        const auto stops = [&] { return rig.mount.count(":q") + rig.mount.count(":Q#"); };
+
+        driver->pulse_guide(leg.direction, 3000);
+        REQUIRE(rig.mount.motion()->pulse_active(leg.pulsed));
+        const int stops_before = stops();
+        driver->move_axis(leg.jog_axis, driver->get_axis_rate_range(leg.jog_axis).first);
+        CHECK(rig.mount.motion()->axis_moving(leg.jogged));
+        CHECK(rig.mount.motion()->pulse_active(leg.pulsed));
+        CHECK(stops() == stops_before);
+        CHECK(driver->get_is_pulse_guiding());
+
+        // Two seconds into the 3 s pulse, with the jog still running.
+        rig.advance(seconds(2));
+        clock.advance(seconds(2));
+        CHECK(rig.mount.motion()->pulse_active(leg.pulsed));
+        CHECK(rig.mount.motion()->axis_moving(leg.jogged));
+        CHECK(stops() == stops_before);
+        CHECK(driver->get_is_pulse_guiding());
+
+        driver->move_axis(leg.jog_axis, 0.0);
+        driver->set_connected(false);
+    }
+}
+
 #endif  // !_WIN32
