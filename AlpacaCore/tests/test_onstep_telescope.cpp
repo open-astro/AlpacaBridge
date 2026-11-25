@@ -2919,6 +2919,48 @@ TEST_CASE("OnStep Telescope Driver - PulseGuide on the axis a MoveAxis drives is
     driver->set_connected(false);
 }
 
+// #2522: OnStep 4.x has no 'h', so a home with switches shows only 'g' while it runs, and the home ends at the first
+// status with no GOTO, no 'h' and no 'g' (#2296, note_motion_end_locked()). The FindHome claim is held until then: a
+// PulseGuide is refused, nothing is sent and the home is not stopped; once a status shows the end it is accepted.
+TEST_CASE("OnStep motion owner - PulseGuide during a home shown only as 'g' is refused (#2522)",
+          "[onstep][telescope][unit][goto-safety][motion-owner]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    using alpacacore::test::error_code_of;
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->version = "4.24q";
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto poll = [&] { REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver)); };
+    const auto searching = [&](bool on) {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->guide_active = on;
+    };
+    const auto home_runs = [&] {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        return mount->guide_active && !mount->stopping;
+    };
+    REQUIRE_NOTHROW(driver->find_home());  // a still mount: :hC# goes out at once
+    REQUIRE(mount->count(":hC#") == 1);
+    searching(true);  // the switch search: 'g', no 'h' and no GOTO
+    poll();
+    const auto stops = mount->count(":Q");
+    for (const int direction : {0, 2}) {
+        CAPTURE(direction);
+        CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == AlpacaError::InvalidOperation);
+        CHECK(mount->count(":Mg") == 0);
+        CHECK(mount->count(":Q") == stops);  // the home was not stopped
+        CHECK(home_runs());
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    }
+    searching(false);
+    poll();  // no 'g': the home ended
+    CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == 0);
+    CHECK(mount->count(":Mgn1000#") == 1);
+    driver->set_connected(false);
+}
+
 namespace {
 
 // run_clock's rendezvous waits for one waiter: the Park or FindHome body's. The status poll (#1783) is a
