@@ -356,11 +356,26 @@ command channel. Nothing scans the network; the host is typed in.
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
   `DestinationSideOfPier`'s RA and Dec. After those checks a pulse is refused with `InvalidOperation`, before
-  anything is sent, while a slew, park or home runs (#2504, `refuse_pulse_during_slew_locked()`): the slew grace, a
-  `Park` or `FindHome` still to be sent after its stops, or a frame showing a GOTO (written through at its dispatch
-  and when the mount takes a park or home), `I` or `h`. It reads the frame, not `:GU#`, so a pulse costs no extra
-  exchange; a handset GOTO, park or home refuses it too, once the poll sees it. A pulse on the axis a non-zero
-  `MoveAxis` drives is refused the same way and the jog runs on (#2503, the #2467 rule); the other axis is accepted.
+  anything is sent, while a slew, park or home runs (#2504): a frame showing a GOTO (written through at its dispatch
+  and when the mount takes a park or home), `I` or `h` (`refuse_pulse_during_slew_locked()`; it reads the frame, not
+  `:GU#`, so a pulse costs no extra exchange, and a handset GOTO, park or home refuses it too, once the poll sees
+  it), or the driver's own slew, Park or FindHome claim (below). A pulse on the axis a non-zero `MoveAxis` drives is
+  refused the same way and the jog runs on (#2503, the #2467 rule); the other axis is accepted.
+- **Motion claims: `util::MotionOwner` (#2522).** `motion_owner_` decides who owns the axes, under `mutex_`; the
+  hand-rolled `park_home_claim_` and `supersede_park_or_home_locked()` are gone. A GOTO (the coordinate and Alt/Az
+  slews, the flip), a `Park` and a `FindHome` claim both axes (`claim_motion_locked()`), a non-zero `MoveAxis` and a
+  `PulseGuide` their own; `AbortSlew`, `Unpark`, a disconnect or relink cancel both and `MoveAxis(axis, 0)` its own
+  (`cancel_motion_locked()`). Every claim and cancel is a new motion command as before: it ends a `Park` or
+  `FindHome` still to be sent or retried and drops the kept failure and the #2296 watch. The controller runs every
+  GOTO, park and home, so no driver body ends one: the slew, Park or FindHome claim (`slew_claim_`) is held from the
+  command until the first status after the mount took it that shows the motion ended, read as the #2296 watch reads
+  it (a GOTO with no GOTO; a park with no GOTO and no `I`; a home with no GOTO, no `h` and no `g`, so an OnStep 4.x
+  switch home, which shows only `g`, holds it), or until an `AbortSlew` whose stops went out, a disconnect or a
+  relink. A command the mount never took (refused, a no-op, given up before it was sent) gives its claim up at once.
+  While it is held a `PulseGuide` is refused by its own claim (the #2504 text), after the jog check. A `MoveAxis`
+  during a GOTO supersedes the claim, and the frame's GOTO letter still refuses the pulse. The re-send and
+  `park_home_` slots keep their own generations (decision 0006). Tests: `[motion-owner]` in
+  `test_onstep_telescope.cpp`, and the #2503 and #2504 cases.
 - **SideOfPier is the mount's own side, from the `:GU#` letter** (#2179). On an OnStepX German mount (`E` in
   `:GU#`) the polled frame's pier-side letter (`T` east, `W` west, `o` none) is served as it is; a fork or alt-az
   mount and OnStep 4.x, not checked on a rig, keep the hour-angle rule. OnStepX's default preferred pier side, Best, keeps the mount on
@@ -934,7 +949,7 @@ command channel. Nothing scans the network; the host is typed in.
     the braking after the stops of a GOTO the park interrupted and the park itself once it moves,
     so such a slew leaves the task and its kept refusal as they were. A
     `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
-    (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
+    (its `util::MotionOwner` claim, decision 0006 rule 3, #2522), so a newer command that lands before the task starts
     still ends it, and `Slewing` reads true from the call until the task ends. The task runs the
     request current when it starts, and a task already stopped when it starts takes none, so a
     newer Park or FindHome is never cleared by an older task that started late.
