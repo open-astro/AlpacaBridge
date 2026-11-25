@@ -25,6 +25,27 @@
     --accent-2: #4a9de8;
     --ok: #43c878;
     --warn: #e8b84a;
+    /* Issue #1764 item 6: every other colour of the page is a token too, so a
+       theme is a remap of this block (tests/web/colour_tokens.test.js). */
+    --panel-hover: #222b3d;
+    --line-hover: #34415a;
+    --accent-hover: #f06b58;
+    --on-accent: #fff;
+    --danger-text: #f08a7a;
+    --danger-line: #7a2e24;
+    --danger-hover: #2a1a18;
+    --focus-glow: rgba(74, 157, 232, 0.2);
+    --inset: #05070b;
+    --code-bg: rgba(0, 0, 0, 0.25);
+    --backdrop: rgba(0, 0, 0, 0.6);
+    --shadow: rgba(0, 0, 0, 0.6);
+    --status-connected: #0BDA51;
+    --status-idle: #d4a72c;
+    --status-error: #f85149;
+    /* The inline colours of the vendor forms' port tables and notes. */
+    --form-table-text: #333;
+    --form-note-text: #666;
+    --form-muted-text: #999;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     /* Issue #1764 item 3: the touch target and the type scale. Tabs, buttons,
        info buttons and toggles are at least --tap high (or have a --tap hit
@@ -193,7 +214,7 @@ h2 {
 }
 
 .device-card:hover {
-    border-color: #34415a;
+    border-color: var(--line-hover);
 }
 
 .device-card.collapsed .device-info,
@@ -249,7 +270,7 @@ h2 {
 
 .status-dot {
     --status-dot-size: 0.65em;
-    --status-dot-color: #d4a72c;
+    --status-dot-color: var(--status-idle);
     position: relative;
     display: inline-block;
     width: var(--status-dot-size);
@@ -260,12 +281,12 @@ h2 {
     flex: none;
 }
 
-.status-dot.status-connected { --status-dot-color: #0BDA51; }
-.status-dot.status-idle { --status-dot-color: #d4a72c; }
+.status-dot.status-connected { --status-dot-color: var(--status-connected); }
+.status-dot.status-idle { --status-dot-color: var(--status-idle); }
 /* Issue #1764: Connected, but no client request for over 60 s. Same yellow as
    idle; the tooltip and label say which. */
-.status-dot.status-quiet { --status-dot-color: #d4a72c; }
-.status-dot.status-error { --status-dot-color: #f85149; }
+.status-dot.status-quiet { --status-dot-color: var(--status-idle); }
+.status-dot.status-error { --status-dot-color: var(--status-error); }
 
 /* Pulsing halo for "online" only; it is absolutely positioned, so no layout shift. */
 .status-dot.status-connected::before {
@@ -312,7 +333,7 @@ h2 {
 }
 
 .device-card.device-error {
-    border-color: #7a2e24;
+    border-color: var(--danger-line);
 }
 
 .device-card.device-error:hover {
@@ -320,7 +341,7 @@ h2 {
 }
 
 .device-card.device-error h3 {
-    color: #f08a7a;
+    color: var(--danger-text);
 }
 
 .device-toggle,
@@ -340,8 +361,8 @@ h2 {
 
 .device-toggle:hover,
 .section-toggle:hover {
-    background: #222b3d;
-    border-color: #34415a;
+    background: var(--panel-hover);
+    border-color: var(--line-hover);
     color: var(--text);
 }
 
@@ -420,7 +441,7 @@ h2 {
 }
 
 .info-value-error {
-    color: #f08a7a;
+    color: var(--danger-text);
     font-family: inherit;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -450,8 +471,8 @@ h2 {
 }
 
 .btn:hover {
-    background: #222b3d;
-    border-color: #34415a;
+    background: var(--panel-hover);
+    border-color: var(--line-hover);
 }
 
 .btn:disabled {
@@ -467,12 +488,12 @@ h2 {
 .btn-primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .btn-primary:hover {
-    background: #f06b58;
-    border-color: #f06b58;
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
 }
 
 .btn-secondary {
@@ -487,12 +508,12 @@ h2 {
 
 .btn-danger {
     background: var(--panel-2);
-    border-color: #7a2e24;
-    color: #f08a7a;
+    border-color: var(--danger-line);
+    color: var(--danger-text);
 }
 
 .btn-danger:hover {
-    background: #2a1a18;
+    background: var(--danger-hover);
     border-color: var(--accent);
 }
 
@@ -556,7 +577,7 @@ h2 {
 .form-group select:focus {
     outline: none;
     border-color: var(--accent-2);
-    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
+    box-shadow: 0 0 0 3px var(--focus-glow);
 }
 
 /* The vendor list is empty until the device catalog has loaded. */
@@ -623,7 +644,7 @@ input[type="range"] {
 .filterwheel-slot-row input:focus {
     outline: none;
     border-color: var(--accent-2);
-    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
+    box-shadow: 0 0 0 3px var(--focus-glow);
 }
 
 .filterwheel-slot-row input[type="text"] {
@@ -710,7 +731,7 @@ input[type="range"] {
 
 .message.error {
     border-left-color: var(--accent);
-    color: #f08a7a;
+    color: var(--danger-text);
 }
 
 .message.warning {
@@ -788,7 +809,7 @@ input[type="range"] {
 .server-location input:focus {
     outline: none;
     border-color: var(--accent-2);
-    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
+    box-shadow: 0 0 0 3px var(--focus-glow);
 }
 
 .server-status {
@@ -798,7 +819,7 @@ input[type="range"] {
 }
 
 .server-status.error {
-    color: #f08a7a;
+    color: var(--danger-text);
 }
 
 .server-clock {
@@ -810,7 +831,7 @@ input[type="range"] {
 }
 
 .server-clock.drift {
-    color: #f08a7a;
+    color: var(--danger-text);
 }
 
 /* open-astro#677: set while the clock shows "clock error"; a tap shows why. */
@@ -893,7 +914,7 @@ header > .server-clock {
 }
 
 .switch input:checked + .slider:before {
-    background: #fff;
+    background: var(--on-accent);
     transform: translateX(20px);
 }
 
@@ -1043,7 +1064,7 @@ header > .server-clock {
     margin-top: 12px;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: #05070b;
+    background: var(--inset);
     color: var(--text);
     overflow: hidden;
 }
@@ -1084,7 +1105,7 @@ header > .server-clock {
 
 .info-box pre {
     color: var(--text);
-    background: #05070b;
+    background: var(--inset);
     padding: 12px;
     border-radius: 8px;
     overflow-x: auto;
@@ -1187,7 +1208,7 @@ header > .server-clock {
 }
 
 .ui-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--backdrop);
 }
 
 .ui-dialog-form {
@@ -1273,7 +1294,7 @@ header > .server-clock {
 
 .toast-error {
     border-left-color: var(--accent);
-    color: #f08a7a;
+    color: var(--danger-text);
 }
 
 .toast-close {
@@ -1289,7 +1310,7 @@ header > .server-clock {
 
 .field-error {
     margin-top: 4px;
-    color: #f08a7a;
+    color: var(--danger-text);
     font-size: var(--fs-small);
 }
 
@@ -1369,7 +1390,7 @@ header > .server-clock {
     background: var(--panel-2);
     border: 1px solid var(--line);
     border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 12px 40px var(--shadow);
     padding: 20px 24px;
     z-index: 1000;
     transform: translateY(24px);
@@ -1490,7 +1511,7 @@ header > .server-clock {
     transition: transform 0.15s, background 0.15s;
 }
 .oa-switch input:checked + .oa-slider { background: var(--accent); border-color: var(--accent); }
-.oa-switch input:checked + .oa-slider::before { transform: translateX(18px); background: #fff; }
+.oa-switch input:checked + .oa-slider::before { transform: translateX(18px); background: var(--on-accent); }
 
 /* Network list */
 .wifi-list { margin: 2px 0 6px; }
@@ -1543,7 +1564,7 @@ header > .server-clock {
     background: var(--panel-2); color: var(--dim);
     padding: 6px 14px;
 }
-.wifi-segment button.active { background: var(--accent); color: #fff; }
+.wifi-segment button.active { background: var(--accent); color: var(--on-accent); }
 .wifi-country-select { max-width: 140px; }
 
 /* Software update card (docs/software-update.md) */
@@ -1561,9 +1582,9 @@ header > .server-clock {
 .update-notes-body p { margin: 6px 0; }
 .update-notes-body ul { margin: 4px 0 8px 18px; padding: 0; }
 .update-notes-body li { margin: 4px 0; }
-.update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: rgba(0, 0, 0, 0.25); font-size: var(--fs-small); }
+.update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: var(--code-bg); font-size: var(--fs-small); }
 #update-status-line.update-available { color: var(--accent); font-weight: 600; }
-#update-message.error, #update-installer-line.error, #update-channel-line.error { color: #f08a7a; }
+#update-message.error, #update-installer-line.error, #update-channel-line.error { color: var(--danger-text); }
 
 /* Help lines under a server setting. */
 .info-note {
