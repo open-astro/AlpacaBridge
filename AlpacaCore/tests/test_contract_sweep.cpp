@@ -716,9 +716,9 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
 }
 
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
-// Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982). A known
-// row's probe must still not answer InvalidOperation, so a fix that lands without deleting its line fails the sweep. A
-// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned.
+// Tier2Host::id. Empty since GPhoto's CaptureSession rewrite (#1982). A known row's probe must still not answer
+// InvalidOperation, so a fix that lands without deleting its line fails the sweep. A skipped row is not run at all: its
+// answer depends on timing, so no outcome can be pinned.
 struct ExposingRefusalExemption {
     const char* id;
     const char* probe;
@@ -728,14 +728,6 @@ struct ExposingRefusalExemption {
 
 // clang-format off
 const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
-    // GPhoto: no exposing check on the ROI setters, and a second StartExposure restarts the exposure (#1982).
-    {"gphoto_camera", "set_bin_x(BinX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "set_bin_y(BinY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "set_num_x(NumX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "set_num_y(NumY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "set_start_x(StartX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "set_start_y(StartY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
-    {"gphoto_camera", "start_exposure(a valid duration)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
 };
 // clang-format on
 

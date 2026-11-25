@@ -265,7 +265,7 @@ value checks, whose text names the value.
   values of an earlier success; only a new success replaces them. Keep the exposure in flight in pending fields
   (`PercentCompleted` reads them) and publish under the state lock when the image is acquired
   (`util::LastExposure`, `util/last_exposure.h`, for supported pairs); clear them on disconnect. While disconnected both raise `NotConnected` first
-  (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
+  (`ensure_connected()`); a GPhoto abort during the decode leaves the body stopped, and it publishes nothing.
 - In cameras that hold the state lock across initialization, fast-fail disconnected reads before taking that
   lock, then recheck connection under it. The first check avoids waiting behind connect I/O; the second closes
   the disconnect race. iGuider's connect I/O already runs outside its leaf state lock.
