@@ -1703,7 +1703,8 @@ public:
 
     static std::string move_axis_cap_ran_text(int axis) {
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(util::kMaxMoveAxisDuration).count();
-        return "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) + " s with no new MoveAxis";
+        return "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
+               " s with no new MoveAxis";
     }
 
     void run_move_axis_cap(int axis, util::MotionClaim claim, util::HoldWindow window, util::OperationContext& ctx) {
@@ -1733,7 +1734,8 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             const auto owns = [&] { return move_axis_cap_owns_locked(axis, claim, ctx); };
             if (!owns()) return;
-            send_motion_locked(lock, owns, [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
+            send_motion_locked(lock, owns,
+                               [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
         };
         hooks.read_status = [this, axis]() -> std::optional<util::MotionStatusReading> {
             bool hc = false;
@@ -1800,8 +1802,8 @@ public:
         }
         last_home_error_.clear();
         if (ex.what() != expired) {
-            last_slew_error_ = move_axis_cap_ran_text(axis) + "; the stop failed: " + ex.what() +
-                               "; the mount may still be moving";
+            last_slew_error_ =
+                move_axis_cap_ran_text(axis) + "; the stop failed: " + ex.what() + "; the mount may still be moving";
             ALPACA_LOG_WARN("Celestron", last_slew_error_);
             return;
         }
