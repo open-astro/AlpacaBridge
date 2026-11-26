@@ -1235,7 +1235,8 @@ private:
         const util::TcpConnectResult connected = util::connect_tcp(host, port, kConnectTimeoutMs, nullptr, {}, AF_INET);
         if (connected.fd < 0) {
             last_connect_error_ = "could not connect to " + host + ":" + std::to_string(port) + ": " + connected.error;
-            ALPACA_LOG_ERROR("OnStep", "Network connect failed: " + last_connect_error_);
+            // Client-triggerable, so below WARNING (decision 0007 rule 9); the client gets the reason.
+            ALPACA_LOG_INFO("OnStep", "Network connect failed: " + last_connect_error_);
             return false;
         }
         socket_fd_ = connected.fd;

@@ -4490,6 +4490,19 @@ TEST_CASE("OnStep network - a refused connect fails at once, naming the host, th
     conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
     conn.host = "127.0.0.1";
     conn.tcp_port = port;
+    // Decision 0007 rule 9: a client can point the entry at a dead port, so the wrapper logs the refusal below WARNING.
+    std::atomic<int> loud{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level >= alpacacore::logging::LogLevel::Warn && component == "OnStep" &&
+                message.find("Network connect failed") != std::string_view::npos) {
+                ++loud;
+            }
+        });
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
     std::string message;
     const auto start = std::chrono::steady_clock::now();
@@ -4503,4 +4516,5 @@ TEST_CASE("OnStep network - a refused connect fails at once, naming the host, th
     CHECK(message.find("could not connect to 127.0.0.1:" + std::to_string(port)) != std::string::npos);
     CHECK(message.find("refused") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
+    CHECK(loud.load() == 0);
 }

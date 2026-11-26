@@ -1289,7 +1289,8 @@ private:
         const std::string endpoint = host + ":" + std::to_string(port);
         const auto fail = [&](const std::string& why) {
             last_connect_error_ = "could not connect to " + endpoint + ": " + why;
-            ALPACA_LOG_ERROR("ZWO", "Network connect failed: " + last_connect_error_);
+            // Client-triggerable, so below WARNING (decision 0007 rule 9); the client gets the reason.
+            ALPACA_LOG_INFO("ZWO", "Network connect failed: " + last_connect_error_);
             return false;
         };
         // One deadline for the lookup, the claim wait and the TCP connect (#2711).

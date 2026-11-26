@@ -648,6 +648,19 @@ TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers
           "[zwo][network]") {
     auto silent = std::make_unique<alpacacore::test::SilentListener>();
     REQUIRE(silent->ok());  // the accept queue filled: a connect to it gets no answer
+    // Decision 0007 rule 9: a client can point the entry at a dead host, so the failure is logged below WARNING.
+    std::atomic<int> loud{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level >= alpacacore::logging::LogLevel::Warn && component == "ZWO" &&
+                message.find("Network connect failed") != std::string_view::npos) {
+                ++loud;
+            }
+        });
     ZWOMountProtocolWrapper wrapper;
     const auto start = std::chrono::steady_clock::now();
     auto connected =
@@ -664,6 +677,7 @@ TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers
     INFO("last_connect_error: " << error);
     CHECK(error.find("could not connect to 127.0.0.1:") != std::string::npos);
     CHECK(error.find("no answer within 7000 ms") != std::string::npos);
+    CHECK(loud.load() == 0);
 }
 
 // Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() letting NetworkEndpointClaim::claim() start its own
