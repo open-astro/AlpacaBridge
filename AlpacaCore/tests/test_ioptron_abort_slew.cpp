@@ -92,8 +92,8 @@ TEST_CASE("iOptron AbortSlew - no GOTO reaches the mount after it returns", "[io
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
-    // A new initiator joins the previous dispatch before it starts its own, so
-    // once this pair returns every dispatch above has finished. An escaped GOTO
+    // AbortSlew cancels and joins every dispatch on the slot, so once this
+    // pair returns every dispatch above has finished. An escaped GOTO
     // lands ~0.6 s after AbortSlew returns on this fake, too late for a sleep.
     driver->slew_to_coordinates_async(4.0, 20.0);
     driver->abort_slew();
