@@ -1510,6 +1510,27 @@ TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
     driver->set_connected(false);
 }
 
+// #2651 review: a rate command that throws (a serial timeout) may still have reached the mount, so the jog it started
+// keeps its 60 s cap and the cap's stop goes out.
+TEST_CASE("Celestron MoveAxis - a rate command that throws still leaves the jog its 60 s cap",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->silent.store(true);  // the rate command goes unanswered
+    CHECK_THROWS(driver->move_axis(0, 1.0));
+    st->silent.store(false);
+    const int stops_before = axis_stop_count(*st, 0);
+    step_virtual(clock, std::chrono::seconds(59));
+    step_virtual_fine(clock, std::chrono::seconds(8));
+    CHECK(axis_stop_count(*st, 0) > stops_before);
+    driver->set_connected(false);
+}
+
 // #2651: the cap stop is verified, and a mount that keeps moving through it is stopped 3 times, then Slewing raises the
 // kept error and nothing more goes out for this move.
 TEST_CASE("Celestron MoveAxis - a cap stop the mount ignores is sent 3 times and Slewing raises it",

@@ -2274,6 +2274,38 @@ TEST_CASE("Bisque MoveAxis - an older MoveAxis whose cap starts last leaves the 
     CHECK(rig.mount.move_stops.load() == 1);
 }
 
+// #2651 review: an AbortSlew whose stop failed puts the jog back, and the jog keeps its 60 s cap: the cap bodies end
+// only once the stop went out and verified.
+TEST_CASE("Bisque MoveAxis - a jog that a failed AbortSlew restores is still stopped at 60 s",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.move(0, 0.5);
+    rig.mount.fail_abort = true;
+    CHECK_THROWS(rig.driver->abort_slew());
+    rig.mount.fail_abort = false;
+    const int stops_before = rig.mount.move_stops.load();
+    rig.advance_caps(std::chrono::seconds(61));
+    poll_now(*rig.driver);
+    CHECK(rig.mount.move_stops.load() > stops_before);
+}
+
+// The same for a stop that goes out but does not verify (a jog over a running slew, a mount that ignores Abort()).
+TEST_CASE("Bisque MoveAxis - a jog that an unverified AbortSlew restores is still stopped at 60 s",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    rig.mount.ignore_aborts = 100;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.move(0, 0.5);
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    CHECK(advance_until(rig.clock, [&] { return ready(aborted); }));
+    CHECK_THROWS(aborted.get());
+    rig.mount.ignore_aborts = 0;
+    const int stops_before = rig.mount.move_stops.load();
+    rig.advance_caps(std::chrono::seconds(61));
+    CHECK(rig.mount.move_stops.load() > stops_before);
+}
+
 TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motion command and at a reconnect",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
