@@ -1589,10 +1589,14 @@ TEST_CASE("Celestron hold window - AbortSlew inside the hold clears Slewing once
     REQUIRE(driver->get_slewing());
 
     const auto aborted_at = clock.now();
+    const auto waits_before = clock.wait_count();
     REQUIRE_NOTHROW(driver->abort_slew());
     // #2409: the stop of a mount in motion is verified before Slewing reads false: the stop check (its own task-clock
     // waiter beside the paused poll) reads the mount still, which ends the hold (the superseded body wakes, sees the
     // claim and ends). The clearing is the verified stop's, not the 8 s hold's expiry.
+    // Step only once the stop check waits and the superseded body has left: the paused poll alone meets
+    // advance_until()'s rendezvous, so a stop check slow to start would let virtual time run past the hold.
+    REQUIRE(wait_until([&] { return clock.wait_count() > waits_before && clock.waiter_count() == 2; }, 5000));
     REQUIRE(advance_until(
         clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(100)));
     CHECK(read_slewing(*driver) == SlewingRead::False);
