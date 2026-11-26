@@ -54,6 +54,8 @@ on:
       - "AlpacaCore/include/alpacacore/vendor/gemini/**"
       - "AlpacaCore/src/vendors/gphoto/**"
       - "AlpacaCore/include/alpacacore/vendor/gphoto/**"
+      - "AlpacaCore/src/vendors/wandererastro/**"
+      - "AlpacaCore/include/alpacacore/vendor/wandererastro/**"
       - "scripts/build_bundled_gphoto.sh"
       - "AlpacaCore/src/vendors/remotealpaca/**"
       - "AlpacaCore/include/alpacacore/vendor/remotealpaca/**"
@@ -81,6 +83,7 @@ on:
       - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
       - "AlpacaCore/tests/fake_gemini_flatpanel.h"
+      - "AlpacaCore/tests/fake_serial_streamer.h"
       - "AlpacaCore/tests/conformu_switch_factories.h"
       - "AlpacaCore/tests/fake_ioptron_gpio.h"
       - "AlpacaCore/tests/fake_gemini_pdh.h"
@@ -199,7 +202,8 @@ jobs:
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
-                         "altair": "Altair", "remotealpaca": "Remote Alpaca"}
+                         "altair": "Altair", "remotealpaca": "Remote Alpaca",
+                         "wandererastro": "WandererAstro"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
