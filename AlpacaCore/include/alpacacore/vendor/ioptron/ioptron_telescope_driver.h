@@ -107,10 +107,15 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_zero_search_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                 std::function<std::thread(std::function<void()>)> spawn);
 
-/// Test seam (issue #2396): replaces the thread factory of the motion bound watchdog slot (the MoveAxis dead-man and
-/// the async GOTO bound), so a case can find its thread. A driver not from the factories is ignored.
+/// Test seam (issue #2396): replaces the thread factory of the motion bound watchdog slot (the async GOTO bound), so a
+/// case can find its thread. A driver not from the factories is ignored.
 void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
                                                  std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam (issue #2651): replaces the thread factory of both MoveAxis cap slots (one per axis), so a case can find
+/// a cap body's thread. A driver not from the factories is ignored.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test seam (issue #2396): whether the motion bound watchdog has a body running. False for a driver not from the
 /// factories.

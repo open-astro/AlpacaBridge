@@ -59,10 +59,10 @@ Symbol: `AsyncOperation`
 
 | Driver | Symbol | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Sky-Watcher telescope | | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #931 | slices K2, K3, K3b |
+| Sky-Watcher telescope | | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #931, #2651 | slices K2, K3, K3b; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
 | Celestron telescope | | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1406, #2263 | claim protocol; send gate; `util::MotionOwner` |
-| SynScan telescope | | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1407 | claim protocol; bodies release `mutex_` per exchange |
-| iOptron telescope | | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1246, #2263, #2716 | `util::MotionOwner` claim; a newer async slew supersedes the body, never joins it; the body checks its claim under the operation lock it holds for the whole dispatch, so a newer initiator waits for that dispatch; only AbortSlew, disconnect and the destructor cancel and join |
+| SynScan telescope | | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1407, #2651 | claim protocol; bodies release `mutex_` per exchange; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
+| iOptron telescope | | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1246, #2263, #2716, #2651 | `util::MotionOwner` claim; a newer async slew supersedes the body, never joins it; the body checks its claim under the operation lock it holds for the whole dispatch, so a newer initiator waits for that dispatch; only AbortSlew, disconnect and the destructor cancel and join; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
 | Bisque telescope | | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | |
 | Celestron CGX telescope | | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #2263 | `util::MotionOwner`: a Park or FindHome supersedes any slew, Park or FindHome, a slew only one that holds the pointing reference |
 | Gemini flat panel | | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
