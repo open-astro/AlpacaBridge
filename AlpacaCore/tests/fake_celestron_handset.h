@@ -27,8 +27,9 @@
 // Counters and knobs are atomics: the server's handler thread writes them while the test thread reads.
 //
 // KNOWN PARITY GAPS (what the real hand controller does and this fake does not):
-// - A GOTO never moves the reported position: e/E/z/Z answer one pair for both frames, changed only by
-//   set_position(). A Sync (s/S) is acknowledged and re-labels nothing.
+// - The reported position moves only on a landed GOTO (celestron_landing_model.h, #2409: the HC GOTO r/R, or a
+//   pass-through motor GOTO pair) or set_position(); miss_landing keeps it, a GOTO that came to rest far from its
+//   target. e/E/z/Z answer one pair for both frames. A Sync (s/S) is acknowledged and re-labels nothing.
 // - The tracking mode is a knob (tracking_on): `t` answers EQ North or Off from it, and a `T` write is counted but not
 //   read back. The hand controller reports the mode last written.
 // - Every AUX address answers GET_VER (0xFE), so the connect-time bus probe finds every device (the GPS module
@@ -45,15 +46,18 @@
 #include <alpacacore/util/task_clock.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "celestron_landing_model.h"
 #include "fake_mount_server.h"
 
 namespace alpacacore::test {
@@ -75,7 +79,7 @@ public:
     /// @param tracking what `t` answers until a case changes tracking_on (no default: the scenario is the caller's)
     /// @param position the e/E/z/Z reply, "RRRRRRRR,DDDDDDDD#"
     FakeCelestronHandset(util::TaskClock& clock, CelestronTracking tracking, std::string position)
-        : clock_(clock), position_(std::move(position)) {
+        : clock_(clock), landing_(without_hash(std::move(position))) {
         tracking_on.store(tracking == CelestronTracking::EqNorth);
     }
 
@@ -148,6 +152,23 @@ public:
     /// The next / every MC_SLEW_DONE answers 0x01 (neither done nor busy).
     std::atomic<bool> invalid_next_mc_slew_status{false};
     std::atomic<bool> invalid_mc_slew_status{false};
+    /// #2409: an accepted HC GOTO keeps the old reported position (a GOTO that comes to rest far from its target).
+    std::atomic<bool> miss_landing{false};
+    /// #2409: a GOTO is answered "1#" instead of "#" and starts nothing.
+    std::atomic<bool> odd_goto_reply{false};
+    /// This many cancel-GOTO commands (M) are answered but do not stop the GOTO.
+    std::atomic<int> ignore_cancels{0};
+    /// The next M is answered this late (real time, ms), then 0 again.
+    std::atomic<int> first_cancel_delay_ms{0};
+    /// Every position read is 40 arcsec further in RA than the last: the mount never holds still.
+    std::atomic<bool> unsettled{false};
+    std::atomic<int> drift_reads{0};
+    /// Every position read goes unanswered.
+    std::atomic<bool> reject_positions{false};
+    /// MC_LEVEL_DONE answers "in progress" while set.
+    std::atomic<bool> hold_home{false};
+    /// goto_count when the last site (W) or time (H) write arrived; -1 before any.
+    std::atomic<int> goto_count_at_write{-1};
     /// MC_LEVEL_START (home) goes unanswered.
     std::atomic<bool> reject_level_start{false};
     /// The next / every MC_LEVEL_DONE answers 0x01 (neither done nor in progress).
@@ -187,7 +208,7 @@ public:
     /// Every T write, answered or not.
     std::atomic<int> t_count{0};
 
-    /// Log of the T, P, M, W and H commands, in wire order.
+    /// Log of the T, P, M, W, H and S (sync) commands, in wire order.
     std::mutex command_mutex;
     std::vector<std::string> commands;
 
@@ -210,6 +231,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return last_goto_text_;
     }
+    /// Pins the e/E/z/Z reply ("RRRRRRRR,DDDDDDDD#") whatever a GOTO does after it.
     void set_position(std::string value) {
         std::lock_guard<std::mutex> lock(mutex_);
         position_ = std::move(value);
@@ -223,6 +245,11 @@ public:
     }
 
 private:
+    static std::string without_hash(std::string position) {
+        if (!position.empty() && position.back() == '#') position.pop_back();
+        return position;
+    }
+
     static void hold_for(std::atomic<int>& gate, std::atomic<Clock::rep>* entered, std::atomic<Clock::rep>* left) {
         const int hold = gate.exchange(0);
         if (hold <= 0) return;
@@ -242,12 +269,14 @@ private:
     }
 
     // The common tail of an HC or AUX GOTO: "" when it goes unanswered, else the acknowledgement.
-    std::string accept_goto() {
+    std::string accept_goto(const std::string& chunk) {
         if (silent_from_goto.load()) {
             silent.store(true);
             return "";
         }
         if (reject_goto.load()) return "";
+        if (odd_goto_reply.load()) return "1#";
+        landing_.land(chunk, miss_landing.load());
         hold_for(gate_ms, &gate_entered, &gate_left);
         goto_started_.store(clock_.now().time_since_epoch().count());
         goto_seen.store(true);
@@ -283,10 +312,11 @@ private:
                 home_status_polls.fetch_add(1);
                 if (invalid_next_home_status.exchange(false)) return std::string("\x01#", 2);
                 if (invalid_home_status.load()) return std::string("\x01#", 2);
+                if (hold_home.load()) return std::string("\x00#", 2);
                 return std::string("\xFF#");
             case 0x02:  // MC_GOTO_FAST
             case 0x17:  // MC_GOTO_SLOW
-                return accept_goto();
+                return accept_goto(chunk);
             case 0x13:  // MC_SLEW_DONE: 0x00 still slewing, 0xFF done
                 slew_done_count.fetch_add(1);
                 if (invalid_next_mc_slew_status.exchange(false)) return std::string("\x01#", 2);
@@ -314,10 +344,12 @@ private:
             return "";
         }
         if (chunk.empty()) return "";
-        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'W' || chunk[0] == 'H') {
+        if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'W' || chunk[0] == 'H' ||
+            chunk[0] == 's' || chunk[0] == 'S') {
             std::lock_guard<std::mutex> lock(command_mutex);
             commands.push_back(chunk);
         }
+        if (chunk[0] == 'W' || chunk[0] == 'H') goto_count_at_write.store(goto_count.load());
         switch (chunk[0]) {
             case 'V':  // HC version: chr(major) chr(minor) '#'
                 return std::string(1, static_cast<char>(firmware_major.load())) +
@@ -338,9 +370,15 @@ private:
                 if (const int hold = e_hold_ms.exchange(0); hold > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
                 }
-                if (reject_next_position_reply.exchange(false)) return "";
+                if (reject_next_position_reply.exchange(false) || reject_positions.load()) return "";
+                if (unsettled.load()) {
+                    std::array<char, 32> text{};
+                    std::snprintf(text.data(), text.size(), "%06X00,20000500#",
+                                  static_cast<unsigned>(0x12AB05 + 0x200 * drift_reads.fetch_add(1)) & 0xFFFFFFu);
+                    return text.data();
+                }
                 std::lock_guard<std::mutex> lock(mutex_);
-                return position_;
+                return position_.empty() ? landing_.position() + "#" : position_;
             }
             case 'r':
             case 'R':
@@ -351,18 +389,25 @@ private:
                     std::lock_guard<std::mutex> lock(mutex_);
                     last_goto_text_ = chunk;
                 }
-                return accept_goto();
+                return accept_goto(chunk);
             }
             case 'L':  // GOTO in progress: ASCII '0' or '1' '#'
                 return slew_status();
             case 'M':  // cancel GOTO: '#'
                 if (reject_stop.load()) return "";
                 hold_for(stop_gate_ms, &stop_gate_entered, &stop_gate_left);
+                if (const int delay = first_cancel_delay_ms.exchange(0); delay > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                }
                 {
                     int none = 0;
                     cancel_first_seq.compare_exchange_strong(none, seq.fetch_add(1) + 1);
                 }
                 cancel_goto_count.fetch_add(1);
+                if (ignore_cancels.load() > 0) {
+                    ignore_cancels.fetch_sub(1);
+                    return "#";  // answered, but the GOTO runs on
+                }
                 goto_seen.store(false);
                 return "#";
             case 't':  // tracking mode: chr(mode) '#'
@@ -392,7 +437,8 @@ private:
     util::TaskClock& clock_;
     std::atomic<Clock::rep> goto_started_{0};
     std::mutex mutex_;  // position_, last_goto_text_
-    std::string position_;
+    std::string position_;  // pinned by set_position(); empty: the landing model answers
+    CelestronLanding landing_;
     std::string last_goto_text_;
 };
 

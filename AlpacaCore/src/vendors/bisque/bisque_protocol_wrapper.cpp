@@ -42,6 +42,13 @@ constexpr int kErrorPrefixLen = 21; // strlen("|No error. Error = 0.")
 // The message of a wrapped command TheSkyX answered with an error (is_theskyx_refusal()).
 constexpr std::string_view kRefusalPrefix = "TheSkyX command failed: ";
 
+// Thrown only for a wrapped command TheSkyX answered with something other than OK: the type, not the text, tells
+// is_theskyx_refusal() that TheSkyX ran the script (#2410).
+class TheSkyXRefusal : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
+};
+
 // Socket read timeout granularity (ms). This controls how often we poll
 // the socket for data via recv(). A shorter value means we detect the '#'
 // terminator sooner but spend more CPU in the poll loop.
@@ -518,7 +525,7 @@ private:
         std::string response = read_until_hash_locked(effective_timeout);
 
         if (response != "|No error. Error = 0.OK") {
-            throw AlpacaException(std::string(kRefusalPrefix) + response);
+            throw TheSkyXRefusal(std::string(kRefusalPrefix) + response);
         }
     }
 
@@ -528,9 +535,7 @@ private:
     ConnectionInfo connection_info_;
 };
 
-bool is_theskyx_refusal(const std::exception& e) {
-    return std::string_view(e.what()).substr(0, kRefusalPrefix.size()) == kRefusalPrefix;
-}
+bool is_theskyx_refusal(const std::exception& e) { return dynamic_cast<const TheSkyXRefusal*>(&e) != nullptr; }
 
 // Singleton
 BisqueProtocolWrapper& BisqueProtocolWrapper::instance() {

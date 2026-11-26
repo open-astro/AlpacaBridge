@@ -1008,7 +1008,7 @@ public:
                           axis, dev, position);
             ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
-        (void)send_command(cmd, true, 0);
+        require_goto_ack(send_command(cmd, true, 0));
     }
 
     void mc_set_position(int axis, uint32_t position) {
@@ -1243,7 +1243,16 @@ public:
                           ra_raw, dec_raw, precise ? 1 : 0, cmd.c_str());
             ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
-        (void)send_command(cmd, true, 0);
+        require_goto_ack(send_command(cmd, true, 0));
+    }
+
+    // #2409: the hand controller and a motor controller answer a GOTO with '#' alone. Any other reply is not a
+    // confirmed GOTO: the mount may not have taken it, so the caller treats the GOTO as failed and stops the mount.
+    static void require_goto_ack(const std::string& reply) {
+        if (!reply.empty()) {
+            throw AlpacaException("GOTO not confirmed: the mount answered \"" + reply + "\" instead of \"#\"",
+                                  AlpacaError::DriverException);
+        }
     }
 
     void goto_alt_az_raw(uint32_t az_raw, uint32_t alt_raw, bool precise) {

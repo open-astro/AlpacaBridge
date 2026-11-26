@@ -131,13 +131,4 @@ void set_connect_before_state_lock_hook_for_testing(TelescopeDriver& driver, std
 /// empty function to clear it.
 void set_connected_before_transition_unlock_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
-namespace detail {
-// open-astro#521 / #1241: how long the serial link may be gone before motion
-// that outlived the outage is stopped at relink rather than left running
-// (default util::kRelinkMotionPreserveWindow, 5 s; a test shortens it).
-// Process-wide; tests restore the default afterwards.
-void set_relink_motion_preserve_window(std::chrono::milliseconds window);
-std::chrono::milliseconds relink_motion_preserve_window();
-}  // namespace detail
-
 }  // namespace alpacacore::vendor::onstep
