@@ -31,6 +31,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_qhy_sdk.h"
+#include "fake_task_clock.h"
 #include "locked_qhy_sdk.h"
 
 using alpacacore::AlpacaException;
@@ -785,6 +786,37 @@ TEST_CASE("FakeQHYSDK - move_cfw enforces the single-digit protocol ceiling", "[
     // require_open() first this reads NotConnected and nothing else notices).
     require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 10); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 3); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("FakeQHYSDK - on a timing clock the exposure reports its time left and guide blocks for its pulse",
+          "[qhy][fake][unit]") {
+    // #2693: the ConformU host's model. GetQHYCCDExposureRemaining reports time left (more than 100) until the
+    // exposure is over, and ControlQHYCCDGuide returns only after the pulse.
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = FakeQHYSDK::with_one_camera();
+    fake.set_timing_clock(&clock);
+    fake.open_camera("fake-qhy-0");
+    fake.set_param("fake-qhy-0", alpacacore::vendor::qhy::control::EXPOSURE, 2'000'000.0);  // microseconds
+    fake.start_single_frame("fake-qhy-0");
+    CHECK(fake.get_exposure_remaining("fake-qhy-0") == 2'000'000U);
+    clock.advance(std::chrono::milliseconds(1999));
+    CHECK(fake.get_exposure_remaining("fake-qhy-0") == 1000U);
+    clock.advance(std::chrono::milliseconds(1));
+    CHECK(fake.get_exposure_remaining("fake-qhy-0") <= 100U);
+
+    std::atomic<bool> returned{false};
+    std::jthread guide([&] {  // joins on a failed REQUIRE too
+        fake.guide("fake-qhy-0", 1, 300);
+        returned = true;
+    });
+    REQUIRE(clock.wait_for_waiter_thread(guide.get_id(), std::chrono::milliseconds(2000)));
+    clock.advance(std::chrono::milliseconds(299));
+    CHECK(clock.waiter_count() == 1);
+    CHECK_FALSE(returned.load());
+    clock.advance(std::chrono::milliseconds(1));
+    guide.join();
+    CHECK(returned.load());
+    CHECK(fake.last_guide_duration_ms == 300);
 }
 
 TEST_CASE("LockedQHYSDK - records the slowest forward so a blocking fake is nameable", "[qhy][fake][unit]") {

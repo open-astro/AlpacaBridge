@@ -126,7 +126,10 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   named fake method block (the three #339 cases use it to prove the
   slowest-forward watchdog, the cancel forward's own timing and the cancel
   overtake); a case that sets it owns the consequences and must release the
-  block before its driver is destroyed.
+  block before its driver is destroyed. The one timed block is opt-in too:
+  `FakeQHYSDK::set_timing_clock()`, null in every ordinary test, makes
+  `guide()` block for its pulse as `ControlQHYCCDGuide` does; the fake
+  ConformU host sets it (#2693).
 - **When a fake and the real SDK disagree, the fake must be the HARSHER of the
   two** (`fake_qhy_sdk.h`, issues #373/#365/#390). A fake that answers a
   plausible value where hardware answers a sentinel, or that settles instantly

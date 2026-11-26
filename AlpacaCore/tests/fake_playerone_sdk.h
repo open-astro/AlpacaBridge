@@ -29,13 +29,15 @@
 #include <vector>
 
 #include "connect_hold_gate.h"
+#include "fake_timed_completion.h"
 
 namespace alpacacore::test {
 
 // KNOWN PARITY GAPS: one fully modelled camera. add_listed_camera() adds more
 // that enumerate, open (ref-counted per id, like the wrapper's usage_ count),
 // probe their own caps and answer heater/fan reads, but cannot expose; no
-// hot-plug enumeration; ordinary image-ready is immediate; set_image_size/start/bin
+// hot-plug enumeration; image-ready is immediate unless set_timing_clock() times the
+// exposure (#2693); set_image_size/start/bin
 // model the state changes but not additional model-specific SDK alignment.
 // hold_image_data intentionally ignores the SDK timeout to model a late return
 // and is always released by explicit test release or stop_exposure(). The SDK
@@ -63,6 +65,7 @@ public:
         camera_.max_width = 16;
         camera_.max_height = 8;
         camera_.bit_depth = 16;
+        camera_.pixel_size_um = 2.9;  // POACameraProperties::pixelSize of a Ceres-M (IMX462); the SDK never reports 0
         camera_.supported_bins = {1, 2};
         camera_.supported_formats = {ImageFormat::Raw16, ImageFormat::Raw8, ImageFormat::Rgb24};
         caps_.has_gain = true;
@@ -229,6 +232,7 @@ public:
         stopped_ = false;
         exposure_started_ = true;
         ready_ = ready_on_start_.load();
+        timing_.start(std::chrono::microseconds(exposure_us_));
         image_data_started_.store(false);
         image_data_finished_.store(false);
         exposure_start_count_.fetch_add(1);
@@ -271,7 +275,7 @@ public:
         require_open_locked("image_ready");
         image_ready_polls_.fetch_add(1);
         if (readiness_error_.load()) throw std::runtime_error("scripted image-ready failure");
-        return ready_.load();
+        return ready_.load() && timing_.ready();
     }
     bool get_image_data(int, std::uint8_t* buffer, std::size_t buffer_size, int timeout_ms) override {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -510,6 +514,12 @@ public:
         ready_ = ready;
     }
     void set_readiness_error(bool fail) { readiness_error_ = fail; }
+    /// Times each exposure on `clock` (nullptr, the default: ready at once): POAImageReady turns true only once the
+    /// POA_EXPOSURE value has passed since start_exposure, as on a camera (#2693). Set before a driver connects.
+    void set_timing_clock(util::TaskClock* clock) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        timing_.set_clock(clock);
+    }
     void set_frame_data(std::vector<std::uint8_t> data) {
         std::lock_guard<std::mutex> lock(mutex_);
         frame_data_ = std::move(data);
@@ -594,6 +604,7 @@ private:
     int start_y_{0};
     int bin_{1};
     long exposure_us_{1};
+    FakeTimedCompletion timing_;  // the exposure, under mutex_ (#2693)
     std::optional<int> returned_width_;
     std::optional<int> returned_height_;
     std::vector<std::uint8_t> frame_data_ = std::vector<std::uint8_t>(16 * 8 * 2, 0);
