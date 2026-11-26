@@ -12342,7 +12342,7 @@ int main() {
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         for (const std::shared_ptr<alpacacore::AlpacaDriver>& device :
              std::initializer_list<std::shared_ptr<alpacacore::AlpacaDriver>>{telescope, camera, focuser, sw, connect,
-                                                                               command}) {
+                                                                              command}) {
             EXPECT(registry.register_device(device));
         }
         alpacahttp::Router router;
