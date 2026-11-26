@@ -2220,13 +2220,13 @@ public:
                 drop_offset_model_locked();
             }
             move_axis_cap_[axis].cancel();  // the stop went out: nothing is left for the cap to stop
+            move_axis_cap_window_[axis].clear();
             // :Qe#/:Qw# and :Qn#/:Qs# end every guide on that axis, a pulse
             // guide included (OnStepX Guide.command.cpp stopAxis1/stopAxis2).
             pulse_guiding_active_[axis] = false;
             pulse_hold_[axis].clear();
         }
         std::uint64_t generation = 0;
-        util::HoldWindow cap_window;
         if (moving) {
             // Drop this axis's earlier move from the re-send first: the new
             // move sets it again only once its own command went out. This
@@ -2240,7 +2240,7 @@ public:
             // the operation lock this call holds and checks its stop reason there. A move command that threw never
             // gets here, and leaves the cap that was running.
             move_axis_cap_[axis].cancel();
-            cap_window.arm(clock_.now(), util::kMaxMoveAxisDuration);
+            move_axis_cap_window_[axis].arm(clock_.now(), util::kMaxMoveAxisDuration);
             // Decision 0006 rule 3: supersede the running re-send under mutex_
             // before this move's flags change; start() below replaces it. Only
             // once the move went out: a failed send must leave the other
@@ -2271,7 +2271,7 @@ public:
         try {
             start_move_axis_resend();
             run_move_axis_cap_before_start_hook();
-            start_move_axis_cap(axis, cap_window);
+            start_move_axis_cap(axis);
         } catch (const AlpacaException& ex) {
             lock.lock();
             stop_move_without_resend_locked(axis, generation, ex);
@@ -2348,6 +2348,7 @@ public:
         if (stop_error.empty()) {
             manual_axis_slewing_[axis] = false;
             move_axis_cap_[axis].cancel();
+            move_axis_cap_window_[axis].clear();
             message += "; the axis was stopped";
         } else {
             message += "; stopping the axis failed too: " + stop_error;  // Slewing stays true (#742)
@@ -2747,6 +2748,8 @@ private:
         move_axis_resend_.cancel();
         move_axis_cap_[0].cancel();
         move_axis_cap_[1].cancel();
+        move_axis_cap_window_[0].clear();
+        move_axis_cap_window_[1].clear();
     }
 
     // :GU# says the firmware ended the running MoveAxis (#1378): no 'g',
@@ -2892,9 +2895,21 @@ private:
     // lapsed move or a re-send that ended does not lift it. A renewal supersedes the body, MoveAxis(axis, 0), AbortSlew
     // and every motion command that clears the manual motion cancel it, and a disconnect joins it.
 
-    // Starts the cap body of `axis`. Call with no driver lock held (decision 0006 rule 4). A start the slot refuses
-    // throws, and the caller stops the axis (fail closed).
-    void start_move_axis_cap(int axis, util::HoldWindow window) {
+    // Starts the cap body of `axis` for the window its latest move armed. Call with no driver lock held (decision 0006
+    // rule 4). A start the slot refuses throws, and the caller stops the axis (fail closed). Two MoveAxis calls on one
+    // axis reach here after their locks are released, in either order: each starts the body of the axis's latest
+    // window, read under the axis's start lock, so an older call can never replace the newer move's cap with its own
+    // earlier deadline; a window a stop, AbortSlew or a disconnect cleared starts nothing (#2651 review).
+    void start_move_axis_cap(int axis) {
+        const std::lock_guard<std::mutex> start_lock(move_axis_cap_start_mutex_[axis]);
+        util::HoldWindow window;
+        {
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            window = move_axis_cap_window_[axis];
+            if (!connected_ || window.until() == util::TaskClock::clock::time_point::min()) {
+                return;  // a stop, AbortSlew or a disconnect cleared the move this call started
+            }
+        }
         move_axis_cap_[axis].start(
             [this, axis, window](util::OperationContext& ctx) { run_move_axis_cap(axis, window, ctx); });
     }
@@ -5639,6 +5654,10 @@ private:
     // Issue #2651: the 60 s MoveAxis cap of each axis (run_move_axis_cap()); a generation of its own per axis, so a
     // renewal on one axis never supersedes the other's body.
     std::array<util::OperationGeneration, 2> move_axis_cap_generation_;
+    // The window of each axis's latest move (under mutex_; cleared with the manual motion), and the lock that holds
+    // start_move_axis_cap()'s read and start together. Taken with no driver lock held.
+    mutable util::HoldWindow move_axis_cap_window_[2];
+    std::mutex move_axis_cap_start_mutex_[2];
     mutable std::array<util::AsyncOperation, 2> move_axis_cap_{
         {{"OnStep MoveAxis cap 0", move_axis_cap_generation_[0], clock_},
          {"OnStep MoveAxis cap 1", move_axis_cap_generation_[1], clock_}}};

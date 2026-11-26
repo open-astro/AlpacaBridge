@@ -4989,7 +4989,7 @@ private:
     // be moving then too, and re-armed when the stop fails, so a handshake step that then fails keeps it for the
     // next Connect; only a Connect that completes clears it. Under transition_mutex_.
     bool relink_stop_due_ = false;
-    // #2409: the claim of each axis's running MoveAxis, so the bound's stop (stop_overdue_move_axis()) acts only
+    // #2409: the claim of each axis's running MoveAxis, so the cap's stop (run_move_axis_cap()) acts only
     // while that MoveAxis still owns the axis. Under mutex_.
     mutable util::MotionClaim move_axis_claim_[2];
     std::string mount_firmware_version_;

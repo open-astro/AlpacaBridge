@@ -1240,6 +1240,7 @@ public:
             // DoCommand(10) stopped both axes, but only this axis's stop is the client's; the cap of the other axis
             // finds its own flag still set and stops (and verifies) as before.
             move_axis_cap_[axis].cancel();
+            move_axis_cap_window_[axis].clear();
             drop_poll_in_flight_locked();
             return std::nullopt;
         }
@@ -1263,7 +1264,7 @@ public:
         // 6). Its stop takes initiator_mutex_, which this call holds, and checks its stop reason there. A start that
         // threw never gets here, and leaves the cap that was running.
         move_axis_cap_[axis].cancel();
-        util::HoldWindow cap;
+        util::HoldWindow& cap = move_axis_cap_window_[axis];
         cap.arm(clock_.now(), util::kMaxMoveAxisDuration);
         at_home_ = false;  // see note_slew_started_locked()
         drop_poll_in_flight_locked();
@@ -2261,7 +2262,17 @@ private:
 
     // Starts the cap body of `axis`. Call with no driver lock held. A start the slot refuses leaves the move with no
     // cap, so the move is stopped and the call fails (fail closed).
+    // Two MoveAxis calls on one axis reach here after their locks are released, in either order: under the axis's start
+    // lock, a call whose window a newer command has already replaced or cleared starts nothing, so an older body can
+    // never replace the newer move's cap (#2651 review).
     void start_move_axis_cap(int axis, util::HoldWindow window) {
+        const std::lock_guard<std::mutex> start_lock(move_axis_cap_start_mutex_[axis]);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (move_axis_cap_window_[axis].until() != window.until()) {
+                return;  // a newer MoveAxis, a stop or AbortSlew owns the axis, and starts its own cap if it needs one
+            }
+        }
         try {
             move_axis_cap_[axis].start(
                 [this, axis, window](util::OperationContext& ctx) { run_move_axis_cap(axis, window, ctx); });
@@ -2358,9 +2369,11 @@ private:
     }
 
     // Under mutex_: AbortSlew, a connect and a disconnect end both caps. Never joins (decision 0006 rule 3).
-    void cancel_move_axis_caps_locked() const {
+    void cancel_move_axis_caps_locked() {
         move_axis_cap_[0].cancel();
         move_axis_cap_[1].cancel();
+        move_axis_cap_window_[0].clear();
+        move_axis_cap_window_[1].clear();
     }
 
     // Cancel and join both cap bodies. Without mutex_ or initiator_mutex_ held (the bodies take them); under
@@ -2492,6 +2505,10 @@ private:
     mutable std::array<util::AsyncOperation, 2> move_axis_cap_{
         {{"Bisque MoveAxis cap 0", move_axis_cap_generation_[0], clock_},
          {"Bisque MoveAxis cap 1", move_axis_cap_generation_[1], clock_}}};
+    // The window of each axis's latest move (under mutex_; cleared by a stop, AbortSlew and a disconnect), and the lock
+    // that holds start_move_axis_cap()'s check and start together. Taken with no driver lock held.
+    util::HoldWindow move_axis_cap_window_[2];
+    std::mutex move_axis_cap_start_mutex_[2];
     util::OperationGeneration poll_generation_;
 
     int slew_settle_time_seconds_ = 0;
