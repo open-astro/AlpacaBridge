@@ -752,7 +752,7 @@ TEST_CASE("SynScan host clock - a reconnect drops a host clock change left pendi
 // below waits in real time for 300 ms, or until the clock is 31 s on: a helper that steps the clock whatever the call
 // is doing reaches 31 s at once, and the RightAscension read then finds the frame lost.
 TEST_CASE("SynScan host clock - a stepped call held in real time does not age the paused poll's frame (#2685)",
-          "[synscan][clock]") {
+          "[synscan][clock][driver_rig]") {
     TrustGuard trust(true);
     Rig rig(false);
     rig.connect();
