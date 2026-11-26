@@ -413,7 +413,9 @@ public:
     NetworkEndpointClaim(const NetworkEndpointClaim&) = delete;
     NetworkEndpointClaim& operator=(const NetworkEndpointClaim&) = delete;
 
-    Result claim(const sockaddr_in& address, Kind kind, const std::atomic<bool>* cancelled = nullptr) {
+    // A wait for a probe ends after 1500 ms or at @p latest (the caller's connect deadline), whichever is first.
+    Result claim(const sockaddr_in& address, Kind kind, const std::atomic<bool>* cancelled = nullptr,
+                 std::chrono::steady_clock::time_point latest = std::chrono::steady_clock::time_point::max()) {
         auto& reg = registry();
         std::unique_lock lock(reg.mutex);
         std::optional<std::chrono::steady_clock::time_point> deadline;
@@ -434,7 +436,7 @@ public:
                 return Result::Acquired;
             }
             if (!deadline) {
-                deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+                deadline = std::min(std::chrono::steady_clock::now() + std::chrono::milliseconds(1500), latest);
                 lock.unlock();
                 ALPACA_LOG_DEBUG("ZWO", "Waiting up to 1500 ms for a network discovery probe to release its endpoint");
                 lock.lock();
@@ -1298,13 +1300,16 @@ private:
         auto claim = std::make_unique<NetworkEndpointClaim>();
         const auto result = claim->claim(
             addr, automatic ? NetworkEndpointClaim::Kind::AutoLink : NetworkEndpointClaim::Kind::ExplicitLink,
-            &closing_);
+            &closing_, deadline.at);
+        const bool out_of_time = std::chrono::steady_clock::now() >= deadline.at;
         if (result != NetworkEndpointClaim::Result::Acquired) {
             last_connect_error_ = "ZWO mount network endpoint is held by another ZWO entry or discovery probe";
             if (result == NetworkEndpointClaim::Result::TimedOut)
                 last_connect_error_ =
-                    "ZWO mount network endpoint claim deadline expired after waiting up to 1500 ms for a discovery "
-                    "probe; retry Connect";
+                    out_of_time ? "ZWO mount network connect deadline (" + std::to_string(kNetworkConnectTimeoutMs) +
+                                      " ms) passed while a discovery probe held the endpoint; retry Connect"
+                                : "ZWO mount network endpoint claim deadline expired after waiting up to 1500 ms for a "
+                                  "discovery probe; retry Connect";
             if (result == NetworkEndpointClaim::Result::Cancelled)
                 last_connect_error_ = "ZWO mount connection cancelled";
             ALPACA_LOG_DEBUG("ZWO", "Skipping held network endpoint " + host + ":" + std::to_string(port));
@@ -1313,6 +1318,11 @@ private:
         if (closing_.load()) {
             last_connect_error_ = "ZWO mount connection cancelled";
             return false;
+        }
+        // A lookup that used the whole budget leaves the connect none: say so, not "no answer".
+        if (out_of_time) {
+            return fail("the " + std::to_string(kNetworkConnectTimeoutMs) + " ms connect deadline passed before the TCP "
+                        "connect started");
         }
         util::TcpAddress address;
         std::memcpy(&address.storage, &addr, sizeof(addr));
