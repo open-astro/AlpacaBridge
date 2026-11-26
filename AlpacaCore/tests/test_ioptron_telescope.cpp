@@ -1618,6 +1618,9 @@ TEST_CASE("iOptron Telescope Driver - the UTCDate readback after a write moves b
                                                                                   std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     wait_for_ioptron_connect_parked(clock);
+    // This fake answers no poll read, so the 90 s advance would let the poll's tick lose the link (no frame for
+    // util::kLinkStalenessBound) in a race with the UTCDate read below. The case is about the readback, not the poll.
+    alpacacore::vendor::ioptron::set_state_poll_paused_for_testing(*driver, true);
 
     const auto written = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 365 * 30);
     driver->set_utc_date(written);
