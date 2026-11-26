@@ -644,8 +644,7 @@ TEST_CASE("ZWO mount network - cancellation during Auto discovery prevents final
 
 // Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() calling a blocking ::connect() on the explicit-host
 // path (the Connect waits out the kernel's TCP timeout, about 127 s, holding the wrapper mutex)
-TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers ends within 10 s",
-          "[zwo][network]") {
+TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers ends within 10 s", "[zwo][network]") {
     auto silent = std::make_unique<alpacacore::test::SilentListener>();
     REQUIRE(silent->ok());  // the accept queue filled: a connect to it gets no answer
     ZWOMountProtocolWrapper wrapper;
