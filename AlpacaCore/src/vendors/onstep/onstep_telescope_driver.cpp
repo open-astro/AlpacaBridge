@@ -26,6 +26,7 @@
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_guards.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/polled_state.h>
@@ -1994,6 +1995,9 @@ public:
             throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
                                   AlpacaError::InvalidOperation);
         }
+        // #2522: the pulse claims its axis, after the jog check (motion_owner.h). The owner refuses it while the
+        // driver's own slew, Park or FindHome holds its claim, with the #2504 text; nothing has been sent.
+        (void)motion_owner_.claim(util::MotionCommand::PulseGuide, axis);
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here:
@@ -2157,7 +2161,7 @@ public:
         check_connected();
         refuse_while_faulted_locked("Unpark");
         ensure_status_read_locked("Unpark");  // the write-through below needs a status to land in (#1895)
-        supersede_park_or_home_locked();      // a newer motion command wins (#1430)
+        cancel_motion_locked(util::MotionOwner::kBothAxes);  // a stop: also ends a Park or FindHome (#1430, #2522)
         // A refusal used to read as success (#1379): OnStepX refuses :hR# before the
         // date and time are set or on a motor fault (Park.cpp restore()). "Not
         // parked" (11) is ASCOM's no-op, not a refusal.
@@ -2190,7 +2194,13 @@ public:
         // FindHome.
         const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
         util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
-        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        // #2522: a move claims its axis, which supersedes a slew, Park or FindHome (they own both); a stop cancels
+        // its axis. Either ends a Park or FindHome still to be sent (#1430).
+        if (moving) {
+            (void)claim_motion_locked(util::MotionCommand::MoveAxis, axis);
+        } else {
+            cancel_motion_locked(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+        }
         // A MoveAxis is not refused while a GOTO runs, so it keeps that GOTO's bound (and its site-write refusal).
         begin_motion_command_locked(/*keep_goto_bound=*/true);
         const Wire protocol = wire();
@@ -2386,7 +2396,7 @@ public:
                 driver->motion_error_.reset();
             }
         } drop_watch{this};
-        supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
+        cancel_motion_locked(util::MotionOwner::kBothAxes);  // also ends a Park or FindHome still finishing (#1430)
         watched_motion_ = watched_slew;
         begin_motion_command_locked();
         // Every stop on its own, so one lost command cannot skip the others (#781).
@@ -2399,6 +2409,7 @@ public:
             throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
         slew_hold_.clear();
+        finish_slew_claim_locked();  // #2522: the stops went out, so PulseGuide is accepted again
         clear_manual_motion_locked();
         clear_pulse_guides_locked();    // :Q# ends every guide, a pulse guide included (Guide::stop())
         // #2406 (#2396 AB-4): a stop the mount did not hear counted as done. The status poll now checks it: while
@@ -2922,7 +2933,7 @@ private:
     // kStopSettleTimeout), then send and retry "in motion" refusals (up to
     // kInMotionRetryWindow). A refusal there is kept and raised by Slewing,
     // and by AtPark or AtHome, until the next motion command or a reconnect.
-    // A newer motion command (supersede_park_or_home_locked()) ends the body
+    // A newer motion command's claim or stop (claim_motion_locked(), cancel_motion_locked()) ends the body
     // without sending anything. Park and home end with tracking off, so no
     // tracking restore is kept (#1218). The stops, the :GU# polls, :hP# and
     // :GE# (up to 1 s each without a reply; OnStep 4.x can take that long) and
@@ -2930,8 +2941,11 @@ private:
     // the :GE# that explains it, and run with mutex_ free (decision 0016, #1449):
     // a getter answers meanwhile.
     void start_park_or_home_locked(StateLock& lock, const char* who, bool home) {
-        supersede_park_or_home_locked();
-        const std::uint64_t claim = park_home_claim_;
+        // #2522: both axes, superseding whatever ran on them (an earlier Park or FindHome too, #1430). Given up on
+        // the way out unless the mount took it or the body below was handed it.
+        const util::MotionClaim claim = claim_motion_locked(util::MotionCommand::Slew);
+        slew_claim_ = SlewClaim{claim, home ? MotionKind::Home : MotionKind::Park, false};
+        UntakenSlewClaim give_up{this, claim};
         const bool stopped = stop_motion_before_park_or_home_locked(who);
         int code = -1;
         if (!stopped) {
@@ -2950,6 +2964,7 @@ private:
         // is current when it starts, so a newer Park or FindHome whose start()
         // lands first is still carried out by the body started last.
         park_home_request_ = ParkHomeRequest{claim, who, home, stopped, code};
+        give_up.handed_off = true;  // the body ends it, or the refusal below
         // Test seam, read under mutex_.
         const auto before_start = park_home_before_start_;
         lock.unlock();  // start() without mutex_: decision 0006 rule 4
@@ -2960,8 +2975,9 @@ private:
             park_home_.start([this](util::OperationContext& ctx) { run_park_or_home(ctx); });
         } catch (const AlpacaException&) {
             lock.lock();
-            if (park_home_request_ && park_home_request_->claim == claim) {
+            if (park_home_request_ && same_claim(park_home_request_->claim, claim)) {
                 park_home_request_.reset();  // no body will finish it
+                release_untaken_slew_claim_locked(claim);
             }
             throw;
         }
@@ -3138,6 +3154,9 @@ private:
     // The mount took the park or home: it now moves to it with tracking off.
     void finish_park_or_home_locked(bool home) {
         tracking_before_slew_ = false;  // never restart tracking afterwards (#1218)
+        if (slew_claim_) {
+            slew_claim_->taken = true;  // #2522: held until a status shows the park or home ended
+        }
         // #2296: a limit can stop it on the way; before the write-through, from the status read. A home on a mount
         // with a tangent arm or a sector gear ends without 'H' (read_home_geometry_locked()), so it is not watched.
         if (!home || !home_moves_one_axis_.value_or(false)) {
@@ -3167,7 +3186,7 @@ private:
         // before its start() marked this one superseded, and this body must
         // not end that request (#1430). Leaving it is safe because every way
         // this slot is cancelled also clears or replaces the request
-        // (supersede_park_or_home_locked(), a newer start): keep it so, or a
+        // (end_park_or_home_locked(), a newer start): keep it so, or a
         // request no body runs leaves Slewing true.
         if (!park_home_request_ || ctx.stop_reason() != util::StopReason::None) {
             return;  // superseded or cancelled, or carried out by an earlier body
@@ -3177,16 +3196,18 @@ private:
         // Done, unless a newer start() superseded this body: the body it
         // started runs the request. A newer claim already replaced it.
         if (ctx.stop_reason() != util::StopReason::Superseded && park_home_request_ &&
-            park_home_request_->claim == request.claim) {
+            same_claim(park_home_request_->claim, request.claim)) {
             park_home_request_.reset();
+            release_untaken_slew_claim_locked(request.claim);  // #2522: a refusal kept, or a no-op
         }
     }
 
     // The steps of the body; returns with `lock` held.
     void run_park_or_home_locked(StateLock& lock, util::OperationContext& ctx, const char* who, bool home, bool settle,
-                                 int code, std::uint64_t claim) {
+                                 int code, const util::MotionClaim& claim) {
         const auto still_ours = [&] {
-            return ctx.stop_reason() == util::StopReason::None && connected_ && park_home_claim_ == claim;
+            return ctx.stop_reason() == util::StopReason::None && connected_ &&
+                   motion_owner_.stop_reason(claim) == util::StopReason::None;
         };
         const auto wait = [&](std::chrono::milliseconds d) {
             lock.unlock();
@@ -3238,16 +3259,66 @@ private:
         }
     }
 
-    // A newer motion command or a reconnect: a Park or FindHome still
-    // finishing ends without sending anything, and its kept failure is
-    // dropped, as is the watch on a motion the driver started (#2296).
-    // cancel() never blocks, so mutex_ may be held (rule 10).
-    void supersede_park_or_home_locked() {
+    // #2522 (util::MotionOwner, decision 0006 rule 3): a motion command claims the axes it moves and a stop cancels
+    // them, under mutex_ before either sets its flags. Either is a new motion command: a Park or FindHome still
+    // finishing ends without sending anything, and its kept failure is dropped, as is the watch on a motion the
+    // driver started (#1430, #2296). Each call ends the Park or FindHome: a slew, Park or FindHome owns both axes, so
+    // any claim or stop reaches it. cancel() never blocks, so mutex_ may be held (rule 10).
+    util::MotionClaim claim_motion_locked(util::MotionCommand command, int axis = 0) {
+        const util::MotionClaim claim = motion_owner_.claim(command, axis);
+        end_park_or_home_locked();
+        return claim;
+    }
+
+    void cancel_motion_locked(std::uint8_t axes) {
+        motion_owner_.cancel(axes);
+        end_park_or_home_locked();
+    }
+
+    void end_park_or_home_locked() {
         motion_error_.reset();
         watched_motion_.reset();
-        ++park_home_claim_;
-        park_home_request_.reset();
+        if (park_home_request_) {
+            release_untaken_slew_claim_locked(park_home_request_->claim);  // it was never sent
+            park_home_request_.reset();
+        }
         park_home_.cancel();
+    }
+
+    static bool same_claim(const util::MotionClaim& a, const util::MotionClaim& b) {
+        return a.generation == b.generation;
+    }
+
+    // #2522: the slew, Park or FindHome claim ends, so a PulseGuide is accepted again.
+    void finish_slew_claim_locked() const {
+        if (slew_claim_) {
+            motion_owner_.finished(slew_claim_->claim);
+            slew_claim_.reset();
+        }
+    }
+
+    // #2522: a slew, Park or FindHome the mount never took (refused, a no-op, given up before it was sent) moved
+    // nothing, so its claim ends at once.
+    void release_untaken_slew_claim_locked(const util::MotionClaim& claim) const {
+        if (slew_claim_ && !slew_claim_->taken && same_claim(slew_claim_->claim, claim)) {
+            finish_slew_claim_locked();
+        }
+    }
+
+    // #2522: the controller runs every GOTO, park and home, so no driver body ends one. Its claim ends at the first
+    // status after the mount took it that shows it no longer running, read as note_motion_end_locked() reads it: a
+    // GOTO with no GOTO, a park with no GOTO and no 'I', a home with no GOTO, no 'h' and no 'g' (a 4.x switch home
+    // shows only 'g'). A stop that went out ends it too (AbortSlew), as does a disconnect or relink.
+    void end_slew_claim_if_ended_locked(const MountStatus& status) const {
+        if (!slew_claim_ || !slew_claim_->taken) {
+            return;
+        }
+        const MotionKind kind = slew_claim_->kind;
+        const bool running = status.is_slewing || (kind == MotionKind::Park && status.is_parking) ||
+                             (kind == MotionKind::Home && (status.is_homing || status.is_guide_active));
+        if (!running) {
+            finish_slew_claim_locked();
+        }
     }
 
     // Raises a failure kept for a motion (a refusal the park_home_ body met, or an end note_motion_end_locked()
@@ -3370,6 +3441,7 @@ private:
     // it a slew that needs it reads :GRa#/:GDe# now (every caller holds the operation lock), and if that fails the
     // watch stays for the next status.
     void note_motion_end_locked(const MountStatus& status, std::optional<Position> position = std::nullopt) const {
+        end_slew_claim_if_ended_locked(status);  // #2522
         if (warned_stop_code_ != 0 && status.general_error != warned_stop_code_) {
             // Another code (or none): the next stop with a code is logged at WARN again (log_motion_stop_locked()).
             warned_stop_code_ = 0;
@@ -3612,7 +3684,8 @@ private:
 
     // The per-session state a disconnect or a lost link leaves behind.
     void reset_session_state_locked() {
-        supersede_park_or_home_locked();
+        cancel_motion_locked(util::MotionOwner::kBothAxes);
+        finish_slew_claim_locked();
         // open-astro#2419: a host clock re-sync the old session decided ends without sending. A relink whose loss the
         // pre-lock link check missed reaches here with the body still waiting out motion, and it must not write into
         // the new session. cancel() never blocks (rule 7); the next disconnect or connect joins the body.
@@ -3749,16 +3822,15 @@ private:
     }
 
     // #2504, ITelescopeV4: a guide pulse during a GOTO, a Park or a FindHome changes the motion the mount runs, so a
-    // PulseGuide is refused while one runs, before anything is sent. Both sources count. The driver's state covers what
-    // the mount's status does not show yet: its slew grace (decision 0022) and a Park or FindHome still to be sent once
-    // its stops have settled (park_home_request_). The frame covers the motion itself: a GOTO (written through at its
-    // dispatch), a park or home the mount took (written through as slewing), then 'I' parking and 'h' homing from the
-    // mount. The frame is read, not :GU#, so a guide pulse costs no extra exchange. A MoveAxis is not a slew here
-    // ('N' covers a GOTO only).
+    // PulseGuide is refused while one runs, before anything is sent. This half reads the frame, the mount's own
+    // status: a GOTO (written through at its dispatch), a park or home the mount took (written through as slewing),
+    // 'I' parking and 'h' homing, so a handset motion refuses too. The frame is read, not :GU#, so a guide pulse costs
+    // no extra exchange. A MoveAxis is not a slew here ('N' covers a GOTO only). The driver's own slew, Park or
+    // FindHome is refused by the pulse's claim (util::MotionOwner, #2522), from the command until a status shows it
+    // ended.
     void refuse_pulse_during_slew_locked() const {
         const MountStatus status = frame_status_locked();
-        if (slew_hold_.active(clock_.now()) || park_home_request_ || status.is_slewing || status.is_parking ||
-            status.is_homing) {
+        if (status.is_slewing || status.is_parking || status.is_homing) {
             throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
                                   AlpacaError::InvalidOperation);
         }
@@ -4075,7 +4147,10 @@ private:
     void dispatch_goto_locked(const char* context, const char* command, Prepare&& prepare, Send&& send) {
         refuse_while_faulted_locked(context);
         refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
-        supersede_park_or_home_locked();            // a newer motion command wins (#1430)
+        // #2522: the GOTO claims both axes, superseding whatever ran on them (a Park or FindHome too, #1430); a GOTO
+        // the mount does not take gives the claim up on the way out.
+        slew_claim_ = SlewClaim{claim_motion_locked(util::MotionCommand::Slew), MotionKind::Slew, false};
+        const UntakenSlewClaim give_up{this, slew_claim_->claim};
         begin_motion_command_locked();
         const Wire protocol = wire();
         prepare(protocol);
@@ -4099,6 +4174,7 @@ private:
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
         watch_motion_locked(MotionKind::Slew, context);  // #2296: before the write-through, from the status read
+        slew_claim_->taken = true;                       // #2522: held until a status shows the GOTO ended
         // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the GOTO
         // says otherwise; a tick that sampled before it is dropped.
         write_status_locked([](MountStatus& status) { status.is_slewing = true; });
@@ -5466,17 +5542,38 @@ private:
     // True while AbortSlew's own :GU# read judges the watched slew: a failure there is logged at INFO (#2296).
     // Under mutex_.
     mutable bool judging_abort_ = false;
-    // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
-    // every supersede, and the request its background part is still to
-    // finish. Under mutex_.
+    // #2522: who owns the axes (util::MotionOwner, decision 0006 rule 3), under mutex_. A slew, Park or FindHome
+    // claims both axes, a non-zero MoveAxis and a PulseGuide their own; AbortSlew, Unpark, a disconnect or relink and
+    // MoveAxis(axis, 0) cancel. The controller runs every GOTO, park and home, so the slew, Park or FindHome claim is
+    // kept in slew_claim_ and finished by the driver (end_slew_claim_if_ended_locked() and the paths above it).
+    // `taken`: the mount took the command, so a status that shows no motion ends the claim.
+    struct SlewClaim {
+        util::MotionClaim claim;
+        MotionKind kind;
+        bool taken;
+    };
+    mutable util::MotionOwner motion_owner_;
+    mutable std::optional<SlewClaim> slew_claim_;
+    // Gives up the slew claim `claim` on the way out of a dispatch unless the mount took it or the Park/FindHome body
+    // was handed it (handed_off). Destroyed with mutex_ held.
+    struct UntakenSlewClaim {
+        const OnStepTelescopeDriver* driver = nullptr;
+        util::MotionClaim claim;
+        bool handed_off = false;
+        ~UntakenSlewClaim() {
+            if (!handed_off) {
+                driver->release_untaken_slew_claim_locked(claim);
+            }
+        }
+    };
+    // The current Park/FindHome's request: its claim and what its background part is still to finish. Under mutex_.
     struct ParkHomeRequest {
-        std::uint64_t claim;
+        util::MotionClaim claim;
         const char* who;
         bool home;
         bool stopped;
         int code;
     };
-    std::uint64_t park_home_claim_ = 0;
     std::optional<ParkHomeRequest> park_home_request_;
     // Test seam: runs between the unlock and park_home_.start(). Set only
     // while no Park or FindHome is in flight.

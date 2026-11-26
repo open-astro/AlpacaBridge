@@ -104,4 +104,6 @@ the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_st
 `Kind::SafetyMonitor` scripts a SafetyMonitor upstream) with the poll on `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
-ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI.
+ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row
+(`scripts/conformu_fake_runs.tsv`, #2696) runs the driver over `AlpacaUpstreamScript` through `FakeHttpClient`
+(`conformu_observingconditions_factories.h`), with the poll on the real task clock; it is fake evidence only.

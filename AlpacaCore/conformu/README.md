@@ -28,6 +28,7 @@ One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md
 - **OnStep** - TeSeek HM-17 telescope
 - **Player One** - Ceres 462M, Uranus-C PRO, Mars-C II cameras; PW8 filter wheel; Uranus-C PRO thermal switch
 - **QHY** - QHY268C, miniCam8M cameras; miniCam8M CFW filter wheel
+- **Remote Alpaca** - fake report only: the ObservingConditions proxied device over a scripted upstream
 - **Sky-Watcher** - two drivers share `Sky-Watcher/`. Direct motor controller (EQMOD): Wave 100i telescope (USB and Wi-Fi reports); EQM-35 Pro telescope (built-in USB; site coordinates rounded to whole degrees). SynScan V3/V4 hand controller (serial): HEQ5 PRO and EQM-35 Pro telescopes; site coordinates rounded to whole degrees
 - **SVBONY** - SV905C2 camera; SC715C camera (rebadged ToupTek G3M715C, served by the ToupTek driver); SC571CC camera (rebadged ToupTek ATR2600C, served by the ToupTek driver)
 - **ToupTek** - GPCMOS01200KPF, GPCMOS02000KPA, ATR2600M, GPM662M, ATR585M, G3M678C cameras (also G3M715C and ATR2600C, whose reports are filed under `SVBONY/SC715C/` and `SVBONY/SC571CC/` after the badges they were validated under); AFW-M filter wheel; AAF focuser; ATR2600M and ATR585M thermal switches; StellaVita PowerBox switch

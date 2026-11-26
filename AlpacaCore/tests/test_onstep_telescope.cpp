@@ -1976,6 +1976,7 @@ struct ParkHomeFake {
     bool home_ack_25 = false;   // :hC# accepted with :GE# 25 instead of 0
     bool park_zero_ok = false;  // :hP# accepted, reply reads '0', :GE# 00
     bool park_runs = false;     // :hP# accepted: the park runs ('I' and a GOTO) until the case ends it
+    char goto_reply = '0';      // the :MS# digit; anything but '0' refuses the GOTO
     std::string ge_reply;       // non-empty: :GE# answers this instead of the code
     bool silent_after_ge = false;  // goes silent once it has answered a :GE#
     int brake_ms = 300;
@@ -2058,8 +2059,8 @@ struct ParkHomeFake {
             return "";
         }
         if (chunk.rfind(":MS", 0) == 0) {
-            goto_active = true;
-            return "0";  // GOTO accepted (bare digit)
+            goto_active = goto_reply == '0';
+            return std::string(1, goto_reply);  // a bare digit: '0' accepted
         }
         if (chunk.rfind(":M", 0) == 0 || chunk.rfind(":R", 0) == 0) {
             guide_active = guide_active || chunk.rfind(":M", 0) == 0;
@@ -2916,6 +2917,75 @@ TEST_CASE("OnStep Telescope Driver - PulseGuide on the axis a MoveAxis drives is
     driver->move_axis(axis, 0.0);
     CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == 0);  // the refusal ended with the jog
     CHECK(mount->count(guide) == 1);
+    driver->set_connected(false);
+}
+
+// #2522: OnStep 4.x has no 'h', so a home with switches shows only 'g' while it runs, and the home ends at the first
+// status with no GOTO, no 'h' and no 'g' (#2296, note_motion_end_locked()). The FindHome claim is held until then: a
+// PulseGuide is refused, nothing is sent and the home is not stopped; once a status shows the end it is accepted.
+TEST_CASE("OnStep motion owner - PulseGuide during a home shown only as 'g' is refused (#2522)",
+          "[onstep][telescope][unit][goto-safety][motion-owner]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    using alpacacore::test::error_code_of;
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->version = "4.24q";
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto poll = [&] { REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver)); };
+    const auto searching = [&](bool on) {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->guide_active = on;
+    };
+    const auto home_runs = [&] {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        return mount->guide_active && !mount->stopping;
+    };
+    REQUIRE_NOTHROW(driver->find_home());  // a still mount: :hC# goes out at once
+    REQUIRE(mount->count(":hC#") == 1);
+    searching(true);  // the switch search: 'g', no 'h' and no GOTO
+    poll();
+    const auto stops = mount->count(":Q");
+    for (const int direction : {0, 2}) {
+        CAPTURE(direction);
+        CHECK(error_code_of([&] { driver->pulse_guide(direction, 1000); }) == AlpacaError::InvalidOperation);
+        CHECK(mount->count(":Mg") == 0);
+        CHECK(mount->count(":Q") == stops);  // the home was not stopped
+        CHECK(home_runs());
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    }
+    searching(false);
+    poll();  // no 'g': the home ended
+    CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == 0);
+    CHECK(mount->count(":Mgn1000#") == 1);
+    driver->set_connected(false);
+}
+
+// #2522: a GOTO or a Park the mount does not take moved nothing, so no status will end its claim: the command gives it
+// up on the way out, and a PulseGuide is accepted at once, with no poll in between.
+TEST_CASE("OnStep motion owner - a GOTO or Park the mount refused leaves PulseGuide accepted (#2522)",
+          "[onstep][telescope][unit][motion-owner]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    using alpacacore::test::error_code_of;
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*driver, true);  // no status ends a claim here
+    SECTION("a GOTO refused below the horizon (:MS# 1)") {
+        mount->goto_reply = '1';
+        CHECK(error_code_of([&] { driver->slew_to_coordinates_async(2.0, 10.0); }) != 0);
+        CHECK(mount->count(":MS#") == 1);
+    }
+    SECTION("a Park refused with no park position (:GE# 13)") {
+        mount->refuse_code = 13;
+        CHECK(error_code_of([&] { driver->park(); }) == AlpacaError::InvalidOperation);
+        CHECK(mount->count(":hP#") == 1);
+    }
+    CHECK(error_code_of([&] { driver->pulse_guide(0, 1000); }) == 0);
+    CHECK(mount->count(":Mgn1000#") == 1);
     driver->set_connected(false);
 }
 
