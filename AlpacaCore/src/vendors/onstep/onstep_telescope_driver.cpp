@@ -2270,6 +2270,7 @@ public:
         lock.unlock();  // start() without mutex_: decision 0006 rule 4, async_operation.h rule 10
         try {
             start_move_axis_resend();
+            run_move_axis_cap_before_start_hook();
             start_move_axis_cap(axis, cap_window);
         } catch (const AlpacaException& ex) {
             lock.lock();
@@ -2541,6 +2542,11 @@ public:
         move_axis_send_hook_ = std::move(hook);
     }
 
+    void set_move_axis_cap_before_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+        move_axis_cap_before_start_hook_ = std::move(hook);
+    }
+
     void set_connect_before_state_lock_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
         connect_before_state_lock_hook_ = std::move(hook);
@@ -2615,6 +2621,18 @@ private:
         {
             std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
             hook = move_axis_send_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // Test seam (#2651): runs in move_axis()'s unlocked gap, before start_move_axis_cap().
+    void run_move_axis_cap_before_start_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+            hook = move_axis_cap_before_start_hook_;
         }
         if (hook) {
             hook();
@@ -5713,6 +5731,7 @@ private:
     std::function<void()> pulse_guide_gap_hook_;
     std::function<bool()> move_axis_resend_before_send_hook_;
     std::function<void()> move_axis_send_hook_;
+    std::function<void()> move_axis_cap_before_start_hook_;
     // Test seam: runs at the start of the host clock re-sync body, with no driver lock held (#2419).
     std::function<void()> clock_resync_before_lock_hook_;
     std::function<void()> connect_before_state_lock_hook_;
@@ -5831,6 +5850,12 @@ void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::
 void set_move_axis_send_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_move_axis_send_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_move_axis_cap_before_start_hook_for_testing(std::move(hook));
     }
 }
 

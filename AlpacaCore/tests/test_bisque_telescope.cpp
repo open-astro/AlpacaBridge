@@ -2249,6 +2249,31 @@ TEST_CASE("Bisque MoveAxis - a renewal that lands as the cap fires is not stoppe
     CHECK(rig.driver->get_slewing());
 }
 
+// #2651 (review): two MoveAxis calls on one axis start their cap bodies after the initiator lock is released, so the
+// older call's start can land after the newer one's. The older body would replace the newer one and stop the newer jog
+// at the older call's 60 s: the newer jog must keep its own.
+TEST_CASE("Bisque MoveAxis - an older MoveAxis whose cap starts last leaves the newer jog its own 60 s",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    alpacacore::test::Latch older_held;  // declared first: it outlives the driver the hook below is set on
+    ClockedBisque rig;
+    std::atomic<int> calls{0};
+    alpacacore::vendor::bisque::set_move_axis_cap_before_start_hook_for_testing(*rig.driver, [&] {
+        if (calls.fetch_add(1) == 0) older_held.block();  // only the first (older) call waits here
+    });
+    std::thread older([&] { rig.driver->move_axis(0, 0.5); });
+    REQUIRE(older_held.wait_entered());
+    rig.clock.advance(std::chrono::seconds(10));
+    rig.move(0, 0.5);  // the newer call starts its cap body first
+    older_held.release();
+    older.join();
+    alpacacore::vendor::bisque::set_move_axis_cap_before_start_hook_for_testing(*rig.driver, {});
+    rig.advance_caps(std::chrono::seconds(55));  // 65 s: past the older call's 60 s, short of the newer's 70 s
+    CHECK(rig.mount.move_stops.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    rig.advance_caps(std::chrono::seconds(6));  // past the newer jog's own 60 s
+    CHECK(rig.mount.move_stops.load() == 1);
+}
+
 TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motion command and at a reconnect",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;

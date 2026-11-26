@@ -1184,7 +1184,10 @@ public:
     void move_axis(int axis, double rate) override {
         const std::optional<util::HoldWindow> cap = move_axis_under_initiator(axis, rate);
         // The initiator lock is released: the cap body's stop takes it (decision 0006 rule 4).
-        if (cap) start_move_axis_cap(axis, *cap);
+        if (cap) {
+            run_move_axis_cap_before_start_hook();
+            start_move_axis_cap(axis, *cap);
+        }
     }
 
     // Returns the cap's window when the move runs (a non-zero rate), armed when TheSkyX accepted the start.
@@ -1395,6 +1398,11 @@ public:
     void set_stop_sent_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(test_hook_mutex_);
         stop_sent_hook_ = std::move(hook);
+    }
+
+    void set_move_axis_cap_before_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        move_axis_cap_before_start_hook_ = std::move(hook);
     }
 
     void set_move_axis_cap_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
@@ -2373,6 +2381,18 @@ private:
         }
     }
 
+    // Test seam: runs in move_axis()'s unlocked gap, before start_move_axis_cap().
+    void run_move_axis_cap_before_start_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = move_axis_cap_before_start_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_stop_sent_hook() {
         std::function<void()> hook;
         {
@@ -2423,6 +2443,7 @@ private:
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
     std::function<void()> stop_sent_hook_;      // guarded by test_hook_mutex_
+    std::function<void()> move_axis_cap_before_start_hook_;  // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -2534,6 +2555,12 @@ void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
                                          std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_move_axis_cap_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_move_axis_cap_before_start_hook_for_testing(std::move(hook));
     }
 }
 

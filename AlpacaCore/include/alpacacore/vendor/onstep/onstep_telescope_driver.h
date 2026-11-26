@@ -128,6 +128,12 @@ void set_move_axis_resend_before_send_hook_for_testing(TelescopeDriver& driver, 
 /// from the factories above; anything else is ignored.
 void set_move_axis_send_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam (issue #2651): runs on the thread of a non-zero MoveAxis, after the re-send start, with the driver locks
+/// released and the axis's cap body not yet started, so a case can land a second MoveAxis on the axis in that window.
+/// Pass an empty function to clear it, and release anything the hook blocks on first. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Test seams of the host clock re-sync (open-astro#2419). `hook` runs at the start of each re-sync body, with no
 /// driver lock held, so a case can land a client command between the host clock change and the re-sync's write.
 /// Pass an empty function to clear it. `driver` must come from the factories above; anything else is ignored.

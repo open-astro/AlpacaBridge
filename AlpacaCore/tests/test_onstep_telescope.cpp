@@ -4726,6 +4726,39 @@ TEST_CASE("OnStep Telescope Driver - a renewal that lands as the cap fires is no
     driver->set_connected(false);
 }
 
+// #2651 (review): two MoveAxis calls on one axis start their cap bodies after the driver locks are released, so the
+// older call's start can land after the newer one's. The older body would replace the newer one and stop the newer jog
+// at the older call's 60 s: the newer jog must keep its own.
+TEST_CASE("OnStep Telescope Driver - an older MoveAxis whose cap starts last leaves the newer jog its own 60 s",
+          "[onstep][telescope][unit][goto-safety]") {
+    alpacacore::test::Latch older_held;  // declared first: it outlives the driver the hook below is set on
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);
+    std::atomic<int> calls{0};
+    alpacacore::vendor::onstep::set_move_axis_cap_before_start_hook_for_testing(*driver, [&] {
+        if (calls.fetch_add(1) == 0) older_held.block();  // only the first (older) call waits here
+    });
+    std::thread older([&] { driver->move_axis(0, 1.0); });
+    REQUIRE(older_held.wait_entered());
+    fake.advance(std::chrono::seconds(7));
+    fake.start_move(*driver, 0, 1.0);  // the newer call starts its cap body first, 7 s later
+    older_held.release();
+    older.join();
+    alpacacore::vendor::onstep::set_move_axis_cap_before_start_hook_for_testing(*driver, nullptr);
+    for (int i = 0; i < 8; ++i) {
+        fake.advance(std::chrono::seconds(7));  // 63 s from the older call: past its 60 s, short of the newer's 67 s
+    }
+    CHECK(fake.count(":Qe#") == 0);
+    CHECK(fake.count(":Qw#") == 0);
+    CHECK(driver->get_slewing());
+    fake.advance(std::chrono::seconds(7));  // past the newer jog's own 60 s
+    CHECK(fake.count(":Qe#") >= 1);
+    driver->set_connected(false);
+}
+
 // #2651: the cap no longer rides on the re-send body. Firmware that never sends 'g' ends the re-send body at its first
 // tick, and the 60 s cap still stops the axis.
 TEST_CASE("OnStep Telescope Driver - a MoveAxis on firmware without status g is still stopped at 60 s",

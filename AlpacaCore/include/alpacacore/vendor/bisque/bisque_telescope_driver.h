@@ -62,6 +62,10 @@ void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void(
 /// a cap body's start fail. Call only while no start is in flight. A driver not from the factories is ignored.
 void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
                                          std::function<std::thread(std::function<void()>)> spawn);
+/// Test seam (issue #2651): `hook` runs on the thread of a non-zero MoveAxis, with the initiator lock released and the
+/// axis's cap body not yet started, so a case can land a second MoveAxis on the axis in that window. Pass an empty
+/// function to clear it, and release anything the hook blocks on first.
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Whether the 8 s Slewing hold (decision 0022) is open now, on the driver's task clock. A Slewing read cannot tell
 /// once the slew's own flag is down, so the clear sites that lower it too (a disconnect, a landing) are pinned here.
 bool slew_hold_active_for_testing(TelescopeDriver& driver);
