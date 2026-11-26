@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -17,7 +17,9 @@ each driver (decision 0013 section 5): the self-loop check at Connect, the forwa
 branded Name and the Description, the `util::PolledState` frame with the link's fault and loss, the command slot and
 the pass-through of upstream errors. A driver keeps its frame and how to measure it, its own reads at Connect, its
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
-driver.
+driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
+proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
+3 for SafetyMonitor.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -35,7 +37,7 @@ driver.
 
 #### The ObservingConditions proxied device (issue #1753 slice 3)
 
-Config (`remotealpaca_fields.h`): `upstreamHost` (a name or an IP address, no scheme), `upstreamPort` (1 to 65535,
+Config (`remotealpaca_fields.h`, the same four fields for every proxied device type): `upstreamHost` (a name or an IP address, no scheme), `upstreamPort` (1 to 65535,
 32323 by default), `upstreamDeviceNumber` (the upstream's own number, 0 to 2147483647) and `pollPeriodSeconds` (1 to
 60, 2 by default). The factory refuses each out of range with `InvalidValue`, from both config sources.
 
@@ -73,10 +75,33 @@ Config (`remotealpaca_fields.h`): `upstreamHost` (a name or an IP address, no sc
   its error unchanged. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
 - Actions and `Command*` are not forwarded (`ActionNotImplemented`, `NotImplemented`).
 
+#### The SafetyMonitor proxied device (issue #1753 slice 4)
+
+The same config, self-loop check, Connect (Platform 7 is `ISafetyMonitorV3`; a version 1 or 2 upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. The Connect reads nothing of its own: the first frame is `IsSafe`, a value or the upstream's error. `IsSafe`:
+
+- connected and not faulted: the frame's value, or the upstream's error unchanged (decision 0023 rule 5). A stale
+  frame is served, never refused (decision 0010 rule 6): the upstream's last answer stands until the loss bound;
+- faulted (latched, not yet lost): `DriverException` with the fault text, as every served getter (decision 0009 rule
+  1); `DeviceState` then omits `IsSafe`, so it is empty;
+- lost (a refused connection, a fault or a frame no poll refreshed past the loss bound, found by the poll or by the
+  `IsSafe` read itself): `false`, with no exception (decision 0009 rule 3, #1753): a lost link never reads safe, and an
+  observatory that polls `IsSafe` closes rather than stops on an error. `Connected` is false and `DeviceState` empty,
+  as for every lost link (also the `DeviceState` read that finds the loss: the base checks `Connected` again after
+  `IsSafe`), and `get_link_fault()` keeps the reason;
+- never connected, connecting (a Connect, also one after a loss, ends the kept reason), after a Connect that failed
+  (also one after a loss, while the upstream still refuses) or disconnected by the client: `NotConnected`, as every
+  member.
+
+It has no command: nothing runs in the command slot. Actions and `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
-counts calls. The ObservingConditions tests (`test_remotealpaca_observingconditions.cpp`, the contract sweep and the
-`[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
-(`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`) with the poll on `FakeTaskClock`.
+counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
+the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
+`AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
+`Kind::SafetyMonitor` scripts a SafetyMonitor upstream) with the poll on `FakeTaskClock`. The contract sweep's snapshot
+rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
 ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI.

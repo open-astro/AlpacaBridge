@@ -321,8 +321,10 @@ public:
             lost = !loss_reason_locked().empty();
             connected_.store(false);
             loss_text_.clear();  // rule 5: the kept text ends at the next Disconnect
+            // In the same hold: a loss the module latched would otherwise still read lost() after the kept text is
+            // gone, and a SafetyMonitor's IsSafe read in between would answer false, not NotConnected.
+            state_.reset();
         }
-        state_.reset();
         if (forwarded_connect_) {
             if (lost) {
                 forwarded_connect_ = false;  // the upstream is gone: nothing to tell it, and the call would only wait

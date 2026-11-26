@@ -3399,6 +3399,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'remotealpaca') {
         document.getElementById('remotealpaca-config').style.display = 'block';
+        updateRemoteAlpacaConfigFields();
     } else if (vendor === 'gemini') {
         document.getElementById('gemini-config').style.display = 'block';
         updateGeminiConfigFields();
@@ -3538,6 +3539,26 @@ function updateIfrConfigFields() {
     rotatorSection.style.display = isRotator ? 'block' : 'none';
     setFieldGroupEnabled(focuserSection, !isRotator);
     setFieldGroupEnabled(rotatorSection, isRotator);
+}
+
+// Remote Alpaca has one sub-section per proxied device type, each with the
+// same four fields; show the one for the Device Type and disable the other so
+// its inputs never reach FormData (same pattern as updateIfrConfigFields).
+function updateRemoteAlpacaConfigFields() {
+    const sections = {
+        observingconditions: document.getElementById('remotealpaca-observingconditions-fields'),
+        safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields')
+    };
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    Object.entries(sections).forEach(([kind, section]) => {
+        if (!section) {
+            return;
+        }
+        const shown = kind === deviceType;
+        section.style.display = shown ? 'block' : 'none';
+        setFieldGroupEnabled(section, shown);
+    });
 }
 
 ['focuser', 'rotator'].forEach(kind => {
@@ -5134,16 +5155,18 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.timeoutMs = timeoutMs;
         }
     } else if (deviceData.vendor === 'remotealpaca') {
-        deviceData.upstreamHost = (formData.get('remoteAlpacaHost') || '').trim();
-        const upstreamPort = readOptionalNumber(formData, 'remoteAlpacaPort');
+        // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions) or remoteAlpacaSafety* (SafetyMonitor).
+        const prefix = normalizeDeviceType(deviceData.deviceType) === 'safetymonitor' ? 'remoteAlpacaSafety' : 'remoteAlpaca';
+        deviceData.upstreamHost = (formData.get(`${prefix}Host`) || '').trim();
+        const upstreamPort = readOptionalNumber(formData, `${prefix}Port`);
         if (upstreamPort !== null) {
             deviceData.upstreamPort = upstreamPort;
         }
-        const upstreamDeviceNumber = readOptionalNumber(formData, 'remoteAlpacaDeviceNumber');
+        const upstreamDeviceNumber = readOptionalNumber(formData, `${prefix}DeviceNumber`);
         if (upstreamDeviceNumber !== null) {
             deviceData.upstreamDeviceNumber = upstreamDeviceNumber;
         }
-        const pollPeriod = readOptionalNumber(formData, 'remoteAlpacaPollPeriod');
+        const pollPeriod = readOptionalNumber(formData, `${prefix}PollPeriod`);
         if (pollPeriod !== null) {
             deviceData.pollPeriodSeconds = pollPeriod;
         }

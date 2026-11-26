@@ -86,7 +86,7 @@ Symbol: `transition_mutex_`
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
 | ZWO switch |  | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted |  |  |
 | ZWO telescope |  | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  |  |
-| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | snapshot-served (the state lock, a leaf, and the rule that no upstream call runs under it are in the vendor's shared `UpstreamProxy`); commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
+| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | snapshot-served (ObservingConditions, SafetyMonitor, over the shared `UpstreamProxy`, which holds the state lock, a leaf, and the rule that no upstream call runs under it); commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
 
 ## Alternatives rejected
 
