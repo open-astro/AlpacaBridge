@@ -10,7 +10,8 @@
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
 # Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches and the remotealpaca ObservingConditions since slice 6; a row runs
+# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
+# remotealpaca ObservingConditions since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -77,6 +78,10 @@ on:
       - "AlpacaCore/tests/fake_qhy_cfw3.h"
       - "AlpacaCore/tests/fake_playerone_pw_sdk.h"
       - "AlpacaCore/tests/conformu_camera_factories.h"
+      - "AlpacaCore/tests/fake_timed_completion.h"
+      - "AlpacaCore/tests/fake_qhy_sdk.h"
+      - "AlpacaCore/tests/locked_qhy_sdk.h"
+      - "AlpacaCore/tests/fake_playerone_sdk.h"
       - "AlpacaCore/tests/conformu_rotator_factories.h"
       - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
@@ -200,9 +205,10 @@ jobs:
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
                          "altair": "Altair", "remotealpaca": "Remote Alpaca"}
-          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
-          # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
-          # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
+          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers, or a few vendors' (a
+          # tuple). A fake_*.h that is not named for a vendor counts as the vendor of the run row that names it:
+          # fake_mount_server.h is OnStep's only while the ZWO, Celestron, SynScan and OnStep telescope rows that also
+          # use it stay pending.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
                           "AlpacaCore/tests/conformu_telescope_factories.h": "ioptron",
                           "AlpacaCore/tests/fake_mount_motion_model.h": "ioptron",
@@ -211,6 +217,8 @@ jobs:
                           "AlpacaCore/tests/locked_iguider_v4l2.h": "ioptron",
                           "AlpacaCore/tests/locked_gphoto_sdk.h": "gphoto",
                           "AlpacaCore/tests/fake_raw_decoder.h": "gphoto",
+                          "AlpacaCore/tests/locked_qhy_sdk.h": "qhy",
+                          "AlpacaCore/tests/fake_timed_completion.h": ("qhy", "playerone"),
                           "scripts/build_bundled_gphoto.sh": "gphoto",
                           "AlpacaCore/tests/conformu_observingconditions_factories.h": "remotealpaca",
                           "AlpacaCore/tests/alpaca_upstream_script.h": "remotealpaca"}
@@ -252,13 +260,18 @@ jobs:
 
           shared_change = changed is None or any(filtered(p) and not vendor_specific(p) for p in changed)
 
+          def file_vendors(path):
+              owner = VENDOR_FILES.get(path, ())
+              return (owner,) if isinstance(owner, str) else owner
+
           def reaches(vendor, fake):
               dirs = SOURCE_DIRS.get(vendor, [vendor])
               mine = ["AlpacaCore/src/vendors/%s/" % d for d in dirs]
               mine += ["AlpacaCore/include/alpacacore/vendor/%s/" % d for d in dirs]
               mine += ["AlpacaCore/conformu/%s/Fake/" % REPORT_DIRS.get(vendor, vendor)]
               mine += ["AlpacaCore/tests/fake_%s_" % d for d in dirs]  # the vendor's other fakes (a shared board)
-              return any(p.startswith(tuple(mine)) or p == "AlpacaCore/tests/" + fake or VENDOR_FILES.get(p) in dirs
+              return any(p.startswith(tuple(mine)) or p == "AlpacaCore/tests/" + fake
+                         or any(d in file_vendors(p) for d in dirs)
                          for p in changed)
 
           rows = []

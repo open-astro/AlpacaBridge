@@ -1,0 +1,248 @@
+FAKE REPORT: ConformU against FakePlayerOneSDK (simulated Player One camera SDK, in process), not hardware. Not hardware validation.
+18:07:31.868 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 14:09:42          
+18:07:31.868                                              
+18:07:31.868 Operating system is Armbian 26.8.3 trixie, Processor is ARM 64bit, Application is 64bit.          
+18:07:31.868                                              
+18:07:31.868 Alpaca device:  (127.0.0.1:11694 Camera/0)          
+18:07:31.868                                              
+18:07:31.868 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11694, Alpaca device number: 0
+18:07:31.878 CreateDevice                        INFO     Alpaca device created OK
+18:07:32.879 CreateDevice                        INFO     Successfully created driver
+18:07:32.960 CreateDevice                        OK       Found a valid interface version: 4
+18:07:32.960 CreateDevice                        OK       Driver instance created successfully
+18:07:32.960                                              
+18:07:32.960 Connect to device                            
+18:07:33.049 Connected                           OK       Connected to device successfully using Connected = True
+18:07:33.605 Connected                           OK       Disconnected from device successfully using Connected = False
+18:07:33.611 Connect                             OK       Connected to device successfully using Connect()
+18:07:33.611                                              
+18:07:33.612 Common Driver Methods                        
+18:07:33.612 InterfaceVersion                    OK       4
+18:07:33.612 Connected                           OK       True
+18:07:33.616 Description                         OK       Player One Camera Driver
+18:07:33.616 DriverInfo                          OK       AlpacaCore Player One Camera Driver
+18:07:33.617 DriverVersion                       OK       5.0.2
+18:07:33.618 Name                                OK       Player One Fake Player One Camera
+18:07:33.618                                              
+18:07:33.621 SupportedActions                    OK       Found action: GetHeaterPower
+18:07:33.631 SupportedActions                    OK       Found action: SetHeaterPower
+18:07:33.631 SupportedActions                    OK       Found action: GetFanPower
+18:07:33.631 SupportedActions                    OK       Found action: SetFanPower
+18:07:33.631                                              
+18:07:33.631 Action                              INFO     Conform cannot test the Action method
+18:07:33.631                                              
+18:07:33.637 DeviceState                         OK       Received 5 operational state properties.
+18:07:33.637 DeviceState                         OK         CameraState = Idle
+18:07:33.637 DeviceState                         OK         CCDTemperature = -5
+18:07:33.637 DeviceState                         OK         ImageReady = False
+18:07:33.637 DeviceState                         OK         IsPulseGuiding = False
+18:07:33.637 DeviceState                         OK         TimeStamp = 11/26/2026 6:07:33 PM
+18:07:33.641 DeviceState                         INFO     Operational property CoolerPower was not included in the DeviceState response.
+18:07:33.641 DeviceState                         INFO     Operational property HeatSinkTemperature was not included in the DeviceState response.
+18:07:33.641 DeviceState                         INFO     Operational property PercentCompleted was not included in the DeviceState response.
+18:07:33.642                                              
+18:07:33.642 Can Properties                               
+18:07:33.643 CanAbortExposure                    OK       True
+18:07:33.644 CanAsymmetricBin                    OK       False
+18:07:33.645 CanGetCoolerPower                   OK       False
+18:07:33.646 CanPulseGuide                       OK       False
+18:07:33.647 CanSetCCDTemperature                OK       False
+18:07:33.647 CanStopExposure                     OK       False
+18:07:33.648 CanFastReadout                      OK       False
+18:07:33.648                                              
+18:07:33.648 Pre-run Checks                               
+18:07:33.648                                              
+18:07:33.648 Last Tests                                   
+18:07:33.659 LastExposureDuration                OK       LastExposureDuration returned an error before an exposure was made: No image has been successfully acquired yet
+18:07:33.660 LastExposureStartTime               OK       LastExposureStartTime returned an error before an exposure was made: No image has been successfully acquired yet
+18:07:33.660                                              
+18:07:33.660 Properties                                   
+18:07:33.661 MaxBinX                             OK       2
+18:07:33.662 MaxBinY                             OK       2
+18:07:33.663 BinX Read                           OK       1
+18:07:33.663 BinY Read                           OK       1
+18:07:33.664 BinX Write                          OK       Received error on setting BinX to 0: Bin value must be positive
+18:07:33.672 BinX Write                          OK       Received error on setting BinX to 3: Bin value not supported
+18:07:33.673 BinY Write                          OK       Received error on setting BinY to 0: Bin value must be positive
+18:07:33.674 BinY Write                          OK       Received error on setting BinY to 3: Bin value not supported
+18:07:33.676 BinXY Write                         OK       Successfully set symmetric XY binning: 1 x 1
+18:07:33.678 BinXY Write                         OK       Successfully set symmetric XY binning: 2 x 2
+18:07:33.681 CameraState                         OK       Idle
+18:07:33.682 CameraXSize                         OK       16
+18:07:33.685 CameraYSize                         OK       8
+18:07:33.687 CCDTemperature                      OK       -5
+18:07:33.688 CoolerOn Read                       OK       Optional member returned a NotImplementedException error.
+18:07:33.691 CoolerOn Read                       OK       Optional member returned a NotImplementedException error.
+18:07:33.692 CoolerPower                         OK       Optional member returned a NotImplementedException error.
+18:07:33.694 ElectronsPerADU                     OK       Optional member returned a NotImplementedException error.
+18:07:33.695 FullWellCapacity                    OK       Optional member returned a NotImplementedException error.
+18:07:33.697 HasShutter                          OK       False
+18:07:33.700 HeatSinkTemperature                 OK       Optional member returned a NotImplementedException error.
+18:07:33.701 ImageReady                          OK       False
+18:07:33.708 ImageArray                          OK       Received error when ImageReady is false: PlayerOne: no image is ready
+18:07:33.712 ImageArrayVariant                   OK       Optional member returned a NotImplementedException error.
+18:07:33.717 IsPulseGuiding                      OK       False
+18:07:33.719 MaxADU                              OK       65535
+18:07:33.719 NumX Read                           OK       16
+18:07:33.721 NumX write                          OK       Successfully wrote 8
+18:07:33.721 NumY Read                           OK       8
+18:07:33.722 NumY write                          OK       Successfully wrote 4
+18:07:33.723 PixelSizeX                          OK       2.9
+18:07:33.724 PixelSizeY                          OK       2.9
+18:07:33.725 SetCCDTemperature Read              OK       Optional member returned a NotImplementedException error.
+18:07:33.726 SetCCDTemperature Write             OK       Optional member returned a NotImplementedException error.
+18:07:33.727 StartX Read                         OK       0
+18:07:33.728 StartX write                        OK       Successfully wrote 8
+18:07:33.729 StartY Read                         OK       0
+18:07:33.729 StartY write                        OK       Successfully wrote 4
+18:07:33.730 SensorType Read                     OK       Monochrome
+18:07:33.731 BayerOffsetX Read                   OK       Sensor type is Monochrome and a NotImplementedException error was generated as expected
+18:07:33.732 BayerOffsetY Read                   OK       Sensor type is Monochrome and a NotImplementedException error was generated as expected
+18:07:33.734 ExposureMax Read                    OK       10
+18:07:33.734 ExposureMin Read                    OK       1E-06
+18:07:33.734 ExposureMin                         OK       ExposureMin is less than or equal to ExposureMax
+18:07:33.735 ExposureResolution Read             OK       1E-06
+18:07:33.735 ExposureResolution                  OK       ExposureResolution is less than or equal to ExposureMax
+18:07:33.736 FastReadout Read                    OK       Optional member returned a NotImplementedException error.
+18:07:33.737 FastReadout Write                   OK       Optional member returned a NotImplementedException error.
+18:07:33.738 GainMin Read                        OK       0
+18:07:33.739 GainMax Read                        OK       100
+18:07:33.739 Gains Read                          OK       Optional member returned a NotImplementedException error.
+18:07:33.740 Gain Read                           OK       10
+18:07:33.740 Gain Implementation                 OK       Gain, GainMin and GainMax worked as expected while Gains is not implemented - the driver is in "Gain Value" mode.
+18:07:33.741 Gain Write                          OK       Successfully set gain minimum value 0.
+18:07:33.742 Gain Write                          OK       Successfully set gain maximum value 100.
+18:07:33.742 Gain Write                          OK       Received InvalidValue error for gain -1, which is lower than the minimum value.
+18:07:33.743 Gain Write                          OK       Received InvalidValue error for gain 101 which is higher than the maximum value.
+18:07:33.744 PercentCompleted Read               OK       Operation is invalid when camera is not imaging or downloading
+18:07:33.745 ReadoutModes Read                   OK       Normal
+18:07:33.746 ReadoutMode Read                    OK       0
+18:07:33.746 ReadoutMode Index                   OK       ReadReadoutMode is within the bounds of the ReadoutModes ArrayList
+18:07:33.746 ReadoutMode Index                   INFO     Current value: Normal
+18:07:33.747 SensorName Read                     OK       FakeSensor
+18:07:33.748 OffsetMin Read                      OK       0
+18:07:33.748 OffsetMax Read                      OK       255
+18:07:33.749 Offsets Read                        OK       Optional member returned a NotImplementedException error.
+18:07:33.750 Offset Read                         OK       0
+18:07:33.750 Offset Implementation               OK       Offset, OffsetMin and OffsetMax worked as expected while Offsets is not implemented - the driver is in "Offset Value" mode.
+18:07:33.751 Offset Write                        OK       Successfully set offset minimum value 0.
+18:07:33.751 Offset Write                        OK       Successfully set offset maximum value 255.
+18:07:33.752 Offset Write                        OK       InvalidValue Received error for offset -1, which is lower than the minimum value.
+18:07:33.753 Offset Write                        OK       InvalidValue Received error for offset 256 which is higher than the maximum value.
+18:07:33.754 SubExposureDuration                 OK       Optional member returned a NotImplementedException error.
+18:07:33.755 SubExposureDuration write           OK       Optional member returned a NotImplementedException error.
+18:07:33.755                                              
+18:07:33.755 Methods                                      
+18:07:33.757 AbortExposure                       OK       No error returned when camera is already idle
+18:07:33.758 PulseGuide                          OK       CanPulseGuide is false and an error was returned when calling the method: Pulse guide not supported
+18:07:33.759 StopExposure                        OK       CanStopExposure is false and an error was returned: StopExposure is not supported (CanStopExposure is false); use AbortExposure
+18:07:33.760                                              
+18:07:33.760 Taking full frame image 1 x 1 bin (16 x 8) - 0.0 MPix          
+18:07:33.766 StartExposure                       OK       Completed successfully.
+18:07:35.784 ImageReady                          OK       ImageReady is True after a successful exposure of 2 seconds.
+18:07:35.784 LastExposureDuration                OK       Last exposure duration is: 2.000 seconds
+18:07:35.799 LastExposureStartTime               OK       LastExposureStartTime 2026-11-26T18:07:33 agrees with UTC time on this device to within ±2 seconds (Difference: 0.772 seconds)
+18:07:35.800 CameraState                         OK       The camera returned the camera state as Camera.Idle after exposure completed.
+18:07:35.810 ImageArray                          OK       Successfully read 32 bit integer array (1 plane) 16 x 8 pixels in 6ms.
+18:07:35.821 ImageArrayVariant                   OK       Optional member returned a NotImplementedException error.
+18:07:35.821                                              
+18:07:35.821 Taking full frame image 2 x 2 bin (8 x 4) - 0.0 MPix          
+18:07:35.830 StartExposure                       OK       Completed successfully.
+18:07:37.847 ImageReady                          OK       ImageReady is True after a successful exposure of 2 seconds.
+18:07:37.849 LastExposureDuration                OK       Last exposure duration is: 2.000 seconds
+18:07:37.850 LastExposureStartTime               OK       LastExposureStartTime 2026-11-26T18:07:35 agrees with UTC time on this device to within ±2 seconds (Difference: 0.836 seconds)
+18:07:37.851 CameraState                         OK       The camera returned the camera state as Camera.Idle after exposure completed.
+18:07:37.855 ImageArray                          OK       Successfully read 32 bit integer array (1 plane) 8 x 4 pixels in 1ms.
+18:07:37.864 ImageArrayVariant                   OK       Optional member returned a NotImplementedException error.
+18:07:37.864                                              
+18:07:37.864 StartExposure error cases                    
+18:07:37.870 Reject Negative Duration            OK       Received error: Exposure duration must be non-negative
+18:07:38.393 Reject Bad XSize (bin 1 x 1)        OK       Received error: ROI size exceeds sensor dimensions
+18:07:38.819 Reject Bad YSize (bin 1 x 1)        OK       Received error: ROI size exceeds sensor dimensions
+18:07:38.850 Reject Bad XStart (bin 1 x 1)       OK       Received error: ROI extends beyond sensor bounds
+18:07:38.858 Reject Bad YStart (bin 1 x 1)       OK       Received error: ROI extends beyond sensor bounds
+18:07:38.864 Reject Bad XSize (bin 2 x 2)        OK       Received error: ROI size exceeds sensor dimensions
+18:07:39.324 Reject Bad YSize (bin 2 x 2)        OK       Received error: ROI size exceeds sensor dimensions
+18:07:39.860 Reject Bad XStart (bin 2 x 2)       OK       Received error: ROI extends beyond sensor bounds
+18:07:39.868 Reject Bad YStart (bin 2 x 2)       OK       Received error: ROI extends beyond sensor bounds
+18:07:39.868                                              
+18:07:39.869 Post-run Checks                              
+18:07:39.873                                              
+18:07:39.873 Disconnect from device                       
+18:07:39.879 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+18:07:39.879                                              
+18:07:39.879 Conformance test has finished                
+18:07:39.879                                              
+18:07:39.879 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+18:07:39.879                                     
+18:07:39.879 Timing Summary                               See Help for further information.
+18:07:39.879 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+18:07:39.879 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+18:07:39.879 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+18:07:39.879 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+18:07:39.879                                              
+18:07:39.879 Connect                                      At 18:07:33.607 Connect                  0.002 seconds. ✓ (STANDARD)
+18:07:39.879 InterfaceVersion                             At 18:07:33.612 InterfaceVersion         0.000 seconds. ✓ (FAST)
+18:07:39.879 Connected                                    At 18:07:33.612 Connected                0.001 seconds. ✓ (FAST)
+18:07:39.879 Description                                  At 18:07:33.616 Description              0.003 seconds. ✓ (FAST)
+18:07:39.879 DriverInfo                                   At 18:07:33.616 DriverInfo               0.001 seconds. ✓ (FAST)
+18:07:39.879 DriverVersion                                At 18:07:33.617 DriverVersion            0.001 seconds. ✓ (FAST)
+18:07:39.879 Name                                         At 18:07:33.618 Name                     0.001 seconds. ✓ (FAST)
+18:07:39.879 SupportedActions                             At 18:07:33.621 SupportedActions         0.003 seconds. ✓ (FAST)
+18:07:39.879 DeviceState                                  At 18:07:33.637 DeviceState              0.005 seconds. ✓ (FAST)
+18:07:39.879 CanAbortExposure                             At 18:07:33.643 CanAbortExposure         0.001 seconds. ✓ (FAST)
+18:07:39.879 CanAsymmetricBin                             At 18:07:33.644 CanAsymmetricBin         0.001 seconds. ✓ (FAST)
+18:07:39.879 CanGetCoolerPower                            At 18:07:33.645 CanGetCoolerPower        0.001 seconds. ✓ (FAST)
+18:07:39.879 CanPulseGuide                                At 18:07:33.646 CanPulseGuide            0.001 seconds. ✓ (FAST)
+18:07:39.879 CanSetCCDTemperature                         At 18:07:33.647 CanSetCCDTemperature     0.001 seconds. ✓ (FAST)
+18:07:39.879 CanStopExposure                              At 18:07:33.647 CanStopExposure          0.001 seconds. ✓ (FAST)
+18:07:39.879 CanFastReadout                               At 18:07:33.648 CanFastReadout           0.001 seconds. ✓ (FAST)
+18:07:39.879 MaxBinX                                      At 18:07:33.661 MaxBinX                  0.001 seconds. ✓ (FAST)
+18:07:39.879 MaxBinY                                      At 18:07:33.662 MaxBinY                  0.001 seconds. ✓ (FAST)
+18:07:39.879 BinX Read                                    At 18:07:33.663 BinX Read                0.001 seconds. ✓ (FAST)
+18:07:39.879 BinY Read                                    At 18:07:33.663 BinY Read                0.001 seconds. ✓ (FAST)
+18:07:39.879 BinX Write                                   At 18:07:33.675 BinX Write               0.001 seconds. ✓ (STANDARD)
+18:07:39.879 BinY Write                                   At 18:07:33.676 BinY Write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 BinX Write                                   At 18:07:33.676 BinX Write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 BinY Write                                   At 18:07:33.678 BinY Write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 CameraState                                  At 18:07:33.681 CameraState              0.002 seconds. ✓ (FAST)
+18:07:39.880 CameraXSize                                  At 18:07:33.682 CameraXSize              0.001 seconds. ✓ (FAST)
+18:07:39.880 CameraYSize                                  At 18:07:33.685 CameraYSize              0.003 seconds. ✓ (FAST)
+18:07:39.880 CCDTemperature                               At 18:07:33.687 CCDTemperature           0.002 seconds. ✓ (FAST)
+18:07:39.880 HasShutter                                   At 18:07:33.697 HasShutter               0.001 seconds. ✓ (FAST)
+18:07:39.880 ImageReady                                   At 18:07:33.700 ImageReady               0.001 seconds. ✓ (FAST)
+18:07:39.880 IsPulseGuiding                               At 18:07:33.717 IsPulseGuiding           0.003 seconds. ✓ (FAST)
+18:07:39.880 MaxADU                                       At 18:07:33.719 MaxADU                   0.001 seconds. ✓ (FAST)
+18:07:39.880 NumX Read                                    At 18:07:33.719 NumX Read                0.001 seconds. ✓ (FAST)
+18:07:39.880 NumX write                                   At 18:07:33.720 NumX write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 NumY Read                                    At 18:07:33.721 NumY Read                0.001 seconds. ✓ (FAST)
+18:07:39.880 NumY write                                   At 18:07:33.722 NumY write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 PixelSizeX                                   At 18:07:33.723 PixelSizeX               0.002 seconds. ✓ (FAST)
+18:07:39.880 PixelSizeY                                   At 18:07:33.724 PixelSizeY               0.001 seconds. ✓ (FAST)
+18:07:39.880 StartX Read                                  At 18:07:33.727 StartX Read              0.001 seconds. ✓ (FAST)
+18:07:39.880 StartX write                                 At 18:07:33.728 StartX write             0.001 seconds. ✓ (STANDARD)
+18:07:39.880 StartY Read                                  At 18:07:33.729 StartY Read              0.001 seconds. ✓ (FAST)
+18:07:39.880 StartY write                                 At 18:07:33.729 StartY write             0.001 seconds. ✓ (STANDARD)
+18:07:39.880 SensorType                                   At 18:07:33.730 SensorType               0.001 seconds. ✓ (FAST)
+18:07:39.880 ExposureMax Read                             At 18:07:33.734 ExposureMax Read         0.001 seconds. ✓ (FAST)
+18:07:39.880 ExposureMin Read                             At 18:07:33.734 ExposureMin Read         0.001 seconds. ✓ (FAST)
+18:07:39.880 ExposureResolution Read                      At 18:07:33.735 ExposureResolution Read  0.001 seconds. ✓ (FAST)
+18:07:39.880 GainMin                                      At 18:07:33.738 GainMin                  0.001 seconds. ✓ (STANDARD)
+18:07:39.880 GainMax                                      At 18:07:33.739 GainMax                  0.001 seconds. ✓ (STANDARD)
+18:07:39.880 Gain Read                                    At 18:07:33.740 Gain Read                0.001 seconds. ✓ (FAST)
+18:07:39.880 Gain Write                                   At 18:07:33.741 Gain Write               0.001 seconds. ✓ (STANDARD)
+18:07:39.880 ReadoutModes                                 At 18:07:33.745 ReadoutModes             0.001 seconds. ✓ (FAST)
+18:07:39.880 ReadoutMode Read                             At 18:07:33.746 ReadoutMode Read         0.001 seconds. ✓ (FAST)
+18:07:39.880 SensorName Read                              At 18:07:33.747 SensorName Read          0.001 seconds. ✓ (FAST)
+18:07:39.880 OffsetMin                                    At 18:07:33.748 OffsetMin                0.001 seconds. ✓ (FAST)
+18:07:39.880 OffsetMax                                    At 18:07:33.748 OffsetMax                0.000 seconds. ✓ (FAST)
+18:07:39.880 Offset                                       At 18:07:33.750 Offset                   0.001 seconds. ✓ (FAST)
+18:07:39.880 Offset Write                                 At 18:07:33.751 Offset Write             0.001 seconds. ✓ (STANDARD)
+18:07:39.880 AbortExposure                                At 18:07:33.757 AbortExposure            0.001 seconds. ✓ (STANDARD)
+18:07:39.880 StartExposure                                At 18:07:33.766 StartExposure            0.001 seconds. ✓ (STANDARD)
+18:07:39.880 ImageArray                                   At 18:07:35.810 ImageArray               0.006 seconds. ✓ (EXTENDED)
+18:07:39.880 StartExposure                                At 18:07:35.830 StartExposure            0.001 seconds. ✓ (STANDARD)
+18:07:39.880 ImageArray                                   At 18:07:37.855 ImageArray               0.001 seconds. ✓ (EXTENDED)
+18:07:39.880 Disconnect                                   At 18:07:39.877 Disconnect               0.001 seconds. ✓ (STANDARD)
+18:07:39.880                                              
+18:07:39.880 Congratulations, all members returned within their target response times!!          
