@@ -174,6 +174,12 @@ std::pair<double, double> optics_for_testing(const TelescopeDriver& driver);
 void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
                                         std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam (issue #2651): replaces the thread factory of both MoveAxis cap slots (one per axis), so a case can make
+/// a cap body's start fail. Call only while no start is in flight. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: while paused the driver's status poll (decision 0010) wakes and
 /// samples nothing, so a case can age the snapshot's frame on the task clock
 /// without the board going quiet. `driver` must come from the factories above;

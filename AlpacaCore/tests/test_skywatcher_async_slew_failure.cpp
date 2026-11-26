@@ -580,10 +580,16 @@ TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to t
     driver->move_axis(1, 1.0);
     REQUIRE(mount.axis_running(2));
     mount.reject_instant_stop(2, 10);  // the cap's ":L" is refused
-    // The cap is checked by the status poll, the one thread parked on the clock while the jog runs.
-    for (int i = 0; i < 62; ++i) {
-        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
+    // The status poll and the cap's body (#2651) are the two threads parked on the clock while the jog runs.
+    for (int i = 0; i < 59; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
         clock.advance(std::chrono::seconds(1));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    // The cap's body wakes at 60 s and sends its 3 stops, one 250 ms verify round each (#2651).
+    for (int i = 0; i < 24; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));  // the body's end leaves the poll alone
+        clock.advance(std::chrono::milliseconds(250));
         REQUIRE(clock.wait_for_woken_settled(kRendezvous));
     }
     std::string message;
