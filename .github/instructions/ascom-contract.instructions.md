@@ -107,7 +107,7 @@ The motion guards that make telescope motion fail closed live in one module, `ut
 | Throw | When |
 |---|---|
 | `InvalidValue` | Bad argument / out-of-range id or index — **even while disconnected** (precedes the connection check). |
-| `NotConnected` | Any operational property/method called while disconnected. |
+| `NotConnected` | Any operational property/method called while disconnected. One exception: a SafetyMonitor's `IsSafe` returns `false`, and does not throw, while its link is lost (Connected false after a link loss; never connected, connecting or disconnected by the client it still throws `NotConnected`), so a lost link never reads safe ([decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md) rule 3, #1753). |
 | `PropertyNotImplemented` | A property the hardware genuinely lacks (e.g. `Offsets` list, `SubExposureDuration`). |
 | `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
 | `ActionNotImplemented` | `Action()` called with a name the driver does not list in `SupportedActions` (0x40C, ASCOM's `ActionNotImplementedException`). An unsupported `CommandBlind`/`CommandBool`/`CommandString` is `MethodNotImplemented`, not this. |
