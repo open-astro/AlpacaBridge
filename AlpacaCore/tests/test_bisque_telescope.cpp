@@ -2213,6 +2213,28 @@ TEST_CASE("Bisque MoveAxis - a cap stop that fails keeps the axis moving, sends 
     rig.mount.fail_move_stop = false;
 }
 
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis renewal claims its axis before its start command, so the cap of the
+// move it renews sends no stop while the renewal's DoCommand(9) is on the wire, even when the first move's 60 s passes
+// then. The fake moves virtual time past it from inside that exchange.
+TEST_CASE("Bisque MoveAxis - a renewal that lands as the cap fires is not stopped by the old cap",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.clock.advance(std::chrono::seconds(59));
+    poll_now(*rig.driver);
+    REQUIRE(rig.mount.move_stops.load() == 0);
+    rig.mount.on_move_start = [&] { rig.clock.advance(std::chrono::seconds(2)); };  // 61 s, mid-renewal
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.mount.on_move_start = nullptr;
+    (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
+    rig.clock.advance(std::chrono::seconds(5));
+    (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
+    poll_now(*rig.driver);
+    CHECK(rig.mount.move_stops.load() == 0);
+    CHECK(rig.mount.move_starts.load() == 2);
+    CHECK(rig.driver->get_slewing());
+}
+
 TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motion command and at a reconnect",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
