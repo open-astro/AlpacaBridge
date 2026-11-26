@@ -203,7 +203,7 @@ Checks:
      reverse is required from record 0020 on and in any record that supersedes
      another), numbered Rules lines that end
      `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
-     file (`**` only in 0013), no except/unless/until/for now on a rule line
+     file (never `**`), no except/unless/until/for now on a rule line
      without the `<!-- allowed -->` marker, bare `Checked by: review` rules
      held to the per-record ratchet DECISION_BARE_REVIEW_BASELINE, and an
      index that lists every record once, in order, with `(retired)` on exactly
@@ -2709,10 +2709,6 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0017-serial-port-ownership.md": 0,
     "0019-connect-without-site.md": 1,
 }
-# The negative catalogue's rules have no natural file scope, so it alone may
-# write `Scope: `**``; anywhere else that scope marks a rule that belongs in
-# the catalogue or in a topic file.
-DECISION_ANY_SCOPE_RECORDS = ("0013-designs-to-avoid.md",)
 # Records from this number on say how to undo themselves (README.md, "How to
 # reverse"); the earlier ones add the section when next touched.
 DECISION_REVERSE_REQUIRED_FROM = 20
@@ -2824,9 +2820,9 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
             if rule.group("check") == "review":
                 bare_review += 1
             for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
-                if glob_pattern == "**" and name not in DECISION_ANY_SCOPE_RECORDS:
-                    findings.append("%s: rule %s scope `**` is allowed only in %s; name the files or move "
-                                    "the rule" % (where, rule.group("n"), ", ".join(DECISION_ANY_SCOPE_RECORDS)))
+                if glob_pattern == "**":
+                    findings.append("%s: rule %s scope `**` is not allowed; name the files or move the rule to "
+                                    "a topic file" % (where, rule.group("n")))
                 elif not any(_glob_match(p, glob_pattern) for p in tracked):
                     findings.append("%s: rule %s scope `%s` matches no tracked file"
                                     % (where, rule.group("n"), glob_pattern))
@@ -3012,10 +3008,13 @@ def _adoption_closed_issue_findings(rows, states):
     """A `partial` or `planned` row whose every issue is closed has nothing tracking the work it still owes.
 
     states: {issue number: "OPEN" | "CLOSED"}. Pure, so --self-test can drive it. A row with one open issue is
-    tracked; an issue whose state could not be read is a finding of its own, so a failed lookup is never a pass."""
+    tracked; with none open, an issue whose state could not be read is a finding of its own, so a failed lookup
+    is never a pass."""
     findings = []
     for where, name, state, issues in rows:
         unknown = [n for n in issues if n not in states]
+        if any(states.get(n) == "OPEN" for n in issues):
+            continue
         if unknown:
             findings.append("%s: Adoption row %s: could not read the state of %s"
                             % (where, name, ", ".join("#%d" % n for n in unknown)))
@@ -3043,8 +3042,9 @@ def check_adoption_issues(root=ROOT):
     for number in sorted({n for row in rows for n in row[3]}):
         result = subprocess.run(["gh", "issue", "view", str(number), "--repo", ADOPTION_ISSUES_REPO,
                                  "--json", "state", "--jq", ".state"], capture_output=True, text=True, check=False)
-        if result.returncode == 0 and result.stdout.strip() in ("OPEN", "CLOSED"):
-            states[number] = result.stdout.strip()
+        state = result.stdout.strip()
+        if result.returncode == 0 and state in ("OPEN", "CLOSED", "MERGED"):  # a row may name the PR that landed it
+            states[number] = "OPEN" if state == "OPEN" else "CLOSED"
     findings = _adoption_closed_issue_findings(rows, states)
     for f in findings:
         print("  - %s" % f)
@@ -4774,12 +4774,7 @@ def self_test():
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])
     f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"))
-    check("decision records: scope `**` outside the catalogue is reported",
-          any("scope `**` is allowed only in" in x for x in f))
-    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"),
-                extra={"0013-designs-to-avoid.md": good_record.replace("Scope: `src/a.cpp`", "Scope: `**`")})
-    check("decision records: scope `**` inside the catalogue is not the finding",
-          not any("0013-designs-to-avoid.md: rule 1 scope `**`" in x for x in f))
+    check("decision records: scope `**` is reported", any("scope `**` is not allowed" in x for x in f))
     f = records(reverse_from=2)
     check("decision records: a record from the cut-over number on without How to reverse is reported",
           any("0002-second.md: a record from 0002 on needs a `## How to reverse`" in x for x in f)
@@ -4842,6 +4837,8 @@ def self_test():
     f = _adoption_closed_issue_findings(unfinished, {2: "CLOSED", 3: "CLOSED", 4: "CLOSED"})
     check("adoption issues: a partial row whose issue is closed is reported", any("row B is partial but #2 is closed" in x for x in f))
     check("adoption issues: a planned row whose issues are all closed is reported", any("row C is planned but #3, #4 are all closed" in x for x in f))
+    check("adoption issues: one open issue tracks the row even when another was not read",
+          _adoption_closed_issue_findings(unfinished, {2: "OPEN", 4: "OPEN"}) == [])
     f = _adoption_closed_issue_findings(unfinished, {2: "OPEN", 3: "CLOSED"})
     check("adoption issues: an issue whose state was not read is a finding, not a pass", any("row C: could not read the state of #4" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/e_driver.cpp": "Clock c;"}))
