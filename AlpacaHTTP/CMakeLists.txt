@@ -549,6 +549,8 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_thread_join tests/test_thread_join.cpp)
     target_link_libraries(test_thread_join alpacahttp)
     target_include_directories(test_thread_join PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    # It scans src/http/server.cpp for a raw .join() (decision 0002 rule 2).
+    target_compile_definitions(test_thread_join PRIVATE ALPACAHTTP_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME test_thread_join COMMAND test_thread_join)
 
     # open-astro#664: the JSON bridge of the device catalog (src/core/catalog_json.h,
