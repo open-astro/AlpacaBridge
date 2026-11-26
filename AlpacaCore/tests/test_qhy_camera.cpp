@@ -857,6 +857,35 @@ TEST_CASE("QHY Camera Driver - 16-bit samples are read little-endian (low byte f
     driver->set_connected(false);
 }
 
+// The QHY SDK API manual ("Image data structure") says RGB24 frames from
+// GetQHYCCDSingleFrame are BGR: bytes 0..2 are B, G, R of the first pixel.
+// Alpaca colour planes are R, G, B, so the driver must swap like ZWO, SVBONY
+// and Player One do (#2689).
+TEST_CASE("QHY Camera Driver - 3-channel 8-bit frames are BGR and come out as RGB planes", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 2;
+    fake.frame_height = 1;
+    fake.frame_bpp = 8;
+    fake.frame_channels = 3;
+    fake.mem_length_override = 6;
+    fake.frame_bytes = {10, 20, 30, 40, 50, 60};  // B,G,R of pixel 0, then B,G,R of pixel 1
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(1);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 2);
+    CHECK(image.height == 1);
+    REQUIRE(image.rank == 3);
+    // Per pixel: plane 0 = R, plane 1 = G, plane 2 = B.
+    CHECK(image.data == std::vector<std::int32_t>{30, 20, 10, 60, 50, 40});
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after NumX changes", "[qhy][camera][unit]") {
     auto fake = make_fake();
     fake.frame_width = 2;
