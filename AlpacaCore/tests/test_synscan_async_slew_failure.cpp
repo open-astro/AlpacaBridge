@@ -3024,7 +3024,7 @@ TEST_CASE("SynScan MoveAxis - a client-silence watchdog stop leaves the 60 s bou
 }
 
 // #2412 (#2652 review): every stop after a motion fault is verified, as AbortSlew's: the slew deadline, a failed
-// Park, the MoveAxis bound, a refused start that displaced a body, and Unpark during a Park.
+// Park, the MoveAxis cap, a refused start that displaced a body, and Unpark during a Park.
 namespace {
 
 // Steps virtual time in 1 s steps up to just short of the slew deadline, then in 50 ms steps until `pred` holds, so
