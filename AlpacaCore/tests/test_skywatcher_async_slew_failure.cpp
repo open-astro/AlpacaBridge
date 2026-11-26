@@ -33,6 +33,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -1011,6 +1012,91 @@ TEST_CASE("SkyWatcher async - SiteLongitude is refused while a Park runs", "[sky
     CHECK(read_slewing(*driver) == SlewingRead::True);
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK_NOTHROW(driver->set_site_longitude(10.0));
+    driver->set_connected(false);
+}
+
+// open-astro#2407: the AbortSlew stop check is what proves an acked ":L" stopped the axes. When that check cannot
+// start (the OS refuses its thread), nothing confirms the stop, so the next Slewing read must raise it instead of
+// reading as a stopped mount. Dec's ":L" is acked and ignored here, so the axis runs on.
+TEST_CASE("SkyWatcher async - an AbortSlew whose stop check does not start raises through Slewing",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.ignore_instant_stops(2, 10);
+    sw::set_abort_verify_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    REQUIRE_NOTHROW(driver->abort_slew());
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("AbortSlew: the stop could not be confirmed") != std::string::npos);
+    CHECK(mount.axis_running(2));  // the fake still runs: only the check would have resent the stop
+    driver->set_connected(false);
+}
+
+// open-astro#2407 (the issue's Decisions, 2026-11-24): a Sync more than util::kMaxSyncOffsetDegrees from where
+// the mount points is refused (InvalidValue), and writes nothing. A Sky-Watcher board has no sky reference at power-up,
+// so the first Sync after each Connect is exempt: it sets the reference.
+namespace {
+
+bool sync_refused_invalid_value(alpacacore::TelescopeDriver& driver, double ra, double dec) {
+    try {
+        driver.sync_to_coordinates(ra, dec);
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.error_code() == alpacacore::AlpacaError::InvalidValue;
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher sync - a Sync more than 5 degrees off after the first is refused and writes nothing",
+          "[skywatcher][sync][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    // The first Sync of the session is far from the power-up frame, and is taken.
+    const double first_ra = std::fmod(driver->get_right_ascension() + 3.0, 24.0);
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(first_ra, 20.0));
+    const double ra = driver->get_right_ascension();
+    const double dec = driver->get_declination();
+    const int writes_before = mount.frames_seen('E');
+    const double axis1_before = mount.axis_degrees(1);
+    const double axis2_before = mount.axis_degrees(2);
+    CHECK(sync_refused_invalid_value(*driver, ra, dec + 10.0));
+    CHECK(mount.frames_seen('E') == writes_before);  // no position write
+    CHECK(mount.axis_degrees(1) == axis1_before);
+    CHECK(mount.axis_degrees(2) == axis2_before);
+    CHECK(std::abs(driver->get_declination() - dec) < 0.01);
+    // A Sync within the bound is still taken.
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(ra, dec + 2.0));
+    CHECK(mount.frames_seen('E') > writes_before);
+    CHECK(std::abs(driver->get_declination() - (dec + 2.0)) < 0.01);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher sync - each Connect exempts its first Sync again", "[skywatcher][sync][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(std::fmod(driver->get_right_ascension() + 3.0, 24.0), 20.0));
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    // A new session: its first Sync sets the reference however far off.
+    const double ra = std::fmod(driver->get_right_ascension() + 6.0, 24.0);
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(ra, -10.0));
+    CHECK(std::abs(driver->get_declination() - (-10.0)) < 0.01);
+    // The second Sync of that session is bounded.
+    const int writes_before = mount.frames_seen('E');
+    CHECK(sync_refused_invalid_value(*driver, ra, 10.0));
+    CHECK(mount.frames_seen('E') == writes_before);
     driver->set_connected(false);
 }
 

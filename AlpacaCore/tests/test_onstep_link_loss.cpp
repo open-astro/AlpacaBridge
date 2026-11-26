@@ -13,7 +13,7 @@
 // OnStep serial link loss (decision 0009, issue #1241): an unplugged or
 // re-enumerated adapter reads as not connected, operations fail NotConnected
 // at once, a Connected=true reconnects instead of short-circuiting, and the
-// reconnect after a long outage stops the motion that ran unattended (#521).
+// reconnect after a link loss stops the motion that ran unattended (#521, #2406).
 // The serial cases run the driver over a pty reached through a symlink, which
 // an unplug removes. The network cases at the end (#2220) run it over the TCP
 // command channel against a loopback FakeMountServer, where a hangup is the
@@ -288,13 +288,6 @@ struct JoinOnExit {
         if (thread.joinable()) {
             thread.join();
         }
-    }
-};
-
-struct WindowReset {
-    ~WindowReset() {
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(
-            std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kRelinkMotionPreserveWindow));
     }
 };
 
@@ -672,10 +665,12 @@ TEST_CASE("OnStep link loss - a reconnect after the loss is recorded keeps the n
     CHECK(replugged.received(":GVP#"));
 }
 
-TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outage", "[onstep][serial][connected]") {
-    WindowReset window_reset;
-    // The outage is timed on the driver's clock, which the wrapper's loss
-    // stamps read too (decision 0005); declared before the driver.
+// #2406 (#2396 AB-9): a link lost while a GOTO or a MoveAxis ran leaves the mount moving with nobody in control, so
+// the reconnect sends AbortSlew's stops whatever the outage length. The #521 window (5 s) no longer keeps motion
+// alive after a short outage.
+TEST_CASE("OnStep link loss - the reconnect after a link loss stops motion whatever the outage length",
+          "[onstep][serial][connected][goto-safety]") {
+    // The loss stamps read the driver's clock (decision 0005); declared before the driver.
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
@@ -689,10 +684,9 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
     first.sever_link();
     link.repoint(replugged.slave_path());
 
-    SECTION("outage past the window: AbortSlew's stops are sent") {
+    SECTION("a reconnect at once after the loss: AbortSlew's stops are sent") {
         REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
-        driver->set_connected(true);
+        driver->set_connected(true);             // no time has passed on the driver's clock
         REQUIRE(driver->get_connected());
         CHECK(replugged.received(":Q#"));
         CHECK(replugged.received(":Qn#"));
@@ -700,45 +694,30 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
         CHECK(replugged.received(":Qe#"));
         CHECK(replugged.received(":Qw#"));
     }
-    SECTION("outage past the window while the mount parks: the park is left to finish") {
+    SECTION("the mount parks: the park is left to finish") {
         REQUIRE_FALSE(driver->get_connected());
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
         replugged.set_reply(":GU#", "nIEo190#");  // parking (#1289 item 5)
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
         CHECK_FALSE(replugged.received_any_stop());  // :Q# would abort the park
     }
-    SECTION("outage past the window, status unreadable: the stops are sent anyway") {
+    SECTION("status unreadable: the stops are sent anyway") {
         REQUIRE_FALSE(driver->get_connected());
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
         replugged.set_reply(":GU#", "");  // no reply: whether it parks is unknown
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
         CHECK(replugged.received(":Q#"));
         CHECK(replugged.received(":Qe#"));
     }
-    SECTION("outage inside the window: motion is left alone") {
-        REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::hours(1));
-        driver->set_connected(true);
-        REQUIRE(driver->get_connected());
-        CHECK_FALSE(replugged.received_any_stop());
-    }
-    SECTION("the management listing alone notices the loss, and a watched outage keeps motion") {
+    SECTION("the management listing alone notices the loss: the reconnect still stops") {
         REQUIRE_FALSE(driver->get_link_fault().empty());  // only the listing has looked
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::hours(1));
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
-        CHECK_FALSE(replugged.received_any_stop());
+        CHECK(replugged.received(":Q#"));
+        CHECK(replugged.received(":Qn#"));
     }
-    SECTION("nobody looked for longer than the window: the reconnect stops, even after its own Connected read") {
-        // Nothing reads Connected or runs an operation for longer than the
-        // window, then Connected is read right before the reconnect, as the
-        // router does before every Connect. That read is the first to notice
-        // the loss, so timing from it would call the outage 0 s; the outage
-        // is timed from the last moment the link was seen alive instead.
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(1500));
-        clock.advance(std::chrono::milliseconds(2000));
+    SECTION("nobody looked for a long time: the reconnect stops, even after its own Connected read") {
+        clock.advance(std::chrono::seconds(10));
         REQUIRE_FALSE(driver->get_connected());
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
@@ -754,7 +733,6 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
 // with that driver instead of being timed as an outage there.
 TEST_CASE("OnStep link loss - a loss stamped on one driver's clock is not timed on the next driver's",
           "[onstep][serial][connected]") {
-    WindowReset window_reset;
     alpacacore::test::FakeTaskClock first_clock;
     alpacacore::test::FakeTaskClock second_clock;
     FakeOnStepSerialMount first;
@@ -768,8 +746,7 @@ TEST_CASE("OnStep link loss - a loss stamped on one driver's clock is not timed 
         link.repoint(replugged.slave_path());
         REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped on first_clock, here
     }
-    // Any recorded outage would stop motion now.
-    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+    // Any recorded loss would stop motion now.
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), second_clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
@@ -802,7 +779,6 @@ TEST_CASE("OnStep link loss - a change of clock forgets the wrapper's loss stamp
 // lost driver's own reconnect still times its outage.
 TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the loss stamps alone",
           "[onstep][serial][connected]") {
-    WindowReset window_reset;
     alpacacore::test::FakeTaskClock fake_clock;
     alpacacore::test::FakeTaskClock other_clock;
     FakeOnStepSerialMount first;
@@ -817,10 +793,9 @@ TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the lo
         link.repoint(replugged.slave_path());
         REQUIRE_FALSE(driver->get_connected());  // the loss is stamped here
         { auto bystander = alpacacore::vendor::onstep::create_onstep_telescope(1, serial_info(link), other); }
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
-        CHECK(replugged.received(":Q#"));  // the outage was still timed
+        CHECK(replugged.received(":Q#"));  // the loss stamp was still there
         driver->set_connected(false);
     };
     SECTION("a driver on another clock that never connected") { lose_then_reconnect(fake_clock, other_clock); }
@@ -873,9 +848,8 @@ TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once
     }
 }
 
-TEST_CASE("OnStep link loss - a reconnect that auto-detects a new port still stops motion after a long outage",
+TEST_CASE("OnStep link loss - a reconnect that auto-detects a new port still stops motion after a link loss",
           "[onstep][serial][connected]") {
-    WindowReset window_reset;
     FakeOnStepSerialMount first;
     PortLink old_port(first.slave_path());
     FakeOnStepSerialMount replugged;
@@ -893,7 +867,6 @@ TEST_CASE("OnStep link loss - a reconnect that auto-detects a new port still sto
 
     first.sever_link();
     old_port.remove();
-    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
     REQUIRE_FALSE(driver->get_connected());  // the router's read before a Connect
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
@@ -1246,14 +1219,11 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
 
     mount.mute(false);
     REQUIRE_FALSE(mount.received_any_stop());
-    // The outage is timed from the loss (the muted reads still found the fd
-    // alive), so the relink must come past the #521 preserve window.
-    clock.advance(alpacacore::util::kRelinkMotionPreserveWindow + std::chrono::seconds(1));
-    driver->set_connected(true);  // only the client relinks
+    driver->set_connected(true);  // only the client relinks, here at once after the loss
     CHECK(driver->get_connected());
     CHECK(driver->get_link_fault().empty());
-    // The loss was recorded as for a pulled adapter, so the relink after a
-    // long outage sends the #521 stops.
+    // The loss was recorded as for a pulled adapter, so the relink sends the
+    // stops, whatever the outage length (#2406).
     CHECK(mount.received_any_stop());
 
     driver->set_connected(false);
@@ -1484,7 +1454,6 @@ TEST_CASE("OnStep link loss - a connect that loses the link keeps the earlier na
 // Connect would not time the outage and would leave the motion that ran unattended.
 TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps its loss time for the next connect",
           "[onstep][serial][connected]") {
-    WindowReset window_reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
@@ -1493,7 +1462,6 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(driver->get_connected());
 
-    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(1500));
     clock.advance(std::chrono::milliseconds(2000));
     FakeOnStepSerialMount replugged;
     link.repoint(replugged.slave_path());
@@ -1777,14 +1745,13 @@ TEST_CASE("OnStep network - a refused connect fails at once, naming the host and
 }
 
 // Decision 0009 rule 2a and #521/#1289 over TCP: the hangup is a loss stamped at once, a reconnect the controller
-// refuses keeps the stamps, and the reconnect that gets through times the whole outage (21 s here, from the last time
-// the link was seen alive) and stops the motion that ran unattended only when that is past the window, and never
-// while the mount parks. A refused reconnect that re-stamped the times would measure 1 s and stop nothing.
+// refuses keeps the stamps, and the reconnect that gets through stops the motion that ran unattended whatever the
+// outage length (#2406; 21 s here, from the last time the link was seen alive, only logged), and never while the
+// mount parks. A refused reconnect that dropped the stamps would stop nothing.
 // Falsified by: onstep_protocol_wrapper.cpp link_alive() not polling the socket for a hangup (no stamp, so the
 // reconnect stops nothing)
-TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after a long outage, never while parking",
+TEST_CASE("OnStep network - the reconnect after a hangup stops motion whatever the outage length, never while parking",
           "[onstep][network][connected]") {
-    WindowReset window_reset;
     alpacacore::test::FakeTaskClock clock;
     auto first = std::make_unique<NetworkOnStep>();
     REQUIRE(first->server.ok());
@@ -1805,8 +1772,7 @@ TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after
     NetworkOnStep back(static_cast<std::uint16_t>(port));  // the controller is back, on the same port
     REQUIRE(back.server.ok());
     clock.advance(std::chrono::seconds(1));  // the outage is now 21 s; 1 s since the refused reconnect
-    SECTION("outage past the window: AbortSlew's stops are sent") {
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(10));
+    SECTION("AbortSlew's stops are sent") {
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
         CHECK(back.received(":Q#"));
@@ -1815,15 +1781,8 @@ TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after
         CHECK(back.received(":Qe#"));
         CHECK(back.received(":Qw#"));
     }
-    SECTION("outage past the window while the mount parks: the park is left to finish (#1289)") {
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(10));
+    SECTION("while the mount parks: the park is left to finish (#1289)") {
         back.set_status("nIEo190#");
-        driver->set_connected(true);
-        REQUIRE(driver->get_connected());
-        CHECK_FALSE(back.received_any_stop());
-    }
-    SECTION("outage inside the window: motion is left alone") {
-        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(30));
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
         CHECK_FALSE(back.received_any_stop());

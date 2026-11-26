@@ -28,11 +28,13 @@
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -145,6 +147,31 @@ std::chrono::microseconds timed(Fn&& fn) {
     const auto start = std::chrono::steady_clock::now();
     fn();
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// Runs `fn`, a call that waits on `clock` (a verified AbortSlew, #2412), on its own thread and steps the clock by
+// `step` until it returns, then rethrows what it threw. Fails the case when it has not returned after 60 s of real
+// time (the thread is released first, so it can be joined).
+template <typename Fn>
+void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step = std::chrono::milliseconds(50)) {
+    std::exception_ptr error;
+    std::atomic<bool> done{false};
+    std::thread caller([&] {
+        try {
+            fn();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done.store(true);
+    });
+    const bool returned = clock.drain_until([&] { return done.load(); }, step, std::chrono::seconds(60));
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    caller.join();
+    REQUIRE(returned);
+    if (error) std::rethrow_exception(error);
 }
 
 // Advances the fake clock one poll period, then waits (up to `bound` of real time) until the woken poll

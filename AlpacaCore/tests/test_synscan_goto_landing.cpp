@@ -80,6 +80,10 @@ struct LandingOffsetHandset {
     std::atomic<uint32_t> ra_offset_counts{kRaOffsetCounts};
     std::atomic<bool> growing{false};
     std::atomic<int> goto_ms{300};
+    // A real handset reports a GOTO it accepted in progress at the next `L`. Virtual time may run past goto_ms while
+    // the driver is still on the socket, so the first `L` reads after each GOTO answer in progress (#2412's start
+    // grace). Three, so the status poll reading one first cannot take the slew wait's.
+    std::atomic<int> goto_status_unread{0};
     // When set, GOTO n (1-based, up to the array size) lands dec_offset_script[n-1] counts off the commanded Dec:
     // the random per-GOTO Dec scatter a SynScan handset shows on a real mount (#1027).
     std::atomic<bool> dec_scripted{false};
@@ -264,6 +268,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 }
                 st->dec_raw.store(static_cast<uint32_t>(static_cast<int32_t>(dec) + dec_offset) & kCountsMask);
                 st->goto_started.store(st->now().time_since_epoch().count());
+                st->goto_status_unread.store(3);
                 if (ordinal == 1) st->first_goto_at.store(st->goto_started.load());
                 if (ordinal == 2) st->second_goto_at.store(st->goto_started.load());
                 st->goto_stopped.store(false);
@@ -271,6 +276,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             }
             case 'L':
                 st->status_reads.fetch_add(1);
+                if (st->goto_status_unread.fetch_sub(1) > 0 && !st->goto_stopped.load()) return "1#";
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':
                 st->goto_stopped.store(true);
@@ -404,6 +410,41 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, std::size_t mi
     const auto real_deadline = Clock::now() + std::chrono::seconds(120);
     while (!done.load() && Clock::now() < real_deadline) {
         step_virtual(clock, min_waiters);
+    }
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    caller.join();
+    if (error) std::rethrow_exception(error);
+}
+
+// Runs a blocking driver call on its own thread and steps virtual time only while that thread waits on the clock,
+// then rethrows what it threw. Not a waiter count: the status poll and a body the call supersedes park on the same
+// clock, so a count can be met before the call has even started, and virtual time then runs ahead of it (the #880
+// AbortSlew case read 5.35 s on arm64 CI). Bounded by 120 s of real time.
+template <typename Fn>
+void run_virtual_on_own_thread(alpacacore::test::FakeTaskClock& clock, Fn&& fn) {
+    std::exception_ptr error;
+    std::atomic<bool> done{false};
+    std::atomic<std::thread::id> caller_id{};
+    std::thread caller([&] {
+        caller_id.store(std::this_thread::get_id());
+        try {
+            fn();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done.store(true);
+    });
+    const auto real_deadline = Clock::now() + std::chrono::seconds(120);
+    while (!done.load() && Clock::now() < real_deadline) {
+        const auto id = caller_id.load();
+        if (id == std::thread::id{} || !clock.wait_for_waiter_thread(id, std::chrono::milliseconds(20))) {
+            continue;
+        }
+        clock.advance(kVirtualStep);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
@@ -892,27 +933,13 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     }
     REQUIRE(st->nudge_starts.load() == 1);  // the landing move is under way
 
-    // The abort must return while virtual time stands still: the move's remaining 4 s of it never comes, so an abort
-    // that waited it out would hang here (and is released after the check below).
+    // The abort verifies its stop on the task clock (#2412), so virtual time steps under it; it returns well before
+    // the move's remaining 4 s would have run out.
     const auto abort_started = clock.now();
-    std::promise<void> abort_done;
-    auto aborted = abort_done.get_future();
-    std::thread aborter([&] {
-        try {
-            driver->abort_slew();
-            abort_done.set_value();
-        } catch (...) {
-            abort_done.set_exception(std::current_exception());
-        }
-    });
-    const bool returned = aborted.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-    CHECK(returned);
+    // Stepped only while the abort's own thread waits on the clock, so no step lands before it starts or while it is
+    // on the socket.
+    REQUIRE_NOTHROW(run_virtual_on_own_thread(clock, [&] { driver->abort_slew(); }));
     CHECK(clock.now() - abort_started < std::chrono::milliseconds(1500));  // not the move's remaining 4 s
-    while (aborted.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
-        clock.advance(std::chrono::seconds(10));  // release the abort (it may park again) so the thread can join
-    }
-    aborter.join();
-    CHECK_NOTHROW(aborted.get());
     CHECK_FALSE(driver->get_slewing());
     advance_idle(clock, std::chrono::milliseconds(600));
     CHECK_FALSE(driver->get_slewing());
@@ -960,16 +987,28 @@ TEST_CASE(
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the caller is parked in the nudge wait
     const auto parked_at = clock.now();
 
-    REQUIRE_NOTHROW(driver->abort_slew());
+    // AbortSlew's claim wakes the caller at once; AbortSlew itself then verifies its stop on the task clock (#2412), so
+    // it runs on its own thread and is stepped only after the caller's return was checked with the clock standing.
+    std::atomic<bool> aborted{false};
+    std::atomic<bool> abort_threw{false};
+    std::thread aborter([&] {
+        try {
+            driver->abort_slew();
+        } catch (...) {
+            abort_threw.store(true);
+        }
+        aborted.store(true);
+    });
     const auto join_deadline = Clock::now() + std::chrono::seconds(5);
     while (!returned.load() && Clock::now() < join_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(returned.load());  // without the fix the caller sleeps out the 4 s of virtual time, which never comes
     CHECK(clock.now() - parked_at < std::chrono::milliseconds(500));
-    if (!returned.load()) {
-        clock.advance(std::chrono::seconds(10));  // release the caller so the thread can join
-    }
+    clock.drain_until([&] { return aborted.load() && returned.load(); }, std::chrono::milliseconds(50),
+                      std::chrono::seconds(60));
+    aborter.join();
+    CHECK_FALSE(abort_threw.load());
     caller.join();
     CHECK(st->nudge_count.load() == 1);  // AbortSlew stopped the move; the woken nudge did not stop it again
     driver->set_connected(false);
@@ -1054,9 +1093,12 @@ constexpr long kWaiterBoundMs = 500;
 TEST_CASE("SynScan initiator supersede - AbortSlew during a long landing move waits for its stop only",
           "[synscan][initiator-supersede][goto-landing]") {
     LongDecNudge n;
-    const long took = n.time_initiator([&] { n.driver->abort_slew(); });
-    CHECK(took >= 0);
-    CHECK(took < kWaiterBoundMs);
+    // AbortSlew verifies its stop on the task clock (#2412), so it is stepped; it takes the verify's virtual time
+    // (well under a second), never the move's remaining seconds.
+    const auto t0 = n.clock.now();
+    // Stepped only while the abort's own thread waits on the clock (see run_virtual_on_own_thread()).
+    REQUIRE_NOTHROW(run_virtual_on_own_thread(n.clock, [&] { n.driver->abort_slew(); }));
+    CHECK(n.clock.now() - t0 < std::chrono::milliseconds(1500));
     advance_idle(n.clock, std::chrono::milliseconds(600));
     const auto wire = n.st->wire_log();
     std::string order;
@@ -1198,7 +1240,8 @@ namespace {
 // A Tracking write queued behind the RA landing move, then `initiator` (AbortSlew, or MoveAxis(0, 0)) behind it: the
 // write's `T0` goes out first, so the initiator's tracking restore must use the mode at its own turn (off), not the
 // one cached when it was called.
-void check_initiator_behind_queued_tracking_write(const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+void check_initiator_behind_queued_tracking_write(
+    const std::function<void(alpacacore::TelescopeDriver&, alpacacore::test::FakeTaskClock&)>& initiator) {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();
     st->attach(clock);
@@ -1234,7 +1277,7 @@ void check_initiator_behind_queued_tracking_write(const std::function<void(alpac
     // The initiator claims, which ends the move at once; it then waits for the write's turn.
     std::exception_ptr initiator_error;
     try {
-        initiator(*driver);
+        initiator(*driver, clock);
     } catch (...) {
         initiator_error = std::current_exception();
     }
@@ -1269,12 +1312,14 @@ void check_initiator_behind_queued_tracking_write(const std::function<void(alpac
 
 TEST_CASE("SynScan initiator supersede - AbortSlew queued behind a Tracking write keeps tracking off",
           "[synscan][initiator-supersede][goto-landing]") {
-    check_initiator_behind_queued_tracking_write([](auto& driver) { driver.abort_slew(); });
+    // AbortSlew verifies its stop on the task clock (#2412).
+    check_initiator_behind_queued_tracking_write(
+        [](auto& driver, auto& clock) { alpacacore::test::call_stepping(clock, [&] { driver.abort_slew(); }); });
 }
 
 TEST_CASE("SynScan initiator supersede - an RA MoveAxis stop queued behind a Tracking write keeps tracking off",
           "[synscan][initiator-supersede][goto-landing]") {
-    check_initiator_behind_queued_tracking_write([](auto& driver) { driver.move_axis(0, 0.0); });
+    check_initiator_behind_queued_tracking_write([](auto& driver, auto&) { driver.move_axis(0, 0.0); });
 }
 
 // With no motion in flight the turn is free: the write goes out at once and is the same `T` as before.
@@ -1872,7 +1917,7 @@ TEST_CASE("SynScan GOTO landing - a superseded synchronous landing move leaves t
     }
     REQUIRE(st->nudge_starts.load() >= 1);
     advance_idle(clock, std::chrono::milliseconds(300));
-    driver->abort_slew();
+    alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });  // verified on the task clock (#2412)
     driver->move_axis(0, 0.5);
     while (!slew_done.load()) {
         step_virtual(clock);

@@ -76,6 +76,10 @@ namespace alpacacore::test {
  * (its stop) are counted; `fail_move_stop` answers the stop with a TheSkyX error. `ledger()` lists the motion and
  * park commands in the order they came, as "Abort", "SlewToRaDec", "MoveStart", "MoveStop" and "IsParked".
  *
+ * A park in flight reads as a slew to IsSlewComplete, as TheSkyX's Park docs say to monitor it. With
+ * `abort_ends_park` set, an Abort() that is not ignored also ends it (off by default: the #1838 cases let the park
+ * finish after an AbortSlew).
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -134,6 +138,7 @@ public:
     std::atomic<int> move_starts{0};
     std::atomic<int> move_stops{0};
     std::atomic<bool> fail_move_stop{false};
+    std::atomic<bool> abort_ends_park{false};
 
     std::vector<std::string> ledger() const {
         std::lock_guard<std::mutex> lock(ledger_mutex_);
@@ -173,6 +178,7 @@ private:
                 --ignore_aborts;
             } else {
                 slewing = false;
+                if (abort_ends_park) parking_ = false;
             }
             return "|No error. Error = 0.OK#";
         }
@@ -292,7 +298,7 @@ private:
                     dec_degrees = target_dec_;
                 }
             }
-            return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
+            return slewing || parking_ ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
         }
         if (has(command, "DirectGuide")) {
             ++guide_commands;

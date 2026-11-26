@@ -203,6 +203,9 @@ public:
 
     SiteInfo get_site_info();
     void set_site_info(const SiteInfo& info);
+    /// #2408: a ":SMGE" whose site and go-ahead are decided inside the exchange, as set_time_info_if() does for the
+    /// time. Returns whether it was sent (and acknowledged: a refused write throws like set_site_info()).
+    bool set_site_info_if(const std::function<std::optional<SiteInfo>()>& decide);
 
     TimeInfo get_time_info();
     void set_time_info(const TimeInfo& info);
