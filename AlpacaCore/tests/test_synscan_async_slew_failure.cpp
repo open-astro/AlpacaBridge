@@ -2374,7 +2374,8 @@ struct MoveAxisBoundRig {
         alpacacore::logging::set_log_sink(
             [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
                 // The driver's own lines, and the guard's note that a stop could not be sent.
-                const bool driver_line = component == "SynScan" && message.find("MoveAxis on axis") != std::string_view::npos;
+                const bool driver_line =
+                    component == "SynScan" && message.find("MoveAxis on axis") != std::string_view::npos;
                 if (!driver_line && component != "MotionGuards") return;
                 if (level == alpacacore::logging::LogLevel::Info) ++infos;
                 if (level == alpacacore::logging::LogLevel::Warn || level == alpacacore::logging::LogLevel::Error) {
@@ -2486,7 +2487,8 @@ TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][t
     REQUIRE(rig.bound_thread.load() != std::thread::id{});  // the bound watches the axis
     REQUIRE(rig.clock.wait_for_waiter_thread(rig.bound_thread.load(), std::chrono::seconds(5)));
     rig.advance(std::chrono::seconds(65));
-    CHECK(rig.warns.load() == 4);  // at 60 s it tried the axis's stop 3 times (the dropped link refused each), then kept the failure
+    CHECK(rig.warns.load() ==
+          4);  // at 60 s it tried the axis's stop 3 times (the dropped link refused each), then kept the failure
 }
 
 // A stop the handset answered is known to have landed: only its tracking restore failed. The axis is not put back

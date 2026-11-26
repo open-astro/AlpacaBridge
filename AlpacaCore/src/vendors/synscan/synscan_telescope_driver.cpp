@@ -1291,7 +1291,8 @@ public:
                 set_slewing_locked(prev_slewing);
                 at_home_ = prev_at_home;
                 // TODO: a jog flag with no running cap (cap restart where a restored jog flag is set): the cap bodies
-                // were cancelled when the flags were taken over, so a restored jog has no 60 s limit until it is renewed.
+                // were cancelled when the flags were taken over, so a restored jog has no 60 s limit until it is
+                // renewed.
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
@@ -1867,7 +1868,8 @@ public:
                 set_slewing_locked(prev_slewing);
                 at_home_ = prev_at_home;
                 // TODO: a jog flag with no running cap (cap restart where a restored jog flag is set): the cap bodies
-                // were cancelled when the flags were taken over, so a restored jog has no 60 s limit until it is renewed.
+                // were cancelled when the flags were taken over, so a restored jog has no 60 s limit until it is
+                // renewed.
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
@@ -2793,7 +2795,8 @@ private:
 
     static std::string move_axis_cap_ran_text(int axis) {
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(util::kMaxMoveAxisDuration).count();
-        return "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) + " s, the longest allowed";
+        return "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
+               " s, the longest allowed";
     }
 
     // What the last stop of a cap body did to the RA tracking mode, for the outcome to settle. Written by the stop,
