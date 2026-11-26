@@ -76,6 +76,9 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
+    // Decision 0009 rule 5: the one fault text, the status cache's latched fault, empty while healthy.
+    std::string get_link_fault() const override { return status_cache_.fault(); }
+
     ToupTekThermalSwitchDriver(int device_number, int camera_index, ToupTekSDK& sdk)
         : AsyncConnectable(kLogTag),
           sdk_(sdk),

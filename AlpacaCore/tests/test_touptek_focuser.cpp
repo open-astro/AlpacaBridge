@@ -461,7 +461,8 @@ TEST_CASE("ToupTek AAF Focuser Driver - A move and a halt drop the cached frame"
 }
 
 // Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw
-// (the third failure reports the raw SDK error, not "communications compromised").
+// (the third failure reports the raw SDK error, not "communications compromised"), or touptek_focuser_driver.cpp
+// dropping its get_link_fault() override (decision 0009 rule 5: the latched fault text reads empty).
 TEST_CASE("ToupTek AAF Focuser Driver - A dead link refuses reads instead of serving the cache",
           "[touptek][focuser][unit][fake]") {
     alpacacore::test::FakeToupTekSDK fake;
@@ -479,10 +480,14 @@ TEST_CASE("ToupTek AAF Focuser Driver - A dead link refuses reads instead of ser
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        // Decision 0009 rule 5: get_link_fault() is the one fault text, the one the getter throws.
+        REQUIRE_FALSE(driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(driver->get_link_fault()) != std::string::npos);
     }
     CHECK(driver->get_connected() == true);
     CHECK(driver->get_device_state().empty());
 
     fake.throw_from.clear();
     CHECK(driver->get_position() == 0);
+    CHECK(driver->get_link_fault().empty());
 }
