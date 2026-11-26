@@ -747,4 +747,24 @@ TEST_CASE("SynScan host clock - a reconnect drops a host clock change left pendi
     CHECK(rig.done.size() == 0);
 }
 
+// #2685: call_stepping() steps the task clock only while the call is parked on it, so a call held in real time (a
+// slow wire reply on a slow runner) does not age the paused poll's held frame past util::kLinkStalenessBound. The call
+// below waits in real time for 300 ms, or until the clock is 31 s on: a helper that steps the clock whatever the call
+// is doing reaches 31 s at once, and the RightAscension read then finds the frame lost.
+TEST_CASE("SynScan host clock - a stepped call held in real time does not age the paused poll's frame (#2685)",
+          "[synscan][clock]") {
+    TrustGuard trust(true);
+    Rig rig(false);
+    rig.connect();
+    const auto start = rig.clock.now();
+    REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] {
+        const auto give_up = std::chrono::steady_clock::now() + milliseconds(300);
+        while (rig.clock.now() < start + std::chrono::seconds(31) && std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+        CHECK_NOTHROW(rig.driver->get_right_ascension());
+    }));
+    CHECK(rig.clock.now() - start < std::chrono::seconds(30));
+}
+
 #endif  // !_WIN32
