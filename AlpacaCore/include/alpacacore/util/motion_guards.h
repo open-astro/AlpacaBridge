@@ -279,6 +279,21 @@ inline bool enforce_motion_deadline(OperationContext& ctx, TaskClock& clock, Hol
     throw AlpacaException(expired_text, AlpacaError::DriverException);
 }
 
+/**
+ * The body of a timed motion's own slot (a MoveAxis cap, #2651): waits through `ctx` until `deadline` has passed, then
+ * enforce_motion_deadline(). Returns, sending nothing, when the body was cancelled or superseded first (a renewal, a
+ * stop, AbortSlew, a disconnect); throws as enforce_motion_deadline() once the deadline passed.
+ */
+inline void run_motion_deadline(OperationContext& ctx, TaskClock& clock, HoldWindow deadline,
+                                const StopVerifyHooks& hooks, const std::string& expired_text) {
+    for (auto now = clock.now(); deadline.active(now); now = clock.now()) {
+        if (!ctx.wait_for(deadline.until() - now)) {
+            return;
+        }
+    }
+    static_cast<void>(enforce_motion_deadline(ctx, clock, deadline, hooks, expired_text));
+}
+
 // ── Landing gate ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 enum class Landing : std::uint8_t { Settling, Landed, FarMiss };
