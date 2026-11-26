@@ -125,6 +125,9 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
+    // Decision 0009 rule 5: the one fault text, the status cache's latched fault, empty while healthy.
+    std::string get_link_fault() const override { return status_cache_.fault(); }
+
     // camera_index: an enumeration index, or util::kAutoThermalCamera for the one
     // camera with a heater or fan. bound_serial, when set, names the camera and wins.
     // owned_sdk, when set, is the adapter `sdk` refers to; the driver keeps it alive.

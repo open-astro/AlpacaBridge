@@ -229,15 +229,13 @@ rather than 403, while
 anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
-unaffected) or the same-origin web portal. Four device endpoints take the same
-guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
-a UTCDate write steps the system clock (see the clock sync section below), and
-`PUT /api/v1/telescope/{n}/sitelatitude`, `sitelongitude` and `siteelevation`,
-because since #444 they also rewrite the device's persisted configuration, the
-effect `configuredevice` guards. The guard also runs for any device method on
-a verb it does not accept (a POST or DELETE, or a PUT to a GET-only property):
-a foreign `Origin` gets 403 before the 400 that verb check would return. Every
-other device setter, on the verb it accepts, is unguarded.
+unaffected) or the same-origin web portal. Every Device API request except
+`GET` takes the same guard before the router's verb check (decision 0007
+rule 2): a PUT that would reach the driver (a slew, an exposure,
+`Connected`, `UTCDate`, the `Site*` setters) and a verb the method does not
+accept (a POST or DELETE, or a PUT to a GET-only property) both get 403 with
+"Cross-origin device method requests are not allowed" before the driver runs
+or the 400 the verb check would return.
 
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,

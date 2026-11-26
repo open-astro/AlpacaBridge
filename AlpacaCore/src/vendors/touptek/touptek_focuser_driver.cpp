@@ -41,6 +41,9 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
+    // Decision 0009 rule 5: the one fault text, the status cache's latched fault, empty while healthy.
+    std::string get_link_fault() const override { return status_cache_.fault(); }
+
     ToupTekFocuserDriver(int device_number, std::optional<int> focuser_index, std::optional<std::string> focuser_id,
                          ToupTekSDK& sdk)
         : AsyncConnectable(kLogTag),

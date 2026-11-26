@@ -22,8 +22,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -145,6 +149,22 @@ void test_happy_path_unaffected() {
     EXPECT(alpacahttp::detail::abandoned_thread_count() == before);
 }
 
+// Decision 0002 rule 2: every lifecycle join in server.cpp goes through join_or_abandon(), so a raw
+// .join() there (comments excluded) would bypass the never-retry, never-rethrow fallback tested above.
+void test_server_has_no_raw_join() {
+    std::ifstream in(std::string(ALPACAHTTP_REPO_ROOT) + "/AlpacaHTTP/src/http/server.cpp");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT(contains(text, "join_or_abandon("));
+    std::istringstream lines(text);
+    for (std::string line; std::getline(lines, line);) {
+        const std::string code = line.substr(0, line.find("//"));
+        if (contains(code, ".join(")) {
+            std::fprintf(stderr, "raw join in server.cpp: %s\n", line.c_str());
+        }
+        EXPECT(!contains(code, ".join("));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -159,6 +179,7 @@ int main() {
     test_happy_path_unaffected();
     test_join_fails_detach_succeeds();
     test_join_and_detach_both_fail();
+    test_server_has_no_raw_join();
 
     alpacahttp::util::set_external_log_sink(nullptr);
 

@@ -215,14 +215,6 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
             }
         }
         else if (method_name == "utcdate") {
-            // open-astro#401: a UTCDate write can step the host clock (#289)
-            // and latch ClockSource, the same host-level effect the synctime
-            // endpoint guards. A browser page on another origin must not be
-            // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected =
-                    reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(), "UTCDate")) {
-                return *rejected;
-            }
             if (request.method() == HttpMethod::GET) {
                 auto utc = telescope->get_utc_date();
                 auto time_t = std::chrono::system_clock::to_time_t(utc);
@@ -379,12 +371,6 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 return call.ok(telescope->get_site_elevation());
             }
             else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteElevation")) {
-                    return *rejected;
-                }
                 double value = call.get_double("SiteElevation");
                 telescope->set_site_elevation(value);
                 persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
@@ -396,12 +382,6 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 return call.ok(telescope->get_site_latitude());
             }
             else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLatitude")) {
-                    return *rejected;
-                }
                 double value = call.get_double("SiteLatitude");
                 telescope->set_site_latitude(value);
                 persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
@@ -413,12 +393,6 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 return call.ok(telescope->get_site_longitude());
             }
             else if (request.method() == HttpMethod::PUT) {
-                // open-astro#444: this PUT rewrites persisted device config,
-                // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
-                                                                "SiteLongitude")) {
-                    return *rejected;
-                }
                 double value = call.get_double("SiteLongitude");
                 telescope->set_site_longitude(value);
                 persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444

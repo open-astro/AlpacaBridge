@@ -390,8 +390,8 @@ notes carry only the pin map and per-board deltas.
   Plus RK3568 ioctl path, with its two ioctl numberings and its kernel index offset). The wrapper
   type is `util::OwnedSoftPwmPorts<Backend>`. The ASIAIR Pro, Plus CM4 and Plus RK3568 are on it;
   the iOptron iMate (`ioptron_powerbox_wrapper.cpp`) and ToupTek StellaVita
-  (`touptek_powerbox_wrapper.cpp`) wrappers still carry their own copy until the follow-up of
-  #1757. A test drives the engine over `FakeGpioLineBackend` and `FakeTaskClock`
+  (`touptek_powerbox_wrapper.cpp`) wrappers still carry their own copy until #2722.
+  A test drives the engine over `FakeGpioLineBackend` and `FakeTaskClock`
   (`tests/test_soft_pwm_ports.cpp`), with no real sleep.
 - **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
   `gpiod_line_request*` owns all lines together; values go through

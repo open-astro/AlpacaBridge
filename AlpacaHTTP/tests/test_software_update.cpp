@@ -964,9 +964,20 @@ int main() {
         for (const char* forbidden : {"indexOf", "match(", "RegExp", "startsWith", "endsWith", "test(", "search("}) {
             EXPECT(code.find(forbidden) == std::string::npos);
         }
-        std::size_t units = 0;
-        for (std::size_t pos = 0; (pos = code.find("alpacabridge-", pos)) != std::string::npos; ++pos) ++units;
-        EXPECT(units == 3);
+        const auto count = [&code](const std::string& needle) {
+            std::size_t n = 0;
+            for (std::size_t pos = 0; (pos = code.find(needle, pos)) != std::string::npos; ++pos) ++n;
+            return n;
+        };
+        EXPECT(count("alpacabridge-") == 3);
+        // YES for the start verb only: one YES, one verb read, and the YES is the start branch's body.
+        EXPECT(count("polkit.Result.YES") == 1);
+        EXPECT(count("action.lookup(\"verb\")") == 1);
+        const std::string start_branch = "if (action.lookup(\"verb\") === \"start\") {";
+        const auto branch = code.find(start_branch);
+        EXPECT(branch != std::string::npos);
+        const auto body = code.find_first_not_of(" \t\n", branch + start_branch.size());
+        EXPECT(body != std::string::npos && code.compare(body, 25, "return polkit.Result.YES;") == 0);
     }
 
     {

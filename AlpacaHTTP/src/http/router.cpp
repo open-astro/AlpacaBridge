@@ -2358,18 +2358,18 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // before it reaches the ASCOM operation
         // (.claude/skills/ascom-alpaca-protocol/references/http-api-contract.md)
         // instead of letting it fall through to a "not yet implemented"
-        // dispatcher fallback that answered HTTP 200 with 0x400. A foreign
-        // Origin is refused with 403 first, so UTCDate's #401 guard (which
-        // runs for every verb) keeps its 403 for a forged POST; the Site*
-        // guards (#444) sit in their PUT branch only, so a forged POST there
-        // now gets 403 too, where it used to reach the 200/0x400 fallback.
+        // dispatcher fallback that answered HTTP 200 with 0x400.
+        //
+        // Decision 0007 rule 2: a foreign Origin is refused with 403 before
+        // the verb check, so every device PUT that would reach a driver is
+        // guarded, not only a wrong verb. The guard passes every GET.
+        if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device method")) {
+            return *rejected;
+        }
         const unsigned request_verb = request.method() == HttpMethod::GET   ? kVerbGet
                                       : request.method() == HttpMethod::PUT ? kVerbPut
                                                                             : 0U;
         if ((method_verbs & request_verb) == 0) {
-            if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device method")) {
-                return *rejected;
-            }
             set_bad_request_text(
                 response, "Method '" + match.method_name + "' does not accept " + http_method_name(request.method()));
             return response;

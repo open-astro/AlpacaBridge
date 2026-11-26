@@ -4049,22 +4049,22 @@ private:
     // Must be called WITHOUT mutex_ held -- the body takes mutex_, so joining
     // under the lock would deadlock -- and every caller holds
     // slew_handoff_mutex_ (or is the destructor), because the slot requires
-    // its reapers to be serialized across the whole join. The body sends one
-    // command (no long waits), so the join is quick.
-    // open-astro#768: abort and disconnect fence the dispatch through this.
+    // its reapers to be serialized across the whole join.
+    // open-astro#768: only the stop paths (abort, disconnect, the destructor) fence the dispatch through this; a
+    // motion command supersedes it (rule 3).
     void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
 
     // Starts `body` on the slew slot after the initiator published its state
     // and claimed both axes (`claim`). Call without mutex_ held, under
-    // slew_handoff_mutex_. A refused start (no thread) undoes the published
+    // slew_handoff_mutex_, which keeps the starts in claim order. A refused start (no thread) undoes the published
     // state and restores the error the initiator cleared.
+    // The older body is superseded, never joined (decision 0006 rule 3): the claim already took its axes, and it
+    // checks that claim under the operation lock before it sends anything, so its GOTO either went out before this
+    // claim or never goes out (open-astro#768).
     void start_slew_body(const util::MotionClaim& claim, std::string& previous_slew_error, const char* failure_prefix,
                          std::function<void(util::OperationContext&)> body) {
         try {
             if (before_slew_reap_) before_slew_reap_();
-            // The previous dispatch is cancelled and joined first, so a newer
-            // initiator never leaves an older body running (open-astro#768).
-            reap_slew_dispatch();
             slew_.start(std::move(body));
         } catch (const std::exception& e) {
             StateLock lock(lock_gate_, StateLock::Mode::State);

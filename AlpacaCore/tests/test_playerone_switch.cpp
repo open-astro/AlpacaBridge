@@ -418,6 +418,8 @@ TEST_CASE("Player One Switch Driver - a write and a reconnect drop the cached fr
     CHECK(driver->get_switch_value(0) == 55.0);
 }
 
+// Falsified by: playerone_switch_driver.cpp dropping its get_link_fault() override (decision 0009 rule 5: the
+// latched fault text reads empty while reads throw "communications compromised").
 TEST_CASE("Player One Switch Driver - a dead link is not served from the cache", "[playerone][switch][unit]") {
     alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeThermalSdk sdk;
@@ -437,11 +439,15 @@ TEST_CASE("Player One Switch Driver - a dead link is not served from the cache",
         FAIL("Expected AlpacaException");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        // Decision 0009 rule 5: get_link_fault() is the one fault text, the one the getter throws.
+        REQUIRE_FALSE(driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(driver->get_link_fault()) != std::string::npos);
     }
     CHECK(driver->get_connected());
 
     sdk.fail_reads = false;
     CHECK(driver->get_switch_value(0) == 40.0);
+    CHECK(driver->get_link_fault().empty());
 }
 
 TEST_CASE("Player One Switch Driver - no-I/O getters do not wait behind the connect handshake",
