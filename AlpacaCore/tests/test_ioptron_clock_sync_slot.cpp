@@ -147,6 +147,12 @@ const auto kRealHost = std::chrono::system_clock::time_point(std::chrono::second
 const auto kMountPowerUp = std::chrono::system_clock::time_point(std::chrono::seconds(1483272042));
 constexpr std::chrono::milliseconds kRc51Step{24507000};
 
+// A thread for each MoveAxis cap slot that never runs the cap body: the move keeps its axis flag, and no cap waiter
+// joins the task clock.
+void idle_move_axis_cap(alpacacore::TelescopeDriver& driver) {
+    ioptron::set_move_axis_cap_spawn_for_testing(driver, [](std::function<void()>) { return std::thread([] {}); });
+}
+
 // A mount connected on an untrusted host clock: the connect's body has sent its site commands and no clock command.
 // The host UTC seam reads `host`; the clock-sync UTC hook counts the body's finished passes in `passes`.
 struct UntrustedConnect {
@@ -178,14 +184,16 @@ struct UntrustedConnect {
     void set_host(std::chrono::system_clock::time_point utc) {
         host_s.store(std::chrono::duration_cast<std::chrono::seconds>(utc.time_since_epoch()).count());
     }
-    // The motion bound watchdog (#2396 AB-8, AB-9: the MoveAxis dead-man and the async GOTO bound) waits on the same
-    // task clock, so wait_for_waiters(2), the state poll and the re-sync body, would count it in place of the re-sync
-    // body. connect() refuses that slot for every rig case (a refused start is logged and leaves the router's
-    // client-silence watchdog as the bound).
+    // The motion bound watchdog (#2396 AB-8: the async GOTO bound) and a MoveAxis cap (#2651) wait on the same task
+    // clock, so wait_for_waiters(2), the state poll and the re-sync body, would count them in place of the re-sync
+    // body. connect() refuses the watchdog slot for every rig case (a refused start is logged and leaves the router's
+    // client-silence watchdog as the bound) and gives the cap slots a thread that never runs the body (a refused cap
+    // start fails the MoveAxis), so a MoveAxis case holds its motion past the 60 s cap.
     void refuse_motion_bound_watchdog() {
         ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
             throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
         });
+        idle_move_axis_cap(*driver);
     }
     // Sends the event and lets the re-sync body past its start delay.
     void host_clock_changed(alpacacore::util::HostClockEvent event) {
@@ -940,10 +948,8 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     CHECK(mount.count(":SLA") == 0);
     CHECK(mount.count(":SUT") == 0);
 
-    // The MoveAxis dead-man (#2396 AB-9) would stop the axis long before the 15 min motion bound; refused here.
-    ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
-        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-    });
+    // The MoveAxis cap (#2396 AB-9, #2651) would stop the axis long before the 15 min motion bound; it never runs here.
+    idle_move_axis_cap(*driver);
     driver->move_axis(0, driver->get_axis_rate_range(0).first);
     driver->on_host_clock_changed(kStepped);
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));

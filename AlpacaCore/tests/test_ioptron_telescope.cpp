@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -4451,17 +4452,20 @@ TEST_CASE("iOptron mount wrapper - bytes already queued before a command are dis
 // Issue #2396 (AB-9, AB-8, AB-7): the motion bound watchdog and the async landing gate.
 namespace {
 
-// The motion bound watchdog's newest thread, from the slot's spawn seam (every start supersedes the last body).
+// The newest thread of the motion bound watchdog (the async GOTO bound) or of a MoveAxis cap, from the slots' spawn
+// seams (every start supersedes the last body of its slot).
 struct MotionBoundThread {
     std::mutex mutex;
     std::thread::id id;
     void attach(alpacacore::TelescopeDriver& driver) {
-        io::set_motion_bound_watchdog_spawn_for_testing(driver, [this](std::function<void()> body) {
+        const auto spawn = [this](std::function<void()> body) {
             std::thread thread(std::move(body));
             std::lock_guard<std::mutex> lock(mutex);
             id = thread.get_id();
             return thread;
-        });
+        };
+        io::set_motion_bound_watchdog_spawn_for_testing(driver, spawn);
+        io::set_move_axis_cap_spawn_for_testing(driver, spawn);
     }
     std::thread::id current() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -4509,11 +4513,13 @@ TEST_CASE("iOptron motion bound - a MoveAxis left running past its dead-man is s
     driver->move_axis(0, driver->get_axis_rate_range(0).second);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
     advance_polling(clock, std::chrono::seconds(59));
-    CHECK(mount.count(":Q#") == 0);
+    CHECK(mount.count(":qR#") == 0);
     CHECK(driver->get_slewing());
 
     advance_polling(clock, std::chrono::seconds(2));
-    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(wait_until([&] { return mount.count(":qR#") == 1; }));
+    CHECK(mount.count(":Q#") == 0);  // the cap stops its own axis only
+    poll_ticks(clock, 4);            // the stop verifies after two still reads 500 ms apart
     CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));  // the body has logged and ended
     CHECK(info_lines.load() == 1);
@@ -4541,13 +4547,13 @@ TEST_CASE("iOptron motion bound - a MoveAxis renewed before its dead-man keeps r
     driver->move_axis(0, rate);  // the client renews its move
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
     advance_polling(clock, std::chrono::seconds(40));  // 80 s after the first, 40 s after the renewal
-    // The body woke at the first move's 60 s: wait until it has waited again or ended, so the check follows it.
+    // The first move's body was superseded at its renewal: wait until nothing is left to wake, so the check follows it.
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    CHECK(mount.count(":Q#") == 0);
+    CHECK(mount.count(":qR#") == 0);
     CHECK(driver->get_slewing());
 
-    advance_polling(clock, std::chrono::seconds(21));
-    CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    advance_polling(clock, std::chrono::seconds(20));  // the renewal's own 60 s: the first stop, not yet a resend
+    CHECK(wait_until([&] { return mount.count(":qR#") == 1; }));
     driver->set_connected(false);
 }
 
@@ -4591,6 +4597,120 @@ TEST_CASE("iOptron motion bound - a renewal that lands as the dead-man fires is 
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     CHECK(stops() == 0);
     CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651 (DIFFERENCE 1): the cap is per axis. A jog on the other axis no longer renews this axis's cap, so a client
+// cannot keep axis 0 running by jogging axis 1 every 50 s. Each cap stops its own axis with :qR# or :qD#; the first
+// stop leaves Tracking alone while the other axis jogs, and the second, with both idle, restores it.
+// Falsified by: ioptron_telescope_driver.cpp move_axis_under_lock() arming one window for both axes again (the :qR#
+// check fails: nothing goes out at 61 s), or the cap stopping with :Q# (the :Q# and :qD# checks fail).
+TEST_CASE("iOptron motion bound - a jog on the other axis does not renew this axis's cap",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    MotionBoundThread cap;
+    cap.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(cap.current(), std::chrono::seconds(5)));
+    advance_polling(clock, std::chrono::seconds(40));
+    driver->move_axis(1, driver->get_axis_rate_range(1).second);  // 40 s in: renews its own axis only
+    REQUIRE(clock.wait_for_waiter_thread(cap.current(), std::chrono::seconds(5)));
+    advance_polling(clock, std::chrono::seconds(19));  // 59 s
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":qR#") + mount.count(":qD#") + mount.count(":Q#") == 0);
+
+    advance_polling(clock, std::chrono::seconds(2));  // 61 s: axis 0's 60 s has passed, axis 1's has 39 s to go
+    CHECK(wait_until([&] { return mount.count(":qR#") == 1; }));
+    poll_ticks(clock, 4);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":qD#") == 0);
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(mount.count(":ST1#") == 0);  // axis 1 still jogs: Tracking stays as the jog left it
+    CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
+
+    advance_polling(clock, std::chrono::seconds(40));  // 101 s: axis 1's own 60 s
+    CHECK(wait_until([&] { return mount.count(":qD#") == 1; }));
+    poll_ticks(clock, 4);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":qR#") == 1);  // no second stop on axis 0
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(mount.count(":ST1#") == 1);  // both idle: the tracking state from before the first move comes back
+    driver->abort_slew();              // clears the stored failure
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651 (DIFFERENCE 3 and 4): the cap's stop is verified, resent up to 3 times in 3 s, and a mount that still reports
+// motion then leaves kStopNotVerifiedText for Slewing, with no further retry; the flag stays set.
+// Falsified by: ioptron_telescope_driver.cpp keeping the single blind :Q# (the :qR# counts fail), resending until the
+// mount stops (the count after 30 s more fails), or clearing the axis flag on an unverified stop (Slewing then reads
+// false after AbortSlew's frame is stale).
+TEST_CASE("iOptron MoveAxis - a cap stop the mount ignores is sent 3 times and Slewing raises it",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    MotionBoundThread cap;
+    cap.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(cap.current(), std::chrono::seconds(5)));
+    advance_polling(clock, std::chrono::seconds(59));
+    mount.set_system_status(2);  // the mount keeps reporting motion whatever it is sent
+    advance_polling(clock, std::chrono::seconds(2));
+    CHECK(wait_until([&] { return mount.count(":qR#") == 1; }));
+    poll_ticks(clock, 5);
+    CHECK(mount.count(":qR#") == 2);  // a round is 1 s
+    poll_ticks(clock, 8);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":qR#") == 3);
+    const std::string failure = slewing_failure(*driver);
+    CHECK(contains(failure, "MoveAxis ran for 60 s"));
+    CHECK(contains(failure, alpacacore::util::kStopNotVerifiedText));
+
+    advance_polling(clock, std::chrono::seconds(30));
+    CHECK(mount.count(":qR#") == 3);  // no retry without end
+    CHECK(mount.count(":Q#") == 0);
+    CHECK(contains(slewing_failure(*driver), alpacacore::util::kStopNotVerifiedText));  // kept until the next command
+
+    mount.set_system_status(1);
+    driver->abort_slew();
+    poll_ticks(clock, 1);
+    CHECK(slewing_failure(*driver).empty());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651 (decision 0006 rule 2 fail closed): a MoveAxis whose cap the slot refuses is not left running with no
+// dead-man: the axis is stopped and the call fails.
+// Falsified by: ioptron_telescope_driver.cpp start_move_axis_cap() logging the refusal and returning (the move then
+// runs on with no cap: the throw and the :qR# fail).
+TEST_CASE("iOptron motion bound - a MoveAxis whose cap cannot start is stopped and fails",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    io::set_move_axis_cap_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    require_alpaca_error([&] { driver->move_axis(0, driver->get_axis_rate_range(0).second); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(mount.count(":qR#") == 1);
+    CHECK(slewing_failure(*driver).empty());
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
@@ -4794,7 +4914,7 @@ TEST_CASE("iOptron motion bound - a dead-man stop that the link loss refused is 
 
     driver->move_axis(0, driver->get_axis_rate_range(0).second);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    first.unplug_on(on_command(":Q#"));
+    first.unplug_on(on_command(":qR#"));
     advance_polling(clock, std::chrono::seconds(61));
     REQUIRE(wait_until([&] { return first.unplugged(); }));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
