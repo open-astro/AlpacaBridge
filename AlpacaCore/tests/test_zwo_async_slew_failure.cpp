@@ -20,6 +20,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <algorithm>
@@ -91,8 +92,13 @@ struct Rig {
         REQUIRE(alpacacore::test::settle_connected(*driver, true, budget));
     }
     // One poll step: wait for the poll loop to park on the clock, advance, let the woken waiters finish.
+    // A running jog adds the clock waiter of its cap body (#2651), so the poll loop is parked once that many waiters
+    // are there; a jog the fake still holds with no cap body (its start failed) falls back to the one waiter.
     void tick(std::chrono::nanoseconds duration = std::chrono::milliseconds(250)) {
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        const auto parked = static_cast<std::size_t>(1 + mount.jogging_axes());
+        if (!clock.wait_for_waiters(parked, std::chrono::seconds(2))) {
+            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        }
         clock.advance(duration);
         REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     }
@@ -1872,7 +1878,8 @@ TEST_CASE("ZWO goto-safety - a MoveAxis that is not renewed is stopped after 60 
     run_polls(rig, std::chrono::seconds(56));
     CHECK(rig.mount.count(":Qe") == 0);
     CHECK(read_slewing(*rig.driver) == SlewingRead::True);
-    run_polls(rig, std::chrono::seconds(8));
+    // The cap's verified stop reads once per 250 ms round (#2651), so its 60 s is crossed in the poll's own steps.
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
     REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
     std::string message;
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
@@ -1917,7 +1924,8 @@ TEST_CASE("ZWO goto-safety - the MoveAxis dead-man sends :Q only when the other 
     run_polls(rig, std::chrono::seconds(40));
     if (both) REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));  // axis 1 renewed: only axis 0 reaches its bound
     const int q_before = count_exact(rig.mount, ":Q");
-    run_polls(rig, std::chrono::seconds(24));
+    run_polls(rig, std::chrono::seconds(16));
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));  // the cap at 60 s and its verified stop
     REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1; }, 5000));
     if (both) {
         CHECK(count_exact(rig.mount, ":Q") == q_before);  // ":Q" would also stop the jog on axis 1
@@ -1926,6 +1934,188 @@ TEST_CASE("ZWO goto-safety - the MoveAxis dead-man sends :Q only when the other 
     } else {
         CHECK(count_exact(rig.mount, ":Q") == q_before + 1);
     }
+    rig.driver->abort_slew();
+}
+
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis renewal claims its axis before ":Rv", so the cap of the move it
+// renews sends no stop while the renewal is on the wire, even when the first move's 60 s passes then.
+TEST_CASE("ZWO goto-safety - a renewal that lands as the cap fires is not stopped by the old cap",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    run_polls(rig, std::chrono::seconds(56));
+    REQUIRE(rig.mount.count(":Qe") == 0);
+    std::atomic<bool> fired{false};
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view label) {
+        if (label == ":Rv" && !fired.exchange(true)) rig.clock.advance(std::chrono::seconds(6));  // 62 s, mid-renewal
+    });
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, nullptr);
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
+    CHECK(rig.mount.count(":Qe") == 0);
+    CHECK(count_exact(rig.mount, ":Q") == 0);
+    CHECK(rig.mount.jogging());
+    CHECK(read_slewing(*rig.driver) == SlewingRead::True);
+    rig.driver->abort_slew();
+}
+
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis(axis, 0) takes the axis, so the cap whose 60 s passes right after
+// it sends no stop of its own.
+TEST_CASE("ZWO goto-safety - a MoveAxis(axis, 0) that lands as the cap fires gets no cap stop after it",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    const char* east_or_north = axis == 0 ? ":Qe" : ":Qn";
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 1.0));
+    run_polls(rig, std::chrono::seconds(56));
+    std::atomic<bool> fired{false};
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == "MoveAxis" && !fired.exchange(true)) rig.clock.advance(std::chrono::seconds(6));  // 62 s, mid-stop
+    });
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, nullptr);
+    const int directional_after_client = rig.mount.count(east_or_north);
+    const int stops_after_client = count_exact(rig.mount, ":Q");
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
+    CHECK(rig.mount.count(east_or_north) == directional_after_client);  // the client's own, no cap stop behind it
+    CHECK(count_exact(rig.mount, ":Q") == stops_after_client);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// #2651: the cap stop is verified, and a mount that keeps moving through it is stopped 3 times, then Slewing raises
+// the kept error and nothing more goes out for this move.
+TEST_CASE("ZWO goto-safety - a MoveAxis cap stop the mount ignores is sent 3 times and Slewing raises it",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    run_polls(rig, std::chrono::seconds(56));
+    rig.mount.set_ignore_axis_stops(true);
+    rig.mount.ignore_stops(10);  // the directional stops and ":Q" are acknowledged, and the jog runs on
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
+    CHECK(rig.mount.count(":Qe") == 3);
+    CHECK(rig.mount.count(":Qw") == 3);
+    CHECK(count_exact(rig.mount, ":Q") == 3);
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
+    CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
+    run_polls(rig, std::chrono::seconds(10), std::chrono::milliseconds(250));
+    CHECK(rig.mount.count(":Qe") == 3);  // no retry from the cap
+    CHECK(count_exact(rig.mount, ":Q") == 3);
+    rig.mount.set_ignore_axis_stops(false);
+    rig.mount.ignore_stops(0);
+    rig.driver->abort_slew();
+}
+
+// #2651: a cap the slot cannot start fails closed: the axis just started is stopped and the MoveAxis throws.
+TEST_CASE("ZWO goto-safety - a MoveAxis whose cap cannot start stops the axis and throws",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    rig.connect();
+    alpacacore::vendor::zwo::set_move_axis_cap_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    try {
+        rig.driver->move_axis(0, 1.0);
+        FAIL("Expected the MoveAxis to fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("could not start its time limit") != std::string::npos);
+    }
+    CHECK(rig.mount.count(":Qe") == 1);
+    CHECK_FALSE(rig.mount.jogging());
+    run_polls(rig, std::chrono::seconds(1), std::chrono::milliseconds(250));  // a poll reads the stopped mount
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+}
+
+// #2651: a cap stop on one axis verifies while the other axis keeps jogging: the status is the mount's, so it reads
+// stopped, and the position read is the stopped axis's own coordinate, on an equatorial and an alt-az mount.
+TEST_CASE("ZWO goto-safety - a cap stop on one axis verifies while the other axis keeps jogging",
+          "[zwo][telescope][async][goto-safety]") {
+    Rig rig;
+    const bool alt_az = GENERATE(false, true);
+    CAPTURE(alt_az);
+    rig.mount.set_alt_az(alt_az);
+    rig.mount.set_second_axis_drift(0.05);  // 180 arcsec per read while axis 1 jogs
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));
+    run_polls(rig, std::chrono::seconds(40));
+    REQUIRE_NOTHROW(rig.driver->move_axis(1, 1.0));  // axis 1 renewed: only axis 0 reaches its cap
+    const int q_before = count_exact(rig.mount, ":Q");
+    run_polls(rig, std::chrono::seconds(16));
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
+    CHECK(rig.mount.count(":Qe") == 1);
+    CHECK(rig.mount.count(":Qw") == 1);
+    CHECK(count_exact(rig.mount, ":Q") == q_before);
+    CHECK(rig.mount.jogging());
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s with no new MoveAxis; the driver stopped it") != std::string::npos);
+    CHECK(message.find("still reports motion") == std::string::npos);
+    rig.driver->abort_slew();
+}
+
+// #2651 (decision 0006 ZWO paragraph, #720): the cap's stop is one gated call (the ":Q" decision and the sends), and
+// every claim waits for it once the claim is visible, so a MoveAxis on the other axis goes out after the cap's ":Q"
+// when it comes in while the stop goes out or sits between its fence and its claim when the cap decides. A MoveAxis
+// that has already claimed (its jog is pending, its flag not yet set) makes the cap send no ":Q" at all.
+TEST_CASE("ZWO goto-safety - a MoveAxis on the other axis that lands as the cap stop goes out is not stopped by its :Q",
+          "[zwo][telescope][async][goto-safety]") {
+    enum class Landing : std::uint8_t { WhileSending, BetweenFenceAndClaim, AfterClaim };
+    const Landing landing = GENERATE(Landing::WhileSending, Landing::BetweenFenceAndClaim, Landing::AfterClaim);
+    CAPTURE(static_cast<int>(landing));
+    Rig rig;
+    std::atomic<bool> hold{false};
+    std::atomic<bool> held{false};
+    std::atomic<bool> cap_counted{false};
+    // The MoveAxis is held at the named point until the cap has counted its call.
+    const std::string hold_at = landing == Landing::BetweenFenceAndClaim ? "MoveAxis fenced" : "MoveAxis";
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == hold_at && hold.exchange(false)) {
+            held.store(true);
+            static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10000));
+        }
+    });
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view label) {
+        if (label != ":Qe" || cap_counted.exchange(true)) return;  // the cap's first gated call only
+        // Gated, a MoveAxis that claims later waits in its claim for this call, so no ":Mn" goes out and this wait
+        // times out. Ungated, or waiting only in fence_goto(), its ":Mn" is on the wire before this call's ":Q".
+        // Waiting for the claim instead would let the cap's stops race ":Rv" and ":Mn" for the exchange lock, and
+        // usually win.
+        static_cast<void>(wait_until([&] { return rig.mount.count(":Mn") > 0; }, 500));
+    });
+    rig.connect();
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));  // axis 1 idle: the cap's call includes ":Q" unless a jog is pending
+    run_polls(rig, std::chrono::seconds(56));
+    REQUIRE(rig.mount.count(":Qe") == 0);
+    const auto from = static_cast<std::ptrdiff_t>(rig.mount.commands().size());
+    const bool held_jog = landing != Landing::WhileSending;
+    hold.store(held_jog);
+    std::jthread jog([&] {
+        if (!held_jog) static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10000));
+        rig.driver->move_axis(1, 1.0);
+    });
+    if (held_jog) REQUIRE(wait_until([&] { return held.load(); }, 5000));
+    run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
+    REQUIRE(wait_until([&] { return cap_counted.load() && rig.mount.count(":Mn") > 0; }, 5000));
+    jog.join();
+    const auto all = rig.mount.commands();
+    const auto mn = std::find(all.begin() + from, all.end(), std::string(":Mn"));
+    REQUIRE(mn != all.end());
+    if (landing == Landing::AfterClaim) {
+        CHECK(std::count(all.begin() + from, all.end(), std::string(":Q")) == 0);  // the jog is pending: no ":Q"
+    } else {
+        const auto q = std::find(all.begin() + from, all.end(), std::string(":Q"));
+        REQUIRE(q != all.end());
+        CHECK(q < mn);                                                             // the cap's ":Q" before axis 1's jog
+        CHECK(std::count(all.begin() + from, all.end(), std::string(":Q")) == 1);  // and none after it
+    }
+    CHECK(rig.mount.jogging());  // axis 1 still jogs
     rig.driver->abort_slew();
 }
 
@@ -2167,7 +2357,7 @@ TEST_CASE("ZWO goto-safety - a redundant Connected=true keeps a running jog or P
     if (path == "jog cap") {
         run_polls(rig, std::chrono::seconds(46));  // 56 s after the MoveAxis
         CHECK(rig.mount.count(":Qe") == 0);
-        run_polls(rig, std::chrono::seconds(8));
+        run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));  // the cap's verified stop (#2651)
         REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
         CHECK_FALSE(rig.mount.jogging());
         std::string message;
