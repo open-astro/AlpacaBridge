@@ -314,6 +314,14 @@ public:
         return waiters_.size();
     }
 
+    /// The threads that have a wait (wait_for or sleep_for) registered now.
+    std::set<std::thread::id> waiter_threads() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        std::set<std::thread::id> threads;
+        for (const auto& waiter : waiters_) threads.insert(waiter.second.thread);
+        return threads;
+    }
+
 private:
     struct Entry {
         clock::time_point deadline;

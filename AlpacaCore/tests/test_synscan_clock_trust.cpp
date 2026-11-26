@@ -747,10 +747,11 @@ TEST_CASE("SynScan host clock - a reconnect drops a host clock change left pendi
     CHECK(rig.done.size() == 0);
 }
 
-// #2685: call_stepping() steps the task clock only while the call is parked on it, so a call held in real time (a
-// slow wire reply on a slow runner) does not age the paused poll's held frame past util::kLinkStalenessBound. The call
-// below waits in real time for 300 ms, or until the clock is 31 s on: a helper that steps the clock whatever the call
-// is doing reaches 31 s at once, and the RightAscension read then finds the frame lost.
+// #2685: call_stepping() steps the task clock only while the call, or a thread it started, is parked on it; the paused
+// poll was parked before the call and does not count. So a call held in real time (a slow wire reply on a slow runner)
+// never moves the clock and cannot age the paused poll's held frame past util::kLinkStalenessBound. The call below
+// waits in real time for 300 ms, or until the clock is 31 s on: a helper that steps the clock whatever the call is
+// doing moves it while the call is off it, and the RightAscension read can then find the frame lost.
 TEST_CASE("SynScan host clock - a stepped call held in real time does not age the paused poll's frame (#2685)",
           "[synscan][clock][driver_rig]") {
     TrustGuard trust(true);
