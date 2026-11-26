@@ -78,3 +78,26 @@ jobs:
         with:
           path: .lycheecache
           key: lychee-links-${{ github.run_id }}
+
+  # A `partial` or `planned` Adoption row of a decision record names the issue
+  # that finishes it; when that issue is closed the row is a dead reference of
+  # another kind, and nothing tracks the work. Not a pull_request check: a PR
+  # must not fail because someone closed an issue.
+  adoption-issues:
+    name: Check Adoption rows name open issues
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Unfinished Adoption rows against issue state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_docs_drift.py --adoption-issues

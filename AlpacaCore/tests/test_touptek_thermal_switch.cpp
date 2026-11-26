@@ -267,3 +267,36 @@ TEST_CASE("ToupTek Thermal Switch Driver - fan off is refused while the cooler r
     thermal->set_connected(false);
     camera->set_connected(false);
 }
+
+// Decision 0009 rules 1 and 5. Falsified by: touptek_thermal_switch_driver.cpp without its get_link_fault()
+//   override (the base returns "" while reads throw "communications compromised").
+TEST_CASE("ToupTek Thermal Switch Driver - a latched link fault is the get_link_fault text until a good read",
+          "[touptek][switch][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Connect resets the cache and a failed refill drops the frame, so every read below reaches the SDK.
+    fake.throw_from.insert("get_heat");
+    for (int i = 0; i < 2; ++i) {
+        require_alpaca_error([&]() { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(driver->get_link_fault().empty());  // below the threshold: no latch yet
+    try {
+        (void)driver->get_switch_value(0);
+        FAIL("third consecutive failure must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        REQUIRE_FALSE(driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(driver->get_link_fault()) != std::string::npos);
+    }
+    CHECK(driver->get_connected());
+
+    fake.throw_from.clear();
+    (void)driver->get_switch_value(0);
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}

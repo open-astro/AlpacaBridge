@@ -1222,7 +1222,9 @@ public:
                 const auto deadline = clock_.now() + std::chrono::milliseconds(total_wait_ms);
                 bool got_frame = false;
                 int attempts = 0;
-                while (!cancelled() && clock_.now() < deadline) {
+                // A zero wait_for applies the session watchdog on every pass, so the loop ends at its deadline
+                // even when no getter polls (rule 4).
+                while (c.wait_for(std::chrono::nanoseconds::zero()) && clock_.now() < deadline) {
                     if (call([&] {
                             return sdk.get_video_data(id, buffer.data(), static_cast<long>(buffer.size()), 500);
                         }) == SVBVideoDataResult::Frame) {

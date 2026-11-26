@@ -410,7 +410,8 @@ TEST_CASE("Player One PW Filter Wheel Driver - a reconnect drops the cached Posi
 
 // Falsified by: playerone_filterwheel_driver.cpp reading Position without the cache's fault threshold (the
 // third failed read throws the raw scripted failure, not "Player One PW communications compromised"), or serving
-// the last good frame after a failed refill (the first failed read returns 0).
+// the last good frame after a failed refill (the first failed read returns 0), or dropping its get_link_fault()
+// override (decision 0009 rule 5: the latched fault text reads empty).
 TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not served and latch a link fault",
           "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
     alpacacore::test::FakePlayerOnePWSDK fake;
@@ -436,11 +437,15 @@ TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not ser
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        // Decision 0009 rule 5: get_link_fault() is the one fault text, the one the getter throws.
+        REQUIRE_FALSE(driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(driver->get_link_fault()) != std::string::npos);
     }
 
     // A good refill clears the latch with no reconnect, and its frame is served again.
     const int before = fake.call_count("get_position");
     CHECK(driver->get_position() == 0);
+    CHECK(driver->get_link_fault().empty());
     CHECK(driver->get_position() == 0);
     CHECK(fake.call_count("get_position") == before + 1);
     driver->set_connected(false);

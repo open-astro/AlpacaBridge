@@ -287,7 +287,8 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a reconnect clears the Position lin
 
 // Falsified by: touptek_filterwheel_driver.cpp reading Position without the cache's fault threshold (the third
 // failed read throws the raw injected failure, not "ToupTek AFW communications compromised"), or serving the
-// last good frame after a failed refill (the first failed read returns 0).
+// last good frame after a failed refill (the first failed read returns 0), or dropping its get_link_fault()
+// override (decision 0009 rule 5: the latched fault text reads empty).
 TEST_CASE("ToupTek AFW Filter Wheel Driver - failed Position reads are not served and latch a link fault",
           "[touptek][filterwheel][unit][position-cache]") {
     ConnectedAfw wheel;
@@ -309,12 +310,16 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - failed Position reads are not serve
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        // Decision 0009 rule 5: get_link_fault() is the one fault text, the one the getter throws.
+        REQUIRE_FALSE(wheel.driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(wheel.driver->get_link_fault()) != std::string::npos);
     }
 
     // A good refill clears the latch with no reconnect, and its frame is served again.
     wheel.fake.throw_from.erase(kPositionCall);
     const int before = wheel.reads();
     CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.driver->get_link_fault().empty());
     CHECK(wheel.driver->get_position() == 0);
     CHECK(wheel.reads() == before + 1);
 }

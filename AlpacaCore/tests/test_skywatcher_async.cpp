@@ -6619,9 +6619,10 @@ TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the pulse-end restart
 
 TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the post-restore rate check reverses RA",
           "[skywatcher][async]") {
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount);  // northern site
+    auto driver = connected_driver(mount, clock);  // northern site
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     const char north_dir = mount.axis_dir(1);
@@ -6632,12 +6633,12 @@ TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the post-restore rate
         ~HookReset() { alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr); }
     } hook_reset;
     driver->pulse_guide(2, 2000);  // East, long enough for the post-stop rate check
-    REQUIRE(wait_until([&] { return restored.load(); }, 8000));
+    REQUIRE(run_clock_until(clock, [&] { return restored.load(); }, std::chrono::milliseconds(4000)));
     // Inside the ~450 ms check: the pulse still holds RA, so the setter skips it.
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(150)));
     REQUIRE(driver->get_is_pulse_guiding());
     driver->set_site_latitude(-33.856784);
-    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
     REQUIRE(driver->get_site_latitude() < 0.0);
     CHECK(driver->get_tracking());
     CHECK(mount.axis_running(1));
@@ -6740,9 +6741,10 @@ TEST_CASE("SkyWatcher async - Tracking reads false once a Tracking=false stop-wa
 
 TEST_CASE("SkyWatcher async - MoveAxis(RA) during the RightAscensionRate check is not overridden",
           "[skywatcher][async]") {
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount);
+    auto driver = connected_driver(mount, clock);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     mount.stall_live_rate_writes(1, 1);
@@ -6750,7 +6752,7 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA) during the RightAscensionRate check i
     driver->set_right_ascension_rate(0.5);  // spawns the rate-applied check
     driver->move_axis(0, 1.0);
     const uint32_t move_period = mount.step_period(1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // past settle + window
+    elapse(clock, std::chrono::milliseconds(2500));  // past settle + window
     CHECK(mount.step_period(1) == move_period);
     CHECK(mount.axis_running(1));
     driver->move_axis(0, 0.0);

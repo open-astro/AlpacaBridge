@@ -3609,6 +3609,16 @@ TEST_CASE("OnStep Telescope Driver - the Name is OnStep and the OnStepX product 
         fake->gvc = "EQ6 (belt mod), roof";
         expected = "OnStep EQ6";
     }
+    SECTION("a qualifier with no space before its bracket leaves the name") {
+        fake->version = "10.24a";
+        fake->gvc = "EQ6(belt)";
+        expected = "OnStep EQ6";
+    }
+    SECTION("an unclosed qualifier leaves the name with the rest of the description") {
+        fake->version = "10.24a";
+        fake->gvc = "EQ6 (belt mod";
+        expected = "OnStep EQ6";
+    }
     SECTION("OnStepX that answers :GVC# with 0") {
         fake->version = "10.24a";
         fake->gvc = "0";  // real firmware never sends it; the guard stays

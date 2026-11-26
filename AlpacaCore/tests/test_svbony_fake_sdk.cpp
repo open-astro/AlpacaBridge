@@ -1388,3 +1388,37 @@ TEST_CASE("SVBONY Camera - readout wait deadline reads the TaskClock", "[svbony]
     CHECK(reads == 22);
     CHECK(sdk.call_count("get_video_data") == 22);
 }
+
+TEST_CASE("SVBONY Camera - the watchdog deadline ends the readout loop with no getter polling",
+          "[svbony][camera][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    constexpr int kCap = 200;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera_on_clock(sdk, clock);
+    sdk.timeout_next_video_data(kCap + 10);  // every read answers Timeout at once
+
+    int reads = 0;
+    sdk.before_call = [&](const std::string& name) {
+        // A slow settings stage before the capture: 9 s of the 15.001 s watchdog budget (decision 0020 rule 4).
+        if (name == "get_roi_format") clock.advance(9s);
+        if (name != "get_video_data") return;
+        if (++reads > kCap) {
+            throw alpacacore::AlpacaException("readout loop ran past the cap",
+                                              alpacacore::AlpacaError::DriverException);
+        }
+        clock.advance(500ms);
+    };
+
+    camera->start_exposure(0.001, true);
+    // No getter runs until the body has stopped the capture, so only the body itself can see the watchdog.
+    const auto bound = std::chrono::steady_clock::now() + 5s;
+    while (sdk.call_count("stop_video_capture") == 0 && std::chrono::steady_clock::now() < bound) {
+        std::this_thread::yield();
+    }
+    REQUIRE(sdk.call_count("stop_video_capture") == 1);
+    // Reads start at 9 s; the pass at 15.5 s is past the 15.001 s deadline: 13 reads, not 21 to the 19.001 s
+    // local frame timeout.
+    CHECK(reads == 13);
+    wait_for_driver_exception(*camera, "did not complete before its deadline");
+}

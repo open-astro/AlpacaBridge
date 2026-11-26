@@ -22,7 +22,7 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 ## Rules
 
 1. A getter that needs no device access takes no lock that is held across a device transaction, and the driver `mutex_` is not held across an SDK call, serial exchange, connect handshake or move; a camera's short `with_camera`/`with_handle` SDK call is bounded by Rule 4. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`. Checked by: review (trace getter locks and every device exchange in the converted class).
-2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (leaf), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and a helper mutex nests under `mutex_` only as a leaf that takes no other lock and does no I/O or joins (the driver lifecycle instructions list the shared leaves and each vendor file its own). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (inspect nested acquisitions and confirm each leaf's call graph contains no other locks, I/O or joins).
+2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (the leaf of the driver's own locks), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and a helper mutex nests under `mutex_` only as a leaf that takes no other lock and does no I/O or joins (the driver lifecycle instructions list the shared leaves and each vendor file its own). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (inspect nested acquisitions and confirm each leaf's call graph contains no other locks, I/O or joins).
 3. `Connected` is lock-free, and identity and limits are published at the end of connect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`. Checked by: review (Connected reads an atomic without waiting; getters use connect-published metadata).
 4. A camera driver's `with_camera` and `with_handle` hold `mutex_` across short SDK calls, never across an image wait, an exposure or the connect handshake, and a camera moves its operational calls to the order of Rule 2 only with a measured getter stall. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: review (an image wait, exposure or connect under `mutex_`; an operational lock-order conversion that cites no measured stall).
 5. `AGENTS.md` and the driver lifecycle instructions state this rule and link this record. Scope: `AGENTS.md`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (both instruction owners retain the lock-order rule and a link to this record).
@@ -39,7 +39,7 @@ Symbol: `transition_mutex_`
 | --- | --- | --- | --- | --- | --- |
 | Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | adopted |  |  |
 | Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted |  | served from `PolledState` |
-| Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | partial | #1838 | rule 6: slew gate re-locks after a live `is_tracking()` without re-checking park |
+| Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1838 | rule 6: both slew forms re-check the link and park after the live `is_tracking()` read (#1883) |
 | Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1759 |  |
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
@@ -99,7 +99,7 @@ Symbol: `transition_mutex_`
 
 - Reviewers check each driver PR against the Rules above. A driver that still holds `mutex_` across device I/O is a defect with its own issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (the cameras #1841 to #1845, and others; the iOptron telescope converted in #1829).
+- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (none is left: the cameras converted in #1841 to #1845, the iOptron telescope in #1829 and the Bisque telescope in #1883).
 
 ## How to reverse
 

@@ -203,7 +203,7 @@ Checks:
      reverse is required from record 0020 on and in any record that supersedes
      another), numbered Rules lines that end
      `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
-     file (`**` only in 0013), no except/unless/until/for now on a rule line
+     file (never `**`), no except/unless/until/for now on a rule line
      without the `<!-- allowed -->` marker, bare `Checked by: review` rules
      held to the per-record ratchet DECISION_BARE_REVIEW_BASELINE, and an
      index that lists every record once, in order, with `(retired)` on exactly
@@ -2709,10 +2709,6 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0017-serial-port-ownership.md": 0,
     "0019-connect-without-site.md": 1,
 }
-# The negative catalogue's rules have no natural file scope, so it alone may
-# write `Scope: `**``; anywhere else that scope marks a rule that belongs in
-# the catalogue or in a topic file.
-DECISION_ANY_SCOPE_RECORDS = ("0013-designs-to-avoid.md",)
 # Records from this number on say how to undo themselves (README.md, "How to
 # reverse"); the earlier ones add the section when next touched.
 DECISION_REVERSE_REQUIRED_FROM = 20
@@ -2824,9 +2820,9 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
             if rule.group("check") == "review":
                 bare_review += 1
             for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
-                if glob_pattern == "**" and name not in DECISION_ANY_SCOPE_RECORDS:
-                    findings.append("%s: rule %s scope `**` is allowed only in %s; name the files or move "
-                                    "the rule" % (where, rule.group("n"), ", ".join(DECISION_ANY_SCOPE_RECORDS)))
+                if glob_pattern == "**":
+                    findings.append("%s: rule %s scope `**` is not allowed; name the files or move the rule to "
+                                    "a topic file" % (where, rule.group("n")))
                 elif not any(_glob_match(p, glob_pattern) for p in tracked):
                     findings.append("%s: rule %s scope `%s` matches no tracked file"
                                     % (where, rule.group("n"), glob_pattern))
@@ -2988,6 +2984,73 @@ def check_decision_adoption(root=ROOT):
 
 # Records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
 MIN_ADOPTION_RECORDS = 6
+
+
+def _adoption_unfinished_rows(where, body):
+    """(where, driver, state, [issue numbers]) for each `partial` or `planned` Adoption row that names an issue."""
+    table = [l for l in body.splitlines() if l.startswith("|")]
+    if len(table) < 3:
+        return []
+    header = [c.strip() for c in table[0].strip("|").split("|")]
+    rows = []
+    for row in table[2:]:
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        if len(cells) != len(header):
+            continue
+        cell = dict(zip(header, cells))
+        issues = [int(n[1:]) for n in ISSUE_REF_RE.findall(cell.get("Issue", ""))]
+        if cell.get("State") in ("partial", "planned") and issues:
+            rows.append((where, cell.get("Driver", ""), cell["State"], issues))
+    return rows
+
+
+def _adoption_closed_issue_findings(rows, states):
+    """A `partial` or `planned` row whose every issue is closed has nothing tracking the work it still owes.
+
+    states: {issue number: "OPEN" | "CLOSED"}. Pure, so --self-test can drive it. A row with one open issue is
+    tracked; with none open, an issue whose state could not be read is a finding of its own, so a failed lookup
+    is never a pass."""
+    findings = []
+    for where, name, state, issues in rows:
+        unknown = [n for n in issues if n not in states]
+        if any(states.get(n) == "OPEN" for n in issues):
+            continue
+        if unknown:
+            findings.append("%s: Adoption row %s: could not read the state of %s"
+                            % (where, name, ", ".join("#%d" % n for n in unknown)))
+        elif all(states[n] == "CLOSED" for n in issues):
+            findings.append("%s: Adoption row %s is %s but %s closed: open or name the issue that finishes it, "
+                            "or mark the row adopted"
+                            % (where, name, state, ", ".join("#%d" % n for n in issues)
+                               + (" is" if len(issues) == 1 else " are all")))
+    return findings
+
+
+ADOPTION_ISSUES_REPO = "open-astro/AlpacaBridge"
+
+
+def check_adoption_issues(root=ROOT):
+    """--adoption-issues: the live half of check 23. Asks GitHub (the `gh` CLI) for each issue's state, so it is
+    not in CHECKS: a pull request must not fail because someone closed an issue. link-check.yml runs it weekly."""
+    root = Path(root)
+    rows = []
+    for record in sorted((root / DECISION_DIR).glob("0*.md")):
+        body = dict(_decision_sections(record.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+        if body is not None:
+            rows.extend(_adoption_unfinished_rows("%s/%s" % (DECISION_DIR, record.name), body))
+    states = {}
+    for number in sorted({n for row in rows for n in row[3]}):
+        result = subprocess.run(["gh", "issue", "view", str(number), "--repo", ADOPTION_ISSUES_REPO,
+                                 "--json", "state", "--jq", ".state"], capture_output=True, text=True, check=False)
+        state = result.stdout.strip()
+        if result.returncode == 0 and state in ("OPEN", "CLOSED", "MERGED"):  # a row may name the PR that landed it
+            states[number] = "OPEN" if state == "OPEN" else "CLOSED"
+    findings = _adoption_closed_issue_findings(rows, states)
+    for f in findings:
+        print("  - %s" % f)
+    print("\n%d finding(s) over %d unfinished Adoption row(s)." % (len(findings), len(rows)) if findings
+          else "\nAdoption issues OK: %d unfinished row(s), each with an open issue." % len(rows))
+    return 1 if findings else 0
 
 
 # --- check 24: review job time budget ------------------------------------------
@@ -4711,12 +4774,7 @@ def self_test():
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])
     f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"))
-    check("decision records: scope `**` outside the catalogue is reported",
-          any("scope `**` is allowed only in" in x for x in f))
-    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"),
-                extra={"0013-designs-to-avoid.md": good_record.replace("Scope: `src/a.cpp`", "Scope: `**`")})
-    check("decision records: scope `**` inside the catalogue is not the finding",
-          not any("0013-designs-to-avoid.md: rule 1 scope `**`" in x for x in f))
+    check("decision records: scope `**` is reported", any("scope `**` is not allowed" in x for x in f))
     f = records(reverse_from=2)
     check("decision records: a record from the cut-over number on without How to reverse is reported",
           any("0002-second.md: a record from 0002 on needs a `## How to reverse`" in x for x in f)
@@ -4771,6 +4829,18 @@ def self_test():
         return _adoption_findings("rec", body, adoption_files if files is None else files)
 
     check("adoption: the baseline fixture is clean", adoption() == [])
+    unfinished = _adoption_unfinished_rows("rec", adoption_body.replace("| planned | — | |\n| D", "| planned | #3, #4 | |\n| D"))
+    check("adoption issues: partial and planned rows that name an issue are collected, adopted rows are not",
+          unfinished == [("rec", "B", "partial", [2]), ("rec", "C", "planned", [3, 4])])
+    check("adoption issues: every row with an open issue is clean",
+          _adoption_closed_issue_findings(unfinished, {2: "OPEN", 3: "CLOSED", 4: "OPEN"}) == [])
+    f = _adoption_closed_issue_findings(unfinished, {2: "CLOSED", 3: "CLOSED", 4: "CLOSED"})
+    check("adoption issues: a partial row whose issue is closed is reported", any("row B is partial but #2 is closed" in x for x in f))
+    check("adoption issues: a planned row whose issues are all closed is reported", any("row C is planned but #3, #4 are all closed" in x for x in f))
+    check("adoption issues: one open issue tracks the row even when another was not read",
+          _adoption_closed_issue_findings(unfinished, {2: "OPEN", 4: "OPEN"}) == [])
+    f = _adoption_closed_issue_findings(unfinished, {2: "OPEN", 3: "CLOSED"})
+    check("adoption issues: an issue whose state was not read is a finding, not a pass", any("row C: could not read the state of #4" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/e_driver.cpp": "Clock c;"}))
     check("adoption: a scanned file that names the symbol with no row is reported", any("src/e_driver.cpp" in x and "no Adoption row" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "nothing"}))
@@ -5054,6 +5124,8 @@ if __name__ == "__main__":
             sys.exit(1)
         print(b.group("date"))
         sys.exit(0)
+    if "--adoption-issues" in sys.argv:
+        sys.exit(check_adoption_issues())
     if "--counts" in sys.argv:
         sys.exit(print_counts())
     if "--badge-json" in sys.argv:

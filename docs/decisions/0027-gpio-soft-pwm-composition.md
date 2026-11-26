@@ -1,6 +1,6 @@
 # GPIO soft-PWM composition
 
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -27,7 +27,7 @@ The rules a change is checked against. Each names where it applies and what chec
 4. Period waits and edges go through the `TaskClock`; the engine never sleeps or reads `std::chrono::steady_clock` itself. Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("PWM 50 % at 50 Hz is one high at t0 and one low 10 ms later": a raw sleep leaves the fake clock without a waiter and the case fails).
 5. Lock order is `lifecycle_mutex_`, then `io_mutex_` (every backend call), then `mutex_` (state, a leaf never held across a backend call or a join); `close()` signals the workers under `mutex_`, joins outside it, and settles and releases under `io_mutex_`. Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`, `AlpacaCore/include/alpacacore/util/soft_pwm_ports.h`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("close waits for a boolean write in flight") and the `[stress]` case "set_value storm during close" in `AlpacaCore/tests/test_zwo_asiair_concurrency_stress.cpp`.
 6. `close()` settles each armed PWM port at the steady level of its duty (above 0 high) and never drives a boolean line; a PWM port no client armed on a backend that cannot read its lines is neither written nor settled. Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("close settles each armed PWM line at its steady level and joins the workers", "on a backend that cannot read, an unarmed PWM port is neither written nor settled").
-7. `open()` claims the lines at the level they hold and writes none ([decision 0021](0021-power-port-power-on-state.md) rule 1). Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`, `AlpacaCore/include/alpacacore/util/gpiod_line_backend.h`, `AlpacaCore/src/vendors/zwo/pwm_gpio_misc_backend.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("open claims the writable lines once and writes nothing").
+7. `open()` claims the lines at the level they hold and writes none itself; a PWM duty kept across a reconnect resumes on its worker ([decision 0021](0021-power-port-power-on-state.md) rule 1). Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`, `AlpacaCore/include/alpacacore/util/gpiod_line_backend.h`, `AlpacaCore/src/vendors/zwo/pwm_gpio_misc_backend.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("open claims the writable lines once and writes nothing").
 8. The ASIAIR Plus kernel index offset and polarity inversion live in `PwmGpioMiscBackend`, never in a port table or a driver. Scope: `AlpacaCore/src/vendors/zwo/pwm_gpio_misc_backend.cpp`, `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp`. Checked by: `AlpacaCore/tests/test_zwo_asiair_plus_switch.cpp` ("every ISwitchV3 member answers while connected" reads the raw level per kernel index; a flipped polarity or offset fails it).
 9. A test of the engine runs over `FakeGpioLineBackend` and `FakeTaskClock` and does not sleep; a wait for something that must not happen is a bounded wait on a condition variable. Scope: `AlpacaCore/tests/test_soft_pwm_ports.cpp`. Checked by: review (no `sleep_for` in the file).
 
@@ -57,8 +57,8 @@ Symbol: `OwnedSoftPwmPorts`
 | --- | --- | --- | --- | --- |
 | ZWO ASIAIR Pro and Plus CM4 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted | #1757 | over `util::GpiodLineBackend` |
 | ZWO ASIAIR Plus RK3568 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted | #1757 | over `PwmGpioMiscBackend` |
-| iOptron iMate PowerBox switch | — | planned | #1757 | the follow-up deletes `ioptron_powerbox_wrapper.cpp` |
-| ToupTek StellaVita switch | — | planned | #1757 | the follow-up deletes `touptek_powerbox_wrapper.cpp` |
+| iOptron iMate PowerBox switch | — | planned | #2722 | the follow-up deletes `ioptron_powerbox_wrapper.cpp` |
+| ToupTek StellaVita switch | — | planned | #2722 | the follow-up deletes `touptek_powerbox_wrapper.cpp` |
 
 ## How to reverse
 

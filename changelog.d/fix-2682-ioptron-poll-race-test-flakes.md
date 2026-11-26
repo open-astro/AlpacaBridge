@@ -1,0 +1,2 @@
+### Fixed
+- **iOptron telescope tests: two poll-race flakes** (AlpacaCore tests, issue #2682): a test that stepped the fake clock before the state poll had parked lost its ticks to it. The zero-search reconnect case let a frame age past `util::kLinkStalenessBound` and read "link lost"; the wedged-park finalizer case never saw the poll's pull. Both now wait for the poll to park, and `latch_by_polls()` repeats a tick until the fake sees the poll's `:GLS#` read. No driver change.
