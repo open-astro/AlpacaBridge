@@ -72,6 +72,7 @@
 #include "client_connection_ledger.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "management_call.h"
 #include "persisted_config_store.h"
 #include "router_helpers.h"
 #include "thread_join.h"
@@ -3967,76 +3968,32 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
 }
 
 Response Router::handle_log_level(const Request& request, std::uint32_t server_tx_id) {
-    Response response;
-    response.set_content_type("application/json");
-
-    std::uint32_t client_tx_id = 0;
-    if (request.has_query_param("ClientTransactionID")) {
-        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
-
-    auto send_payload = [&](std::uint32_t ctx_id) {
-        AlpacaResponse alpaca_response(ctx_id, server_tx_id);
-        alpaca_response.value = make_log_level_payload();
-        response.set_body(alpaca_response);
-        return response;
-    };
-
+    const ManagementCall call(request, server_tx_id);
     try {
         if (request.method() == HttpMethod::GET) {
-            return send_payload(client_tx_id);
+            return call.ok(make_log_level_payload());
         }
 
         // POST or PUT: the route table answers any other verb.
         if (request.body().empty()) {
-            AlpacaResponse err =
-                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET, "Missing request body");
-            response.set_body(err);
-            return response;
+            return call.error(util::ErrorCode::VALUE_NOT_SET, "Missing request body");
+        }
+        if (call.json_body() == nullptr) {
+            return call.error(util::ErrorCode::INVALID_VALUE, "Invalid JSON payload");
         }
 
-        auto json_opt = parse_json(request.body());
-        if (!json_opt) {
-            AlpacaResponse err =
-                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, "Invalid JSON payload");
-            response.set_body(err);
-            return response;
+        const nlohmann::json* level_node = call.json_field({"level", "Level"});
+        if (level_node == nullptr) {
+            return call.error(util::ErrorCode::VALUE_NOT_SET, "Request must include a 'level' property");
         }
-
-        const auto& body = *json_opt;
-        auto body_client_tx = extract_client_transaction_id(body);
-        if (body_client_tx != 0) {
-            client_tx_id = body_client_tx;
+        if (!level_node->is_string()) {
+            return call.error(util::ErrorCode::INVALID_VALUE, "'level' must be a string");
         }
-
-        const nlohmann::json* level_node = nullptr;
-        if (body.contains("level")) {
-            level_node = &body["level"];
-        } else if (body.contains("Level")) {
-            level_node = &body["Level"];
-        }
-        if (level_node && !level_node->is_string()) {
-            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                                     "'level' must be a string");
-            response.set_body(err);
-            return response;
-        }
-        std::string requested_level;
-        if (level_node) {
-            requested_level = level_node->get<std::string>();
-        } else {
-            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
-                                                     "Request must include a 'level' property");
-            response.set_body(err);
-            return response;
-        }
+        const std::string requested_level = level_node->get<std::string>();
 
         auto parsed_level = util::parse_log_level_name(requested_level);
         if (!parsed_level.has_value()) {
-            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                                     "Unknown log level: " + requested_level);
-            response.set_body(err);
-            return response;
+            return call.error(util::ErrorCode::INVALID_VALUE, "Unknown log level: " + requested_level);
         }
 
         alpacacore::logging::set_log_level(*parsed_level);
@@ -4047,32 +4004,21 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             util::log_warning(std::string("Failed to persist log level: ") + log_what(save_err));
         }
         util::log_info("Log level set to " + log_level_to_string(*parsed_level));
-        return send_payload(client_tx_id);
+        return call.ok(make_log_level_payload());
     } catch (const std::exception& e) {
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::DRIVER_ERROR,
-            "Failed to update log level: " + std::string(e.what())
-        );
-        response.set_body(err);
-        return response;
+        return call.failure("Failed to update log level: ", e);
     }
 }
 
 Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id) {
-    Response response;
-
-    std::uint32_t client_tx_id = 0;
-    if (request.has_query_param("ClientTransactionID")) {
-        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
+    const ManagementCall call(request, server_tx_id);
 
     // Serve today's on-disk daily file. The in-memory history buffer was
     // removed in favor of the durable per-day files in logging.directory.
+    // No file yet is an empty body, not an error.
     const std::string today = util::current_log_filename();
     const std::string log_directory = util::get_log_directory();
     std::string logs;
-    bool have_logs = false;
 
     if (!log_directory.empty()) {
         const std::filesystem::path path =
@@ -4081,22 +4027,13 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
         if (std::filesystem::exists(path, exists_ec)) {
             try {
                 logs = util::read_log_file(today);
-                have_logs = true;
             } catch (const std::exception& e) {
                 // Real failure (size cap, permission denied, etc.) — surface
                 // to the client rather than silently returning an empty body.
-                response.set_content_type("application/json");
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::DRIVER_ERROR,
-                    std::string("Failed to read log file: ") + e.what()
-                );
-                response.set_body(err);
-                return response;
+                return call.failure("Failed to read log file: ", e);
             }
         }
     }
-    (void)have_logs;  // empty-body path is intentional when no file exists yet
 
     std::string format;
     if (request.has_query_param("format")) {
@@ -4106,6 +4043,7 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     }
 
     if (format == "plain" || format == "text") {
+        Response response;
         response.set_content_type("text/plain");
         if (request.has_query_param("download")) {
             response.set_header("Content-Disposition",
@@ -4115,22 +4053,12 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
         return response;
     }
 
-    response.set_content_type("application/json");
-    AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-    alpaca_response.value = logs;
-    response.set_body(alpaca_response);
-    return response;
+    return call.ok(logs);
 }
 
 
 Response Router::handle_log_files_list(const Request& request, std::uint32_t server_tx_id) {
-    Response response;
-    response.set_content_type("application/json");
-
-    std::uint32_t client_tx_id = 0;
-    if (request.has_query_param("ClientTransactionID")) {
-        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
+    const ManagementCall call(request, server_tx_id);
 
     if (request.method() == HttpMethod::DELETE_) {
         const auto files = util::list_log_files();
@@ -4151,23 +4079,18 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
                 ++deleted;
             }
             util::log_info("Deleted " + std::to_string(deleted) + " log file(s)");
-            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             nlohmann::json payload;
             payload["DeletedCount"] = deleted;
-            alpaca_response.value = payload;
-            response.set_body(alpaca_response);
-            return response;
+            return call.ok(payload);
         } catch (const std::exception& e) {
             // Partial deletion is possible — tell the caller exactly how far
             // it got rather than leaving the outcome ambiguous. Details (which
             // can include errno text) go to the server log, not the response.
             util::log_warning("Delete log files failed: " + log_what(e));
-            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                     "Failed to delete log files (deleted " + std::to_string(deleted) +
-                                                         " of " + std::to_string(files.size()) +
-                                                         " before the failure); see the server log for details");
-            response.set_body(err);
-            return response;
+            return call.error(util::ErrorCode::DRIVER_ERROR,
+                              "Failed to delete log files (deleted " + std::to_string(deleted) + " of " +
+                                  std::to_string(files.size()) +
+                                  " before the failure); see the server log for details");
         }
     }
 
@@ -4176,11 +4099,10 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         // gzip buffer. A concurrent request is refused, never queued.
         std::unique_lock<std::mutex> archive_lock(log_archive_mutex_, std::try_to_lock);
         if (!archive_lock.owns_lock()) {
-            response.set_content_type("application/json");
-            response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                                  "Log archive build already in progress; retry shortly"));
-            return response;
+            return call.error(util::ErrorCode::INVALID_OPERATION,
+                              "Log archive build already in progress; retry shortly");
         }
+        Response response;
         try {
             auto files = util::list_log_files();
             // Cap the combined archive so a long retention window cannot
@@ -4232,10 +4154,12 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             response.set_body(gzip_compress(combined));
             return response;
         } catch (const std::exception& e) {
-            response.set_content_type("application/json");
-            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                     std::string("Failed to build log archive: ") + e.what());
-            response.set_body(err);
+            // Not call.failure(): a gzip_compress() throw comes after the
+            // Content-Disposition header above, and the error reply has always
+            // kept it, so the envelope goes into this response.
+            response.set_body(make_error_response(call.client_tx_id(), call.server_tx_id(),
+                                                  util::exception_to_error_code(e),
+                                                  std::string("Failed to build log archive: ") + e.what()));
             return response;
         }
     }
@@ -4252,50 +4176,29 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             files.push_back(std::move(entry));
         }
         payload["Files"] = std::move(files);
-
-        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = payload;
-        response.set_body(alpaca_response);
-        return response;
+        return call.ok(payload);
     } catch (const std::exception& e) {
         // Catch here so the Alpaca error envelope carries the caller's
         // ClientTransactionID rather than the route()-level fallback of 0.
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::DRIVER_ERROR,
-            std::string("Failed to list log files: ") + e.what()
-        );
-        response.set_body(err);
-        return response;
+        return call.failure("Failed to list log files: ", e);
     }
 }
 
 Response Router::handle_log_file_item(const Request& request,
                                       const std::string& filename,
                                       std::uint32_t server_tx_id) {
-    Response response;
-
-    std::uint32_t client_tx_id = 0;
-    if (request.has_query_param("ClientTransactionID")) {
-        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-    }
+    const ManagementCall call(request, server_tx_id);
 
     // The route table answers a wrong verb before the name is checked, so the answer does not depend on the
     // name (#2484).
     if (!util::is_valid_log_filename(filename)) {
-        response.set_content_type("application/json");
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Invalid log file name"
-        );
-        response.set_body(err);
-        return response;
+        return call.error(util::ErrorCode::INVALID_VALUE, "Invalid log file name");
     }
 
     if (request.method() == HttpMethod::GET) {
         try {
             const std::string contents = util::read_log_file(filename);
+            Response response;
             response.set_content_type("text/plain");
             if (request.has_query_param("download")) {
                 response.set_header(
@@ -4305,36 +4208,21 @@ Response Router::handle_log_file_item(const Request& request,
             response.set_body(contents);
             return response;
         } catch (const std::exception& e) {
-            response.set_content_type("application/json");
             // DRIVER_ERROR is the right runtime-failure code here: the
             // endpoint exists (so NOT_IMPLEMENTED would be misleading); the
             // failure is "file missing", "size cap exceeded", or generic I/O.
-            AlpacaResponse err = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::DRIVER_ERROR,
-                std::string("Failed to read log file: ") + e.what()
-            );
-            response.set_body(err);
-            return response;
+            return call.failure("Failed to read log file: ", e);
         }
     }
 
     try {
         util::delete_log_file(filename);
         util::log_info("Deleted log file " + filename);
-        response.set_content_type("application/json");
-        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         nlohmann::json payload;
         payload["Deleted"] = filename;
-        alpaca_response.value = payload;
-        response.set_body(alpaca_response);
-        return response;
+        return call.ok(payload);
     } catch (const std::exception& e) {
-        response.set_content_type("application/json");
-        AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                 std::string("Failed to delete log file: ") + e.what());
-        response.set_body(err);
-        return response;
+        return call.failure("Failed to delete log file: ", e);
     }
 }
 

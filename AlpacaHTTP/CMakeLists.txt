@@ -276,6 +276,7 @@ set(ALPACAHTTP_SOURCES
     src/http/routes/telescope_routes.cpp
     src/http/client_connection_ledger.cpp
     src/http/device_call.cpp
+    src/http/management_call.cpp
     src/http/persisted_config_store.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
@@ -486,6 +487,12 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_device_call tests/test_device_call.cpp)
     target_link_libraries(test_device_call alpacahttp)
     add_test(NAME test_device_call COMMAND test_device_call)
+
+    # ManagementCall (management ClientTransactionID, body lookup, envelope and
+    # exception map, #2486) on a parsed Request: no Router.
+    add_executable(test_management_call tests/test_management_call.cpp)
+    target_link_libraries(test_management_call alpacahttp)
+    add_test(NAME test_management_call COMMAND test_management_call)
 
     # Camera imagearray payload (ImageBytes and JSON ImageArray) on synthetic images.
     add_executable(test_image_payload tests/test_image_payload.cpp)
