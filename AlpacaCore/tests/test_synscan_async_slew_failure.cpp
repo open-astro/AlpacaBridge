@@ -2574,6 +2574,9 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
     // The cancelled GOTO body may still be winding down, and it no longer refuses (#2586). AbortSlew verifies its stop
     // on the task clock (#2412).
     REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
+    // call_stepping() steps the clock while AbortSlew waits on the wire, and the status poll is paused: on a slow
+    // runner the held frame passes the 30 s loss bound and a getter reads a lost link. One poll refreshes it.
+    sc_bound::poll_status_now_for_testing(*rig.driver);
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
     // Where the mount points: a Sync is bounded to 5 deg from it (#2412).
@@ -2611,6 +2614,7 @@ TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew whi
 
     // AbortSlew verifies its stop on the task clock (#2412).
     REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
+    sc_bound::poll_status_now_for_testing(*rig.driver);  // the frame call_stepping() aged, as in the case above
     REQUIRE(held.wait_entered());  // the cancelled body is held; the slot still counts it as running
     CHECK_FALSE(rig.driver->get_slewing());
     const std::size_t sent_before_writes = rig.st->command_snapshot().size();
