@@ -119,6 +119,9 @@ namespace alpacacore::test {
  *   returns (frame_bpp/frame_channels overrides included), still clamped to
  *   the last get_mem_length(); a valid 3-channel 8-bit frame therefore also
  *   needs mem_length_override set to width * height * 3.
+ * - exposure_remaining defaults to 0 (the exposure is over), so a case that
+ *   does not set it gets the frame call straight after the arm, where a real
+ *   camera reports the remaining time during the exposure (#2721).
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
@@ -220,6 +223,7 @@ public:
     std::deque<int> cfw_position_script;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
+    uint32_t exposure_remaining = 0;  // get_exposure_remaining's return; 100 or less: the exposure is over (#2721)
     // When set, get_single_frame throws this NotConnected text instead of returning, as the real wrapper does for a
     // handle closed under the call (#2292).
     std::optional<std::string> frame_throw;
@@ -584,6 +588,12 @@ public:
         hit("start_single_frame");
         require_open(camera_id);
         return read_directly;
+    }
+
+    uint32_t get_exposure_remaining(const std::string& camera_id) override {
+        hit("get_exposure_remaining");
+        require_open(camera_id);
+        return exposure_remaining;
     }
 
     bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,

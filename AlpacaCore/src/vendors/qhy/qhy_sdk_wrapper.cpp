@@ -537,6 +537,12 @@ bool QHYSDKWrapper::start_single_frame(const std::string& camera_id) {
     return false;
 }
 
+uint32_t QHYSDKWrapper::get_exposure_remaining(const std::string& camera_id) {
+    auto ref = pimpl_->get_handle_ref(camera_id);
+    std::lock_guard<std::mutex> call_lock(*ref.call_mutex);
+    return GetQHYCCDExposureRemaining(ref.handle.get());
+}
+
 bool QHYSDKWrapper::get_single_frame(const std::string& camera_id,
                                      uint8_t* buffer,
                                      uint32_t& width, uint32_t& height,

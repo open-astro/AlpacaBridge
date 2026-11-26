@@ -149,6 +149,9 @@ public:
     bool start_single_frame(const std::string& camera_id) override {
         return locked([&] { return inner_.start_single_frame(camera_id); });
     }
+    uint32_t get_exposure_remaining(const std::string& camera_id) override {
+        return locked([&] { return inner_.get_exposure_remaining(camera_id); });
+    }
     bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
                           uint32_t& bpp, uint32_t& channels) override {
         return locked([&] { return inner_.get_single_frame(camera_id, buffer, width, height, bpp, channels); });

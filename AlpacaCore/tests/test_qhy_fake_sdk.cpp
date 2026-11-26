@@ -361,6 +361,7 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     sdk.set_bits_mode(id, 16);
     sdk.get_mem_length(id);
     sdk.start_single_frame(id);
+    sdk.get_exposure_remaining(id);
     std::vector<uint8_t> buffer(1024 * 1024, 0);
     uint32_t w = 0, h = 0, bpp = 0, channels = 0;
     sdk.get_single_frame(id, buffer.data(), w, h, bpp, channels);
@@ -401,6 +402,7 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
         "set_bits_mode",
         "get_mem_length",
         "start_single_frame",
+        "get_exposure_remaining",
         "get_single_frame",
         "cancel_exposure",
         "guide",
@@ -421,7 +423,7 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     // number here and the list above in the same change as the interface.
     // What this CASE catches (mutation-verified) is a forward wired to the
     // wrong inner method, or to none.
-    CHECK(methods.size() == 27);
+    CHECK(methods.size() == 28);
     for (const auto& name : methods) {
         INFO("method: " << name);
         CHECK(fake.call_count(name.c_str()) == ((name == "set_param" || name == "close_camera") ? 2 : 1));

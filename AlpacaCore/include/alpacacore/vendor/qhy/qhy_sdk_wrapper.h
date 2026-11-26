@@ -240,6 +240,11 @@ public:
     virtual bool start_single_frame(const std::string& camera_id) = 0;
 
     /**
+     * @brief GetQHYCCDExposureRemaining: 100 or less means the exposure is over (qhyccd.h). Does not block.
+     */
+    virtual uint32_t get_exposure_remaining(const std::string& camera_id) = 0;
+
+    /**
      * @brief Blocking call that waits for a single frame and copies it into buffer.
      *
      * buffer must be pre-allocated to at least get_mem_length() bytes.
@@ -349,6 +354,7 @@ public:
     uint32_t get_mem_length(const std::string& camera_id) override;
 
     bool start_single_frame(const std::string& camera_id) override;
+    uint32_t get_exposure_remaining(const std::string& camera_id) override;
     bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
                           uint32_t& bpp, uint32_t& channels) override;
     void cancel_exposure(const std::string& camera_id) override;

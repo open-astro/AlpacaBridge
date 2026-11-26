@@ -292,8 +292,9 @@ private:
             // use-after-close inside libqhyccd. stop_or_abort_exposure_locked() marks the exposure stopping (its broken
             // download is dropped, not kept) and its token tells the body the stop is meant for it, or ends a start
             // still reserved; disconnecting_ refuses a
-            // StartExposure from here on. The join has no time bound: when cancel_exposure() does not interrupt
-            // the frame call, the disconnect waits for that one call (decision 0020, the QHY row; as on ZWO).
+            // StartExposure from here on. The join has no time bound: during the exposure the body is in its poll
+            // wait and returns within one step; in the readout, when cancel_exposure() does not interrupt the frame
+            // call, the disconnect waits for that readout (decision 0020, the QHY row; #2721).
             std::string exposure_id;
             bool stop_exposure = false;
             {
@@ -1449,6 +1450,8 @@ private:
         // Host trigger boundary (LastExposureStartTime, the PercentCompleted base), not setup, settle or download
         // time; SDK latency is unmeasured (issue #1477).
         c.exposure_started();
+        const auto exposure_end = clock_.now() + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                     std::chrono::duration<double, std::micro>(request.exposure_us));
         ALPACA_LOG_DEBUG("QHY", "exposure body: calling start_single_frame...");
         bool read_directly = false;
         try {
@@ -1476,6 +1479,33 @@ private:
             ALPACA_LOG_DEBUG("QHY", "exposure body: settling 1s before GetMemLength/GetSingleFrame...");
             if (!c.wait_for(std::chrono::seconds(1))) {
                 cancel_sdk_exposure(request.id, "after a stopped settle");
+                return;
+            }
+        }
+
+        // #2721 (rule 5): GetQHYCCDSingleFrame has no timeout and blocks until the exposure ends, and a cancel need
+        // not wake it. Poll the SDK's exposure-remaining instead, where a stop ends the wait, so an AbortExposure or a
+        // disconnect waits one poll step during the exposure and only the readout after it. Never past the requested
+        // exposure: a camera that misreports the remaining time falls back to the frame call's own wait.
+        bool first_remaining = true;
+        const auto exposing = [&] {
+            try {
+                const uint32_t remaining = sdk_.get_exposure_remaining(request.id);
+                if (first_remaining) {  // the header gives no unit: a rig run reads it from this line
+                    first_remaining = false;
+                    ALPACA_LOG_DEBUG("QHY",
+                                     "exposure body: first get_exposure_remaining = " + std::to_string(remaining));
+                }
+                return remaining > 100;  // qhyccd.h: 100 or less, the exposure is over
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "get_exposure_remaining failed: " + std::string(e.what()));
+                return false;
+            }
+        };
+        constexpr std::chrono::nanoseconds kExposurePollStep = std::chrono::milliseconds(100);
+        while (clock_.now() < exposure_end && exposing()) {
+            if (!c.wait_for(std::min(kExposurePollStep, exposure_end - clock_.now()))) {
+                cancel_sdk_exposure(request.id, "after a stopped exposure");
                 return;
             }
         }
@@ -1619,11 +1649,11 @@ private:
     }
 
     // AbortExposure (decision 0020 rule 5): stops the SDK exposure, then ends the session's exposure and joins its
-    // body. Its worst case is one whole GetQHYCCDSingleFrame call, when cancel_exposure() does not interrupt it (as
-    // ZWO's abort waits for one SDK call). A finished frame survives; a kept failure stays until the next
-    // StartExposure or a reconnect (rule 3). An abort that meets a start still reserved is recorded and ends that
-    // start (rule 9). A body the watchdog already failed that is still inside the SDK is stopped, not joined: the
-    // next StartExposure waits for it.
+    // body. Its worst case is one exposure poll step during the exposure, and the readout of an exposure that has
+    // ended when cancel_exposure() does not interrupt GetQHYCCDSingleFrame (#2721). A finished frame survives; a kept
+    // failure stays until the next StartExposure or a reconnect (rule 3). An abort that meets a start still reserved
+    // is recorded and ends that start (rule 9). A body the watchdog already failed that is still inside the SDK is
+    // stopped, not joined: the next StartExposure waits for it.
     void cancel_running_exposure() {
         ensure_connected();
         std::string id;
@@ -2010,8 +2040,8 @@ private:
     }
 
     void stop_all_threads() {
-        // Wake a body parked in GetQHYCCDSingleFrame before the join, or the join waits for the whole remaining
-        // exposure (decision 0020 rule 5), then close the session and join the body with no time bound.
+        // Stop the SDK exposure before the join, which can interrupt a body in its GetQHYCCDSingleFrame readout
+        // (decision 0020 rule 5), then close the session and join the body with no time bound.
         std::string exposure_id;
         bool stop_exposure = false;
         {
