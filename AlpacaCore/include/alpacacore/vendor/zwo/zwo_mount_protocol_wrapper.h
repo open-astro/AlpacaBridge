@@ -128,7 +128,8 @@ enum class ParkStatus {
 class ZWOMountProtocolWrapper {
 public:
     // Driver links require identity admission under the I/O lock; raw transport users keep the default mode.
-    // @p resolver looks up a host name for the explicit network connect (default getaddrinfo); a test injects a slow one.
+    // @p resolver looks up a host name for the explicit network connect (default getaddrinfo); a test injects a slow
+    // one.
     explicit ZWOMountProtocolWrapper(bool require_identity = false,
                                      std::optional<std::vector<ZWODeviceInfo>> discovery_candidates = std::nullopt,
                                      util::TcpResolver resolver = {});

@@ -1321,8 +1321,8 @@ private:
         }
         // A lookup that used the whole budget leaves the connect none: say so, not "no answer".
         if (out_of_time) {
-            return fail("the " + std::to_string(kNetworkConnectTimeoutMs) + " ms connect deadline passed before the TCP "
-                        "connect started");
+            return fail("the " + std::to_string(kNetworkConnectTimeoutMs) +
+                        " ms connect deadline passed before the TCP connect started");
         }
         util::TcpAddress address;
         std::memcpy(&address.storage, &addr, sizeof(addr));
