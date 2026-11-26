@@ -666,6 +666,44 @@ TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers
     CHECK(error.find("no answer within 7000 ms") != std::string::npos);
 }
 
+// Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() letting NetworkEndpointClaim::claim() start its own
+// 1500 ms wait after a slow lookup instead of stopping at the 7000 ms connect deadline (the Connect ends at ~7.5 s)
+TEST_CASE("ZWO mount network - a slow lookup and a held probe claim still end the Connect within 7 s",
+          "[zwo][network][issue1620]") {
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    FakeMountServer server([&](const std::string& chunk) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+        }
+        return mount_reply(chunk, "AM5");
+    });
+    REQUIRE(server.ok());
+    // The probe holds the endpoint claim until the case releases its reply (its own timeout is 10 s).
+    auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 10000); });
+    REQUIRE(probing.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const int port = server.port();
+    // A lookup that answers after 6 s, as a slow DNS server does.
+    ZWOMountProtocolWrapper explicit_link(false, std::nullopt, [port](const std::string&, int, int family) {
+        std::this_thread::sleep_for(std::chrono::seconds(6));
+        return alpacacore::util::lookup_tcp_host("127.0.0.1", port, family, alpacacore::util::TcpDeadline::in(1000));
+    });
+    const auto start = std::chrono::steady_clock::now();
+    const bool connected = explicit_link.connect(network_info("mount.test", port));
+    const auto took = std::chrono::steady_clock::now() - start;
+    resume.set_value();
+    (void)probe.get();
+    const std::string error = explicit_link.last_connect_error();
+    INFO("last_connect_error: " << error << ", took "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
+    CHECK_FALSE(connected);
+    CHECK(took >= std::chrono::milliseconds(6900));
+    CHECK(took < std::chrono::milliseconds(7300));
+    CHECK(error.find("7000 ms") != std::string::npos);
+}
+
 // Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() not passing closing_ to the bounded connect (a
 // Disconnect waits out the 7 s connect deadline)
 TEST_CASE("ZWO mount network - a cancel ends an explicit Connect to a mount that never answers", "[zwo][network]") {

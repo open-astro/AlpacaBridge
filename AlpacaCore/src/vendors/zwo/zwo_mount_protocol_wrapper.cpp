@@ -465,8 +465,9 @@ private:
 
 // The IPv4 address the endpoint claim is keyed on, looked up by @p deadline (#2711). "" or why there is none.
 std::string resolve_network_endpoint(const std::string& host, int port, sockaddr_in& address,
-                                     const util::TcpDeadline& deadline, const std::atomic<bool>* cancel = nullptr) {
-    const util::TcpLookup lookup = util::lookup_tcp_host(host, port, AF_INET, deadline, cancel);
+                                     const util::TcpDeadline& deadline, const std::atomic<bool>* cancel = nullptr,
+                                     const util::TcpResolver& resolver = {}) {
+    const util::TcpLookup lookup = util::lookup_tcp_host(host, port, AF_INET, deadline, cancel, resolver);
     if (!lookup.error.empty()) return lookup.error;
     std::memcpy(&address, &lookup.addresses.front().storage, sizeof(address));
     return "";
@@ -707,9 +708,11 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 class ZWOMountProtocolWrapper::Impl {
 public:
-    explicit Impl(bool require_identity, std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
+    explicit Impl(bool require_identity, std::optional<std::vector<ZWODeviceInfo>> discovery_candidates,
+                  util::TcpResolver resolver)
         : require_identity_(require_identity),
           discovery_candidates_(std::move(discovery_candidates)),
+          resolver_(std::move(resolver)),
           connected_(false),
           connection_type_(ConnectionType::Serial)
 #ifdef _WIN32
@@ -1290,7 +1293,7 @@ private:
         // One deadline for the lookup, the claim wait and the TCP connect (#2711).
         const auto deadline = util::TcpDeadline::in(kNetworkConnectTimeoutMs);
         sockaddr_in addr{};
-        const std::string lookup_error = resolve_network_endpoint(host, port, addr, deadline, &closing_);
+        const std::string lookup_error = resolve_network_endpoint(host, port, addr, deadline, &closing_, resolver_);
         if (!lookup_error.empty()) return fail(lookup_error);
         auto claim = std::make_unique<NetworkEndpointClaim>();
         const auto result = claim->claim(
@@ -1517,6 +1520,7 @@ private:
     mutable std::mutex mutex_;
     const bool require_identity_;
     const std::optional<std::vector<ZWODeviceInfo>> discovery_candidates_;
+    const util::TcpResolver resolver_;  // empty: getaddrinfo
     bool identity_verified_ = false;
     bool connected_;
     std::atomic<bool> link_lost_{false};
@@ -1544,8 +1548,9 @@ private:
 };
 
 ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity,
-                                                 std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
-    : pimpl_(std::make_unique<Impl>(require_identity, std::move(discovery_candidates))) {}
+                                                 std::optional<std::vector<ZWODeviceInfo>> discovery_candidates,
+                                                 util::TcpResolver resolver)
+    : pimpl_(std::make_unique<Impl>(require_identity, std::move(discovery_candidates), std::move(resolver))) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
 

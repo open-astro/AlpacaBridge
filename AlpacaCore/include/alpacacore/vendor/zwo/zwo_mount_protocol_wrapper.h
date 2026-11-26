@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/tcp_connect.h>
+
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -126,8 +128,10 @@ enum class ParkStatus {
 class ZWOMountProtocolWrapper {
 public:
     // Driver links require identity admission under the I/O lock; raw transport users keep the default mode.
+    // @p resolver looks up a host name for the explicit network connect (default getaddrinfo); a test injects a slow one.
     explicit ZWOMountProtocolWrapper(bool require_identity = false,
-                                     std::optional<std::vector<ZWODeviceInfo>> discovery_candidates = std::nullopt);
+                                     std::optional<std::vector<ZWODeviceInfo>> discovery_candidates = std::nullopt,
+                                     util::TcpResolver resolver = {});
     ~ZWOMountProtocolWrapper();
     ZWOMountProtocolWrapper(const ZWOMountProtocolWrapper&) = delete;
     ZWOMountProtocolWrapper& operator=(const ZWOMountProtocolWrapper&) = delete;
