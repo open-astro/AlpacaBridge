@@ -2433,6 +2433,37 @@ struct MoveAxisBoundRig {
             return is_variable_rate_command(c, device) && is_zero_rate_command(c);
         }));
     }
+    // Runs `fn` on its own thread and steps the clock 50 ms only while that thread waits on it, polling after each
+    // step as advance() does. call_stepping() steps blind: on a slow runner it moves virtual time while `fn` is on the
+    // wire, so a verified stop's rounds run out before its reads land and the paused frame passes the loss bound.
+    void call_parked(const std::function<void()>& fn) {
+        std::atomic<bool> done{false};
+        std::exception_ptr error;
+        std::thread caller([&] {
+            try {
+                fn();
+            } catch (...) {
+                error = std::current_exception();
+            }
+            done.store(true);
+        });
+        const auto id = caller.get_id();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+            if (!clock.wait_for_waiter_thread(id, std::chrono::milliseconds(10))) continue;
+            clock.advance(std::chrono::milliseconds(50));
+            clock.wait_for_woken_settled(std::chrono::seconds(10));
+            sc_bound::poll_status_now_for_testing(*driver);
+        }
+        const bool returned = done.load();
+        while (!done.load()) {  // never leave the caller parked: wake it until it returns
+            clock.advance(std::chrono::hours(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        caller.join();
+        REQUIRE(returned);
+        if (error) std::rethrow_exception(error);
+    }
     int starts(int device) {
         const auto commands = st->command_snapshot();
         return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& c) {
@@ -2978,7 +3009,7 @@ TEST_CASE("SynScan MoveAxis - a client-silence watchdog stop leaves the 60 s bou
     rig.driver->note_client_activity(t0);
     bool stopped = false;
     // The watchdog's AbortSlew verifies its stop on the task clock.
-    alpacacore::test::call_stepping(rig.clock, [&] {
+    rig.call_parked([&] {
         stopped = rig.driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30));
     });
     CHECK(stopped);
