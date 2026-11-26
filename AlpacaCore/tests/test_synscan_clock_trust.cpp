@@ -764,7 +764,9 @@ TEST_CASE("SynScan host clock - a stepped call held in real time does not age th
         }
         CHECK_NOTHROW(rig.driver->get_right_ascension());
     }));
-    CHECK(rig.clock.now() - start < std::chrono::seconds(30));
+    // The call never parked, so the clock must not have moved at all (the paused poll is a parked waiter, but it is
+    // not the call): a bounded rate would still latch the loss on a call held for 13 s.
+    CHECK(rig.clock.now() - start < milliseconds(50));
 }
 
 #endif  // !_WIN32
