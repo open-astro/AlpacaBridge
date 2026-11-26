@@ -419,8 +419,7 @@ TEST_CASE("iOptron polled state - three failed polls latch a fault and one good 
 // Issue #2677: with a fault latched, the site getters (SiderealTime, SiteLatitude, SiteLongitude,
 // DestinationSideOfPier) and DeviceState refuse under the state lock alone. They used to fall through to the operation
 // lock and queue behind the poll's probe, which holds it for one :GLS# reply (decision 0016 rule 1).
-TEST_CASE("iOptron polled state - site getters and DeviceState refuse at once with a fault latched while a probe holds "
-          "the wire",
+TEST_CASE("iOptron polled state - site getters and DeviceState refuse at once with a fault latched",
           "[ioptron][telescope][polled][link-fault][getter-locks]") {
     auto rig = make_tcp_rig();
     auto& mount = rig.fake();

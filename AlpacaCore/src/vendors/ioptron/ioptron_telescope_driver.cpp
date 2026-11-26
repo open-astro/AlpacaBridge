@@ -2366,9 +2366,10 @@ private:
     // DestinationSideOfPier, #2491 rule 9: the site is not part of the polled frame): a getter served from the site
     // cache takes the state lock alone and answers when its cache is fresh (primed at connect, 30 s grace, then its 60
     // s TTL), so it never waits behind a command, the clock-sync body or another getter's refill on the wire. Only when
-    // the cache has lapsed, or a fault is latched, does it take the operation lock and run `body` under both locks,
+    // the cache has lapsed does it take the operation lock and run `body` under both locks,
     // where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true must mean `body` reaches no
-    // wire: the refill helpers return early on the same predicates. The check and the refill read the clock
+    // wire: the refill helpers return early on the same predicates. A latched fault is refused under the state lock,
+    // before any wait on the operation lock (#2677). The check and the refill read the clock
     // separately, so the TTL can lapse between the two. A refill reached that way serves a primed cache as it stands,
     // and when the cache it would serve was never primed or was invalidated it signals RefillNeedsOperationLock instead
     // of reaching the wire: the body is then run again under both locks (serve_as_is_locked()). A body signals before
@@ -2382,7 +2383,13 @@ private:
                 throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
             }
             throw_if_link_lost();
-            if (polled_.fault().empty() && fresh()) {
+            // A latched fault is refused here, under the state lock: under the operation lock it would wait for
+            // the poll's probe, one reply timeout, only to refuse the same way (#2677).
+            if (const std::string fault = polled_.fault(); !fault.empty()) {
+                throw AlpacaException("iOptron mount communications compromised: " + fault,
+                                      AlpacaError::DriverException);
+            }
+            if (fresh()) {
                 try {
                     return body();
                 } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch): the body reruns below
