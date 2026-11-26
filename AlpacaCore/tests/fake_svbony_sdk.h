@@ -180,6 +180,7 @@ public:
         if (type == Control::FrameSpeedMode) frame_speed_written_at_ = std::chrono::system_clock::now();
     }
     ROI get_roi_format(int camera_id) override {
+        if (before_call) before_call("get_roi_format");
         std::lock_guard lock(mutex_);
         record_locked("get_roi_format");
         maybe_fail_locked("get_roi_format");
