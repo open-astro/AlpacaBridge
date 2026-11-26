@@ -192,6 +192,11 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// blocks on before the driver is destroyed.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam: `hook` runs on the thread of a non-zero MoveAxis, after the rate command, with the driver locks
+/// released and the axis's cap body not yet started, so a case can land a second MoveAxis on the axis in that
+/// window (#2651). Pass an empty function to clear it, and release anything the hook blocks on first.
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Test seam: `hook` runs on the thread that changes the RA rate, in the window
 /// where it has released the driver locks and not yet started the rate-applied
 /// check, so a case can land a disconnect and a reconnect before the check body

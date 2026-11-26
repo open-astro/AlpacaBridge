@@ -3000,6 +3000,7 @@ public:
         }
         if (started) {
             start_limit_guard();
+            run_move_axis_cap_before_start_hook();
             start_move_axis_cap(axis, cap_owner, cap_window);
         }
         if (!need_stop_task) {
@@ -4320,6 +4321,18 @@ private:
             sample_frame(axis_params_[0].counts_per_revolution, axis_params_[1].counts_per_revolution, sampled_at);
         if (snapshot_.publish(token, frame)) {
             adopt_frame_locked(frame, sampled_at, /*force=*/true);
+        }
+    }
+
+    // Test seam: runs in move_axis()'s unlocked gap, before start_move_axis_cap().
+    void run_move_axis_cap_before_start_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = move_axis_cap_before_start_hook_;
+        }
+        if (hook) {
+            hook();
         }
     }
 
@@ -6525,8 +6538,14 @@ private:
     // the move left: a renewal, MoveAxis(axis, 0) and a stop-completion body supersede it, and a disconnect joins it.
 
     // Starts the cap body of `axis`. Call with no driver lock held (decision 0006 rule 4). A start the slot refuses
-    // fails closed: the axis just started is stopped and MoveAxis throws.
+    // fails closed: the axis just started is stopped and MoveAxis throws. Two MoveAxis calls on one axis reach here
+    // after their locks are released, in either order: under the axis's start lock, a call whose move a newer command
+    // has already superseded starts nothing, so an older body can never replace the newer move's cap (#2651 review).
     void start_move_axis_cap(int axis, std::uint64_t owner, util::HoldWindow window) {
+        const std::lock_guard<std::mutex> start_lock(move_axis_cap_start_mutex_[axis]);
+        if (stop_generation_[axis].current() != owner) {
+            return;  // a newer MoveAxis, a stop or AbortSlew owns the axis, and starts its own cap if it needs one
+        }
         try {
             move_axis_cap_[axis].start([this, axis, owner, window](util::OperationContext& ctx) {
                 run_move_axis_cap(axis, owner, window, ctx);
@@ -7184,6 +7203,11 @@ public:
         status_poll_after_sample_hook_ = std::move(hook);
     }
 
+    void set_move_axis_cap_before_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        move_axis_cap_before_start_hook_ = std::move(hook);
+    }
+
     void set_rate_verify_before_start_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         rate_verify_before_start_hook_ = std::move(hook);
@@ -7563,6 +7587,7 @@ private:
     std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> rate_verify_before_start_hook_;
+    std::function<void()> move_axis_cap_before_start_hook_;
     std::function<void()> disconnect_before_close_hook_;
     std::function<void()> duty_before_exit_stop_hook_;
     mutable std::mutex stopped_body_wake_hook_mutex_;
@@ -7596,6 +7621,9 @@ private:
     // open-astro#2407, #2651: the 60 s MoveAxis cap of each axis (run_move_axis_cap()); a generation of its own per
     // axis, so a renewal on one axis never supersedes the other's body.
     util::OperationGeneration move_axis_cap_generation_[2];
+    // Held across start_move_axis_cap()'s ownership check and start(); taken with no driver lock held, and no
+    // driver lock is taken under it except the refused-start stop's.
+    std::mutex move_axis_cap_start_mutex_[2];
     util::AsyncOperation move_axis_cap_[2] = {{"SkyWatcher MoveAxis cap (RA)", move_axis_cap_generation_[0], clock_},
                                               {"SkyWatcher MoveAxis cap (Dec)", move_axis_cap_generation_[1], clock_}};
     // open-astro#2407: the AbortSlew stop check (run_abort_verify()).
@@ -7789,6 +7817,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_move_axis_cap_before_start_hook_for_testing(std::move(hook));
     }
 }
 

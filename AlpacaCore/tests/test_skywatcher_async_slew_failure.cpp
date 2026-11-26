@@ -656,6 +656,43 @@ TEST_CASE("SkyWatcher async - a MoveAxis whose cap cannot start stops the axis a
     driver->set_connected(false);
 }
 
+// #2651 (review): two MoveAxis calls on one axis start their cap bodies after the locks are released, so the older
+// call's start can land after the newer one's. The older body owns a superseded move and sends no stop: the newer
+// jog must still be stopped at its own 60 s.
+TEST_CASE("SkyWatcher async - an older MoveAxis whose cap starts last leaves the newer jog capped",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::Latch older_held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    std::atomic<int> calls{0};
+    sw::set_move_axis_cap_before_start_hook_for_testing(*driver, [&] {
+        if (calls.fetch_add(1) == 0) older_held.block();  // only the first (older) call waits here
+    });
+    std::thread older([&] { driver->move_axis(1, 1.0); });
+    REQUIRE(older_held.wait_entered());
+    REQUIRE_NOTHROW(driver->move_axis(1, 1.0));  // the newer call starts its cap body first
+    older_held.release();
+    older.join();
+    sw::set_move_axis_cap_before_start_hook_for_testing(*driver, {});
+    REQUIRE(mount.axis_running(2));
+    const int stops_before = mount.frames_seen('L');
+    for (int i = 0; i < 59; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
+        clock.advance(std::chrono::seconds(1));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    for (int i = 0; i < 24; ++i) {  // the cap at 60 s and its verify rounds
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
+        clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    CHECK(mount.frames_seen('L') > stops_before);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a relink stop that fails stays owed to the next connect",
           "[skywatcher][async][moveaxis][goto-safety]") {
     alpacacore::test::FakeTaskClock clock;
