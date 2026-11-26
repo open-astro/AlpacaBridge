@@ -1021,8 +1021,9 @@ private:
             validate_frame_format(id, request.frame, request.formats);
             std::vector<std::uint8_t> buffer(image_buffer_size(request.frame));
             c.reading_out();
-            // ASIGetDataAfterExp is the lazy, potentially multi-second USB transfer. It takes no timeout, so an
-            // AbortExposure is refused in Download and a Disconnect waits for it (the 0020 `partial` note).
+            // ASIGetDataAfterExp takes no timeout, so an AbortExposure is refused in Download and a Disconnect waits
+            // for it. It copies a frame the SDK already transferred before ASI_EXP_SUCCESS: 8 to 10 ms for an 18 MB
+            // frame on the rig (#2721).
             dev_.get_data_after_exposure(id, buffer.data(), static_cast<long>(buffer.size()));
             {
                 std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
