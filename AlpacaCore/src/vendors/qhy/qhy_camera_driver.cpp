@@ -2308,8 +2308,11 @@ private:
                 const std::size_t src = static_cast<std::size_t>(row) * buf_stride;
                 const std::size_t dst = static_cast<std::size_t>(row) * out_stride;
                 const std::size_t copy = std::min(buf_stride, out_stride);
-                for (std::size_t i = 0; i < copy && src + i < frame.buffer.size(); ++i) {
-                    image.data[dst + i] = frame.buffer[src + i];
+                // QHY RGB24 frames are BGR (SDK API manual, "Image data structure"); Alpaca planes are RGB.
+                for (std::size_t i = 0; i + 2 < copy && src + i + 2 < frame.buffer.size(); i += 3) {
+                    image.data[dst + i] = frame.buffer[src + i + 2];
+                    image.data[dst + i + 1] = frame.buffer[src + i + 1];
+                    image.data[dst + i + 2] = frame.buffer[src + i];
                 }
             }
             return image;
