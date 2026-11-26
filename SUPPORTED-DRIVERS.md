@@ -574,7 +574,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel de
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator and FilterWheel devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel and Switch devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
@@ -655,6 +655,8 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the SafetyMonitor 
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Switch Drivers
+
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Switch device of another Alpaca server through this one. The number of switches and each switch's name, range and `CanWrite` are read once at Connect; the values are those of the last poll of the other server, and a write reads back at once. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 ### Gemini
 

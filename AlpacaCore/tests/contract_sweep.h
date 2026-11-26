@@ -94,6 +94,7 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -740,6 +741,24 @@ inline ContractEntry contract_entry_remotealpaca_filterwheel() {
         },
         kSrcAgents);
 }
+// The upstream's switches are read at Connect, so MaxSwitch and the per-id capabilities are NotConnected while
+// disconnected; only a negative id is InvalidValue before the connection check.
+inline ContractEntry contract_entry_remotealpaca_switch() {
+    return with_switch_caps(
+        make_entry(
+            "remotealpaca_switch", "remotealpaca", "switch", DeviceType::Switch,
+            [](int n) -> std::unique_ptr<AlpacaDriver> {
+                vendor::remotealpaca::RemoteDeviceConfig config;
+                config.host = "127.0.0.1";
+                config.port = 32323;
+                return vendor::remotealpaca::create_remotealpaca_switch(n, config);
+            },
+            kSrcAgents),
+        DisconnectedRead::NotConnected, DisconnectedRead::NotConnected, 0,
+        "remotealpaca_switch_driver.cpp info(): the negative-id check, then NotConnected (MaxSwitch "
+        "and CanWrite/CanAsync are the upstream's, read at Connect); id 0 of the scripted "
+        "upstream (alpaca_upstream_script.h) is writable");
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -1006,7 +1025,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #define CS_REMOTEALPACA(X)              \
     X(remotealpaca_observingconditions) \
-    X(remotealpaca_safetymonitor) X(remotealpaca_rotator) X(remotealpaca_filterwheel)
+    X(remotealpaca_safetymonitor) X(remotealpaca_rotator) X(remotealpaca_filterwheel) X(remotealpaca_switch)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1148,6 +1167,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "safetymonitor", "fake_http_client.h"},        // the same, as a SafetyMonitor
     {"remotealpaca", "rotator", "fake_http_client.h"},              // the same, as a Rotator
     {"remotealpaca", "filterwheel", "fake_http_client.h"},          // the same, as a FilterWheel
+    {"remotealpaca", "switch", "fake_http_client.h"},               // the same, as a Switch
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1205,6 +1225,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"remotealpaca_rotator", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp"},
     {"remotealpaca_filterwheel", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp"},
+    {"remotealpaca_switch", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

@@ -12,12 +12,12 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor, Rotator or FilterWheel device for the remotealpaca driver
-// tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake
-// task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP;
-// this one answers per member and per SensorName, keeps the upstream's Connected and AveragePeriod (a Rotator's moves,
-// Sync and Reverse, and a FilterWheel's moves) as a real server does, and counts calls per member. An unscripted member
-// answers 0x400 (not implemented), as a real server does.
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel or Switch device for the remotealpaca
+// driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on
+// the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real
+// HTTP; this one answers per member and per SensorName (or, for a Switch, per Id), keeps the upstream's Connected and
+// AveragePeriod (a Rotator's moves, Sync and Reverse, a FilterWheel's moves and a Switch's writes) as a real server
+// does, and counts calls per member. An unscripted member answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
@@ -42,7 +42,7 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -54,6 +54,9 @@ public:
     // FilterWheel: a FilterWheel 3 upstream (Platform 7) named "Alpaca Simulator Filter Wheel" with four slots, Red,
     // Green, Blue and Clear, offsets 100, 200, 300 and 0, at slot 0. A Position write starts a move that reads -1 until
     // finish_wheel_move() ends it at the written slot, so a test sees the upstream moving for as long as it needs.
+    // Switch: a Switch 3 upstream (Platform 7) named "Alpaca Simulator Switch" with three switches: 0 "Power" (0 to 1,
+    // on), 1 "Dew Heater" (0 to 100 in steps of 1, at 40, asynchronous) and 2 "Sensor" (0 to 10 in steps of 0.5, at
+    // 2.5, read-only). An asynchronous write leaves StateChangeComplete false until finish_async() applies it.
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
         set("connecting", "false");
         if (kind == Kind::FilterWheel) {
@@ -75,6 +78,16 @@ public:
             set("ismoving", "false");
             set_rotator_locked(100.0, 90.0);
             set("targetposition", number(100.0));
+            return;
+        }
+        if (kind == Kind::Switch) {
+            set("interfaceversion", "3");
+            set("name", "\"Alpaca Simulator Switch\"");
+            set("description", "\"ASCOM Alpaca Simulator Switch\"");
+            set("maxswitch", "3");
+            set_switch(0, "Power", 0.0, 1.0, 1.0, true, false, 1.0);
+            set_switch(1, "Dew Heater", 0.0, 100.0, 1.0, true, true, 40.0);
+            set_switch(2, "Sensor", 0.0, 10.0, 0.5, false, false, 2.5);
             return;
         }
         if (kind == Kind::SafetyMonitor) {
@@ -128,6 +141,32 @@ public:
         set(lower(name), number(value));
         set_for("sensordescription", name, "\"" + name + " sensor\"");
         set_for("timesincelastupdate", name, "1.5");
+    }
+
+    // A Switch's switch `id`: its static members and its value (GetSwitch is true above the minimum).
+    void set_switch(int id, const std::string& name, double min, double max, double step, bool can_write,
+                    bool can_async, double value) {
+        const std::string at = std::to_string(id);
+        set_for("getswitchname", at, "\"" + name + "\"");
+        set_for("getswitchdescription", at, "\"" + name + " switch\"");
+        set_for("minswitchvalue", at, number(min));
+        set_for("maxswitchvalue", at, number(max));
+        set_for("switchstep", at, number(step));
+        set_for("canwrite", at, can_write ? "true" : "false");
+        set_for("canasync", at, can_async ? "true" : "false");
+        set_for("statechangecomplete", at, "true");
+        set_for("getswitchvalue", at, number(value));
+        set_for("getswitch", at, value > min ? "true" : "false");
+    }
+
+    // A Switch: applies every asynchronous write still running and reads StateChangeComplete true again.
+    void finish_async() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [id, value] : pending_async_) {
+            apply_switch_value_locked(id, value);
+            replies_[{"statechangecomplete", id}] = {"true", 0, {}};
+        }
+        pending_async_.clear();
     }
 
     // The upstream does not implement the sensor: every member for it answers 0x400.
@@ -199,7 +238,7 @@ public:
             } else if (member == "connected") {
                 reply = {connected_ ? "true" : "false", 0, {}};
             } else {
-                const auto it = replies_.find({member, lower(decode(field(params, "SensorName")))});
+                const auto it = replies_.find({member, key_of(params)});
                 if (it != replies_.end()) reply = it->second;
             }
         }
@@ -252,8 +291,52 @@ private:
             replies_[{"position", ""}] = {"-1", 0, {}};
         } else if (member == "reverse") {
             replies_[{"reverse", ""}] = {lower(field(params, "Reverse")), 0, {}};
+        } else if (member == "setswitch" || member == "setswitchvalue" || member == "setasync" ||
+                   member == "setasyncvalue") {
+            return put_switch_locked(member, params);
+        } else if (member == "setswitchname") {
+            replies_[{"getswitchname", key_of(params)}] = {"\"" + decode(field(params, "Name")) + "\"", 0, {}};
         } else if (member != "refresh") {
             return {{}, 0x400, "Method " + member + " is not implemented"};
+        }
+        return {{}, 0, {}};
+    }
+
+    // The second key of a reply: the SensorName (lower case), or else a Switch's Id.
+    static std::string key_of(const std::string& params) {
+        const std::string sensor = lower(decode(field(params, "SensorName")));
+        return sensor.empty() ? field(params, "Id") : sensor;
+    }
+
+    double value_locked(const std::string& member, const std::string& id) const {
+        const auto it = replies_.find({member, id});
+        return it == replies_.end() || it->second.value_json.empty() ? 0.0 : std::stod(it->second.value_json);
+    }
+
+    void apply_switch_value_locked(const std::string& id, double value) {
+        replies_[{"getswitchvalue", id}] = {number(value), 0, {}};
+        replies_[{"getswitch", id}] = {value > value_locked("minswitchvalue", id) ? "true" : "false", 0, {}};
+    }
+
+    // A Switch write, as a real server takes it: a read-only switch refuses it, an asynchronous one runs until
+    // finish_async().
+    Reply put_switch_locked(const std::string& member, const std::string& params) {
+        const std::string id = field(params, "Id");
+        const auto can_write = replies_.find({"canwrite", id});
+        if (can_write == replies_.end()) return {{}, 0x401, "Switch " + id + " does not exist"};
+        if (can_write->second.value_json != "true") return {{}, 0x400, "Switch " + id + " cannot be written"};
+        const bool by_state = member == "setswitch" || member == "setasync";
+        const double value =
+            by_state ? value_locked(lower(field(params, "State")) == "true" ? "maxswitchvalue" : "minswitchvalue", id)
+                     : std::stod(decode(field(params, "Value")));
+        if (member == "setasync" || member == "setasyncvalue") {
+            if (replies_[{"canasync", id}].value_json != "true") {
+                return {{}, 0x400, "Switch " + id + " cannot be set asynchronously"};
+            }
+            pending_async_[id] = value;
+            replies_[{"statechangecomplete", id}] = {"false", 0, {}};
+        } else {
+            apply_switch_value_locked(id, value);
         }
         return {{}, 0, {}};
     }
@@ -311,6 +394,7 @@ private:
     double mechanical_ = 0.0;
     std::optional<double> rotator_target_;
     std::string last_move_;
+    std::map<std::string, double> pending_async_;  // a Switch's running asynchronous writes, by Id
     std::string wheel_target_;  // a FilterWheel's running move; empty while none runs
     std::string last_position_put_;
 };
