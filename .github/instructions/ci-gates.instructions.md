@@ -130,7 +130,7 @@ author must do. Read the docstring before changing a gate.
   every merge, so a nightly `.deb` that fails the check is never published.
 - **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
-  row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (a `runs` job lists them, and builds libgpiod or the bundled
+  row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (each row restores the pinned ConformU tarball from an Actions cache keyed on its sha256, and a miss downloads it with retries, so a GitHub 5xx no longer fails a row; a `runs` job lists them, and builds libgpiod or the bundled
   libgphoto2 first for a vendor that needs it; a full telescope row takes about 20 minutes on the arm64 runner, a switch row several (ConformU writes every
   switch: 1.5 to 14 minutes on the arm64 runner: iOptron 1m25s, ToupTek 2m45s, OnStep 4m18s, and Gemini 14m22s for the hub's 24 switches), any other row about a minute). On a PR a telescope row runs the PR profile (`FAKE_CONFORMU_PROFILE=pr`, issue #2568):
   ConformU's full-test settings without the extended rate-offset and pulse-guide tests, which pass only with exactly

@@ -370,17 +370,29 @@ jobs:
             "${vendor_options[@]}"
           cmake --build AlpacaHTTP/build --target fake_conformu_server --parallel "$(nproc)"
 
+      - name: Restore the ConformU tarball
+        # Every row downloaded the release asset, and a 504 from GitHub failed the
+        # row with nothing tested. The key is the asset's sha256: change it with
+        # the URL and checksum below.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/conformu-dl
+          key: conformu-tarball-98ae1853e61832e4ed33270c70bbbe442dc7d698756214b4bb294803639482ba
+
       - name: Install ConformU 4.6.0-rc.1 (pinned release, sha256-checked)
         # The standard in .github/instructions/testing.instructions.md; the same
-        # asset and checksum as /conformu step 2g.
+        # asset and checksum as /conformu step 2g. A cache miss downloads it, with
+        # retries for a transient 5xx; the checksum is checked either way.
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/conformu"
-          cd "$RUNNER_TEMP/conformu"
-          curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.6.0-rc.1/conformu.4.6.0.linux-arm64.tar.gz'
+          mkdir -p ~/conformu-dl "$RUNNER_TEMP/conformu"
+          if [ ! -f ~/conformu-dl/cu.tar.gz ]; then
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 10 -o ~/conformu-dl/cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.6.0-rc.1/conformu.4.6.0.linux-arm64.tar.gz'
+          fi
+          cd ~/conformu-dl
           echo '98ae1853e61832e4ed33270c70bbbe442dc7d698756214b4bb294803639482ba  cu.tar.gz' | sha256sum -c -
-          tar xzf cu.tar.gz
-          rm cu.tar.gz
+          tar xzf cu.tar.gz -C "$RUNNER_TEMP/conformu"
+          cd "$RUNNER_TEMP/conformu"
           chmod +x conformu
           ./conformu --version | tail -1
 
