@@ -133,8 +133,8 @@ public:
         ignored_stops_ = n;
     }
 
-    /// The directional stops (":Qe", ":Qw", ":Qn", ":Qs") are received and counted but stop nothing while on, as a mount
-    /// that keeps jogging through a stop (#2651).
+    /// The directional stops (":Qe", ":Qw", ":Qn", ":Qs") are received and counted but stop nothing while on, as a
+    /// mount that keeps jogging through a stop (#2651).
     void set_ignore_axis_stops(bool on) {
         std::lock_guard<std::mutex> lock(mutex_);
         ignore_axis_stops_ = on;
@@ -677,9 +677,7 @@ private:
     bool ignore_axis_stops_ = false;
     double second_axis_drift_degrees_ = 0.0;
     double altitude_degrees_ = 45.0;  // ":GA"
-    bool second_axis_drifts_locked() const {
-        return second_axis_drift_degrees_ != 0.0 && (jog_[2] || jog_[3]);
-    }
+    bool second_axis_drifts_locked() const { return second_axis_drift_degrees_ != 0.0 && (jog_[2] || jog_[3]); }
     std::string site_reply_ = "-33*51:24&-151*12:55";  // ":GMGE" lat&lon, west-positive: -33.856784, 151.215297 E
     std::string time_reply_ = "01/02/2026&03:04:05&+00:00";
 

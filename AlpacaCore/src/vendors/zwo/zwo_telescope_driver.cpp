@@ -1583,8 +1583,8 @@ public:
             // goto failed.
             clear_last_slew_error_locked();
         }
-        // With initiator_mutex_ still held (no mutex_): a newer MoveAxis starts its cap only after this one, so the slot
-        // never ends up holding the older window.
+        // With initiator_mutex_ still held (no mutex_): a newer MoveAxis starts its cap only after this one, so the
+        // slot never ends up holding the older window.
         start_move_axis_cap(axis, cap_window);
     }
 
@@ -1631,8 +1631,8 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 manual_axis_slewing_[axis] = false;
                 manual_axis_tracking_restore_[axis] = std::nullopt;
-                // As MoveAxis(axis, 0) ends the window (decision 0022 rule 2): with the other axis still jogging no ":Q"
-                // went out and that jog keeps it.
+                // As MoveAxis(axis, 0) ends the window (decision 0022 rule 2): with the other axis still jogging no
+                // ":Q" went out and that jog keeps it.
                 if (!other_axis_jogging) slew_hold_.clear();
                 write_frame_locked();
             }
@@ -1660,8 +1660,8 @@ public:
 
     // One gated cap stop (decision 0006 rule 6). In one mutex_ section it checks that the body still owns its jog,
     // reads whether the other axis jogs or has a MoveAxis between its claim and its return, and counts the call; the
-    // wire calls follow with mutex_ released. A command on either axis claims under mutex_ and then waits for this count
-    // in end_pulses(), so it either follows the whole call on the wire or was claimed first: this call then sends
+    // wire calls follow with mutex_ released. A command on either axis claims under mutex_ and then waits for this
+    // count in end_pulses(), so it either follows the whole call on the wire or was claimed first: this call then sends
     // nothing, or no ":Q" that would stop the other axis's new jog. The stops are the directional ones of MoveAxis
     // (axis, 0), and ":Q" only when the other axis has no jog.
     void send_move_axis_cap_stop(int axis, const util::OperationContext& ctx) {
@@ -2982,8 +2982,8 @@ private:
             pulse.queue_end = std::chrono::steady_clock::time_point{};
             pulse.drain_active = false;
             pulse_slot_[axis].cancel();
-            // #2651 (decision 0006 rules 3 and 6): the claim or stop took this axis, so the cap of the jog it ends sends
-            // no stop from here on; a cap stop already past its gate is waited for below.
+            // #2651 (decision 0006 rules 3 and 6): the claim or stop took this axis, so the cap of the jog it ends
+            // sends no stop from here on; a cap stop already past its gate is waited for below.
             move_axis_cap_[axis].cancel();
             (axis == 0 ? ra_offset_hours_ : dec_offset_deg_) = 0.0;
             // until = now, not clear(): the no-sample deadline counts from this reset (update_link_state()).
@@ -4332,7 +4332,8 @@ private:
     util::OperationGeneration pulse_generation_[2];  // #2263: one per axis, shared with neither the other axis nor GOTO
     util::OperationGeneration teardown_generation_;
     util::OperationGeneration clock_resync_generation_;
-    util::OperationGeneration move_axis_cap_generation_[2];  // #2651: one per axis, so a renewal never supersedes the other
+    util::OperationGeneration
+        move_axis_cap_generation_[2];  // #2651: one per axis, so a renewal never supersedes the other
     // open-astro#2419: a host clock change on_host_clock_changed() saw while transition_mutex_ was held (owed), and
     // the connect's untrusted-clock warning (#2480).
     util::HostClockWriteGate host_clock_gate_{"ZWO"};
