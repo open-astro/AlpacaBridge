@@ -1854,6 +1854,7 @@ HELPER_FAKES = {
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
+    "fake_timed_completion.h": "timed exposure and guide completion on a TaskClock that the QHY, Player One and SVBONY camera SDK fakes share (#2693); no driver connects through it",
     "fake_gpio_line_backend.h": "in-memory util::GpioLineBackend recording each write with the shared FakeTaskClock time, for the soft-PWM engine cases (#1757); the GPIO power-port drivers connect through their real backends over the libgpiod and ioctl stubs",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
     "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
