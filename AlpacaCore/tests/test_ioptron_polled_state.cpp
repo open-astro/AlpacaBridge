@@ -416,6 +416,61 @@ TEST_CASE("iOptron polled state - three failed polls latch a fault and one good 
     check_getters_answer_from_the_frame(driver, mount);
 }
 
+// Issue #2677: with a fault latched, the site getters (SiderealTime, SiteLatitude, SiteLongitude,
+// DestinationSideOfPier) and DeviceState refuse under the state lock alone. They used to fall through to the operation
+// lock and queue behind the poll's probe, which holds it for one :GLS# reply (decision 0016 rule 1).
+TEST_CASE("iOptron polled state - site getters and DeviceState refuse at once with a fault latched while a probe holds "
+          "the wire",
+          "[ioptron][telescope][polled][link-fault][getter-locks]") {
+    auto rig = make_tcp_rig();
+    auto& mount = rig.fake();
+    mount.set_alt_az(45.0, 180.0);
+    static_cast<void>(rig.connect());
+    REQUIRE(rig.driver().get_connected());
+    auto& driver = rig.driver();
+    auto& clock = rig.clock();
+    age_past_connect_grace(clock);
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) tick_and_require_a_poll(clock, mount);
+    REQUIRE_FALSE(driver.get_link_fault().empty());
+
+    // The next probe's first read is held: the poll keeps the operation lock for 1.5 s with the fault still latched.
+    mount.set_fail_reads(false);
+    mount.hold_next_reply(milliseconds(1500));
+    clock.advance(kPollPeriod);
+    REQUIRE(mount.wait_until_holding(seconds(5)));
+    const auto sampled_from = steady_clock::now();
+
+    const std::vector<Getter> site_getters = {
+        {"SiderealTime", [](TelescopeDriver& d) { static_cast<void>(d.get_sidereal_time()); }},
+        {"SiteLatitude", [](TelescopeDriver& d) { static_cast<void>(d.get_site_latitude()); }},
+        {"SiteLongitude", [](TelescopeDriver& d) { static_cast<void>(d.get_site_longitude()); }},
+        {"DestinationSideOfPier",
+         [](TelescopeDriver& d) { static_cast<void>(d.get_destination_side_of_pier(5.0, 10.0)); }},
+    };
+    for (const auto& getter : site_getters) {
+        INFO(getter.label);
+        std::string message;
+        int code = 0;
+        const auto elapsed = alpacacore::test::timed(
+            [&] { code = alpacacore::test::error_code_of([&] { getter.read(driver); }, &message); });
+        CHECK(elapsed < kGetterBudget);
+        CHECK(code == AlpacaError::DriverException);
+        CHECK(contains(message, "communications compromised"));
+    }
+    std::vector<alpacacore::DeviceState> state;
+    const auto elapsed = alpacacore::test::timed([&] { state = driver.get_device_state(); });
+    CHECK(elapsed < kGetterBudget);
+    for (const auto& entry : state) {
+        CHECK(entry.name != "SiderealTime");  // omitted: its getter refused
+    }
+    // Every sample above landed while the probe still held the wire.
+    CHECK(steady_clock::now() - sampled_from < milliseconds(1500));
+
+    static_cast<void>(clock.wait_for_woken_settled(kRigBound));
+}
+
 // #728 with the poll's latch: AbortSlew is the one member a latched fault does not refuse, so the stop still goes
 // out, with no status read in front of it. The sent stop is not a poll and does not clear the latch; the next good
 // poll does, with no client call (decision 0009 rule 1).
