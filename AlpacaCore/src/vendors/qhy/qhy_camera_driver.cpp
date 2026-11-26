@@ -1487,9 +1487,16 @@ private:
         // not wake it. Poll the SDK's exposure-remaining instead, where a stop ends the wait, so an AbortExposure or a
         // disconnect waits one poll step during the exposure and only the readout after it. Never past the requested
         // exposure: a camera that misreports the remaining time falls back to the frame call's own wait.
+        bool first_remaining = true;
         const auto exposing = [&] {
             try {
-                return sdk_.get_exposure_remaining(request.id) > 100;  // qhyccd.h: 100 or less, the exposure is over
+                const uint32_t remaining = sdk_.get_exposure_remaining(request.id);
+                if (first_remaining) {  // the header gives no unit: a rig run reads it from this line
+                    first_remaining = false;
+                    ALPACA_LOG_DEBUG("QHY",
+                                     "exposure body: first get_exposure_remaining = " + std::to_string(remaining));
+                }
+                return remaining > 100;  // qhyccd.h: 100 or less, the exposure is over
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "get_exposure_remaining failed: " + std::string(e.what()));
                 return false;

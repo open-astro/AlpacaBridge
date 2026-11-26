@@ -3267,6 +3267,26 @@ TEST_CASE("QHY Camera Driver - Disconnect during a long exposure does not wait f
     CHECK_FALSE(driver->get_connected());
 }
 
+TEST_CASE("QHY Camera Driver - an exposure the SDK still reports running is read once its time has passed (#2721)",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    fake.exposure_remaining = 3'600'000;  // the SDK never reports the exposure over
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver};
+    driver->set_connected(true);
+    driver->start_exposure(2.0, true);
+    // The body has armed and is polling, so the exposure end is fixed on the task clock.
+    REQUIRE(eventually([&] { return fake.call_count("get_exposure_remaining") > 0; }));
+    CHECK(fake.call_count("get_single_frame") == 0);
+    clock.advance(seconds(3));  // past the requested exposure, short of the watchdog
+
+    CHECK(eventually([&] { return driver->get_image_ready(); }, seconds(2)));
+    CHECK(fake.call_count("get_single_frame") == 1);
+}
+
 // Decision 0020 rule 2 (#2259 step 5): a second StartExposure while one exposes is refused; it neither cancels nor
 // re-arms the exposure in flight, which goes on to deliver its frame. The driver used to supersede it.
 TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is InvalidOperation and arms nothing",

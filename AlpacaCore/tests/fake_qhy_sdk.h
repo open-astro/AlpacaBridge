@@ -119,6 +119,9 @@ namespace alpacacore::test {
  *   returns (frame_bpp/frame_channels overrides included), still clamped to
  *   the last get_mem_length(); a valid 3-channel 8-bit frame therefore also
  *   needs mem_length_override set to width * height * 3.
+ * - exposure_remaining defaults to 0 (the exposure is over), so a case that
+ *   does not set it gets the frame call straight after the arm, where a real
+ *   camera reports the remaining time during the exposure (#2721).
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
