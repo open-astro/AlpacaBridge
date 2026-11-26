@@ -598,6 +598,19 @@ void poll_ticks(alpacacore::test::FakeTaskClock& clock, int n) {
     for (int i = 0; i < n; ++i) advance_polling(clock, std::chrono::milliseconds(250));
 }
 
+// One poll period on the task clock, repeated until the poll's :GLS# read reaches the fake: the observable proof that
+// a poll cycle ran. wait_for_ioptron_connect_parked() counts waiters, not the poll, so a case that has another body
+// parked on the clock (an async GOTO's) can step before the poll has parked, and that tick is lost to it.
+void poll_tick_until_read(alpacacore::test::FakeTaskClock& clock, alpacacore::test::FakeIoptronMount& mount) {
+    const int before = mount.count(":GLS#");
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        poll_ticks(clock, 1);
+        if (mount.count(":GLS#") > before) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));  // real time: the poll thread has yet to park
+    }
+    FAIL("no poll cycle read :GLS# in 100 poll periods");
+}
+
 // Latches the fault (#728, decision 0009 rule 1) the way the poll does: three polls whose reads fail in a row. The one
 // place a case latches, so a driver that latches on something else changes it here.
 void latch_by_polls(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
@@ -606,7 +619,7 @@ void latch_by_polls(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeT
     // do not latch.
     alpacacore::test::wait_for_ioptron_connect_parked(clock);
     mount.set_fail_reads(true);
-    poll_ticks(clock, 3);
+    for (int i = 0; i < 3; ++i) poll_tick_until_read(clock, mount);
     REQUIRE_FALSE(driver.get_link_fault().empty());
     REQUIRE(contains(sync_failure(driver), kLatched));
 }
@@ -958,6 +971,7 @@ TEST_CASE("iOptron Link - a hangup in the wedged-park finalizer loses the link i
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);  // a tick taken before the poll parks is lost to it
     REQUIRE_NOTHROW(driver->park());
 
     // The park slew is over but the firmware still says slewing; the poll's next tick runs the finalizer, whose
@@ -3115,6 +3129,7 @@ TEST_CASE("iOptron zero search - a connect over a link lost during an unmoved se
     driver->connect();  // no Disconnect first: the connect ends the dead session, search included
     REQUIRE(wait_until([&] { return !driver->get_connecting(); }));
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);  // else the steps below pass before the poll parks and the frame ages out
     age_past_connect_grace(clock);
     CHECK_FALSE(driver->get_at_home());
     driver->set_connected(false);
