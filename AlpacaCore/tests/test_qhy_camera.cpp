@@ -3226,7 +3226,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure during a long exposure does not wai
     auto fake = make_fake();
     fake.read_directly = true;
     fake.exposure_remaining = 3'600'000;  // the SDK reports the exposure still running
-    gate.arm(fake, "get_single_frame");  // the cancel does not release it
+    gate.arm(fake, "get_single_frame");   // the cancel does not release it
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
     TeardownGuard guard{clock, driver, &gate};
@@ -3251,7 +3251,7 @@ TEST_CASE("QHY Camera Driver - Disconnect during a long exposure does not wait f
     auto fake = make_fake();
     fake.read_directly = true;
     fake.exposure_remaining = 3'600'000;  // the SDK reports the exposure still running
-    gate.arm(fake, "get_single_frame");  // the cancel does not release it
+    gate.arm(fake, "get_single_frame");   // the cancel does not release it
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
     TeardownGuard guard{clock, driver, &gate};
