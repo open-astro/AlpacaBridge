@@ -783,6 +783,9 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
                 if (command.size() >= 4 && static_cast<unsigned char>(command[3]) == 0xFE) {
                     return std::string("\x01\x00#", 3);
                 }
+                if (command.size() >= 4 && static_cast<unsigned char>(command[3]) == 0x13) {
+                    return std::string("\xFF#");  // MC_SLEW_DONE: done (AbortSlew's verified stop reads it)
+                }
                 return std::string("#");
             default:
                 return std::string("#");
@@ -794,7 +797,10 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    alpacacore::test::FakeTaskClock clock;  // the verified stop waits on the task clock (decision 0005)
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, conn, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     driver->move_axis(0, 1.0);
@@ -806,6 +812,13 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
             log->clear();
         }
         REQUIRE_NOTHROW(driver->abort_slew());
+        // #2409: Slewing stays true until the verified stop sees the mount still (two reads 500 ms apart). Each step
+        // waits for the status poll and the stop check on the clock.
+        for (int i = 0; i < 100 && driver->get_slewing(); ++i) {
+            if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
+            clock.advance(std::chrono::milliseconds(100));
+            clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
         CHECK_FALSE(driver->get_slewing());
         std::lock_guard<std::mutex> lock(*log_mutex);
         CHECK(std::count(log->begin(), log->end(), std::string("M")) == 1);
@@ -1226,10 +1239,11 @@ TEST_CASE("Celestron snapshot - a setter's value is read back at once and a stal
     driver->set_tracking(true);
     CHECK(driver->get_tracking());
 
-    // A sync reads back at once, with no poll in between.
-    driver->sync_to_coordinates(3.25, 41.5);
-    CHECK(std::abs(driver->get_right_ascension() - 3.25) < 1e-3);
-    CHECK(std::abs(driver->get_declination() - 41.5) < 1e-3);
+    // A sync reads back at once, with no poll in between. Within 5 deg of the mount's position (1.75 h, +45 deg):
+    // every Sync is bounded (#2409).
+    driver->sync_to_coordinates(1.85, 43.5);
+    CHECK(std::abs(driver->get_right_ascension() - 1.85) < 1e-3);
+    CHECK(std::abs(driver->get_declination() - 43.5) < 1e-3);
 
     // A poll that sampled the mount before the write must not publish over it: the write lands between that
     // poll's sample and its publish.
@@ -1553,9 +1567,9 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
     rig.pause(true);
     // The mount reports its own position, which neither the sync nor the slew below moves: only a write through the
     // frame can make the getter answer with the written value.
-    driver.sync_to_coordinates(3.25, 41.5);
-    CHECK(std::abs(driver.get_right_ascension() - 3.25) < 1e-3);
-    CHECK(std::abs(driver.get_declination() - 41.5) < 1e-3);
+    driver.sync_to_coordinates(1.85, 43.5);  // within 5 deg of the mount's position (#2409)
+    CHECK(std::abs(driver.get_right_ascension() - 1.85) < 1e-3);
+    CHECK(std::abs(driver.get_declination() - 43.5) < 1e-3);
 
     // A slew that ends: Slewing is written false with the position the mount stopped at, with no poll between. The
     // read is the control path's, not a poll's: the frame keeps the age of the last poll (the connect's).
@@ -1569,7 +1583,8 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
     cel::set_slew_body_hook_for_testing(driver, [body_thread, named](const cel::SlewBodyStopReason&) {
         if (!named->exchange(true)) body_thread->set_value(std::this_thread::get_id());
     });
-    driver.slew_to_coordinates_async(5.0, 20.0);
+    // The shifted position is where the GOTO comes to rest, so the landing gate (#2409) sees it arrive.
+    driver.slew_to_coordinates_async(1.8438, 46.4077);
     CHECK(driver.get_slewing());
     const auto bound = std::chrono::seconds(5);
     REQUIRE(body_future.wait_for(bound) == std::future_status::ready);
@@ -1583,8 +1598,8 @@ TEST_CASE("Celestron PolledState - a sync and a slew end read back the written s
         REQUIRE(rig.clock().wait_for_woken_settled(bound));
     }
     REQUIRE_FALSE(driver.get_slewing());
-    CHECK(std::abs(driver.get_right_ascension() - 3.25) > 1e-3);  // the frame the slew end measured, not the sync's
-    CHECK(std::abs(driver.get_declination() - 41.5) > 1e-3);
+    CHECK(std::abs(driver.get_right_ascension() - 1.85) > 1e-3);  // the frame the slew end measured, not the sync's
+    CHECK(std::abs(driver.get_declination() - 43.5) > 1e-3);
     const auto age = std::chrono::system_clock::now() - parse_timestamp(time_stamp_of(driver));
     CHECK(age > std::chrono::milliseconds(2500));
 }
@@ -1911,7 +1926,7 @@ TEST_CASE("Celestron Park - the initiator and the park slew do not hold the gett
 TEST_CASE("Celestron SyncToCoordinates - the sync exchange does not hold the getters",
           "[celestron][telescope][snapshot][iolock]") {
     SlowMountDriver mount;
-    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(5.0, 20.0); });
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(1.8, 44.0); });
 }
 
 TEST_CASE("Celestron FindHome - the dispatch does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
@@ -2012,7 +2027,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held 
     cel::set_failure_stop_hook_for_testing(*driver, [&] {
         if (!syncer.joinable()) {
             const int before = st->s_count.load();
-            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.8, 44.0); });
             REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
         }
     });
@@ -2048,7 +2063,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out after an Unpark",
     cel::set_failure_stop_hook_for_testing(*driver, [&] {
         if (!syncer.joinable()) {
             const int before = st->s_count.load();
-            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.8, 44.0); });
             REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
         }
     });
@@ -2151,7 +2166,7 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync follo
             s_before = st->s_count.load();
             syncer = std::thread([&] {
                 try {
-                    driver->sync_to_coordinates(1.5, 20.0);  // queues on the initiator lock
+                    driver->sync_to_coordinates(1.8, 44.0);  // queues on the initiator lock
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): only its hold on the lock counts
                 }
             });
@@ -2274,6 +2289,7 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
         if (!aborted) {
             aborted = true;
             driver->abort_slew();
+            st->slewing = false;  // the mount obeys the stop, so AbortSlew's verified stop (#2409) can verify it
         }
     });
     std::atomic<bool> done{false};
@@ -2303,6 +2319,12 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
     REQUIRE(finished);  // the slew ended within the stepped window
     cel::set_slewing_read_hook_for_testing(*driver, nullptr);
     REQUIRE(aborted);
+    // #2409: Slewing holds true until AbortSlew's verified stop sees the mount still.
+    for (int i = 0; i < 100 && driver->get_slewing(); ++i) {  // each step waits for the paused poll and the check
+        if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
+        clock.advance(std::chrono::milliseconds(100));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2561,6 +2583,37 @@ TEST_CASE("Celestron Link - a failed relink stop stays owed when the handshake t
     rig.mount->unplug_on(on_command('V'));  // and the cable is pulled at the handshake's first read
     CHECK_THROWS(driver.set_connected(true));
     CHECK_FALSE(driver.get_connected());
+    rig.st->m_mute.store(false);
+    rig.replug();
+    driver.set_connected(true);
+    REQUIRE(driver.get_connected());
+    const std::string received = rig.mount->received();
+    REQUIRE_FALSE(received.empty());
+    CHECK(received.front() == 'M');
+    CHECK(relink_stops_lead(received, 0x10));
+    CHECK(relink_stops_lead(received, 0x11));
+    driver.set_connected(false);
+}
+
+// #2409: a Connect whose status poll cannot start is a failed Connect (no poll would run the MoveAxis cap or the
+// link-loss latch), and a relink stop the mount did not answer stays owed for the next Connect that completes.
+TEST_CASE("Celestron Link - a failed relink stop stays owed when the status poll cannot start",
+          "[celestron][telescope][unit][fake][link-lost][goto-safety]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE_NOTHROW(driver.move_axis(0, 1.0));
+    rig.mount->unplug_on(on_command('T'));
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    rig.replug();
+    rig.st->m_mute.store(true);  // the relink cancel goes unanswered
+    cel::set_status_poll_spawn_for_testing(driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS(driver.set_connected(true));
+    CHECK_FALSE(driver.get_connected());
+    cel::set_status_poll_spawn_for_testing(driver,
+                                           [](std::function<void()> body) { return std::thread(std::move(body)); });
     rig.st->m_mute.store(false);
     rig.replug();
     driver.set_connected(true);

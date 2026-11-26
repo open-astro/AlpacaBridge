@@ -29,6 +29,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <future>
@@ -1032,7 +1033,8 @@ TEST_CASE("SynScan hold window - AbortSlew inside the hold clears Slewing at onc
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::seconds(2); }));
     REQUIRE(driver->get_slewing());
-    REQUIRE_NOTHROW(driver->abort_slew());
+    // The stop is verified on the task clock (#2412).
+    REQUIRE_NOTHROW(alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); }));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2179,13 +2181,16 @@ TEST_CASE("SynScan PulseGuide - a refused slew start after superseding an RA pul
         alpacacore::vendor::synscan::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
             throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
         });
+        // The refusal's stop is verified on the task clock (#2412): stepped.
         require_alpaca_error(
             [&] {
-                if (op == Op::SlewToCoordinatesAsync) {
-                    driver->slew_to_coordinates_async(5.5, 20.0);
-                } else {
-                    driver->park();
-                }
+                alpacacore::test::call_stepping(clock, [&] {
+                    if (op == Op::SlewToCoordinatesAsync) {
+                        driver->slew_to_coordinates_async(5.5, 20.0);
+                    } else {
+                        driver->park();
+                    }
+                });
             },
             alpacacore::AlpacaError::DriverException);
         CHECK(st->tracking_mode.load() == mode);
@@ -2231,7 +2236,13 @@ TEST_CASE("SynScan async - a GOTO past its deadline stops the mount and keeps th
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
-    REQUIRE(advance_virtual_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+    // 1 s steps to just short of the deadline, then 50 ms steps: the deadline's stop is verified (#2412), and its
+    // reads must land inside its rounds.
+    const auto started = clock.now();
+    REQUIRE(
+        advance_virtual_until(clock, [&] { return clock.now() - started >= kSlewDeadline - std::chrono::seconds(2); }));
+    REQUIRE(advance_until(
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(50), 400));
 
     std::string message;
     REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
@@ -2271,7 +2282,13 @@ TEST_CASE("SynScan SlewToCoordinates - a blocking GOTO past its deadline stops t
         done.store(true);
     });
     const bool began = wait_until([&] { return st->goto_count.load() > 0 || done.load(); }, 5000);
-    const bool finished = began && advance_virtual_until(clock, [&] { return done.load(); });
+    // 1 s steps to just short of the deadline, then 50 ms steps for the verified stop's reads (#2412).
+    const auto started = clock.now();
+    const bool finished =
+        began &&
+        advance_virtual_until(
+            clock, [&] { return done.load() || clock.now() - started >= kSlewDeadline - std::chrono::seconds(2); }) &&
+        advance_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(50), 400);
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2390,11 +2407,13 @@ struct MoveAxisBoundRig {
         REQUIRE(clock.wait_for_waiter_thread(bound_thread.load(), std::chrono::seconds(5)));
     }
 
-    // In 5 s steps, polling the handset after each one: the status poll is paused, and a frame older than the
-    // snapshot bound would read as a lost link.
+    // In 250 ms steps, polling the handset after each one: the status poll is paused, and a frame older than the
+    // snapshot bound would read as a lost link. Steps that short let the bound's verified stop (#2412) read inside
+    // its rounds.
     void advance(std::chrono::seconds by) {
-        for (auto left = by; left.count() > 0; left -= std::chrono::seconds(5)) {
-            clock.advance(std::min(left, std::chrono::seconds(5)));
+        const auto step = std::chrono::milliseconds(250);
+        for (auto left = std::chrono::duration_cast<std::chrono::milliseconds>(by); left.count() > 0; left -= step) {
+            clock.advance(step);
             REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
             sc_bound::poll_status_now_for_testing(*driver);
         }
@@ -2552,11 +2571,18 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
                          alpacacore::AlpacaError::InvalidOperation);
     CHECK(rig.st->requests.load() == requests);
 
-    // At once: the cancelled GOTO body may still be winding down, and it no longer refuses (#2586).
-    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    // The cancelled GOTO body may still be winding down, and it no longer refuses (#2586). AbortSlew verifies its stop
+    // on the task clock (#2412).
+    REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
+    // call_stepping() steps the clock while AbortSlew waits on the wire, and the status poll is paused: on a slow
+    // runner the held frame passes the 30 s loss bound and a getter reads a lost link. One poll refreshes it.
+    sc_bound::poll_status_now_for_testing(*rig.driver);
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
-    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+    // Where the mount points: a Sync is bounded to 5 deg from it (#2412).
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(ra, dec));
 }
 
 // #2586 (the maintainer ruled on 2026-11-22): AbortSlew cancels the GOTO or Park body and does not join it. Once
@@ -2586,14 +2612,19 @@ TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew whi
     }
     REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
 
-    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    // AbortSlew verifies its stop on the task clock (#2412).
+    REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
+    sc_bound::poll_status_now_for_testing(*rig.driver);  // the frame call_stepping() aged, as in the case above
     REQUIRE(held.wait_entered());  // the cancelled body is held; the slot still counts it as running
     CHECK_FALSE(rig.driver->get_slewing());
     const std::size_t sent_before_writes = rig.st->command_snapshot().size();
     CHECK_NOTHROW(rig.driver->set_site_latitude(10.0));
     CHECK_NOTHROW(rig.driver->set_site_longitude(10.0));
     CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
-    CHECK_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+    // Where the mount points: a Sync is bounded to 5 deg from it (#2412).
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    CHECK_NOTHROW(rig.driver->sync_to_coordinates(ra, dec));
     CHECK_FALSE(body_ended->load());  // every write above ran while the body was still winding down
 
     // The writes' own commands only (`W`, `H`, `s`): nothing from the body, and no motion command.
@@ -2721,6 +2752,363 @@ TEST_CASE("SynScan MoveAxis - a renewal that lands while the bound's stop is on 
     rig.advance(std::chrono::seconds(61));  // the renewal's own 60 s
     CHECK(rig.stops(kRaMotor) == stops + kStopCommands);
     CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
+}
+
+// #2412 follow-up: the verified AbortSlew, the GOTO that never starts, the 16-bit (V3) landing check and the Sync
+// bound (util/motion_guards.h, #2405).
+namespace {
+
+constexpr const char* kStopNotVerified = "AbortSlew: the mount still reports motion after 3 stops";
+
+// A GOTO under way on the fake clock: the handset reports it in progress until a cancel it does not ignore.
+std::unique_ptr<alpacacore::TelescopeDriver> start_hanging_goto(FakeSynScanHandset& st,
+                                                                alpacacore::test::FakeMountServer& server,
+                                                                alpacacore::test::FakeTaskClock& clock) {
+    auto driver = connect_with_hanging_goto(st, server, clock);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5000));
+    return driver;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> make_v3_driver(int port, alpacacore::util::TaskClock& clock) {
+    return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V3, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan AbortSlew - a stop the mount ignores is resent and fails after 3 stops",
+          "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(100);
+
+    std::string thrown;
+    int thrown_code = 0;
+    try {
+        run_virtual(clock, [&] { driver->abort_slew(); });
+    } catch (const alpacacore::AlpacaException& ex) {
+        thrown = ex.what();
+        thrown_code = ex.error_code();
+    }
+    CHECK(thrown_code == alpacacore::AlpacaError::DriverException);
+    CHECK(thrown == kStopNotVerified);
+    CHECK(st->command_count('M') == 3);  // the stop and two resends, then no more
+    CHECK(st->goto_in_progress());
+    // Slewing raises it: the mount may still be moving.
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == kStopNotVerified);
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan AbortSlew - a stop lost on the wire is resent and verifies", "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(1);
+
+    run_virtual(clock, [&] { driver->abort_slew(); });
+    CHECK(st->command_count('M') == 2);  // the first stop did not take; the resend did
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a GOTO the mount never starts fails with a stop and no repeat GOTO",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    st->no_motion.store(true);
+    st->land_on_goto.store(false);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("the mount never started") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);   // not repeated as a far miss (#1105): it never ran
+    CHECK(st->command_count('M') >= 1);  // and stopped all the same
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan V3 - a 16-bit GOTO that comes to rest far from its target fails",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    st->land_on_goto.store(false);  // the GOTO runs its 1.5 s and the position never moves
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_v3_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("from the target") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan Sync - a Sync more than 5 degrees from the mount's position is refused",
+          "[synscan][telescope][goto-safety]") {
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const double ra = driver->get_right_ascension();
+    const double dec = driver->get_declination();
+    REQUIRE(dec < 80.0);
+
+    require_alpaca_error([&] { driver->sync_to_coordinates(ra, dec + 6.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(st->command_count('s') == 0);  // nothing sent
+    CHECK(std::abs(driver->get_declination() - dec) < 0.01);
+
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(ra, dec + 4.0));  // within the bound
+    CHECK(st->command_count('s') == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan - the client-silence watchdog stops driver motion no client renews",
+          "[synscan][telescope][goto-safety]") {
+    const bool goto_motion = GENERATE(false, true);
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int cancels = st->command_count('M');
+    if (goto_motion) {
+        st->goto_never_ends.store(true);
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    } else {
+        REQUIRE_NOTHROW(driver->move_axis(1, 1.0));
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    CHECK_FALSE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(29), std::chrono::seconds(30)));
+    CHECK(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
+    CHECK(st->command_count('M') > cancels);
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// Both dead-man guards apply (#2412 Decisions): a client-silence watchdog stop of a MoveAxis ends the move for the
+// 60 s bound too, so the bound later sends no stop of its own and leaves no "ran 60 s" error behind.
+TEST_CASE("SynScan MoveAxis - a client-silence watchdog stop leaves the 60 s bound nothing to do",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(1);
+    rig.advance(std::chrono::seconds(31));
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver->note_client_activity(t0);
+    bool stopped = false;
+    // The watchdog's AbortSlew verifies its stop on the task clock.
+    alpacacore::test::call_stepping(rig.clock, [&] {
+        stopped = rig.driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30));
+    });
+    CHECK(stopped);
+    const int stops = rig.stops(kDecMotor);
+    CHECK(stops >= kStopCommands);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    rig.advance(std::chrono::seconds(35));  // past the move's 60 s
+    CHECK(rig.stops(kDecMotor) == stops);
+    CHECK(read_slewing(*rig.driver) == SlewingRead::False);
+    CHECK(rig.infos.load() == 0);
+    CHECK(rig.warns.load() == 0);
+}
+
+// #2412 (#2652 review): every stop after a motion fault is verified, as AbortSlew's: the slew deadline, a failed
+// Park, the MoveAxis bound, a refused start that displaced a body, and Unpark during a Park.
+namespace {
+
+// Steps virtual time in 1 s steps up to just short of the slew deadline, then in 50 ms steps until `pred` holds, so
+// the verified stop's reads land inside its rounds.
+bool advance_past_deadline(alpacacore::test::FakeTaskClock& clock, alpacacore::util::TaskClock::clock::time_point since,
+                           const std::function<bool()>& pred) {
+    if (!advance_virtual_until(clock, [&] { return clock.now() - since >= kSlewDeadline - std::chrono::seconds(2); })) {
+        return false;
+    }
+    return advance_until(clock, pred, std::chrono::milliseconds(50), 400);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan async - a GOTO past its deadline whose stop the mount ignores fails after 3 stops",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(100);
+    const auto started = clock.now();
+
+    std::string message;
+    REQUIRE(advance_past_deadline(clock, started, [&] {
+        message.clear();
+        return read_slewing(*driver, &message) != SlewingRead::True;
+    }));
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find(kStopNotVerified) != std::string::npos);
+    CHECK(message.find("the mount was stopped") == std::string::npos);
+    CHECK(st->command_count('M') == 3);
+    CHECK(st->goto_in_progress());
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a GOTO past its deadline whose first stop is lost gets it resent and verified",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(1);
+    const auto started = clock.now();
+
+    REQUIRE(advance_past_deadline(clock, started, [&] { return read_slewing(*driver) != SlewingRead::True; }));
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message == "Slew timed out after 120 s; the mount was stopped");
+    CHECK(st->command_count('M') == 2);
+    CHECK_FALSE(st->goto_in_progress());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan Park - a Park that fails while the mount ignores the stop fails after 3 stops",
+          "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(100);
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    const auto started = clock.now();
+
+    std::string message;
+    REQUIRE(advance_past_deadline(clock, started, [&] {
+        message.clear();
+        return read_slewing(*driver, &message) != SlewingRead::True;
+    }));
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find(kStopNotVerified) != std::string::npos);
+    CHECK(st->command_count('M') == 3);
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan Unpark - a park stop the mount ignores is resent and fails after 3 stops",
+          "[synscan][telescope][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(*st, server, clock);
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    st->ignore_cancels.store(100);
+
+    std::string thrown;
+    try {
+        alpacacore::test::call_stepping(clock, [&] { driver->unpark(); });
+    } catch (const alpacacore::AlpacaException& ex) {
+        thrown = ex.what();
+    }
+    CHECK(thrown.find(kStopNotVerified) != std::string::npos);
+    CHECK(st->command_count('M') == 3);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find(kStopNotVerified) != std::string::npos);
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a refused start whose stop the mount ignores leaves Slewing raising it",
+          "[synscan][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = start_hanging_goto(*st, server, clock);
+    st->ignore_cancels.store(100);
+    alpacacore::vendor::synscan::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    CHECK_THROWS(alpacacore::test::call_stepping(clock, [&] { driver->slew_to_coordinates_async(6.0, 25.0); }));
+    CHECK(st->command_count('M') == 3);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find(kStopNotVerified) != std::string::npos);
+    st->ignore_cancels.store(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan MoveAxis - a 60 s bound stop the mount ignores fails after 3 stops",
+          "[synscan][telescope][goto-safety]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(1);
+    rig.advance(std::chrono::seconds(55));
+    rig.st->drift_counts.store(1000);  // the mount keeps moving through every stop
+    for (int i = 0; i < 80; ++i) {     // 20 s in 250 ms steps, polling after each: the verify's reads land in rounds
+        rig.clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(10)));
+        sc_bound::poll_status_now_for_testing(*rig.driver);
+    }
+    CHECK(rig.stops(kDecMotor) == 3 * kStopCommands);
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find(kStopNotVerified) != std::string::npos);
+    rig.st->drift_counts.store(0);
+}
+
+// #2652 review: the 16-bit (V3) landing gate's settle budget. A mount that keeps moving after the handset reports the
+// GOTO done is never a far miss, and fails once it has not come to rest within 10 s.
+TEST_CASE("SynScan V3 - a 16-bit GOTO that never comes to rest after the handset reports it done fails",
+          "[synscan][telescope][async][slewfailure][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_v3_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    st->drift_counts.store(4);  // about 79 arcsec per 16-bit read: the mount never holds still
+    REQUIRE(advance_until(
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(250), 200));
+
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("did not come to rest after the handset reported it done") != std::string::npos);
+    st->drift_counts.store(0);
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

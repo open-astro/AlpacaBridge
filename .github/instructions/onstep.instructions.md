@@ -495,15 +495,15 @@ command channel. Nothing scans the network; the host is typed in.
     the re-send slot waits through it, and the other deadlines read it too: the status poll's period
     and the age of its frame, the slew grace and the pulse-guide end (`util::HoldWindow`s, decision 0022), the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
-    connect and on disconnect), and the #521 relink outage:
+    connect and on disconnect), and the relink outage it logs (#521):
     the driver hands its clock to the link it takes at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver lets go of the link, #2223), so the link's loss and last-alive stamps and the
     outage share one clock, and it keeps the stamps of the link it let go of for its next connect. A
-    change of clock forgets the link's stamps: one taken on another driver's clock is not timed
-    as an outage (#1460; production keeps one clock). The re-send, tracking-restore, snapshot and
-    relink-window tests inject a `FakeTaskClock` and `advance()` it (7 s per re-send tick, 1 s per
-    poll tick, 250 ms steps through a synchronous slew, 2 s past the relink window, 60 s past a
+    change of clock forgets the link's stamps: one taken on another driver's clock is not a loss
+    to stop for (#1460; production keeps one clock). The re-send, tracking-restore, snapshot and
+    relink tests inject a `FakeTaskClock` and `advance()` it (7 s per re-send tick, 1 s per
+    poll tick, 250 ms steps through a synchronous slew, 60 s past a
     UTCDate write); a case that pins exchanges of its own pauses the poll
     (`set_status_poll_paused_for_testing()`) and drives ticks with `poll_status_now_for_testing()`.
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
@@ -606,15 +606,16 @@ command channel. Nothing scans the network; the host is typed in.
   CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
   then reconnects. OnStepX keeps running a GOTO while the cable is out, and a `MoveAxis` for up to
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
-  2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
-  sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
-  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout. A GOTO, park or home the driver started that the reconnect leaves running stays watched (#2296, the stop bullet).
+  2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after a recorded loss sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`) before
+  anything else, whatever the outage length (#2406, #2396 AB-9; the #521 window,
+  `util::kRelinkMotionPreserveWindow`, no longer keeps motion alive here); a connect with no
+  recorded loss stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout. A park, or a GOTO or home, the driver started that the reconnect leaves running (a park, or a link with no recorded loss) stays watched (#2296, the stop bullet).
   They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
   never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
-  The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
+  The log line gives the outage from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
-  an auto-detect re-scan included. It is not timed from when the loss was noticed: the status poll
+  an auto-detect re-scan included; it decides nothing. It is not timed from when the loss was noticed: the status poll
   checks the link once a second, but the router reads `Connected` before every Connect, so the
   first to notice can be the reconnect itself. Tracking is left alone. Over TCP the same rules hold with a hangup as
   the evidence (the Network bullet under "Connection types"). `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
@@ -651,14 +652,12 @@ command channel. Nothing scans the network; the host is typed in.
   (`declare_poll_loss()`) calls `OnStepProtocolWrapper::declare_link_lost()` on the poll thread, which
   records the reason and the loss time and closes the port, as for a pulled adapter, so `Connected`
   reads false, calls throw `NotConnected`, `DeviceState` is empty, the poll body ends, and the next
-  Connect relinks (and runs the #521 stops after a long outage). A getter reads `NotConnected` once
+  Connect relinks (and sends the stops, #2406). A getter reads `NotConnected` once
   the frame is that old; a write throws the fault and leaves the bound to the poll, which finds it
   within a tick. Only the poll's probe feeds the latch (#2495, a behaviour change): the control-path
   `:GU#` reads, the synchronous slew's end read, the pulse-end tick and the connect's seed neither
   count a failure nor clear the fault, and a mount that answers none of the seed's reads connects
-  unfaulted, its getters refusing "not available" until a probe answers. That outage runs from the loss, not from the last good reply: the failed
-  reads still found the fd alive, so a Connect right after the loss stops nothing, and one after the
-  preserve window sends the stops. A silent mount latches in about three poll periods plus three
+  unfaulted, its getters refusing "not available" until a probe answers. A Connect right after that loss sends the stops too. A silent mount latches in about three poll periods plus three
   reply timeouts.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
@@ -740,7 +739,7 @@ command channel. Nothing scans the network; the host is typed in.
     failure (it is a new motion command), also when a stop fails: a `:Q#` that fails may still have reached the mount
     (the wrapper writes it, then drains, and a hangup in the drain fails it), so a kept watch could report the client's
     own abort as a limit stop, on OnStep 4.x from an older held code. A link lost before the call fails it with
-    `NotConnected` before the watch is touched, and a relink inside the preserve window still judges that GOTO. The
+    `NotConnected` before the watch is touched. The
     abort logs what its read decided at INFO only. On OnStepX it also sends no restore when its read shows a stop code,
     GOTO flag or not: a limit stop runs `goTo.abort()`, which keeps `GS_GOTO` while the mount brakes, and has already
     turned tracking off. On OnStep 4.x the abort's read is judged like any end: with an older stop code still latched
@@ -750,8 +749,7 @@ command channel. Nothing scans the network; the host is typed in.
     handset abort) still reads as landed: with no code the end position would be the only evidence, and a healthy GOTO can end away
     from the target the driver sent. OnStepX takes a `Tracking` write during a GOTO (`:Te#`/`:Td#` have no GOTO
     refusal), which changes whether the firmware holds the target's RA or its hour angle; a tracking OnStepX GOTO
-    follows the RA and Dec rate offsets on its final approach (`Goto.cpp` `poll()`); and a relink judges a GOTO the user
-    may have moved on from with the handset during the outage.
+    follows the RA and Dec rate offsets on its final approach (`Goto.cpp` `poll()`).
   - **A park** ends with no GOTO and no `I`; both firmwares go from parking to parked or failed in one step (OnStepX
     `Goto.cpp` `poll()` then `Park::requestDone()`, OnStep 4.x `MoveTo.ino`), so no healthy park shows that frame
     unparked. Parked succeeded; `F`, a stop code, or (once a status showed the park running) an end without either, a
@@ -783,15 +781,15 @@ command channel. Nothing scans the network; the host is typed in.
     command is taken, and a relink keeps it. A status showing `w` (a GOTO waiting at home for the user) restarts it.
     It only reports: nothing is sent, as for the driver's other timed-out waits, and the client can `AbortSlew`.
     INDI's `lx200_OnStep` uses 300 s from `:hP#`.
-  - **Across a relink** (#521): a relink that leaves the motion running, inside the preserve window, or a park past it
-    (#1289), keeps the watch, and the relink's first `:GU#` (the connect's seed frame, with its position) judges it at
-    once by the rules above, so a stop during the outage still fails it. When that frame has no position the check
-    reads `:GRa#`/`:GDe#` itself; a link lost there fails the Connect through the connect's own lost-link check, as any
-    lost seed read does. A relink that sends the stops drops it; a
-    kept failure is cleared as by any reconnect. The park and home bound runs on from the command: the outage is part
+  - **Across a relink** (#521, #2406): a relink sends AbortSlew's stops whatever the outage length, so a GOTO it finds
+    running is the driver's own stop then, and its watch is dropped, as is any kept failure. Only a park the relink
+    leaves running (#1289) keeps the watch, and the relink's first `:GU#` (the connect's seed frame, with its position)
+    judges it at once by the rules above. When that frame has no position
+    the check reads `:GRa#`/`:GDe#` itself; a link lost there fails the Connect through the connect's own lost-link
+    check, as any lost seed read does. The park and home bound runs on from the command: the outage is part
     of the park's time. No baseline code is kept: the end position decides a slew, so a 4.x code that changed or was
     cleared during the outage changes nothing.
-- **Motion fails closed: bounds and checked stops** (#2406, under the "motion fails closed" rule that #2395 and #2396 set for every telescope driver). A GOTO the mount still shows `kGotoTimeout` (120 s) after its `:MS#` is stopped with AbortSlew's stops: the status poll checks it each tick for an async slew (`check_motion_bounds_locked()`), and the synchronous slew's wait (whose 120 s runs from the start of the wait, a few exchanges after the `:MS#`), which used to throw with no stop, sends them before it throws. If the AbortSlew check then fails too, its text is appended to the bound's. A `:MS#` with no digit before its reply timeout is followed by `:Q#`, since the mount may have started it. A GOTO's bound is cleared when it lands (the poll, or the synchronous wait's own `:GU#`) and survives a MoveAxis started during it. A `MoveAxis` runs at most `kMaxMoveAxisDuration` (60 s): the re-send body wakes at that deadline too and stops the axis as `MoveAxis(axis, 0)` does (`stop_capped_move_locked()`); firmware without `g`, whose re-send body ends at once (#1461), relies on the firmware's guide time limit as before. After AbortSlew, the status poll checks the stop: while `:GU#` still shows a GOTO, a home search or a guide move (not a pulse guide), it sends the stops again every `kAbortStopRound` (2 s), `kAbortStopRounds` (3) rounds in all, the AbortSlew included; motion after that stores a failure. Each of these failures is `motion_error_` (the MoveAxis cap is logged at INFO, since a client causes it, decision 0007 rule 9; a stop that failed at ERROR), which Slewing raises as DriverException (and the synchronous wait throws) until the next motion command (slew, MoveAxis, AbortSlew, Park, FindHome) or a connect. `SiteLatitude`, `SiteLongitude` and `UTCDate` writes are refused with InvalidOperation while a motion of this driver runs: a GOTO until a frame shows it landed, a MoveAxis, or a Park or FindHome being started (`refuse_while_moving_locked()`, driver state only, so a `:GU#` it cannot parse refuses nothing and a hand-controller motion is not seen); a pulse guide does not count. `MoveAxis(axis, 0)` is allowed while parked (#2435): its `:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` change nothing on a parked mount, and a non-zero rate there stays InvalidWhileParked. The 120 s GOTO bound and the about 6 s AbortSlew check are fake-only so far: a slow build flipping 180 degrees, or a high slew rate's braking, may need more, which the #2406 hardware test plan checks. Not done here: the relink stop after a short outage (`kRelinkMotionPreserveWindow`), a landing gate for a far miss, a sync bound and a setting for the MoveAxis cap. Tests: the `[goto-safety]` cases in `test_onstep_telescope.cpp`.
+- **Motion fails closed: bounds and checked stops** (#2406, under the "motion fails closed" rule that #2395 and #2396 set for every telescope driver). A GOTO the mount still shows `kGotoTimeout` (120 s) after its `:MS#` is stopped with AbortSlew's stops: the status poll checks it each tick for an async slew (`check_motion_bounds_locked()`), and the synchronous slew's wait (whose 120 s runs from the start of the wait, a few exchanges after the `:MS#`), which used to throw with no stop, sends them before it throws. If the AbortSlew check then fails too, its text is appended to the bound's. A `:MS#` with no digit before its reply timeout is followed by `:Q#`, since the mount may have started it. A GOTO's bound is kept after a frame shows it ended, since the mount may start the GOTO only after that frame: a GOTO the mount shows at the deadline is stopped, and a frame with no GOTO at the deadline ends the bound; the next motion command or a connect ends it too, and a MoveAxis started during it keeps it. A poll tick whose `:GU#` fails still stops, once its deadline passes, a GOTO whose landing has not been judged, one no frame has seen run included (`check_goto_bound_unread_locked()`), so the bound does not depend on the poll succeeding. The first frame with no GOTO after a `:GU#` showed the GOTO running (the poll's, or the one the synchronous slew publishes when its wait ends) judges the landing (`judge_landing_locked()`); a frame from before the mount started the GOTO holds the position before the slew, so a GOTO never seen running is not judged and is left to the bound: a GOTO that ended more than `util::kLandingFarMissArcsec` (600 arcsec) from its target on either axis (`util::axis_miss_arcsec`) is stopped with AbortSlew's stops and stored, and the synchronous slew throws it. One frame is taken as still, without `util::LandingGate`'s pair of reads, which a rig has not checked yet. A sync after the first one since the Connect may move the pointing by `util::kMaxSyncOffsetDegrees` (5 degrees, on the sky) at most from the position the frame holds, else InvalidValue and no `:CM#` (`util::check_sync_bound`); the first sync of each session is exempt, since an OnStep mount has no reference at power-up and that sync sets it (the #2406 Decisions (2026-11-24); the handset mounts bound every sync). A `MoveAxis` runs at most `kMaxMoveAxisDuration` (60 s): the re-send body wakes at that deadline too and stops the axis as `MoveAxis(axis, 0)` does (`stop_capped_move_locked()`); firmware without `g`, whose re-send body ends at once (#1461), relies on the firmware's guide time limit as before. After AbortSlew, the status poll checks the stop: while `:GU#` still shows a GOTO, a home search or a guide move (not a pulse guide), it sends the stops again every `kAbortStopRound` (2 s), `kAbortStopRounds` (3) rounds in all, the AbortSlew included; motion after that stores a failure. Each of these failures is `bound_error_` (the MoveAxis cap is logged at INFO, since a client causes it, decision 0007 rule 9; a stop that failed at ERROR), which Slewing raises as DriverException (and the synchronous wait throws) until the next motion command (slew, MoveAxis, AbortSlew, Park, FindHome) or a connect. `SiteLatitude`, `SiteLongitude` and `UTCDate` writes are refused with InvalidOperation while a motion of this driver runs: a GOTO until a frame shows it landed, a MoveAxis, or a Park or FindHome being started (`refuse_while_moving_locked()`, driver state only, so a `:GU#` it cannot parse refuses nothing and a hand-controller motion is not seen); a pulse guide does not count. `MoveAxis(axis, 0)` is allowed while parked (#2435): its `:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` change nothing on a parked mount, and a non-zero rate there stays InvalidWhileParked. The 120 s GOTO bound and the about 6 s AbortSlew check are fake-only so far: a slow build flipping 180 degrees, or a high slew rate's braking, may need more, which the #2406 hardware test plan checks. The MoveAxis cap and the sync bound are constants, with no per-device setting (the #2406 Decisions (2026-11-24)). Tests: the `[goto-safety]` cases in `test_onstep_telescope.cpp`.
 - **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
   used to send their command blind or ignore the reply, so a mount that refused them read as
   success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`

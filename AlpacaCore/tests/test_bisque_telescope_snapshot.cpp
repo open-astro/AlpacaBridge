@@ -88,6 +88,18 @@ struct Rig {
     bool poll() { return bq::poll_status_now_for_testing(*driver); }
 };
 
+// #2410: after TheSkyX reports a synchronous slew complete, its landing gate sleeps 500 ms on the task clock before
+// the second position read. Steps the clock while a slewing thread runs, until `done`.
+void step_clock_until(FakeTaskClock& clock, const std::atomic<bool>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + seconds(30);
+    while (!done && std::chrono::steady_clock::now() < deadline) {
+        if (clock.wait_for_waiters(1, milliseconds(50))) {
+            clock.advance(milliseconds(500));
+            clock.wait_for_woken_settled(seconds(2));
+        }
+    }
+}
+
 bool has_entry(const alpacacore::TelescopeDriver& driver, const std::string& name) {
     for (const auto& entry : driver.get_device_state()) {
         if (entry.name == name) return true;
@@ -363,9 +375,9 @@ TEST_CASE("Bisque snapshot - a setter's value is read back at once and a stale p
 TEST_CASE("Bisque snapshot - a sync, a slew start and an abort are read back at once",
           "[bisque][telescope][snapshot]") {
     Rig rig;
-    rig.driver->sync_to_coordinates(9.0, -30.0);
-    CHECK(rig.driver->get_right_ascension() == 9.0);
-    CHECK(rig.driver->get_declination() == -30.0);
+    rig.driver->sync_to_coordinates(5.6, 21.0);  // within the 5 deg sync bound of the fake's RA 5.5 h, Dec 20 (#2410)
+    CHECK(rig.driver->get_right_ascension() == 5.6);
+    CHECK(rig.driver->get_declination() == 21.0);
 
     rig.mount.slew_polls_needed = 100000;
     rig.driver->slew_to_coordinates_async(5.0, 10.0);
@@ -374,7 +386,7 @@ TEST_CASE("Bisque snapshot - a sync, a slew start and an abort are read back at 
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-TEST_CASE("Bisque snapshot - an async slew ends with Slewing false and the landed position in one step",
+TEST_CASE("Bisque snapshot - an async slew publishes the landed position at its end and clears Slewing once landed",
           "[bisque][telescope][snapshot]") {
     Rig rig;
     rig.mount.land_on_target = true;
@@ -387,9 +399,13 @@ TEST_CASE("Bisque snapshot - an async slew ends with Slewing false and the lande
     CHECK(rig.driver->get_slewing());
 
     CHECK(rig.poll());
-    CHECK_FALSE(rig.driver->get_slewing());
     CHECK(rig.driver->get_right_ascension() == 5.0);
     CHECK(rig.driver->get_declination() == 10.0);
+    // #2410: the landing gate needs a second read 500 ms or more later that agrees, so the next tick clears Slewing.
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(seconds(1));
+    CHECK(rig.poll());
+    CHECK_FALSE(rig.driver->get_slewing());
 }
 
 TEST_CASE("Bisque snapshot - DeviceState TimeStamp is when the poll measured, not when it was asked",
@@ -770,16 +786,16 @@ TEST_CASE("Bisque snapshot - RightAscension answers while the read at the end of
     Rig rig(5000);
     REQUIRE(rig.poll());
     rig.mount.position_ms = 1000;
-    std::thread worker([&] { rig.driver->sync_to_coordinates(7.25, 15.0); });
+    std::thread worker([&] { rig.driver->sync_to_coordinates(5.75, 18.0); });  // within the 5 deg bound (#2410)
     // The Sync exchange is fast; the position read that follows is the slow one.
     const auto deadline = std::chrono::steady_clock::now() + seconds(5);
-    while (rig.mount.ra_hours.load() != 7.25 && std::chrono::steady_clock::now() < deadline) {
+    while (rig.mount.ra_hours.load() != 5.75 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(milliseconds(2));
     }
     std::this_thread::sleep_for(milliseconds(100));
     CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < milliseconds(500));
     worker.join();
-    CHECK(rig.driver->get_right_ascension() == 7.25);
+    CHECK(rig.driver->get_right_ascension() == 5.75);
 }
 
 // Falsified by: bisque_telescope_driver.cpp, set_tracking: hold mutex_ across protocol.set_tracking().
@@ -849,7 +865,19 @@ TEST_CASE("Bisque snapshot - a SlewToCoordinates that completes does not clear t
         rig.mount.slew_polls_needed = 100000;
         rig.driver->slew_to_coordinates_async(6.0, 11.0);
     });
-    rig.driver->slew_to_coordinates(5.0, 10.0);
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread worker([&] {
+        try {
+            rig.driver->slew_to_coordinates(5.0, 10.0);
+        } catch (...) {
+            threw = true;
+        }
+        done = true;
+    });
+    step_clock_until(rig.clock, done);  // the landing gate's 500 ms sleep (#2410)
+    worker.join();
+    CHECK_FALSE(threw.load());
     bq::set_slew_complete_hook_for_testing(*rig.driver, {});
     REQUIRE(retargeted);
     REQUIRE(rig.mount.slew_commands.load() == 2);
@@ -932,10 +960,20 @@ TEST_CASE("Bisque snapshot - RightAscension, Slewing and Connected answer while 
           "[bisque][telescope][snapshot]") {
     Rig rig(5000);
     REQUIRE(rig.poll());
-    rig.mount.slew_polls_needed = 0;  // the first poll answers complete, so the wait sleeps on no task clock
+    rig.mount.slew_polls_needed = 0;  // the first poll answers complete; only the landing gate sleeps (#2410)
     rig.mount.slew_complete_ms = 1500;
+    rig.mount.land_on_target = true;
     const int before = rig.mount.transactions.load();
-    std::thread worker([&] { rig.driver->slew_to_coordinates(5.0, 10.0); });
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread worker([&] {
+        try {
+            rig.driver->slew_to_coordinates(5.0, 10.0);
+        } catch (...) {
+            threw = true;
+        }
+        done = true;
+    });
     // IsTracking and the slew command come first; the third transaction is the IsSlewComplete poll the fake holds.
     const auto deadline = std::chrono::steady_clock::now() + seconds(5);
     while (rig.mount.transactions.load() < before + 3 && std::chrono::steady_clock::now() < deadline) {
@@ -945,7 +983,9 @@ TEST_CASE("Bisque snapshot - RightAscension, Slewing and Connected answer while 
     CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < milliseconds(500));
     CHECK(timed([&] { (void)rig.driver->get_slewing(); }) < milliseconds(500));
     CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    step_clock_until(rig.clock, done);
     worker.join();
+    CHECK_FALSE(threw.load());
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1056,7 +1096,9 @@ TEST_CASE("Bisque snapshot - a tick's slew outcome and its frame arrive together
     rig.mount.slew_polls_needed = 0;
     rig.driver->slew_to_coordinates_async(5.0, 10.0);
     rig.clock.advance(seconds(9));
-    REQUIRE(rig.poll());
+    REQUIRE(rig.poll());  // IsSlewComplete reads true: the landing gate takes its first read
+    rig.clock.advance(seconds(1));
+    REQUIRE(rig.poll());  // the second read agrees: the mount is still, and Slewing clears with that frame
     CHECK_FALSE(rig.driver->get_slewing());
     CHECK(rig.driver->get_right_ascension() == 5.0);
 

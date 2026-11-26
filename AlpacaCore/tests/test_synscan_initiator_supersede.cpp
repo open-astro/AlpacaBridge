@@ -43,6 +43,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
@@ -100,7 +101,8 @@ struct Timing {
 };
 
 Timing time_second_initiator(const char* name, const std::function<void(alpacacore::TelescopeDriver&)>& first,
-                             const std::function<void(alpacacore::TelescopeDriver&)>& second, int model = 50) {
+                             const std::function<void(alpacacore::TelescopeDriver&)>& second, int model = 50,
+                             bool step_clock = false) {
     Rig rig(model);
     rig.st->gate_ms.store(kHoldMs);
     first(*rig.driver);
@@ -116,6 +118,7 @@ Timing time_second_initiator(const char* name, const std::function<void(alpacaco
     std::atomic<long> took{-1};
     std::atomic<long> past_hold{-1};
     std::atomic<bool> threw{false};
+    std::atomic<bool> second_done{false};
     std::thread t([&] {
         const auto t0 = Clock::now();
         try {
@@ -131,7 +134,13 @@ Timing time_second_initiator(const char* name, const std::function<void(alpacaco
                                                                               Clock::time_point(Clock::duration(left)))
                             .count();
         }
+        second_done = true;
     });
+    if (step_clock) {
+        // `second` waits on the task clock (AbortSlew verifies its stop, #2412): step it until it returns.
+        rig.clock.drain_until([&] { return second_done.load(); }, std::chrono::milliseconds(50),
+                              std::chrono::seconds(60));
+    }
     t.join();
     timing.took_ms = took.load();
     timing.past_hold_ms = past_hold.load();
@@ -168,14 +177,17 @@ TEST_CASE("SynScan initiator supersede - MoveAxis during a blocked goto exchange
 
 TEST_CASE("SynScan initiator supersede - AbortSlew during a blocked goto exchange", "[synscan][initiator-supersede]") {
     const auto timing = time_second_initiator(
-        "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.abort_slew(); });
+        "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.abort_slew(); }, 50,
+        true);
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
 
 TEST_CASE("SynScan initiator supersede - Unpark during a Park whose goto exchange is blocked",
           "[synscan][initiator-supersede]") {
-    const auto timing = time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); });
+    // Unpark verifies its park stop on the task clock (#2412): stepped.
+    const auto timing =
+        time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); }, 50, true);
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
@@ -203,11 +215,17 @@ TEST_CASE("SynScan initiator supersede - AbortSlew during a Park on a fresh conn
     rig.st->gate_ms.store(kHoldMs);
     rig.driver->park();
     REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
-    std::thread abort([&] { rig.driver->abort_slew(); });
+    std::atomic<bool> aborted{false};
+    std::thread abort([&] {
+        rig.driver->abort_slew();
+        aborted = true;
+    });
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     const auto probe_t0 = Clock::now();
     (void)rig.driver->get_at_park();
     const long probe_ms = ms_since(probe_t0);
+    // AbortSlew verifies its stop on the task clock (#2412): step it until it returns.
+    rig.clock.drain_until([&] { return aborted.load(); }, std::chrono::milliseconds(50), std::chrono::seconds(60));
     abort.join();
     std::printf("AbortSlew during Park: probe answered after %ld ms (hold %d ms)\n", probe_ms, kHoldMs);
     CHECK(probe_ms < kHoldMs / 2);
@@ -272,7 +290,7 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
         // The body's goto now queues on the wrapper behind the poll's remaining exchanges. Calling AbortSlew at once
         // usually claims before the body's ownership check, which proves nothing; 20 ms lands in the window.
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        rig.driver->abort_slew();
+        alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); });  // verified (#2412)
         std::this_thread::sleep_for(std::chrono::milliseconds(150));  // a late goto would arrive now
         std::string order;
         {
@@ -319,11 +337,30 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
     }
     REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
     const auto entered = Clock::time_point(Clock::duration(rig.st->gate_l_entered.load()));
-    std::thread unpark([&] { rig.driver->unpark(); });
+    std::atomic<bool> unparked{false};
+    std::atomic<std::thread::id> unpark_id{};
+    std::thread unpark([&] {
+        unpark_id = std::this_thread::get_id();
+        rig.driver->unpark();
+        unparked = true;
+    });
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     CHECK(ms_since(entered) < kHoldMs);  // Unpark claimed while the query was still held
+    // Unpark's stop then lands: the handset stops reporting the slew, so the verify after it sees the mount still
+    // (#2412).
+    rig.st->report_slewing.store(false);
+    rig.st->invalid_slew_status.store(false);
     // The Park body's thread exits once its query has failed.
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::milliseconds(kHoldMs + 5000)));
+    // Unpark verifies its park stop on the task clock (#2412): step it while its own thread waits on the clock, so no
+    // step lands while a read is on the socket.
+    const auto unpark_deadline = Clock::now() + std::chrono::seconds(60);
+    while (!unparked.load() && Clock::now() < unpark_deadline) {
+        if (rig.clock.wait_for_waiter_thread(unpark_id.load(), std::chrono::milliseconds(50))) {
+            rig.clock.advance(std::chrono::milliseconds(50));
+            rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
+    }
     unpark.join();
     CHECK(counted.load() == 0);
 }
@@ -395,7 +432,10 @@ TEST_CASE("SynScan initiator supersede - Park waits for a SyncToCoordinates whos
     Rig rig;
     rig.driver->set_park();  // so Park needs no handset read of its own
     rig.st->gate_s_ms.store(1500);
-    std::thread sync([&] { rig.driver->sync_to_coordinates(5.5, 20.0); });
+    // Where the mount points: a Sync is bounded to 5 deg from it (#2412).
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    std::thread sync([&] { rig.driver->sync_to_coordinates(ra, dec); });
     REQUIRE(wait_until([&] { return rig.st->gate_s_entered.load() != 0; }, 5000));
     std::atomic<bool> park_returned{false};
     std::thread park([&] {

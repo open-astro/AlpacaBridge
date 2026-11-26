@@ -602,6 +602,9 @@ void poll_ticks(alpacacore::test::FakeTaskClock& clock, int n) {
 // place a case latches, so a driver that latches on something else changes it here.
 void latch_by_polls(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
                     alpacacore::test::FakeIoptronMount& mount) {
+    // Most callers latch right after the connect: a tick taken before the poll parks is lost, and two failed reads
+    // do not latch.
+    alpacacore::test::wait_for_ioptron_connect_parked(clock);
     mount.set_fail_reads(true);
     poll_ticks(clock, 3);
     REQUIRE_FALSE(driver.get_link_fault().empty());

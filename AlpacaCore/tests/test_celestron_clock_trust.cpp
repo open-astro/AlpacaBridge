@@ -41,6 +41,7 @@
 #include "driver_rig.h"
 
 #ifndef _WIN32
+#include "celestron_landing_model.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -59,6 +60,7 @@ constexpr std::chrono::seconds kMountBehind{6 * 3600 + 48 * 60};
 
 // The NexStar hand controller, enough for a connect, a MoveAxis and the time commands.
 struct ClockMount {
+    alpacacore::test::CelestronLanding landing;
     std::atomic<int> time_writes{0};        // "H"
     std::atomic<int> time_reads{0};         // "h"
     std::atomic<int> site_writes{0};        // "W"
@@ -90,14 +92,15 @@ std::string clock_reply(ClockMount& st, const std::string& chunk) {
             return "#";
         case 'e':
         case 'E':
-            return "12AB0500,20000500#";
+            return st.landing.position() + "#";
         case 'z':
         case 'Z':
             return "20AB0500,10000500#";
         case 'r':
         case 'R':
         case 'b':
-        case 'B':  // GOTO
+        case 'B':                    // GOTO
+            st.landing.land(chunk);  // #2409: the reported position moves to the GOTO's target
             return "#";
         case 'L':  // GOTO in progress
             return st.goto_held.load() ? "1#" : "0#";
@@ -133,7 +136,10 @@ std::string clock_reply(ClockMount& st, const std::string& chunk) {
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // the autoguider port
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // no other bus accessories
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
-            if (op == 0x02 || op == 0x17) return "#";                              // MC_GOTO_FAST / SLOW
+            if (op == 0x02 || op == 0x17) {  // MC_GOTO_FAST / SLOW; #2409: a flip's pair moves the position
+                st.landing.land(chunk);
+                return "#";
+            }
             if (op == 0x13) return st.goto_held.load() ? std::string("\x00#", 2) : std::string("\xFF#");
             return std::string("\xFF#");
         }
