@@ -57,12 +57,16 @@ inline std::unique_ptr<CoverCalibratorDriver> make_gemini_flatpanel_pro(int devi
 #endif
 
 #ifdef FAKE_CONFORMU_WANDERERASTRO
-// The WandererCover V4 Pro status frame of the WandererAstro cover tests (open angle 10.0, close angle 270.0,
-// brightness 0), streamed every 300 ms. The streamer has no cover mode, so the frame never follows an open, close or
-// brightness command.
+// The WandererCover V4 Pro status frame of the WandererAstro cover tests (close angle 10.0, open angle 270.0, the
+// cover closed, brightness 0), streamed every 300 ms. Cover mode: the angle follows an open or close command at 20
+// degrees a second, as the bench cover does (ConformU on the V4 Pro: an open or close took 12.5 s, 250 degrees to
+// within the driver's 10 degree tolerance). The brightness field never follows a command; the driver serves
+// Brightness from what it commanded.
+inline constexpr double kWandererCoverDegPerSecond = 20.0;
 inline FakeSerialStreamer& wandererastro_cover() {
     static FakeSerialStreamer streamer("WandererCoverV4ProA20240301A10.0A270.0A10.0A12.5A0A0A0\n",
-                                       std::chrono::milliseconds(300));
+                                       std::chrono::milliseconds(300), std::chrono::milliseconds(0),
+                                       std::chrono::milliseconds(0), kWandererCoverDegPerSecond);
     return streamer;
 }
 inline std::unique_ptr<CoverCalibratorDriver> make_wandererastro_covercalibrator(int device_number) {

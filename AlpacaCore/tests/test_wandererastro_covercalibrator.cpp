@@ -599,3 +599,40 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - EBADF on the device's fd loses
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
 }
+
+// FakeSerialStreamer WandererCover mode (#2694): the opt-in cover_deg_per_s argument moves the frame's angle toward
+// the commanded end at that rate. The ConformU factory uses the bench rate (conformu_covercalibrator_factories.h);
+// this case runs ten times faster. kCoverFrame is closed at 10 degrees and opens at 270, and the driver calls either
+// end reached within 10 degrees: the open travels 250 degrees before CoverState reads Open. The close may start before
+// the fake reaches 270 (anywhere from 260), so it travels at least 240 degrees before CoverState reads Closed.
+TEST_CASE("FakeSerialStreamer - cover mode opens and closes the cover after the travel time",
+          "[wandererastro][covercalibrator][unit][fake]") {
+    using std::chrono::milliseconds;
+    constexpr double kDegPerSecond = 200.0;
+    constexpr auto kOpenTravel = milliseconds(1250);   // 250 degrees at kDegPerSecond
+    constexpr auto kCloseTravel = milliseconds(1200);  // 240 degrees at kDegPerSecond
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, milliseconds(20), milliseconds(0), milliseconds(0),
+                                               kDegPerSecond);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Closed);
+
+    // Real time: what each wait waits for is the fake's angle, which moves on the steady clock.
+    auto start = std::chrono::steady_clock::now();
+    driver->open_cover();
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == alpacacore::CoverState::Open; },
+                           milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - start >= kOpenTravel);
+
+    start = std::chrono::steady_clock::now();
+    driver->close_cover();
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == alpacacore::CoverState::Closed; },
+                           milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - start >= kCloseTravel);
+    CHECK_NOTHROW(driver->set_connected(false));
+}
