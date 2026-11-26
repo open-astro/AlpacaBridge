@@ -159,6 +159,16 @@ TEST_CASE("TCP connect - a host that is not found says so", "[util][tcp]") {
     CHECK(t.result.error == "host not found (Name or service not known)");
 }
 
+// Falsified by: tcp_connect.h lookup_tcp_host() passing on a resolver result with no address and no error (a caller
+// that reads addresses.front() on an empty error would read past the end)
+TEST_CASE("TCP connect - a lookup with no address and no error is host not found", "[util][tcp]") {
+    const auto empty = [](const std::string&, int, int) { return TcpLookup{}; };
+    const auto lookup = alpacacore::util::lookup_tcp_host("mount.example", 4030, AF_INET,
+                                                          alpacacore::util::TcpDeadline::in(2000), nullptr, empty);
+    CHECK(lookup.addresses.empty());
+    CHECK(lookup.error == "host not found (no address)");
+}
+
 // Falsified by: tcp_connect.h lookup_tcp_host() calling the resolver on the calling thread (a hung lookup holds the
 // connect past its deadline)
 TEST_CASE("TCP connect - a resolver that hangs fails at the deadline", "[util][tcp]") {

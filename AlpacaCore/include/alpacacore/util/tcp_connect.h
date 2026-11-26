@@ -12,10 +12,11 @@
 
 #pragma once
 
-// The bounded outbound TCP connect every mount wrapper uses (#2711): a host name lookup and a non-blocking connect
-// that both end by one deadline, or earlier when a cancel flag is set, with a reason text for every failure. A bare
-// blocking connect() to a host that never answers waits for the kernel's TCP timeout (~127 s) while the wrapper holds
-// its lock. The result is a plain file descriptor: the caller owns it and does its own I/O (decision 0013 section 7).
+// The bounded outbound TCP connect for mount wrappers (#2711; ZWO and OnStep use it, the others move to it in #2712):
+// a host name lookup and a non-blocking connect that both end by one deadline, or earlier when a cancel flag is set,
+// with a reason text for every failure. A bare blocking connect() to a host that never answers waits for the kernel's
+// TCP timeout (~127 s) while the wrapper holds its lock. The result is a plain file descriptor: the caller owns it and
+// does its own I/O (decision 0013 section 7).
 
 #ifndef _WIN32
 
@@ -184,6 +185,10 @@ inline TcpLookup lookup_tcp_host(const std::string& host, int port, int family, 
             return lookup;
         }
         pending->done_cv.wait_for(lock, std::chrono::milliseconds(slice));
+    }
+    // Callers read addresses.front() when error is empty: an injected resolver may return neither.
+    if (pending->result.error.empty() && pending->result.addresses.empty()) {
+        pending->result.error = "host not found (no address)";
     }
     return std::move(pending->result);
 }
