@@ -12,6 +12,13 @@ adding a device type.
 No SDK: the wire is the ASCOM Alpaca Device API over `util::HttpClient`, built under `ALPACACORE_ENABLE_REMOTEALPACA`
 (needs libcurl). No remotealpaca file names libcurl (decision 0023 rule 2).
 
+What every proxied device shares lives in `UpstreamProxy` (`src/vendors/remotealpaca/upstream_proxy.h`), a member of
+each driver (decision 0013 section 5): the self-loop check at Connect, the forwarded Connect and Disconnect, the
+branded Name and the Description, the `util::PolledState` frame with the link's fault and loss, the command slot and
+the pass-through of upstream errors. A driver keeps its frame and how to measure it, its own reads at Connect, its
+commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
+driver.
+
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
 - One client per upstream device. Calls are serialized on the client's own mutex, so a driver's poll and its

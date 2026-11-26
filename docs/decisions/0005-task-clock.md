@@ -83,7 +83,7 @@ Symbol: `TaskClock`
 | ZWO EFW filter wheel | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted | #1668 | Position cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO CAA rotator | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted | #1668 | status cache age and its fault stamp (the decision 0009 staleness bound) |
 | WeeWX observing conditions | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085, #1984 | feed poll interval wait (#2085) and its fault stamp (the decision 0009 staleness bound, #1984) |
-| remotealpaca observing conditions | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp` | adopted | #1753 | upstream poll period wait, the wait for the upstream's Connecting, the fault stamp (the decision 0009 staleness bound) and the snapshot age |
+| remotealpaca observing conditions | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | upstream poll period wait, the wait for the upstream's Connecting, the fault stamp (the decision 0009 staleness bound) and the snapshot age; the Connecting wait and the poll's clock are held by the vendor's shared `UpstreamProxy` |
 | Player One thermal switch | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted | #2088 | status cache age and its fault stamp |
 | Gemini PDH switch | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted | #1987 | fault stamp (the decision 0009 staleness bound) |
 
