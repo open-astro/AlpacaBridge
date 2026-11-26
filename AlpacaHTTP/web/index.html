@@ -19,13 +19,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=38">
+    <script>
+        // Issue #1764 item 6: a stored night theme is set before the first paint, so the page never flashes
+        // the default colours. The key is THEME_STORAGE_KEY in format.js. Blocked storage leaves the default.
+        try {
+            if (localStorage.getItem('alpacabridge.theme') === 'night') {
+                document.documentElement.setAttribute('data-theme', 'night');
+            }
+        } catch (e) {
+            // No storage: the default theme.
+        }
+    </script>
+    <link rel="stylesheet" href="/web/style.css?v=40">
 </head>
 <body>
     <div class="container">
         <header>
             <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><a id="header-build-badge" class="build-badge" hidden title="" href="#" target="_blank" rel="noopener"></a><span id="header-profile" class="profile-name"></span></h1>
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
+            <button type="button" id="theme-toggle" class="btn btn-small theme-toggle" aria-pressed="false" title="Red night theme, to keep your eyes dark-adapted">Night</button>
         </header>
 
         <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
@@ -213,14 +225,14 @@
                         </select>
                         <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                     </div>
-                    <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
-                    <small style="color: #666;">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
-                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                    <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>DC Power Ports</strong></p>
+                    <small style="color: var(--form-note-text);">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
+                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                         <thead>
                             <tr>
-                                <th style="text-align: left; padding: 4px; color: #333;">DC port</th>
-                                <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
-                                <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">DC port</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO line</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -237,7 +249,7 @@
                             <tr>
                                 <td style="padding: 4px;">DC3</td>
                                 <td style="padding: 4px;">&mdash; always on</td>
-                                <td style="padding: 4px; color: #999;">n/a</td>
+                                <td style="padding: 4px; color: var(--form-muted-text);">n/a</td>
                             </tr>
                         </tbody>
                     </table>
@@ -245,7 +257,7 @@
 
                   <div id="ioptron-camera-config" data-device-type="camera" style="display: none;">
                     <h3>iOptron iCAM Camera Configuration</h3>
-                    <small style="color: #666;">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
+                    <small style="color: var(--form-note-text);">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
                     <div class="form-group">
                         <label for="ioptron-camera-index">Camera Index:</label>
                         <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" data-config-key="cameraIndex" value="0" min="0">
@@ -255,7 +267,7 @@
 
                   <div id="ioptron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>iOptron iEAF / iAFS2/3 Focuser Configuration</h3>
-                    <small style="color: #666;">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+                    <small style="color: var(--form-note-text);">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-ieaf-model">Model:</label>
@@ -293,7 +305,7 @@
 
                   <div id="ioptron-filterwheel-config" data-device-type="filterwheel" style="display: none;">
                     <h3>iOptron iEFW Filter Wheel Configuration</h3>
-                    <small style="color: #666;">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+                    <small style="color: var(--form-note-text);">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-filterwheel-model">Model:</label>
@@ -558,7 +570,7 @@
                 <div id="onstep-config" data-vendor="onstep" class="vendor-config" style="display: none;">
                   <div id="onstep-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>OnStep Focuser Configuration</h3>
-                    <small style="color: #666;">A focuser wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Requires OnStepX firmware.</small>
+                    <small style="color: var(--form-note-text);">A focuser wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Requires OnStepX firmware.</small>
 
                     <div class="form-group">
                         <label for="onstep-focuser-number">Focuser Number:</label>
@@ -604,7 +616,7 @@
 
                   <div id="onstep-rotator-config" data-device-type="rotator" style="display: none;">
                     <h3>OnStep Rotator Configuration</h3>
-                    <small style="color: #666;">The rotator wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Moves stay inside the travel set in the firmware and are refused while the firmware's derotation is on. Requires OnStepX firmware.</small>
+                    <small style="color: var(--form-note-text);">The rotator wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Moves stay inside the travel set in the firmware and are refused while the firmware's derotation is on. Requires OnStepX firmware.</small>
 
                     <div class="form-group">
                         <label for="onstep-rotator-connection-type">Connection Type:</label>
@@ -644,7 +656,7 @@
 
                   <div id="onstep-switch-config" data-device-type="switch" style="display: none;">
                     <h3>OnStep Switch Configuration</h3>
-                    <small style="color: #666;">The auxiliary features of the OnStepX controller (power switches, PWM outputs, dew heaters) as one Switch device, each under its firmware name. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. The feature list is read at each connect. Requires OnStepX firmware.</small>
+                    <small style="color: var(--form-note-text);">The auxiliary features of the OnStepX controller (power switches, PWM outputs, dew heaters) as one Switch device, each under its firmware name. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. The feature list is read at each connect. Requires OnStepX firmware.</small>
 
                     <div class="form-group">
                         <label for="onstep-switch-connection-type">Connection Type:</label>
@@ -745,7 +757,7 @@
                 <div id="celestron-config" data-vendor="celestron" class="vendor-config" style="display: none;">
                   <div id="celestron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>Celestron Focus Motor Configuration</h3>
-                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
+                    <small style="color: var(--form-note-text);">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
                         <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" data-config-key="portPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
@@ -999,14 +1011,14 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
-                        <small style="color: #666;">Defaults match the Pi 4 ASIAIR Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
-                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">Defaults match the Pi 4 ASIAIR Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1049,13 +1061,13 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
-                        <small style="color: #666;">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
-                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1340,7 +1352,7 @@
 
                     <!-- Q-Focuser: USB CDC-ACM serial JSON protocol, no SDK. -->
                     <div id="qhy-focuser-fields" data-device-type="focuser" style="display: none;">
-                        <small style="color: #666;">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
+                        <small style="color: var(--form-note-text);">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
 
                         <div class="form-group">
                             <label for="qhy-focuser-connection-type">Connection Type:</label>
@@ -1401,7 +1413,7 @@
 
                         <details>
                             <summary>Advanced: 12 V hold torque</summary>
-                            <small style="color: #666;">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
+                            <small style="color: var(--form-note-text);">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
                             <div class="form-group">
                                 <label><input type="checkbox" id="qhy-focuser-hold-force" name="qhyFocuserHoldForce" data-config-key="holdForce"> Enable hold force</label>
                             </div>
@@ -1446,7 +1458,7 @@
                 <!-- iOptron iGuider Guide Camera Configuration -->
                 <div id="iguider-config" data-vendor="iguider" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>iOptron iGuider Guide Camera Configuration</h3>
-                    <small style="color: #666;">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
+                    <small style="color: var(--form-note-text);">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
 
                     <div class="form-group">
                         <label for="iguider-device-path">Device Path (optional):</label>
@@ -1460,7 +1472,7 @@
                 <div id="ifr-config" data-vendor="ifr" class="vendor-config" style="display: none;">
                   <div id="ifr-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>iOptron iFR Focuser Configuration</h3>
-                    <small style="color: #666;">The iFR is a focuser and a camera rotator in one unit, on one USB link. Add it twice, once as a Focuser and once as a Rotator: both connect over the same port and can be used independently. Either of its two Type-C ports works; plug in one. Fixed 115200 baud; auto-detect checks the unit's handshake.</small>
+                    <small style="color: var(--form-note-text);">The iFR is a focuser and a camera rotator in one unit, on one USB link. Add it twice, once as a Focuser and once as a Rotator: both connect over the same port and can be used independently. Either of its two Type-C ports works; plug in one. Fixed 115200 baud; auto-detect checks the unit's handshake.</small>
 
                     <div class="form-group">
                         <label for="ifr-focuser-model">Model:</label>
@@ -1499,7 +1511,7 @@
 
                   <div id="ifr-rotator-config" data-device-type="rotator" style="display: none;">
                     <h3>iOptron iFR Rotator Configuration</h3>
-                    <small style="color: #666;">The rotator (CAA) half of the iFR. It shares the unit's USB link with the iFR Focuser. Sync is stored in the iFR itself and survives a power cycle.</small>
+                    <small style="color: var(--form-note-text);">The rotator (CAA) half of the iFR. It shares the unit's USB link with the iFR Focuser. Sync is stored in the iFR itself and survives a power cycle.</small>
 
                     <div class="form-group">
                         <label for="ifr-rotator-model">Model:</label>
@@ -1650,14 +1662,14 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
-                        <small style="color: #666;">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>
-                        <table class="touptek-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>DC Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>
+                        <table class="touptek-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Port</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Port</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO line</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2408,8 +2420,8 @@
     </dialog>
     <div id="toast-region" class="toast-region"></div>
 
-    <script src="/web/format.js?v=22"></script>
+    <script src="/web/format.js?v=23"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=56"></script>
+    <script src="/web/app.js?v=58"></script>
 </body>
 </html>

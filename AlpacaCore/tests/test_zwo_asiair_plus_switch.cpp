@@ -23,8 +23,10 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -633,4 +635,237 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - every ISwitchV3 member answers while 
     for (std::int32_t index = 4; index <= 7; ++index) {
         CHECK(last_raw_level(index) == 1);
     }
+}
+
+// ---- The two ioctl numberings (pwm_gpio.h): pwm_gpio_compat gets the corrected one, anything else the legacy one ----
+//
+// The OpenAstro mainline image replaces ZWO's pwm_gpio.ko with the clean-room pwm_gpio_compat, which implements the
+// module's real command numbers. The backend picks the numbering at open() from the device's sysfs driver link; these
+// cases point it at a fake /sys/dev/char tree through the factory's sysfs overload, and the stub plays the module the
+// tree names (zwo_asiair_stubs.h). The legacy cases above run on the default factory and are unchanged.
+namespace {
+
+using alpacacore::test::compat_device;
+using alpacacore::test::IoctlCall;
+using alpacacore::test::kAbiPwmEnable;
+using alpacacore::test::kAbiSetLevel;
+using alpacacore::test::kAbiSetMode;
+using alpacacore::test::kLegacyEnable;
+using alpacacore::test::kLegacySetLevel;
+using alpacacore::test::kLegacySetMode;
+using alpacacore::test::StubDeviceOptions;
+using alpacacore::test::StubModule;
+
+std::unique_ptr<alpacacore::SwitchDriver> make_on(const StubDeviceFile& device,
+                                                  alpacacore::vendor::zwo::AsiairPlusSwitchConfig cfg =
+                                                      alpacacore::vendor::zwo::default_asiair_plus_rk3568_config()) {
+    cfg.device_path = device.path;
+    return alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg, device.sysfs_root());
+}
+
+std::vector<IoctlCall> stub_calls() {
+    auto& st = ioctl_stub();
+    std::lock_guard<std::mutex> lock(st.m);
+    return st.calls;
+}
+
+// The legacy stream for a first ON write to DC port 1 (kernel index 4): SET_MODE(GPIO), ENABLE, SET_LEVEL(raw 0).
+const std::vector<IoctlCall> kLegacyFirstOnPort1 = {
+    {kLegacySetMode, 4, 1, false},
+    {kLegacyEnable, 4, 0, false},
+    {kLegacySetLevel, 4, 0, false},
+};
+
+StubDeviceOptions legacy_device(bool char_device, std::string sysfs_driver) {
+    StubDeviceOptions options;
+    options.module = StubModule::Legacy;
+    options.char_device = char_device;
+    options.sysfs_driver = std::move(sysfs_driver);
+    return options;
+}
+
+// Connects a default driver on a fresh @p options device, sets Port @p port + 1 to @p on, reads it back and
+// disconnects; returns every ioctl the stub saw.
+std::vector<IoctlCall> calls_of_one_write(const StubDeviceOptions& options, int port, bool on) {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile device(options);
+    auto driver = make_on(device);
+    driver->set_connected(true);
+    driver->set_switch(port, on);
+    CHECK(driver->get_switch(port) == on);
+    driver->set_connected(false);
+    return stub_calls();
+}
+
+}  // namespace
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: ON sends SET_MODE(GPIO), then SET_LEVEL(1)",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(compat_device(), 0, true) ==
+          std::vector<IoctlCall>{{kAbiSetMode, 4, 1, false}, {kAbiSetLevel, 4, 1, false}});
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: OFF sends SET_LEVEL(0)",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(compat_device(), 1, false) ==
+          std::vector<IoctlCall>{{kAbiSetMode, 5, 1, false}, {kAbiSetLevel, 5, 0, false}});
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: no PWM ENABLE or other command reaches the module",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile device(compat_device());
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = make_on(device, cfg);
+    driver->set_connected(true);
+    for (int i = 0; i < 3; ++i) {
+        driver->set_switch(i, false);
+        driver->set_switch(i, true);
+    }
+    driver->set_switch_value(3, 0.0);
+    driver->set_switch_value(3, 100.0);
+    driver->set_connected(false);
+    const auto calls = stub_calls();
+    REQUIRE_FALSE(calls.empty());
+    for (const auto& call : calls) {
+        CHECK(call.request != kAbiPwmEnable);
+        CHECK((call.request == kAbiSetMode || call.request == kAbiSetLevel));
+        CHECK_FALSE(call.refused);
+    }
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: SET_MODE once per line since open, SET_LEVEL every write",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile device(compat_device());
+    auto driver = make_on(device);
+    driver->set_connected(true);
+    driver->set_switch(0, false);
+    driver->set_switch(0, true);
+    driver->set_switch(0, false);
+    driver->set_switch(2, true);
+    driver->set_connected(false);
+    CHECK(stub_calls() == std::vector<IoctlCall>{
+                              {kAbiSetMode, 4, 1, false},
+                              {kAbiSetLevel, 4, 0, false},
+                              {kAbiSetLevel, 4, 1, false},
+                              {kAbiSetLevel, 4, 0, false},
+                              {kAbiSetMode, 6, 1, false},
+                              {kAbiSetLevel, 6, 1, false},
+                          });
+    // A new open() starts over: the module is told the mode again before the line's next level.
+    {
+        auto& st = ioctl_stub();
+        std::lock_guard<std::mutex> lock(st.m);
+        st.calls.clear();
+    }
+    driver->set_connected(true);
+    driver->set_switch(0, true);
+    driver->set_connected(false);
+    CHECK(stub_calls() == std::vector<IoctlCall>{{kAbiSetMode, 4, 1, false}, {kAbiSetLevel, 4, 1, false}});
+}
+
+// Decision 0021 rule 1 and the RK3568 open() rule (zwo.instructions.md): a connect touches no kernel-side state.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: connect and disconnect write nothing",
+          "[zwo][switch][asiair-plus][unit][compat][power-on]") {
+    StubDeviceFile device(compat_device());
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = make_on(device, cfg);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(device.open_fds() == 1);
+    auto& st = ioctl_stub();
+    int requests = 0;
+    {
+        // Bounded wait for a write that must not come (a PWM worker's first pass is immediate).
+        std::unique_lock<std::mutex> lock(st.m);
+        st.cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return st.requests > 0; });
+        requests = st.requests;
+    }
+    for (int i = 0; i < 4; ++i) {
+        CHECK(driver->get_switch(i));  // the "on" cache: nothing was read either
+    }
+    driver->set_connected(false);
+    CHECK(device.open_fds() == 0);
+    CHECK(requests == 0);
+    std::lock_guard<std::mutex> lock(st.m);
+    CHECK(st.requests == 0);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: soft-PWM edges are SET_LEVEL only and close settles ON",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile device(compat_device());
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = make_on(device, cfg);
+    driver->set_connected(true);
+    driver->set_switch_value(3, 50.0);
+    auto& st = ioctl_stub();
+    {
+        // Several edges of the 50 Hz waveform, both levels among them.
+        std::unique_lock<std::mutex> lock(st.m);
+        REQUIRE(
+            st.cv.wait_for(lock, std::chrono::seconds(5), [&] { return st.off_writes >= 2 && st.levels.size() >= 4; }));
+    }
+    driver->set_connected(false);
+    const auto calls = stub_calls();
+    REQUIRE(calls.size() >= 5);
+    CHECK(calls.front() == IoctlCall{kAbiSetMode, 7, 1, false});
+    for (std::size_t i = 1; i < calls.size(); ++i) {
+        CHECK(calls[i].request == kAbiSetLevel);
+        CHECK(calls[i].index == 7);
+        CHECK((calls[i].value == 0 || calls[i].value == 1));
+        CHECK_FALSE(calls[i].refused);
+    }
+    CHECK(calls.back().value == 1);  // duty 50 settles ON, level 1 on this module
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - pwm_gpio_compat: off at server start sends SET_LEVEL(0) to every port",
+          "[zwo][switch][asiair-plus][unit][compat][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile device(compat_device());
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = make_on(device, cfg);
+    driver->apply_power_on_state(true);
+    CHECK_FALSE(driver->get_connected());
+    for (std::int32_t index = 4; index <= 7; ++index) {
+        CHECK(last_raw_level(index) == 0);
+    }
+    {
+        auto& st = ioctl_stub();
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.off_writes == 4);
+        CHECK(st.refused.empty());
+    }
+    driver->set_connected(true);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_FALSE(driver->get_switch(i));
+    }
+    driver->set_connected(false);
+}
+
+// Fail toward stock: only a character device whose sysfs driver is exactly pwm_gpio_compat gets the corrected
+// numbering.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a plain file keeps the legacy numbering whatever sysfs names",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(legacy_device(false, "pwm_gpio_compat"), 0, true) == kLegacyFirstOnPort1);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a character device driven by ZWO's pwm_gpio keeps the legacy numbering",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(legacy_device(true, "pwm_gpio"), 0, true) == kLegacyFirstOnPort1);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a character device with no sysfs driver link keeps the legacy numbering",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(legacy_device(true, ""), 0, true) == kLegacyFirstOnPort1);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a driver name that only begins with pwm_gpio_compat keeps the legacy one",
+          "[zwo][switch][asiair-plus][unit][compat]") {
+    CHECK(calls_of_one_write(legacy_device(true, "pwm_gpio_compat_old"), 0, true) == kLegacyFirstOnPort1);
 }

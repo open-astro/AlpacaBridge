@@ -57,6 +57,7 @@ using alpacacore::DeviceType;
 
 namespace {
 
+using alpacacore::test::advance_polling;
 using alpacacore::test::age_past_connect_grace;
 using alpacacore::test::require_alpaca_error;
 
@@ -274,7 +275,7 @@ bool wait_for_goto_dispatch(alpacacore::test::FakeIoptronMount& mount) {
 }
 
 // Slew, then poll Slewing until the driver reports the GOTO complete. The
-// driver holds Slewing true for its 5 s post-dispatch override before it
+// driver holds Slewing true for its 5 s post-dispatch override before the poll
 // consults the mount, so allow comfortably more than that.
 bool slew_and_settle(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
                      alpacacore::test::FakeIoptronMount& mount) {
@@ -287,7 +288,7 @@ bool slew_and_settle(alpacacore::TelescopeDriver& driver, alpacacore::test::Fake
         if (!driver.get_slewing()) {
             return true;
         }
-        clock.advance(std::chrono::milliseconds(100));
+        advance_polling(clock, std::chrono::milliseconds(100));  // the poll trims and lands the GOTO, not the getter
     }
     return false;
 }
@@ -370,12 +371,13 @@ TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is n
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     REQUIRE(driver->get_tracking());
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_system_status(2);
-    age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
+    age_past_connect_grace(clock);            // the poll samples the slewing status
     REQUIRE_FALSE(driver->get_tracking());    // the getter reads the slewing status as Tracking off
     CHECK(driver->get_slewing());
 
@@ -394,7 +396,7 @@ TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is n
     for (const int status : {3, 4}) {
         INFO("system status " << status);
         mount.set_system_status(status);
-        clock.advance(std::chrono::seconds(2));  // past the status TTL
+        advance_polling(clock, std::chrono::seconds(2));  // the poll samples it
         REQUIRE(driver->get_tracking());
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 25.0));
         ++gotos;
@@ -408,7 +410,7 @@ TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is n
 
     // Stopped at home is off: refused, with nothing more sent.
     mount.set_system_status(7);
-    clock.advance(std::chrono::seconds(3));  // past the 2 s Tracking read-back window
+    advance_polling(clock, std::chrono::seconds(3));  // past the 2 s Tracking read-back window, the poll samples 7
     require_alpaca_error([&]() { driver->slew_to_coordinates_async(14.0, 25.0); },
                          alpacacore::AlpacaError::InvalidOperation);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -431,13 +433,14 @@ TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount report
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
         0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    age_past_connect_grace(clock);  // past the connect fast-cache grace and the status TTL
+    wait_for_ioptron_connect_parked(clock);
+    age_past_connect_grace(clock);
     REQUIRE(driver->get_tracking());
 
     // A 3 s pulse: the firmware reports guiding from the ":Z" command on, and the next status read sees it.
     driver->pulse_guide(0, 3000);
     REQUIRE(driver->get_is_pulse_guiding());
-    clock.advance(std::chrono::seconds(2));  // past the status TTL, inside the pulse
+    advance_polling(clock, std::chrono::seconds(2));  // inside the pulse: the poll samples guiding
     CHECK(mount.count(":Z") == 1);           // the one pulse command, whichever axis letter the direction maps to
     CHECK(driver->get_tracking());
     CHECK(driver->get_is_pulse_guiding());
@@ -454,11 +457,11 @@ TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount report
     }
     CHECK(mount.count(":MS1#") == 0);
 
-    // Each status digit on its own, through a fresh ":GLS" read.
+    // Each status digit on its own, through the poll's next ":GLS" read.
     const auto tracking_with_status = [&](int status) {
         INFO("system status " << status);
         mount.set_system_status(status);
-        clock.advance(std::chrono::seconds(2));  // past the status TTL
+        advance_polling(clock, std::chrono::seconds(2));  // the poll samples it
         return driver->get_tracking();
     };
     CHECK(tracking_with_status(4));
@@ -569,13 +572,13 @@ TEST_CASE("iOptron Telescope Driver - the two target properties are independent"
 
 // open-astro#728: the fault latch counted every failed read over the whole
 // session, so three transient failures spread over a night latched it, and the
-// latch then refused AbortSlew too. SyncToCoordinates is the probe because it
-// forces a fresh :GEP position read on every call; the connect grace would
-// serve every other getter from cache.
+// latch then refused AbortSlew too. Since #2491 the latch is the poll's: three failed polls in a row latch it, a good
+// poll clears it, and a command's failed read counts for nothing (SyncToCoordinates is the probe of that: it forces a
+// fresh :GEP position read on every call). The cases tick the poll on a FakeTaskClock, one period at a time.
 namespace {
 
 constexpr const char* kReadFailure = "Failed to refresh mount position";
-constexpr const char* kLatched = "Mount communications compromised";
+constexpr const char* kLatched = "communications compromised";
 
 // The DriverException message of one forced position read, or "" on success.
 std::string sync_failure(alpacacore::TelescopeDriver& driver) {
@@ -590,41 +593,70 @@ std::string sync_failure(alpacacore::TelescopeDriver& driver) {
 
 bool contains(const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; }
 
-// Latches the fault (#728) the way the getters do today: three forced position reads that fail, then the refusal.
-// The one place a case latches by reads, so a driver that latches on a poll tick changes it here. A case whose first
-// failed exchange is a status read the moving axis left stale, not the position read, passes names_the_read = false.
-void latch_by_reads(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeIoptronMount& mount,
-                    bool names_the_read = true) {
+// `n` poll periods on the task clock: exactly `n` poll cycles run and finish.
+void poll_ticks(alpacacore::test::FakeTaskClock& clock, int n) {
+    for (int i = 0; i < n; ++i) advance_polling(clock, std::chrono::milliseconds(250));
+}
+
+// Latches the fault (#728, decision 0009 rule 1) the way the poll does: three polls whose reads fail in a row. The one
+// place a case latches, so a driver that latches on something else changes it here.
+void latch_by_polls(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
+                    alpacacore::test::FakeIoptronMount& mount) {
+    // Most callers latch right after the connect: a tick taken before the poll parks is lost, and two failed reads
+    // do not latch.
+    alpacacore::test::wait_for_ioptron_connect_parked(clock);
     mount.set_fail_reads(true);
-    for (int i = 0; i < 3; ++i) {
-        const std::string failure = sync_failure(driver);
-        if (names_the_read) {
-            REQUIRE(contains(failure, kReadFailure));
-        }
-    }
+    poll_ticks(clock, 3);
+    REQUIRE_FALSE(driver.get_link_fault().empty());
     REQUIRE(contains(sync_failure(driver), kLatched));
 }
 
 }  // namespace
 
-TEST_CASE("iOptron Telescope Driver - failures separated by a successful read never latch (#728)",
+TEST_CASE("iOptron Telescope Driver - failures separated by a successful poll never latch (#728)",
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
     mount.set_fail_reads(true);
-    CHECK(contains(sync_failure(*driver), kReadFailure));
-    CHECK(contains(sync_failure(*driver), kReadFailure));
+    poll_ticks(clock, 2);
     mount.set_fail_reads(false);
-    CHECK(sync_failure(*driver).empty());
+    poll_ticks(clock, 1);
+    CHECK(driver->get_link_fault().empty());
 
     // Two more failures: four in the session, never three in a row.
     mount.set_fail_reads(true);
-    CHECK(contains(sync_failure(*driver), kReadFailure));
-    CHECK(contains(sync_failure(*driver), kReadFailure));
+    poll_ticks(clock, 2);
+    mount.set_fail_reads(false);
+    poll_ticks(clock, 1);
+    CHECK(driver->get_link_fault().empty());
+    CHECK(sync_failure(*driver).empty());
+    CHECK_NOTHROW(driver->get_right_ascension());
+
+    driver->set_connected(false);
+}
+
+// A command's own read is not the poll's: a failed SyncToCoordinates is a DriverException for that call and nothing
+// more, however many fail in a row (the latch is the poll's alone, #2491 rule 6).
+TEST_CASE("iOptron Telescope Driver - failed command reads never latch the fault (#2491)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_connected());
     mount.set_fail_reads(false);
     CHECK(sync_failure(*driver).empty());
     CHECK_NOTHROW(driver->get_right_ascension());
@@ -632,50 +664,57 @@ TEST_CASE("iOptron Telescope Driver - failures separated by a successful read ne
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the fault (#728)",
+TEST_CASE("iOptron Telescope Driver - three consecutive failed polls latch the fault (#728)",
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
     // An earlier failure followed by a success does not count toward the run.
     mount.set_fail_reads(true);
-    CHECK(contains(sync_failure(*driver), kReadFailure));
+    poll_ticks(clock, 1);
     mount.set_fail_reads(false);
+    poll_ticks(clock, 1);
     CHECK(sync_failure(*driver).empty());
 
     mount.set_fail_reads(true);
-    CHECK(contains(sync_failure(*driver), kReadFailure));
-    CHECK(contains(sync_failure(*driver), kReadFailure));
-    CHECK(contains(sync_failure(*driver), kReadFailure));  // the third in a row latches
+    poll_ticks(clock, 2);
+    CHECK(driver->get_link_fault().empty());
+    poll_ticks(clock, 1);  // the third in a row latches
 
-    // Latched: members that run the connection check refuse with the same message. The mount answers again here, but a
-    // write never probes, so the latch holds until a probing getter runs (at most one probe every 5 s,
-    // kFaultProbeInterval).
+    // Latched: members that run the connection check refuse with the same message. The mount answers again here, but
+    // a write never probes: the latch holds until the poll's next good read.
     mount.set_fail_reads(false);
     CHECK(contains(sync_failure(*driver), kLatched));
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
 
+    poll_ticks(clock, 1);  // the poll alone clears it
+    CHECK(driver->get_link_fault().empty());
+    CHECK(sync_failure(*driver).empty());
+
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched fault and clears it (#728)",
-          "[ioptron][telescope][unit][fake][fault]") {
+TEST_CASE(
+    "iOptron Telescope Driver - AbortSlew sends the stop on a latched fault and the next good poll clears it (#728)",
+    "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
     CHECK_FALSE(driver->get_link_fault().empty());
 
-    // Reads still fail and the cached status says "not slewing": the stop
-    // must go out anyway, with no status read in front of it.
+    // Reads still fail and the frame says "not slewing": the stop must go out anyway, with no status read in front
+    // of it.
     const auto before = mount.commands().size();
     REQUIRE_NOTHROW(driver->abort_slew());
     const auto commands = mount.commands();
@@ -688,9 +727,11 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
     CHECK(stops == 1);
     CHECK(status_reads == 0);
 
-    // The stop was sent, so the latch is gone, and the management listing
-    // stops reporting it.
+    // The sent stop is not a poll: the latch and the management listing's report of it stay until the poll reads again.
+    CHECK_FALSE(driver->get_link_fault().empty());
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
     mount.set_fail_reads(false);
+    poll_ticks(clock, 1);
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK(sync_failure(*driver).empty());
     CHECK(driver->get_link_fault().empty());
@@ -702,13 +743,14 @@ TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     driver->set_target_right_ascension(7.25);
     driver->set_target_declination(-30.25);
 
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
 
     // Latched: the stored target is not served, the same refusal as the other commanded-state reads.
     for (const auto& read : {std::function<void()>([&] { (void)driver->get_target_right_ascension(); }),
@@ -722,13 +764,13 @@ TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (
         }
     }
 
-    // The sent stop is a good reply and clears the latch; the stored target is served again. sync_failure's
-    // SyncToCoordinates(12, 20) stored its coordinates as the target before its read failed.
+    // The poll's next good read clears the latch; the stored target is served again. The latched SyncToCoordinates(12,
+    // 20) was refused before it stored its coordinates, so the target is the one written before.
     mount.set_fail_reads(false);
-    REQUIRE_NOTHROW(driver->abort_slew());
+    poll_ticks(clock, 1);
     CHECK(driver->get_link_fault().empty());
-    CHECK(driver->get_target_right_ascension() == 12.0);
-    CHECK(driver->get_target_declination() == 20.0);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -30.25);
 
     driver->set_connected(false);
 }
@@ -737,11 +779,12 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fa
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
 
     // The link is gone, so the blind :Q# cannot be written: the stop was not
     // sent, AbortSlew must say so, and the latch must stay set.
@@ -849,9 +892,11 @@ TEST_CASE("iOptron Link - EIO on a command write that waits for a reply loses th
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
-    age_past_connect_grace(clock);  // past the connect's cache grace: RightAscension reads on the wire
+    age_past_connect_grace(clock);
     mount.unplug();
+    poll_ticks(clock, 1);  // the poll's next read, a write that waits for its reply, meets the pull
     require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::NotConnected);
     require_lost(*driver, "serial link lost (write)");
 }
@@ -909,32 +954,34 @@ TEST_CASE("iOptron Link - a hangup in the wedged-park finalizer loses the link i
     FakeTaskClock clock;
     PtyIoptronMount mount("0036");  // HAE29C: Park arms the finalizer for a mount that stays "slewing"
     mount.model().set_park_position_reply("00000000000000000#");
+    mount.model().set_alt_az(0.0, 0.0);
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     REQUIRE_NOTHROW(driver->park());
 
-    // The park slew is over but the firmware still says slewing; the next status read (past the connect's 30 s
-    // cache grace) runs the finalizer, whose Alt/Az read meets the pull. The status read just before it must not be
-    // served as AtPark false.
+    // The park slew is over but the firmware still says slewing; the poll's next tick runs the finalizer, whose
+    // tracking-off meets the pull. The status the tick read just before it must not be served as AtPark false.
     mount.model().set_system_status(2);
-    age_past_connect_grace(clock);
-    mount.unplug_on(on_command(":GAC#"));
-    require_alpaca_error([&] { (void)driver->get_at_park(); }, AlpacaError::NotConnected);
+    mount.unplug_on(on_command(":ST0#"));
+    poll_ticks(clock, 1);
     REQUIRE(mount.unplugged());
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, AlpacaError::NotConnected);
     require_lost(*driver, "serial link lost (hangup)");
 }
 
-TEST_CASE("iOptron Link - a hangup on a client's Slewing poll loses the link at once",
+TEST_CASE("iOptron Link - a hangup on the poll's status read loses the link at once",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     PtyIoptronMount mount;
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
-    age_past_connect_grace(clock);  // past the connect's cache grace: Slewing reads :GLS#
+    age_past_connect_grace(clock);
     mount.unplug_on(on_command(":GLS#"));
+    poll_ticks(clock, 1);  // the poll's status read meets the pull, with no client call
     require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::NotConnected);
     REQUIRE(mount.unplugged());
     require_lost(*driver, "serial link lost (hangup)");
@@ -947,26 +994,28 @@ TEST_CASE("iOptron Link - a hangup on a site read with a cached site loses the l
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     REQUIRE_NOTHROW(driver->get_site_latitude());
 
     // Past the site cache's 60 s: a failed read would serve the cached site, but not after a pulled cable.
-    clock.advance(std::chrono::seconds(61));
+    advance_polling(clock, std::chrono::seconds(61));
     mount.unplug_on(on_command(":GUT#"));
     require_alpaca_error([&] { (void)driver->get_site_latitude(); }, AlpacaError::NotConnected);
     REQUIRE(mount.unplugged());
     require_lost(*driver, "serial link lost (hangup)");
 }
 
-TEST_CASE("iOptron Link - a hangup in AbortSlew, Unpark or an Alt/Az read loses the link at once",
+TEST_CASE("iOptron Link - a hangup in AbortSlew, Unpark or the poll's Alt/Az read loses the link at once",
           "[ioptron][telescope][unit][fake][link-lost]") {
     struct Pull {
         const char* command;
         std::function<void(alpacacore::TelescopeDriver&)> call;
+        bool by_poll;  // the pull is met by the poll's own read, which a tick runs before the call
     };
     const std::vector<Pull> pulls = {
-        {":Q#", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
-        {":MP0#", [](alpacacore::TelescopeDriver& d) { d.unpark(); }},
-        {":GAC#", [](alpacacore::TelescopeDriver& d) { (void)d.get_altitude(); }},
+        {":Q#", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }, false},
+        {":MP0#", [](alpacacore::TelescopeDriver& d) { d.unpark(); }, false},
+        {":GAC#", [](alpacacore::TelescopeDriver& d) { (void)d.get_altitude(); }, true},
     };
     for (const auto& pull : pulls) {
         INFO(pull.command);
@@ -975,8 +1024,10 @@ TEST_CASE("iOptron Link - a hangup in AbortSlew, Unpark or an Alt/Az read loses 
         auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
-        age_past_connect_grace(clock);  // past the connect's cache grace
+        wait_for_ioptron_connect_parked(clock);
+        age_past_connect_grace(clock);
         mount.unplug_on(on_command(pull.command));
+        if (pull.by_poll) poll_ticks(clock, 1);
         require_alpaca_error([&] { pull.call(*driver); }, AlpacaError::NotConnected);
         REQUIRE(mount.unplugged());
         require_lost(*driver, "serial link lost (hangup)");
@@ -1007,16 +1058,18 @@ TEST_CASE("iOptron Link - a pull during the GOTO settle read loses the link, not
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(12.0, 20.0);
     REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
     mount.unplug_on(on_command(":GEP#"));
-    // Poll Slewing through the 5 s post-dispatch override, as a client does, until the landed GOTO is re-measured.
+    // Poll Slewing through the 5 s post-dispatch override, as a client does, until the poll's position read meets the
+    // pull: the loss is NotConnected, never a Slewing that reads false.
     require_alpaca_error(
         [&] {
             const auto deadline = clock.now() + std::chrono::seconds(20);
             while (driver->get_slewing() && clock.now() < deadline) {
-                clock.advance(std::chrono::milliseconds(100));
+                advance_polling(clock, std::chrono::milliseconds(100));
             }
         },
         AlpacaError::NotConnected);
@@ -1031,6 +1084,7 @@ TEST_CASE("iOptron Link - a pull during a synchronous slew's settle reads fails 
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     mount.unplug_on(on_command(":GEP#"));
     auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(12.0, 20.0); });
@@ -1038,7 +1092,7 @@ TEST_CASE("iOptron Link - a pull during a synchronous slew's settle reads fails 
     const auto real_bound = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (slew.wait_for(std::chrono::milliseconds(2)) != std::future_status::ready &&
            std::chrono::steady_clock::now() < real_bound) {
-        clock.advance(std::chrono::milliseconds(100));
+        advance_polling(clock, std::chrono::milliseconds(100));
     }
     REQUIRE(slew.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
     require_alpaca_error([&] { slew.get(); }, AlpacaError::NotConnected);
@@ -1080,10 +1134,11 @@ TEST_CASE("iOptron Link - the loss reason stays until Disconnect", "[ioptron][te
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     mount.unplug_on(on_command(":GEP#"));
     require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
-    clock.advance(std::chrono::seconds(60));
+    advance_polling(clock, std::chrono::seconds(60));
     CHECK(contains(driver->get_link_fault(), "serial link lost (hangup)"));
     driver->set_connected(false);  // the raw flag is still set: the teardown runs (#1289)
     CHECK_FALSE(driver->get_connected());
@@ -1098,6 +1153,7 @@ TEST_CASE("iOptron Link - Connect over a lost link reopens without a Disconnect,
     auto driver = link_driver(serial_endpoint(port.path.string()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     first->unplug_on(on_command(":GEP#"));
     require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
@@ -1106,7 +1162,7 @@ TEST_CASE("iOptron Link - Connect over a lost link reopens without a Disconnect,
     // The mount comes back on the same by-id name. Nothing reopens it until the client connects.
     PtyIoptronMount second;
     port.replug(second);
-    clock.advance(std::chrono::seconds(120));
+    advance_polling(clock, std::chrono::seconds(120));
     CHECK_FALSE(driver->get_connected());
     CHECK(second.model().commands().empty());
     CHECK(contains(driver->get_link_fault(), "serial link lost (hangup)"));
@@ -1132,7 +1188,7 @@ TEST_CASE("iOptron Link - a latched fault refuses reads and writes with Connecte
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
 
     const auto sent = mount.commands().size();
     const auto refused = [&](const std::function<void()>& call) {
@@ -1177,7 +1233,7 @@ TEST_CASE("iOptron Link - a latched fault refuses reads and writes with Connecte
     refused([&] { driver->set_site_longitude(-75.0); });
     refused([&] { driver->set_utc_date(std::chrono::system_clock::now()); });
     CHECK(driver->get_connected());
-    CHECK(contains(driver->get_link_fault(), "Position"));
+    CHECK(contains(driver->get_link_fault(), "state poll"));
     CHECK(mount.commands().size() == sent);  // nothing went to the mount
 }
 
@@ -1189,35 +1245,35 @@ TEST_CASE("iOptron Link - a fault standing past the staleness bound loses the li
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount);
+    wait_for_ioptron_connect_parked(clock);
+    latch_by_polls(*driver, clock, mount);
 
-    // Found by the next refused call: one second short of the bound it is still a fault.
-    clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    // Found by the poll, with no client call: one second short of the bound it is still a fault.
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::DriverException);
     CHECK(driver->get_connected());
-    clock.advance(std::chrono::seconds(1));
+    advance_polling(clock, std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_connected());
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
     require_lost(*driver, "stood for 30 s");
 
-    // Connect over the lost link relinks over TCP too. A new fault that stands as long is not lost through the
-    // lock-free IsPulseGuiding (it would wait on the wire lock): that stays a DriverException with Connected true, and
-    // the next check_connected() call loses the link.
+    // Connect over the lost link relinks over TCP too. A new fault that stands as long is lost by the poll again,
+    // lock-free IsPulseGuiding included: it reads NotConnected once the poll has set the loss.
     mount.set_fail_reads(false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     CHECK(driver->get_link_fault().empty());
-    latch_by_reads(*driver, mount);
-    clock.advance(alpacacore::util::kLinkStalenessBound);
-    require_alpaca_error([&] { (void)driver->get_is_pulse_guiding(); }, AlpacaError::DriverException);
-    CHECK(driver->get_connected());
-    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    latch_by_polls(*driver, clock, mount);
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_is_pulse_guiding(); }, AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     driver->set_connected(false);
 }
 
-// Decision 0009 rule 1: the next good reply clears a latched fault. While latched, the position, Alt/Az and status
-// getters send one :GLS# probe per probe interval (5 s on the task clock) and refuse with nothing sent in between.
-TEST_CASE("iOptron Link - a latched fault clears on the next good probe reply",
+// Decision 0009 rule 1: the next good reply clears a latched fault. While latched the poll keeps reading every tick and
+// the getters refuse with nothing sent; the poll's first good read clears it, with no client call.
+TEST_CASE("iOptron Link - a latched fault clears on the poll's next good read",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
@@ -1225,29 +1281,28 @@ TEST_CASE("iOptron Link - a latched fault clears on the next good probe reply",
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
     mount.set_fail_reads(false);  // the mount answers again
 
-    // Before the interval: refused, nothing sent.
+    // Until the poll's next tick: refused, nothing sent by the getters.
     const auto sent = mount.commands().size();
-    clock.advance(std::chrono::seconds(4));
     require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::DriverException);
     require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::DriverException);
     CHECK(mount.commands().size() == sent);
 
-    // At the interval the read probes, the good reply clears the latch and the read returns.
-    clock.advance(std::chrono::seconds(1));
+    // The tick reads and the good reply clears the latch.
     const int status_reads = mount.count(":GLS#");
-    CHECK_NOTHROW(driver->get_right_ascension());
-    CHECK(mount.count(":GLS#") == status_reads + 1);  // the one probe
+    poll_ticks(clock, 1);
+    CHECK(mount.count(":GLS#") == status_reads + 1);  // the one poll read
     CHECK(driver->get_connected());
     CHECK(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->get_right_ascension());
     CHECK_NOTHROW(driver->get_is_pulse_guiding());
     CHECK(sync_failure(*driver).empty());  // writes go out again
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Link - a failed probe keeps the latch and failing probes lose the link at the bound",
+TEST_CASE("iOptron Link - a failed poll keeps the latch and failing polls lose the link at the bound",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
@@ -1255,31 +1310,31 @@ TEST_CASE("iOptron Link - a failed probe keeps the latch and failing probes lose
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount);  // reads keep failing
+    wait_for_ioptron_connect_parked(clock);
+    latch_by_polls(*driver, clock, mount);  // reads keep failing
 
-    // RightAscension: inside the connect's 30 s cache grace its position read is served from the connect's cache, so
-    // only the failed probe itself can make the call throw; a probe whose failure were dropped would serve that value.
-    for (int probe = 1; probe <= 5; ++probe) {  // at 5, 10, 15, 20 and 25 s
-        clock.advance(std::chrono::seconds(5));
+    // Each tick reads again (and fails); the getters send nothing of their own.
+    for (int step = 1; step <= 5; ++step) {  // at 5, 10, 15, 20 and 25 s
         const int status_reads = mount.count(":GLS#");
+        advance_polling(clock, std::chrono::seconds(5));
+        CHECK(mount.count(":GLS#") == status_reads + 1);  // one poll read per tick, and the tick skips no more
         require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::DriverException);
-        CHECK(mount.count(":GLS#") == status_reads + 1);  // one probe
         CHECK(driver->get_connected());
         CHECK_FALSE(driver->get_link_fault().empty());
         const auto sent = mount.commands().size();
         require_alpaca_error([&] { (void)driver->get_altitude(); }, AlpacaError::DriverException);
-        CHECK(mount.commands().size() == sent);  // no second probe in the same interval
+        CHECK(mount.commands().size() == sent);  // a faulted getter refuses; it does not probe
     }
-    clock.advance(std::chrono::seconds(4));  // 29 s: still a fault
+    advance_polling(clock, std::chrono::seconds(4));  // 29 s: still a fault
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::DriverException);
     CHECK(driver->get_connected());
-    clock.advance(std::chrono::seconds(1));  // 30 s with no good reply: lost, even though a probe is due
+    advance_polling(clock, std::chrono::seconds(1));  // 30 s with no good reply: lost
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
     require_lost(*driver, "stood for 30 s");
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Link - writes refuse a latched fault with nothing sent even when a probe is due",
+TEST_CASE("iOptron Link - writes refuse a latched fault with nothing sent until the poll reads again",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
@@ -1287,9 +1342,8 @@ TEST_CASE("iOptron Link - writes refuse a latched fault with nothing sent even w
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount);
+    latch_by_polls(*driver, clock, mount);
     mount.set_fail_reads(false);  // the mount answers again, but no write may move it on a faulted link
-    clock.advance(std::chrono::seconds(10));
 
     const auto sent = mount.commands().size();
     const auto refused = [&](const std::function<void()>& call) {
@@ -1309,22 +1363,23 @@ TEST_CASE("iOptron Link - writes refuse a latched fault with nothing sent even w
     CHECK(mount.commands().size() == sent);
     CHECK(driver->get_connected());
 
-    CHECK_NOTHROW(driver->get_tracking());  // a probe-eligible read clears it
+    poll_ticks(clock, 1);  // the poll's good read clears it
+    CHECK_NOTHROW(driver->get_tracking());
     CHECK(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Link - a hangup during a latched-fault probe loses the link at once",
+TEST_CASE("iOptron Link - a hangup during a poll read while latched loses the link at once",
           "[ioptron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     PtyIoptronMount mount;
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    latch_by_reads(*driver, mount.model());
+    latch_by_polls(*driver, clock, mount.model());
 
-    clock.advance(std::chrono::seconds(5));
     mount.unplug_on(on_command(":GLS#"));
+    poll_ticks(clock, 1);  // the poll's read meets the pull while the fault is latched
     require_alpaca_error([&] { (void)driver->get_at_park(); }, AlpacaError::NotConnected);
     REQUIRE(mount.unplugged());
     require_lost(*driver, "serial link lost (hangup)");
@@ -1508,6 +1563,9 @@ TEST_CASE("iOptron Telescope Driver - configured UTC sync publishes only a succe
     conn.tcp_port = mount.port();
     alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, {}, {}, {}, true, clock);
+    // The clock-sync body is the case's only reader: the failed write closes the transport on purpose, which a poll
+    // that kept reading would latch as a fault.
+    alpacacore::vendor::ioptron::set_state_poll_paused_for_testing(*driver, true);
     if (fail_write) {
         alpacacore::vendor::ioptron::set_clock_sync_hook_for_testing(*driver, [] {
             // A closed transport makes the blind write throw; silence alone is permitted by this protocol.
@@ -1516,14 +1574,15 @@ TEST_CASE("iOptron Telescope Driver - configured UTC sync publishes only a succe
     }
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     const auto before = std::chrono::system_clock::now();
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the paused poll and the clock-sync body
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     if (fail_write) {
         // Three commands, each with two cancellable 750 ms retry waits.
         for (int retry = 0; retry < 6; ++retry) {
-            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+            REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
             clock.advance(std::chrono::milliseconds(750));
             REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
         }
@@ -1561,6 +1620,7 @@ TEST_CASE("iOptron Telescope Driver - the UTCDate readback after a write moves b
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, std::nullopt, std::nullopt,
                                                                                   std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    wait_for_ioptron_connect_parked(clock);
 
     const auto written = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 365 * 30);
     driver->set_utc_date(written);
@@ -1718,12 +1778,13 @@ TEST_CASE("iOptron Link - a reconnect over a lost link stops the motion that was
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->move_axis(0, driver->get_axis_rate_range(0).first);
     REQUIRE(mount.count(":mw#") + mount.count(":me#") == 1);
-    // Three failed exchanges latch the fault (#728); the first is the status read the moving axis left stale.
-    latch_by_reads(*driver, mount, false);
-    clock.advance(alpacacore::util::kLinkStalenessBound);
+    // Three failed polls latch the fault (#728).
+    latch_by_polls(*driver, clock, mount);
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound);  // the poll finds the fault stale and loses the link
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver->get_connected());
 
@@ -1748,12 +1809,13 @@ TEST_CASE("iOptron Link - a reconnect over a lost link stops the GOTO that was r
     auto driver = link_driver(loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(wait_until([&] { return mount.count(":MS1#") == 1; }));
     REQUIRE(driver->get_slewing());
-    latch_by_reads(*driver, mount, false);
-    clock.advance(alpacacore::util::kLinkStalenessBound);
+    latch_by_polls(*driver, clock, mount);
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound);  // the poll finds the fault stale and loses the link
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver->get_connected());
     REQUIRE(mount.count(":Q#") == 0);
@@ -1779,12 +1841,13 @@ TEST_CASE("iOptron Link - a reconnect whose stop for the running GOTO cannot be 
     auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
     REQUIRE(driver->get_slewing());
-    latch_by_reads(*driver, mount.model(), false);
-    clock.advance(alpacacore::util::kLinkStalenessBound);
+    latch_by_polls(*driver, clock, mount.model());
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound);  // the poll finds the fault stale and loses the link
     require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver->get_connected());
     REQUIRE(mount.model().count(":Q#") == 0);
@@ -1842,8 +1905,8 @@ void lose_link_with_goto_running(alpacacore::TelescopeDriver& driver, PtyIoptron
     driver.slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
     REQUIRE(driver.get_slewing());
-    latch_by_reads(driver, mount.model(), false);
-    clock.advance(alpacacore::util::kLinkStalenessBound);
+    latch_by_polls(driver, clock, mount.model());
+    advance_polling(clock, alpacacore::util::kLinkStalenessBound);  // the poll finds the fault stale and loses the link
     require_alpaca_error([&] { (void)driver.get_tracking(); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver.get_connected());
 }
@@ -2058,13 +2121,14 @@ TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still r
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     // A slew started from the handset: firmware moving, no driver-initiated motion, no pulse.
     CHECK(driver->get_slewing());
 
     // A short pulse that has ended (duration plus settle delay) no longer masks the firmware status.
     driver->pulse_guide(3, 50);
-    clock.advance(std::chrono::milliseconds(1300));
+    advance_polling(clock, std::chrono::milliseconds(1300));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
 
@@ -2076,7 +2140,7 @@ TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still r
 
     // Past the 5 s Slewing override only the firmware status (still 2) holds Slewing true; the open pulse
     // window must not mask it while the GOTO is in flight.
-    clock.advance(std::chrono::milliseconds(7000));
+    advance_polling(clock, std::chrono::milliseconds(7000));
     CHECK(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
     driver->set_connected(false);
@@ -2091,11 +2155,12 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false in the settle window a
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     // The pulse duration has passed but the driver's 500 ms completion delay has not: the firmware is still
     // reporting the pulse, as a guider reading Slewing right after its pulse sees it.
     driver->pulse_guide(3, 50);
-    clock.advance(std::chrono::milliseconds(300));
+    advance_polling(clock, std::chrono::milliseconds(300));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2113,9 +2178,10 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
         auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
+        wait_for_ioptron_connect_parked(clock);
 
         driver->park();
-        clock.advance(std::chrono::milliseconds(5500));
+        advance_polling(clock, std::chrono::milliseconds(5500));
         CHECK(driver->get_slewing());
         // Issue #2504: refused while the motion runs, and Slewing still reports it.
         require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
@@ -2137,9 +2203,10 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
         auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
+        wait_for_ioptron_connect_parked(clock);
 
         driver->find_home();
-        clock.advance(std::chrono::milliseconds(5500));
+        advance_polling(clock, std::chrono::milliseconds(5500));
         CHECK(driver->get_slewing());
         // Issue #2504: refused while the motion runs, and Slewing still reports it.
         require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
@@ -2204,24 +2271,25 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
         mount.set_system_status(2);
         alpacacore::test::FakeTaskClock clock;
         auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
-        alpacacore::vendor::ioptron::set_zero_search_poll_for_testing(*driver, false);  // the case reads it itself
+        alpacacore::vendor::ioptron::set_state_poll_paused_for_testing(*driver, false);  // the case reads it itself
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
+        wait_for_ioptron_connect_parked(clock);
         const auto connected_at = clock.now();
 
         driver->find_home();
-        // A zero search (0036) lands only once a status 2 showed it moving: this read sees the search's 2.
+        // A zero search (0036) lands only once a status 2 showed it moving: the poll's next tick sees the search's 2.
         CHECK_FALSE(driver->get_at_home());
-        // Past the 5 s Slewing override and the driver's 30 s post-connect status cache, so the reads below
-        // reach the mount.
+        // Past the 5 s Slewing override, with the poll sampling the search's 2 all the way.
         age_past_connect_grace(clock, connected_at);
         mount.set_system_status(7);
+        advance_polling(clock, std::chrono::milliseconds(250));  // the poll samples the landing
         CHECK(driver->get_at_home());
 
         driver->set_tracking(true);
         mount.set_system_status(2);
         driver->pulse_guide(3, 3000);
-        clock.advance(std::chrono::milliseconds(1100));
+        advance_polling(clock, std::chrono::milliseconds(1100));
         CHECK(driver->get_is_pulse_guiding());
         CHECK_FALSE(driver->get_slewing());
         driver->set_connected(false);
@@ -2241,6 +2309,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
         auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
+        wait_for_ioptron_connect_parked(clock);
         const auto connected_at = clock.now();
         // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
         age_past_connect_grace(clock, connected_at);
@@ -2248,7 +2317,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
         driver->find_home();
         CHECK_FALSE(driver->get_at_home());  // still the old tracking status
         mount.set_system_status(2);
-        clock.advance(std::chrono::milliseconds(5500));
+        advance_polling(clock, std::chrono::milliseconds(5500));
         // Issue #2504: refused while the motion runs, and Slewing still reports it.
         require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
         CHECK_FALSE(driver->get_is_pulse_guiding());
@@ -2269,20 +2338,21 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     const auto connected_at = clock.now();
-    // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
     age_past_connect_grace(clock, connected_at);
 
     driver->find_home();
     const auto home_at = clock.now();
     mount.set_system_status(7);
+    advance_polling(clock, std::chrono::milliseconds(250));  // the poll samples the landing, inside the 5 s window
     CHECK(driver->get_at_home());
 
     driver->set_tracking(true);
     mount.set_system_status(2);
-    clock.advance(home_at + std::chrono::seconds(2) - clock.now());
+    advance_polling(clock, home_at + std::chrono::seconds(2) - clock.now());
     driver->pulse_guide(3, 3000);
-    clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
+    advance_polling(clock, home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -2299,6 +2369,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     const auto connected_at = clock.now();
     // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
     age_past_connect_grace(clock, connected_at);
@@ -2310,10 +2381,10 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     CHECK_FALSE(driver->get_at_home());  // the search has not landed
 
     mount.set_system_status(2);
-    clock.advance(home_at + std::chrono::seconds(2) - clock.now());
+    advance_polling(clock, home_at + std::chrono::seconds(2) - clock.now());
     // Issue #2504: refused while the motion runs, and Slewing still reports it.
     require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
-    clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
+    advance_polling(clock, home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
     driver->set_connected(false);
@@ -2332,11 +2403,9 @@ std::unique_ptr<alpacacore::TelescopeDriver> hold_driver(FakeIoptronMount& mount
     auto driver = io::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()), std::nullopt, std::nullopt,
                                                          std::nullopt,
                                                          /*sync_time_on_connect=*/false, clock);
-    // The zero search watchdog's 1 s reads off: these cases drive the search through client reads, and a second
-    // reader on its own thread would race them. The cases about the polling turn it back on and step it.
-    io::set_zero_search_poll_for_testing(*driver, false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     return driver;
 }
 
@@ -2408,7 +2477,8 @@ TEST_CASE("iOptron hold window - Slewing is true as soon as SlewToAltAzAsync ret
 }
 
 // Rule 2: the dispatch arms the window again before its :MS1#, so it runs 5 s from the GOTO, not from an
-// initiator whose body waited for mutex_.
+// initiator whose body waited for mutex_. The mount, not the window, says when the slew ended (decision 0022): a frame
+// the poll sampled inside the window never ends it, so Slewing falls at the first poll after the window closes.
 TEST_CASE("iOptron hold window - the GOTO's window runs 5 s from its :MS1#",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2420,15 +2490,18 @@ TEST_CASE("iOptron hold window - the GOTO's window runs 5 s from its :MS1#",
                                                                 std::nullopt, std::nullopt, {}, {}, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(12.0, 20.0);
-    clock.advance(std::chrono::seconds(4));
+    advance_polling(clock, std::chrono::seconds(4));
     body.release();
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::milliseconds(4900));
+    advance_polling(clock, std::chrono::milliseconds(4900));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(100));
-    CHECK_FALSE(driver->get_slewing());  // the mount reports tracking
+    advance_polling(clock, std::chrono::milliseconds(100));
+    CHECK(driver->get_slewing());  // the window has closed, but the frame on hand was sampled inside it
+    advance_polling(clock, std::chrono::milliseconds(250));
+    CHECK_FALSE(driver->get_slewing());  // the poll after it reads the mount: tracking
     driver->set_connected(false);
 }
 
@@ -2444,7 +2517,7 @@ TEST_CASE("iOptron hold window - AbortSlew inside the hold clears Slewing at onc
     REQUIRE(driver->get_slewing());
     driver->abort_slew();
     CHECK_FALSE(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(500));
+    advance_polling(clock, std::chrono::milliseconds(500));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2534,8 +2607,8 @@ TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false
     driver->set_connected(false);
 }
 
-// Hold lengths are unchanged: FindHome and Park 5 s, Unpark 2 s, each from its command. Past the 1 s status cache
-// the mount reports tracking, so only the window keeps Slewing true.
+// Hold lengths are unchanged: FindHome and Park 5 s, Unpark 2 s, each from its command. The mount reports tracking, so
+// only the window keeps Slewing true, until the first poll after it closes.
 TEST_CASE("iOptron hold window - FindHome, Park and Unpark hold Slewing for 5 s, 5 s and 2 s",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2546,30 +2619,36 @@ TEST_CASE("iOptron hold window - FindHome, Park and Unpark hold Slewing for 5 s,
 
     driver->find_home();
     REQUIRE(mount.count(":MH#") == 1);
-    clock.advance(std::chrono::milliseconds(4900));
+    advance_polling(clock, std::chrono::milliseconds(4900));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(100));
+    advance_polling(clock, std::chrono::milliseconds(100));
+    CHECK(driver->get_slewing());  // closed, but the frame on hand was sampled inside the window
+    advance_polling(clock, std::chrono::milliseconds(250));
     CHECK_FALSE(driver->get_slewing());
 
     driver->park();
     REQUIRE(mount.count(":MP1#") == 1);
-    clock.advance(std::chrono::milliseconds(4900));
+    advance_polling(clock, std::chrono::milliseconds(4900));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(100));
+    advance_polling(clock, std::chrono::milliseconds(100));
+    CHECK(driver->get_slewing());
+    advance_polling(clock, std::chrono::milliseconds(250));
     CHECK_FALSE(driver->get_slewing());
 
     driver->unpark();
     REQUIRE(mount.count(":MP0#") == 1);
-    clock.advance(std::chrono::milliseconds(1900));
+    advance_polling(clock, std::chrono::milliseconds(1900));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(100));
+    advance_polling(clock, std::chrono::milliseconds(100));
+    CHECK(driver->get_slewing());
+    advance_polling(clock, std::chrono::milliseconds(250));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
-// Issue #2562: the 30 s post-connect cache grace is for the burst of getters a client sends after Connect. A motion
-// the driver starts ends it, so a Park, FindHome or GOTO inside those 30 s is followed by the mount's status on the
-// 1 s TTL, not by the status the driver wrote or read at its start. These cases do not pass the grace first.
+// Issue #2562, with the poll (#2491): a Park, FindHome or GOTO right after Connect is followed by the mount's status
+// through the poll's next tick, not by the status the driver wrote or read at its start. These cases do not pass the
+// 30 s grace the site cache keeps first.
 TEST_CASE("iOptron fast cache - a Park right after Connect reads AtPark once the mount reports parked",
           "[ioptron][telescope][unit][fake][fast-cache]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2580,9 +2659,9 @@ TEST_CASE("iOptron fast cache - a Park right after Connect reads AtPark once the
     driver->park();
     REQUIRE(mount.count(":MP1#") == 1);
     mount.set_system_status(6);  // parked
-    clock.advance(std::chrono::seconds(1));
+    advance_polling(clock, std::chrono::seconds(1));
     CHECK(driver->get_at_park());
-    clock.advance(std::chrono::seconds(5));  // past the Park's 5 s window
+    advance_polling(clock, std::chrono::seconds(5));  // past the Park's 5 s window
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_at_park());
     driver->set_connected(false);
@@ -2598,10 +2677,10 @@ TEST_CASE("iOptron fast cache - a FindHome right after Connect reads AtHome once
     driver->find_home();
     REQUIRE(mount.count(":MH#") == 1);
     mount.set_system_status(2);  // on its way to zero
-    clock.advance(std::chrono::seconds(1));
+    advance_polling(clock, std::chrono::seconds(1));
     CHECK_FALSE(driver->get_at_home());
-    mount.set_system_status(7);              // at zero
-    clock.advance(std::chrono::seconds(5));  // past the FindHome's 5 s window
+    mount.set_system_status(7);                       // at zero
+    advance_polling(clock, std::chrono::seconds(5));  // past the FindHome's 5 s window
     CHECK(driver->get_at_home());
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -2617,16 +2696,16 @@ TEST_CASE("iOptron fast cache - a GOTO right after Connect reads Slewing false o
 
     driver->slew_to_coordinates_async(12.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(6));  // past the GOTO's 5 s window
+    advance_polling(clock, std::chrono::seconds(6));  // past the GOTO's 5 s window
     CHECK(driver->get_slewing());
     mount.set_system_status(1);  // landed, tracking
-    clock.advance(std::chrono::seconds(1));
+    advance_polling(clock, std::chrono::seconds(1));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
-// AbortSlew ends the grace too: a motion the driver did not start (a handset slew running at Connect) is stopped, and
-// Slewing follows the mount once it reads stopped.
+// AbortSlew stops a motion the driver did not start (a handset slew running at Connect): the stop is written through
+// the frame at once (a read after it sends nothing), and the poll follows the mount from there.
 TEST_CASE("iOptron fast cache - an AbortSlew right after Connect reads Slewing false once the mount stops",
           "[ioptron][telescope][unit][fake][fast-cache]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2637,9 +2716,9 @@ TEST_CASE("iOptron fast cache - an AbortSlew right after Connect reads Slewing f
 
     driver->abort_slew();
     REQUIRE(mount.count(":Q#") == 1);
-    CHECK(driver->get_slewing());  // still decelerating
-    mount.set_system_status(0);    // stopped
-    clock.advance(std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_slewing());  // the stop was sent: the frame sampled before it no longer says slewing
+    mount.set_system_status(0);          // stopped
+    advance_polling(clock, std::chrono::seconds(1));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2682,23 +2761,23 @@ TEST_CASE("iOptron zero search - Slewing and AtHome follow the search until a st
     age_past_connect_grace(clock);
 
     driver->find_home();
-    clock.advance(std::chrono::milliseconds(1100));  // past the 1 s status cache, inside the 5 s hold
+    advance_polling(clock, std::chrono::milliseconds(1100));  // past the 1 s status cache, inside the 5 s hold
     CHECK_FALSE(driver->get_at_home());              // the false zero, read before the search moves
     CHECK(driver->get_slewing());
 
     mount.set_system_status(2);
-    clock.advance(std::chrono::milliseconds(4400));  // past the hold
+    advance_polling(clock, std::chrono::milliseconds(4400));  // past the hold
     CHECK(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());
 
     mount.set_system_status(0);  // a no-motion status other than 7 does not end the search
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());
     CHECK(mount.count(":MSH#") == 1);  // it moved, so the stop reads as a pause, not as a search that never started
 
     mount.set_system_status(7);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_at_home());
 
@@ -2706,7 +2785,7 @@ TEST_CASE("iOptron zero search - Slewing and AtHome follow the search until a st
     driver->set_tracking(true);
     mount.set_system_status(2);
     driver->pulse_guide(3, 3000);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
     CHECK(mount.count(":Q#") == 0);
@@ -2724,11 +2803,11 @@ TEST_CASE("iOptron zero search - a search with no status 7 in 120 s is stopped a
 
     driver->find_home();
     mount.set_system_status(2);
-    clock.advance(std::chrono::seconds(119));
+    advance_polling(clock, std::chrono::seconds(119));
     CHECK(driver->get_slewing());
     CHECK(mount.count(":Q#") == 0);
 
-    clock.advance(std::chrono::milliseconds(1500));
+    advance_polling(clock, std::chrono::milliseconds(1500));
     try {
         (void)driver->get_slewing();
         FAIL("Slewing did not raise the zero search timeout");
@@ -2759,16 +2838,16 @@ TEST_CASE("iOptron zero search - a search the mount never starts is sent once mo
     REQUIRE(mount.count(":MSH#") == 1);
     // The mount ignored :MSH#: stopped, not at the zero, no motion.
     mount.set_system_status(0);
-    clock.advance(std::chrono::milliseconds(5100));  // past the hold and the status cache
+    advance_polling(clock, std::chrono::milliseconds(5100));  // past the hold and the status cache
     CHECK(driver->get_slewing());                    // this read sends :MSH# once more
     CHECK(mount.count(":MSH#") == 2);
     CHECK(mount.count(":Q#") == 0);
-    clock.advance(std::chrono::milliseconds(1100));  // a status read inside the second :MSH#'s own grace
+    advance_polling(clock, std::chrono::milliseconds(1100));  // a status read inside the second :MSH#'s own grace
     CHECK_FALSE(driver->get_at_home());
     CHECK(mount.count(":Q#") == 0);
     CHECK(mount.count(":MSH#") == 2);
 
-    clock.advance(std::chrono::milliseconds(4000));  // past the second grace, still status 0
+    advance_polling(clock, std::chrono::milliseconds(4000));  // past the second grace, still status 0
     try {
         (void)driver->get_slewing();
         FAIL("Slewing did not raise a zero search that never started");
@@ -2795,20 +2874,20 @@ TEST_CASE("iOptron zero search - a second :MSH# that starts the search runs it t
 
     driver->find_home();
     mount.set_system_status(0);
-    clock.advance(std::chrono::milliseconds(5100));
+    advance_polling(clock, std::chrono::milliseconds(5100));
     CHECK(driver->get_slewing());
     REQUIRE(mount.count(":MSH#") == 2);
 
     mount.set_system_status(2);  // the second :MSH# started the search
-    clock.advance(std::chrono::milliseconds(5100));
+    advance_polling(clock, std::chrono::milliseconds(5100));
     CHECK(driver->get_slewing());
     mount.set_system_status(0);  // a pause after motion is not a search that never started
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_slewing());
     CHECK(mount.count(":MSH#") == 2);
 
     mount.set_system_status(7);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK_FALSE(driver->get_slewing());
     CHECK(driver->get_at_home());
     CHECK(mount.count(":Q#") == 0);
@@ -2827,16 +2906,16 @@ TEST_CASE("iOptron zero search - a status 0 inside the start grace is a search s
     driver->find_home();
     driver->move_axis(0, 0.0);  // keeps the search but closes the slew hold; the start grace is its own
     mount.set_system_status(0);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_slewing());  // a real read inside the grace: not a search that never started
     CHECK_FALSE(driver->get_at_home());
     CHECK(mount.count(":MSH#") == 1);
 
     mount.set_system_status(2);  // it started late
-    clock.advance(std::chrono::milliseconds(5000));
+    advance_polling(clock, std::chrono::milliseconds(5000));
     CHECK(driver->get_slewing());
     mount.set_system_status(0);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_slewing());
     CHECK(mount.count(":MSH#") == 1);
     CHECK(mount.count(":Q#") == 0);
@@ -2854,12 +2933,12 @@ TEST_CASE("iOptron zero search - the start check runs when another getter refres
 
     driver->find_home();
     mount.set_system_status(0);  // the mount ignored :MSH#
-    clock.advance(std::chrono::milliseconds(5100));
+    advance_polling(clock, std::chrono::milliseconds(5100));
     (void)driver->get_tracking();  // a client that reads Tracking first refreshes the shared status
     CHECK(driver->get_slewing());  // the start check still runs: :MSH# once more
     CHECK(mount.count(":MSH#") == 2);
 
-    clock.advance(std::chrono::milliseconds(5100));
+    advance_polling(clock, std::chrono::milliseconds(5100));
     CHECK_FALSE(driver->get_at_park());  // AtPark refreshes it this time
     CHECK_FALSE(driver->get_at_home());  // AtHome runs the check too: the second search never started
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
@@ -2875,19 +2954,21 @@ TEST_CASE("iOptron zero search - an initiator's status read does not send :MSH# 
     mount.set_system_status(7);
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
+    // The poll runs the start check, so it is paused: the case is about the commands' own status reads.
+    io::set_state_poll_paused_for_testing(*driver, true);
     age_past_connect_grace(clock);
 
     driver->find_home();
-    // The mount ignored :MSH# and tracks; then past the grace, with no Slewing or AtHome read.
+    // The mount ignored :MSH# and tracks; then past the grace, with no poll.
     mount.set_system_status(1);
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(6));
 
     driver->find_home();  // a second FindHome reads the status (a search is running) and sends one :MSH#
     CHECK(mount.count(":MSH#") == 2);
     CHECK(mount.count(":Q#") == 0);
 
     mount.set_system_status(1);
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(6));
     REQUIRE_NOTHROW(driver->park());  // its status read must not put a :MSH# ahead of :MP1#
     CHECK(mount.count(":MSH#") == 2);
     CHECK(mount.count(":MP1#") == 1);
@@ -2907,16 +2988,6 @@ struct WatchdogThread {
     }
 };
 
-// Waits for the zero search watchdog to park on the fake clock (it reads the clock and then registers its wait, so
-// an advance before that would move its wake), advances by `step`, and waits until the woken watchdog has finished
-// its read. Every step is taken while the search runs, so the watchdog is always there to park.
-static void step_watchdog(alpacacore::test::FakeTaskClock& clock, const WatchdogThread& watchdog,
-                          std::chrono::milliseconds step) {
-    REQUIRE(clock.wait_for_waiter_thread(watchdog.id->load(), std::chrono::seconds(5)));
-    clock.advance(step);
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
-}
-
 TEST_CASE("iOptron zero search - a :MSH# ignored at a false zero is not home",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
@@ -2924,24 +2995,21 @@ TEST_CASE("iOptron zero search - a :MSH# ignored at a false zero is not home",
     mount.set_system_status(7);  // the false zero after a power loss, and the mount never moves
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
-    io::set_zero_search_poll_for_testing(*driver, true);
-    WatchdogThread watchdog;
-    watchdog.install(*driver);
     age_past_connect_grace(clock);
 
     driver->find_home();
     for (int i = 0; i < 4; ++i) {
-        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));  // inside the 5 s start grace
+        advance_polling(clock, std::chrono::milliseconds(1000));  // inside the 5 s start grace
     }
-    // The poll at the grace sends :MSH# again.
-    step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+    // The poll at the grace sends :MSH# again, with no client read.
+    advance_polling(clock, std::chrono::milliseconds(1000));
     CHECK(mount.count(":MSH#") == 2);
     CHECK(mount.count(":Q#") == 0);
     CHECK_FALSE(driver->get_at_home());  // a 7 the mount never left is not a landing
     CHECK(driver->get_slewing());
 
     for (int i = 0; i < 5; ++i) {
-        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));  // the second search does not start either
+        advance_polling(clock, std::chrono::milliseconds(1000));  // the second search does not start either
     }
     CHECK(mount.count(":Q#") == 1);
     CHECK(mount.count(":MSH#") == 2);
@@ -2956,14 +3024,15 @@ TEST_CASE("iOptron zero search - a :MSH# ignored at a false zero is not home",
     driver->set_connected(false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
     CHECK_FALSE(driver->get_at_home());
     // Once the mount leaves the 7 the flag is gone, and a later 7 is the mount's own answer again.
     mount.set_system_status(1);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK_FALSE(driver->get_at_home());
     mount.set_system_status(7);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_at_home());
     driver->set_connected(false);
 }
@@ -2979,7 +3048,7 @@ TEST_CASE("iOptron zero search - an AbortSlew before the search moved leaves a f
 
     driver->find_home();
     driver->abort_slew();  // the client gives up before any status 2
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK_FALSE(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());  // the 7 is the false zero the search never left
     driver->set_connected(false);
@@ -2996,7 +3065,7 @@ TEST_CASE("iOptron zero search - a command that supersedes an unmoved search lea
 
     driver->find_home();
     driver->unpark();  // supersedes the search before any status 2
-    clock.advance(std::chrono::seconds(3));
+    advance_polling(clock, std::chrono::seconds(3));
     CHECK_FALSE(driver->get_at_home());
     driver->set_connected(false);
 }
@@ -3014,6 +3083,7 @@ TEST_CASE("iOptron zero search - a disconnect during an unmoved search leaves a 
     driver->set_connected(false);  // before any status 2
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
     CHECK_FALSE(driver->get_at_home());
     driver->set_connected(false);
@@ -3026,12 +3096,13 @@ TEST_CASE("iOptron zero search - a connect over a link lost during an unmoved se
     first->model().set_system_status(7);
     alpacacore::test::ReplugPort port(*first);
     auto driver = link_driver(serial_endpoint(port.path.string()), clock);
-    io::set_zero_search_poll_for_testing(*driver, false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->find_home();
     first->unplug_on(on_command(":GEP#"));
+    poll_ticks(clock, 1);  // the poll's position read meets the pull
     require_alpaca_error([&] { (void)driver->get_declination(); }, AlpacaError::NotConnected);
     REQUIRE_FALSE(driver->get_connected());
 
@@ -3046,47 +3117,48 @@ TEST_CASE("iOptron zero search - a connect over a link lost during an unmoved se
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron zero search - a motionless 7 that no client polls is stopped at the bound, not home",
+TEST_CASE("iOptron zero search - a motionless 7 is stopped at the bound by the watchdog, not home",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    mount.set_system_status(7);  // :MSH# ignored at a false zero, and the watchdog's 1 s reads off (hold_driver)
+    mount.set_system_status(7);  // :MSH# ignored at a false zero, and no client reads
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
+    // The poll's start check would resend :MSH# and stop the search at about 10 s: paused, the watchdog's bound is the
+    // only thing that ends it.
+    io::set_state_poll_paused_for_testing(*driver, true);
     age_past_connect_grace(clock);
     WatchdogThread watchdog;
     watchdog.install(*driver);
 
     driver->find_home();
     REQUIRE(clock.wait_for_waiter_thread(watchdog.id->load(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(121));  // the bound's read sees a 7 that never followed motion
+    advance_polling(clock, std::chrono::seconds(121));  // the bound's read sees a 7 that never followed motion
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    io::poll_state_now_for_testing(*driver);  // the paused poll's frame is 121 s old: one tick refreshes it
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_at_home());
     CHECK(mount.count(":MSH#") == 1);
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron zero search - the watchdog sees a short search that no client polls, and it lands",
+TEST_CASE("iOptron zero search - the poll sees a short search that no client polls, and it lands",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     mount.set_system_status(7);
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
-    io::set_zero_search_poll_for_testing(*driver, true);
-    WatchdogThread watchdog;
-    watchdog.install(*driver);
     age_past_connect_grace(clock);
 
     driver->find_home();
     mount.set_system_status(2);  // a search from the true zero: about a second of motion (HAE29C trace)
-    step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+    advance_polling(clock, std::chrono::milliseconds(1000));
     mount.set_system_status(7);
     for (int i = 0; i < 5; ++i) {
-        step_watchdog(clock, watchdog, std::chrono::milliseconds(1000));
+        advance_polling(clock, std::chrono::milliseconds(1000));
     }
-    CHECK(driver->get_at_home());  // the first client read, past the hold: landed
+    CHECK(driver->get_at_home());  // the first client read, past the hold: the poll has landed it
     CHECK_FALSE(driver->get_slewing());
     CHECK(mount.count(":MSH#") == 1);
     CHECK(mount.count(":Q#") == 0);
@@ -3123,14 +3195,14 @@ TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before
 
     driver->find_home();
     mount.set_system_status(2);  // a running search reads status 2 (HAE29C traces, 2026-11-20)
-    clock.advance(std::chrono::seconds(10));
+    advance_polling(clock, std::chrono::seconds(10));
     REQUIRE(driver->get_slewing());
     driver->abort_slew();
     CHECK(mount.count(":Q#") == 1);
     mount.set_system_status(0);  // the stop
-    clock.advance(std::chrono::seconds(1));
+    advance_polling(clock, std::chrono::seconds(1));
     CHECK_FALSE(driver->get_slewing());  // status 0 is the mount's own answer again
-    clock.advance(std::chrono::seconds(130));
+    advance_polling(clock, std::chrono::seconds(130));
     CHECK_NOTHROW(driver->get_slewing());
     CHECK(mount.count(":Q#") == 1);
 
@@ -3141,7 +3213,8 @@ TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before
     driver->set_connected(false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    clock.advance(std::chrono::seconds(130));
+    wait_for_ioptron_connect_parked(clock);
+    advance_polling(clock, std::chrono::seconds(130));
     CHECK_NOTHROW(driver->get_slewing());
     CHECK_FALSE(driver->get_slewing());
     CHECK(mount.count(":Q#") == 1);
@@ -3162,10 +3235,10 @@ TEST_CASE("iOptron zero search - MoveAxis rate 0 keeps the search and its bound"
     mount.set_system_status(2);
     driver->move_axis(0, 0.0);
     mount.set_system_status(0);
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(6));
     CHECK(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());
-    clock.advance(std::chrono::seconds(115));
+    advance_polling(clock, std::chrono::seconds(115));
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));  // this read or the watchdog (#2432) stopped it
     driver->set_connected(false);
@@ -3233,10 +3306,10 @@ TEST_CASE("iOptron zero search - the bound stops a search that no client polls",
     mount.set_system_status(2);  // still searching, and nobody reads it
     // The body reads the clock, then registers its wait: an advance before that would move its wake past the bound.
     REQUIRE(clock.wait_for_waiter_thread(watchdog_thread, std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(119));
+    advance_polling(clock, std::chrono::seconds(119));
     CHECK(mount.count(":Q#") == 0);
 
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     // The stop goes out on the driver's own thread, so the case waits for the fake to record it.
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     try {
@@ -3250,8 +3323,8 @@ TEST_CASE("iOptron zero search - the bound stops a search that no client polls",
     driver->set_connected(false);
 }
 
-// Issue #2432: a FindHome while an earlier search is past its bound. The FindHome's own status read (or the
-// bound's stop, when it got there first) stops the old search, then the new :MSH# goes out, and the old failure
+// Issue #2432: a FindHome while an earlier search is past its bound. The bound's stop (the poll's tick or the
+// watchdog, whichever got there first) has stopped the old search, then the new :MSH# goes out, and the old failure
 // does not outlive the new command.
 TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it and starts a new one",
           "[ioptron][telescope][unit][fake][hold-window]") {
@@ -3265,7 +3338,7 @@ TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it an
     driver->find_home();
     REQUIRE(mount.count(":MSH#") == 1);
     mount.set_system_status(2);
-    clock.advance(std::chrono::seconds(121));  // past the bound, with no status read
+    advance_polling(clock, std::chrono::seconds(121));  // past the bound, with no client read
 
     REQUIRE_NOTHROW(driver->find_home());
     CHECK(mount.count(":Q#") == 1);
@@ -3279,7 +3352,7 @@ TEST_CASE("iOptron zero search - a FindHome during an overdue search stops it an
     // The new search runs, with no failure kept from the old one, and has a bound of its own.
     CHECK(driver->get_slewing());
     CHECK_FALSE(driver->get_at_home());
-    clock.advance(std::chrono::seconds(119));
+    advance_polling(clock, std::chrono::seconds(119));
     CHECK(driver->get_slewing());
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
@@ -3309,10 +3382,10 @@ TEST_CASE("iOptron zero search - a FindHome whose bound cannot start stops the s
     driver->set_connected(false);
 }
 
-// Issue #2432: the bound's watchdog is the first to stop an overdue search, and a status read past the bound is the
-// backstop. Here the watchdog's thread is held, so the client's Slewing read is the one that stops the search; the
+// Issue #2432: the bound's watchdog is the first to stop an overdue search, and the poll's status read past the bound
+// is the backstop. Here the watchdog's thread is held, so the poll's tick is the one that stops the search; the
 // watchdog, once released, finds no search left and sends nothing.
-TEST_CASE("iOptron zero search - a status read past the bound stops the search while the watchdog is held",
+TEST_CASE("iOptron zero search - the poll's status read past the bound stops the search while the watchdog is held",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -3330,8 +3403,8 @@ TEST_CASE("iOptron zero search - a status read past the bound stops the search w
 
     driver->find_home();
     mount.set_system_status(2);
-    clock.advance(std::chrono::seconds(121));
-    CHECK(mount.count(":Q#") == 0);
+    advance_polling(clock, std::chrono::seconds(121));
+    CHECK(mount.count(":Q#") == 1);  // the poll's tick past the 120 s bound, with no client read
     const std::string message = alpacacore::test::alpaca_error_message([&] { (void)driver->get_slewing(); },
                                                                        alpacacore::AlpacaError::DriverException);
     CHECK(message.find("zero sensor search") != std::string::npos);
@@ -3342,8 +3415,9 @@ TEST_CASE("iOptron zero search - a status read past the bound stops the search w
     CHECK(mount.count(":Q#") == 1);
 }
 
-// The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 1.6 s at the
-// default guide rate, so true at 2.0 s and false at 2.2 s.
+// The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 2.1 s at the
+// default guide rate, so true at 2.0 s and false at the first poll after it (a frame sampled inside the hold never
+// ends it).
 TEST_CASE("iOptron hold window - the GOTO trim holds Slewing for its pulse",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
@@ -3353,12 +3427,12 @@ TEST_CASE("iOptron hold window - the GOTO trim holds Slewing for its pulse",
 
     driver->slew_to_coordinates_async(12.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(5));
+    advance_polling(clock, std::chrono::seconds(5));
     CHECK(driver->get_slewing());  // the trim goes out
     REQUIRE(mount.count(":ZQ") == 1);
-    clock.advance(std::chrono::milliseconds(2000));
+    advance_polling(clock, std::chrono::milliseconds(2000));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(200));
+    advance_polling(clock, std::chrono::milliseconds(450));
     CHECK_FALSE(driver->get_slewing());
     CHECK(mount.count(":ZQ") == 1);
     driver->set_connected(false);
@@ -3380,17 +3454,17 @@ TEST_CASE("iOptron hold window - a pulse keeps its axis while virtual time has n
 
     const auto sent = clock.now();
     driver->pulse_guide(0, 2000);
-    clock.advance(std::chrono::milliseconds(1100));
+    advance_polling(clock, std::chrono::milliseconds(1100));
     CHECK(driver->get_right_ascension() == Catch::Approx(10.0));                          // held
     CHECK(driver->get_declination() == Catch::Approx(20.0 + 2.0 * kGuideRateDegPerSec));  // predicted, once
     CHECK(driver->get_declination() == Catch::Approx(21.0));                              // then live
-    clock.advance(sent + std::chrono::milliseconds(2499) - clock.now());
+    advance_polling(clock, sent + std::chrono::milliseconds(2499) - clock.now());
     CHECK(driver->get_is_pulse_guiding());
-    clock.advance(std::chrono::milliseconds(1));
+    advance_polling(clock, std::chrono::milliseconds(1));
     CHECK_FALSE(driver->get_is_pulse_guiding());
-    clock.advance(sent + std::chrono::milliseconds(4499) - clock.now());
+    advance_polling(clock, sent + std::chrono::milliseconds(4499) - clock.now());
     CHECK(driver->get_right_ascension() == Catch::Approx(10.0));
-    clock.advance(std::chrono::milliseconds(1));
+    advance_polling(clock, std::chrono::milliseconds(1));
     CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
     driver->set_connected(false);
 }
@@ -3409,9 +3483,9 @@ TEST_CASE("iOptron Telescope Driver - IsPulseGuiding falls 500 ms after the puls
         INFO("pulse " << duration << " ms");
         const auto sent = clock.now();
         driver->pulse_guide(2, duration);
-        clock.advance(sent + std::chrono::milliseconds(duration + 450) - clock.now());
+        advance_polling(clock, sent + std::chrono::milliseconds(duration + 450) - clock.now());
         CHECK(driver->get_is_pulse_guiding());
-        clock.advance(sent + std::chrono::milliseconds(duration + 550) - clock.now());
+        advance_polling(clock, sent + std::chrono::milliseconds(duration + 550) - clock.now());
         CHECK_FALSE(driver->get_is_pulse_guiding());
     }
     driver->set_connected(false);
@@ -3503,7 +3577,7 @@ TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the ea
         driver->pulse_guide(0, 2000);    // North: holds RA
         driver->pulse_guide(2, 2000);    // East: holds Dec, ends the RA hold
         mount.set_position(11.0, 21.0);  // the fake's :ZS models a GOTO trim and moved RA; the ack came after it
-        clock.advance(std::chrono::milliseconds(1100));
+        advance_polling(clock, std::chrono::milliseconds(1100));
         CHECK(driver->get_right_ascension() == Catch::Approx(10.0 + 2.0 * kGuideRateDegPerSec / 15.0));
         CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
         (void)driver->get_declination();  // the North pulse's prediction, once
@@ -3512,7 +3586,7 @@ TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the ea
     SECTION("a North pulse ends an East pulse's Dec hold") {
         driver->pulse_guide(2, 2000);
         driver->pulse_guide(0, 2000);
-        clock.advance(std::chrono::milliseconds(1100));
+        advance_polling(clock, std::chrono::milliseconds(1100));
         (void)driver->get_declination();      // the North pulse's prediction, once
         (void)driver->get_right_ascension();  // the East pulse's prediction, once
         CHECK(driver->get_declination() == Catch::Approx(21.0));
@@ -3523,12 +3597,12 @@ TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the ea
         driver->pulse_guide(0, 0);
         CHECK_FALSE(driver->get_is_pulse_guiding());
         (void)driver->get_declination();  // the North pulse's prediction, once
-        clock.advance(std::chrono::milliseconds(1100));
+        advance_polling(clock, std::chrono::milliseconds(1100));
         CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
         driver->pulse_guide(2, 2000);
         driver->pulse_guide(2, 0);
         (void)driver->get_right_ascension();  // the East pulse's prediction, once
-        clock.advance(std::chrono::milliseconds(1100));
+        advance_polling(clock, std::chrono::milliseconds(1100));
         CHECK(driver->get_declination() == Catch::Approx(21.0));
     }
     driver->set_connected(false);
@@ -3616,8 +3690,8 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    // The clock-sync body is parked in its 250 ms start delay on the fake clock.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // The clock-sync body is parked in its 250 ms start delay on the fake clock, next to the state poll.
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
 
     std::promise<void> disconnected;
     auto done = disconnected.get_future();
@@ -3646,14 +3720,15 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry de
         0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    // The clock-sync body is parked in its 250 ms start delay.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    wait_for_ioptron_connect_parked(clock);
+    // The clock-sync body is parked in its 250 ms start delay, next to the state poll.
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     // Drop the link, so the first set_latitude send fails and the body lands in its retry delay.
     mount.reset_link();
     const auto waits = clock.wait_count();
     clock.advance(std::chrono::milliseconds(250));
-    // The first set_latitude fails; the body registers its retry delay as the next wait.
-    REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+    // The first set_latitude fails; the body registers its retry delay as the next wait, and the poll its next tick.
+    REQUIRE(clock.wait_for_wait_count(waits + 2, std::chrono::seconds(5)));
 
     std::promise<void> disconnected;
     auto done = disconnected.get_future();
@@ -3715,6 +3790,7 @@ TEST_CASE("iOptron slot - a GOTO the mount rejects after SlewToAltAzAsync return
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
         0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377), as ConformU does
     age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
@@ -3734,6 +3810,7 @@ TEST_CASE("iOptron slot - a refused slew thread throws and Slewing still reports
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
         0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -3771,6 +3848,7 @@ TEST_CASE("iOptron Telescope Driver - an Alt/Az slew is refused while Tracking i
         auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
             0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
 
         // Runs the slew on another thread and advances the fake clock until it returns (a synchronous slew waits
         // on it), so a regression that lets the slew through fails instead of hanging. Returns the call's future.
@@ -3784,7 +3862,7 @@ TEST_CASE("iOptron Telescope Driver - an Alt/Az slew is refused while Tracking i
             });
             for (int i = 0; i < 400; ++i) {
                 if (call.wait_for(std::chrono::milliseconds(5)) == std::future_status::ready) break;
-                clock.advance(std::chrono::seconds(1));
+                advance_polling(clock, std::chrono::seconds(1));
             }
             return call;
         };
@@ -3861,6 +3939,7 @@ TEST_CASE("iOptron Telescope Driver - connected site and pointing getters read t
                                                                                   {}, {}, {}, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     CHECK(std::abs(driver->get_site_latitude() - 40.5) < 1e-6);
     CHECK(std::abs(driver->get_site_longitude() - -75.25) < 1e-6);
@@ -3880,12 +3959,12 @@ TEST_CASE("iOptron Telescope Driver - connected site and pointing getters read t
 
     CHECK(driver->get_tracking_rate() == 0);
     mount.set_tracking_rate_digit(2);  // the mount tracks at the solar rate (set from the hand controller)
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(driver->get_tracking_rate() == 2);
     driver->set_tracking_rate(1);
     CHECK(driver->get_tracking_rate() == 1);
     const int status_reads = mount.count(":GLS#");
-    clock.advance(std::chrono::seconds(3));  // past the write's read-back window: the mount answers again
+    advance_polling(clock, std::chrono::seconds(3));  // past the write's read-back window: the mount answers again
     CHECK(driver->get_tracking_rate() == 1);
     CHECK(mount.count(":GLS#") > status_reads);
     // ":RTn#" is sent blind (its ack is drained for at most 50 ms), so the count is read only after the ":GLS"
@@ -4120,12 +4199,13 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
     // The fake lands at once and reports status 0. The client never reads Slewing; time passes past the
     // dispatch override, and PulseGuide's own status refresh sees the mount stopped before the pulse starts.
-    clock.advance(std::chrono::seconds(10));
+    advance_polling(clock, std::chrono::seconds(10));
     (void)driver->get_right_ascension();
     driver->pulse_guide(3, 2704);
     // The pulse makes the firmware report slewing (status 2) on the firmware that showed open-astro#843.
@@ -4144,10 +4224,11 @@ TEST_CASE("iOptron Telescope Driver - MoveAxis after an unpolled finished GOTO l
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(10));
+    advance_polling(clock, std::chrono::seconds(10));
     (void)driver->get_right_ascension();
     driver->move_axis(0, 0.0);
     driver->pulse_guide(3, 2704);
@@ -4166,10 +4247,11 @@ TEST_CASE("iOptron Telescope Driver - no settle trim during a PulseGuide after a
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(10));
+    advance_polling(clock, std::chrono::seconds(10));
     (void)driver->get_right_ascension();
     const auto zq_before = mount.count(":ZQ");
     driver->pulse_guide(0, 2704);
@@ -4188,15 +4270,16 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(10));
+    advance_polling(clock, std::chrono::seconds(10));
     (void)driver->get_right_ascension();
     driver->pulse_guide(3, 2704);
     mount.set_system_status(2);
-    clock.advance(std::chrono::milliseconds(1500));
+    advance_polling(clock, std::chrono::milliseconds(1500));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -4214,15 +4297,16 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
                                                                 std::nullopt, std::nullopt, {}, {}, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
-    clock.advance(std::chrono::seconds(6));
-    (void)driver->get_tracking();  // fresh status past the initiator's window: the mount has not moved yet
+    advance_polling(clock, std::chrono::milliseconds(5250));  // the first poll past the initiator's window
+    (void)driver->get_tracking();                             // that status: the mount has not moved yet
     body.release();
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_system_status(2);
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(6));
     CHECK(driver->get_slewing());
     // Issue #2504: refused while the motion runs, and Slewing still reports it.
     require_alpaca_error([&] { driver->pulse_guide(3, 2704); }, alpacacore::AlpacaError::InvalidOperation);
@@ -4241,18 +4325,19 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     auto driver = io::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
 
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(6));
     // Fresh status past the dispatch window: the mount stopped 12" off, so the trim pulse goes out.
     CHECK(driver->get_slewing());
     REQUIRE(mount.count(":ZQ") == 1);
     // Issue #2504: refused while the motion runs, and Slewing still reports it.
     require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
     mount.set_system_status(2);
-    clock.advance(std::chrono::milliseconds(2100));  // past the trim hold, inside the client's pulse window
+    advance_polling(clock, std::chrono::milliseconds(2100));  // past the trim hold, inside the client's pulse window
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -4311,6 +4396,7 @@ TEST_CASE("iOptron Telescope Driver - a Sync offset never reports a Dec past the
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_position(6.0, 89.29);
     driver->sync_to_coordinates(6.0, 90.0);  // offset +0.71
@@ -4320,7 +4406,7 @@ TEST_CASE("iOptron Telescope Driver - a Sync offset never reports a Dec past the
     mount.set_position(6.0, -89.5);
     driver->sync_to_coordinates(6.0, -90.0);  // offset -0.5
     mount.set_position(6.0, -90.0);
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(driver->get_declination() == Catch::Approx(-90.0));
     driver->set_connected(false);
 }
@@ -4418,11 +4504,11 @@ TEST_CASE("iOptron motion bound - a MoveAxis left running past its dead-man is s
 
     driver->move_axis(0, driver->get_axis_rate_range(0).second);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(59));
+    advance_polling(clock, std::chrono::seconds(59));
     CHECK(mount.count(":Q#") == 0);
     CHECK(driver->get_slewing());
 
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));  // the body has logged and ended
@@ -4447,16 +4533,16 @@ TEST_CASE("iOptron motion bound - a MoveAxis renewed before its dead-man keeps r
 
     driver->move_axis(0, rate);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(40));
+    advance_polling(clock, std::chrono::seconds(40));
     driver->move_axis(0, rate);  // the client renews its move
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(40));  // 80 s after the first, 40 s after the renewal
+    advance_polling(clock, std::chrono::seconds(40));  // 80 s after the first, 40 s after the renewal
     // The body woke at the first move's 60 s: wait until it has waited again or ended, so the check follows it.
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     CHECK(mount.count(":Q#") == 0);
     CHECK(driver->get_slewing());
 
-    clock.advance(std::chrono::seconds(21));
+    advance_polling(clock, std::chrono::seconds(21));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     driver->set_connected(false);
 }
@@ -4476,10 +4562,10 @@ TEST_CASE("iOptron motion bound - an async GOTO still slewing at 300 s is stoppe
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_system_status(2);  // the mount never reports the GOTO done
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(299));
+    advance_polling(clock, std::chrono::seconds(299));
     CHECK(mount.count(":Q#") == 0);
 
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
     driver->set_connected(false);
@@ -4500,7 +4586,7 @@ TEST_CASE("iOptron motion bound - an async GOTO that landed is left alone at 300
     REQUIRE(wait_for_goto_dispatch(mount));
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
     const int status_reads = mount.count(":GLS#");
-    clock.advance(std::chrono::seconds(301));  // nobody polled; the mount reads tracking (1)
+    advance_polling(clock, std::chrono::seconds(301));  // nobody polled; the mount reads tracking (1)
     // The body's status read at the bound comes before its decision: wait for it, then for the body to end, so the
     // negative check below follows the decision.
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
@@ -4522,16 +4608,20 @@ TEST_CASE("iOptron async landing gate - Slewing stays true until two position re
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(6));  // past the 5 s dispatch hold; the status reads tracking, not slewing
-    mount.set_position(11.9, 19.0);          // the status lies: the mount still moves, 1.6 degrees out
-    CHECK(driver->get_slewing());            // first sample
-    clock.advance(std::chrono::milliseconds(600));
+    mount.set_position(11.9, 19.0);  // the status lies: the mount still moves, 1.6 degrees out
+    // The poll samples every 250 ms, and the gate takes a position sample from each tick past the 5 s dispatch hold
+    // (the status reads tracking, not slewing).
+    advance_polling(clock, std::chrono::seconds(5));
+    CHECK(driver->get_slewing());     // first sample
     mount.set_position(11.99, 20.0);  // about 500 arcsec out: not on target, not a far miss
-    CHECK(driver->get_slewing());     // moved since the first sample
-    clock.advance(std::chrono::milliseconds(200));
+    poll_ticks(clock, 1);
+    CHECK(driver->get_slewing());  // 250 ms after the first sample: under the 500 ms gap, no new sample
+    poll_ticks(clock, 1);
+    CHECK(driver->get_slewing());  // moved since the first sample
+    poll_ticks(clock, 1);
     CHECK(driver->get_slewing());  // agrees, but under the 500 ms gap
-    clock.advance(std::chrono::milliseconds(400));
-    CHECK_FALSE(driver->get_slewing());  // two samples 600 ms apart agree: landed
+    poll_ticks(clock, 1);
+    CHECK_FALSE(driver->get_slewing());  // two samples 500 ms apart agree: landed
     CHECK_FALSE(driver->get_slewing());
     CHECK(mount.count(":Q#") == 0);
     driver->set_connected(false);
@@ -4548,9 +4638,9 @@ TEST_CASE("iOptron async landing gate - a GOTO that came to rest far from the ta
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(5));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(600));
+    poll_ticks(clock, 2);  // the second sample, 500 ms after the first: it agrees, and it is far off
     const std::string failure = slewing_failure(*driver);
     CHECK(contains(failure, "from the target"));
     CHECK(contains(slewing_failure(*driver), "from the target"));  // kept until AbortSlew or a new initiator
@@ -4571,15 +4661,14 @@ TEST_CASE("iOptron async landing gate - a failed position read keeps Slewing tru
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
-    clock.advance(std::chrono::seconds(6));
-    CHECK(driver->get_slewing());  // first sample
-    clock.advance(std::chrono::milliseconds(600));
+    advance_polling(clock, std::chrono::seconds(5));
+    CHECK(driver->get_slewing());       // first sample
     mount.fail_next_position_reads(1);  // the next :GEP# read fails, status reads still answer
-    CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(600));
-    CHECK(driver->get_slewing());  // a fresh first sample after the failed read
-    clock.advance(std::chrono::milliseconds(600));
-    CHECK_FALSE(driver->get_slewing());
+    poll_ticks(clock, 1);
+    CHECK(driver->get_slewing());  // a failed poll is no sample: the frame on hand says the GOTO is still unsettled
+    CHECK(driver->get_link_fault().empty());  // one failed poll is no latch
+    poll_ticks(clock, 1);
+    CHECK_FALSE(driver->get_slewing());  // the next good sample, 500 ms after the first, agrees with it
     driver->set_connected(false);
 }
 
@@ -4599,11 +4688,11 @@ TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_position_drift_per_read(100.0);  // reads stopped, but the position never settles
-    clock.advance(std::chrono::seconds(6));
+    advance_polling(clock, std::chrono::seconds(5));
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::milliseconds(600));
+    poll_ticks(clock, 2);
     CHECK(driver->get_slewing());
-    clock.advance(std::chrono::seconds(300));
+    advance_polling(clock, std::chrono::seconds(300));
     CHECK(contains(slewing_failure(*driver), "did not settle within 300 s"));
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
@@ -4617,9 +4706,10 @@ TEST_CASE("iOptron motion bound - an async Alt/Az GOTO still slewing at 300 s is
     FakeTaskClock clock;
     auto driver = io::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()), -33.856784, 151.215297,
                                                          std::nullopt, /*sync_time_on_connect=*/false, clock);
-    io::set_zero_search_poll_for_testing(*driver, false);
+    io::set_state_poll_paused_for_testing(*driver, false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
     MotionBoundThread watchdog;
     watchdog.attach(*driver);
@@ -4628,10 +4718,10 @@ TEST_CASE("iOptron motion bound - an async Alt/Az GOTO still slewing at 300 s is
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_system_status(2);  // the mount never reports the GOTO done
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(299));
+    advance_polling(clock, std::chrono::seconds(299));
     CHECK(mount.count(":Q#") == 0);
 
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     CHECK(contains(slewing_failure(*driver), "The slew did not end within 300 s"));
     CHECK(mount.count(":Q#") == 1);
@@ -4650,6 +4740,7 @@ TEST_CASE("iOptron motion bound - a dead-man stop that the link loss refused is 
     auto driver = link_driver(serial_endpoint(port.path()), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    wait_for_ioptron_connect_parked(clock);
     age_past_connect_grace(clock);
     MotionBoundThread watchdog;
     watchdog.attach(*driver);
@@ -4657,7 +4748,7 @@ TEST_CASE("iOptron motion bound - a dead-man stop that the link loss refused is 
     driver->move_axis(0, driver->get_axis_rate_range(0).second);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
     first.unplug_on(on_command(":Q#"));
-    clock.advance(std::chrono::seconds(61));
+    advance_polling(clock, std::chrono::seconds(61));
     REQUIRE(wait_until([&] { return first.unplugged(); }));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::NotConnected);
@@ -4677,6 +4768,9 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
     mount.set_system_status(1);
     FakeTaskClock clock;
     auto driver = hold_driver(mount, clock);
+    // The poll reads the status too, and would take the one failure meant for the bound's read: paused, the watchdog's
+    // read is the only one.
+    io::set_state_poll_paused_for_testing(*driver, true);
     age_past_connect_grace(clock);
     MotionBoundThread watchdog;
     watchdog.attach(*driver);
@@ -4685,11 +4779,12 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
     REQUIRE(wait_for_goto_dispatch(mount));
     mount.set_system_status(2);
     REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
-    clock.advance(std::chrono::seconds(299));
+    advance_polling(clock, std::chrono::seconds(299));
     mount.fail_next_reads(1);  // the bound's status read fails
-    clock.advance(std::chrono::seconds(2));
+    advance_polling(clock, std::chrono::seconds(2));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    io::poll_state_now_for_testing(*driver);  // the paused poll's frame is 300 s old: one tick refreshes it
     CHECK(contains(slewing_failure(*driver), "status could not be read at its 300 s bound"));
     CHECK(mount.count(":Q#") == 1);
     driver->set_connected(false);
@@ -4839,7 +4934,7 @@ TEST_CASE("iOptron goto-safety - PulseGuide during a GOTO, Park or FindHome is r
             const int pulses = mount.count(":Z");
             for (const auto step : {std::chrono::seconds(0), std::chrono::seconds(6)}) {
                 CAPTURE(step.count());
-                clock.advance(step);
+                advance_polling(clock, step);
                 require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
                 CHECK(mount.count(":Z") == pulses);
                 CHECK_FALSE(driver->get_is_pulse_guiding());
@@ -4874,12 +4969,12 @@ TEST_CASE("iOptron goto-safety - PulseGuide after an unpolled GOTO, Park or Find
             } else {
                 driver->find_home();
                 // A zero search (0036) lands only once a status 2 past its 5 s hold showed it moving.
-                clock.advance(std::chrono::seconds(6));
+                advance_polling(clock, std::chrono::seconds(6));
                 CHECK(driver->get_slewing());
             }
             // The motion ends while nobody polls: tracking after a GOTO, parked, at home.
             mount.set_system_status(motion == Motion::Goto ? 1 : motion == Motion::Park ? 6 : 7);
-            clock.advance(std::chrono::seconds(6));
+            advance_polling(clock, std::chrono::seconds(6));
             const int pulses = mount.count(":Z");
             if (motion == Motion::Park) {
                 require_alpaca_error([&] { driver->pulse_guide(3, 3000); },
@@ -4943,8 +5038,9 @@ TEST_CASE("iOptron goto-safety - PulseGuide on the jogging axis is refused and t
 // not been seen stopped is refused; once PulseGuide's own status read sees the mount stopped, the client's pulse is
 // accepted and takes over from the trim that has not gone out (#2063).
 // Falsified by: ioptron_telescope_driver.cpp pulse_guide() refusing on slew_in_progress_ alone (the stop seen leg).
-TEST_CASE("iOptron goto-safety - PulseGuide refused before a trimmed GOTO is seen stopped, accepted after (#2504)",
-          "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
+TEST_CASE(
+    "iOptron goto-safety - PulseGuide refused until the poll has trimmed and landed the GOTO, accepted after (#2504)",
+    "[ioptron][telescope][unit][fake][pulseguide][goto-safety]") {
     FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
     REQUIRE(mount.ok());
     FakeTaskClock clock;
@@ -4957,10 +5053,16 @@ TEST_CASE("iOptron goto-safety - PulseGuide refused before a trimmed GOTO is see
     require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK(mount.count(":Z") == pulses);
 
-    // The fake landed 12" off and reads stopped; nobody polled Slewing, so no trim has gone out.
-    clock.advance(std::chrono::seconds(6));
+    // The fake landed 12" off and reads stopped: the poll's first tick past the dispatch window sends the trim, which
+    // is part of the GOTO, so a pulse is still refused while it runs.
+    advance_polling(clock, std::chrono::seconds(5));
+    CHECK(mount.count(":ZQ") == 1);
+    require_alpaca_error([&] { driver->pulse_guide(3, 3000); }, alpacacore::AlpacaError::InvalidOperation);
+    // Past the trim's hold the poll sees the mount stopped on its target and ends the GOTO: the pulse is accepted.
+    advance_polling(clock, std::chrono::seconds(3));
+    poll_ticks(clock, 1);
     driver->pulse_guide(3, 3000);
-    CHECK(mount.count(":Z") == pulses + 1);
+    CHECK(mount.count(":Z") == pulses + 2);
     CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }

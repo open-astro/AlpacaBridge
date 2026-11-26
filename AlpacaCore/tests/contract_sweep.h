@@ -1143,6 +1143,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"celestron_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp"},
     {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
     {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
+    {"ioptron_telescope", "ioptron", "AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp"},
     {"onstep_telescope", "onstep", "AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp"},
     {"onstep_focuser", "onstep", "AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp"},
     {"onstep_rotator", "onstep", "AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp"},

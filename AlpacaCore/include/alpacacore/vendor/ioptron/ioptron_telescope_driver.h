@@ -116,10 +116,14 @@ void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
 /// factories.
 bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver);
 
-/// Test seam: turns the zero search watchdog's 1 s status reads (until a search shows motion) off or on. Off, the
-/// watchdog waits only for the 120 s bound, so a case about client reads runs with no second reader. On by default.
-/// Set it before FindHome. A driver not from the factories is ignored.
-void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled);
+/// Test seam (decision 0010, #2491): pauses or resumes the state poll. A paused poll keeps waiting its ticks on the
+/// task clock and probes nothing, so a case that scripts the mount's replies, or advances the clock while it counts the
+/// commands sent, does not have the poll consume them. A driver not from the factories is ignored.
+void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+
+/// Test seam (decision 0010, #2491): one full poll tick on the calling thread, paused or not, with the effects it
+/// applies. A driver not from the factories is ignored.
+void poll_state_now_for_testing(TelescopeDriver& driver);
 
 /// Test seam: `hook` runs on the clock-sync body after its start delay (it may block or throw).
 /// Set it before connecting. A driver not from the factories above is ignored.

@@ -387,7 +387,7 @@ notes carry only the pin map and per-board deltas.
   `util::SoftPwmPorts` (`alpacacore/util/soft_pwm_ports.h`) is held as a member, never a base
   class, and talks to the kernel only through a `util::GpioLineBackend` (`gpio_line_backend.h`):
   `util::GpiodLineBackend` (libgpiod v2) or the vendor's own (`PwmGpioMiscBackend`, the ASIAIR
-  Plus RK3568 ioctl path, with its inverted polarity and its kernel index offset). The wrapper
+  Plus RK3568 ioctl path, with its two ioctl numberings and its kernel index offset). The wrapper
   type is `util::OwnedSoftPwmPorts<Backend>`. The ASIAIR Pro, Plus CM4 and Plus RK3568 are on it;
   the iOptron iMate (`ioptron_powerbox_wrapper.cpp`) and ToupTek StellaVita
   (`touptek_powerbox_wrapper.cpp`) wrappers still carry their own copy until the follow-up of
