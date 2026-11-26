@@ -2367,7 +2367,9 @@ struct MoveAxisBoundRig {
     alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
     std::atomic<std::thread::id> bound_thread{};
 
-    MoveAxisBoundRig() {
+    // `model_id` is the handset's `m` reply, set before the connect: 50 equatorial, 160 an AZ GOTO (AltAz).
+    explicit MoveAxisBoundRig(unsigned char model_id = 50) {
+        st->model_id.store(model_id);
         alpacacore::logging::set_log_sink(
             [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
                 if (component != "SynScan" || message.find("MoveAxis on axis") == std::string_view::npos) return;
@@ -2752,6 +2754,50 @@ TEST_CASE("SynScan MoveAxis - a renewal that lands while the bound's stop is on 
     rig.advance(std::chrono::seconds(61));  // the renewal's own 60 s
     CHECK(rig.stops(kRaMotor) == stops + kStopCommands);
     CHECK(read_slewing(*rig.driver) == SlewingRead::Threw);
+}
+
+// #2651 (I8): the cap's verified stop on axis 0 checks that axis alone. Axis 1 keeps jogging, so the position on axis 1
+// keeps changing: equatorial, Dec moves and RA stays; AltAz, altitude moves and azimuth stays, while RA and Dec both
+// move. A check on RA and Dec together never sees axis 0 still, sends the stop three times and raises "still reports
+// motion" for a stop that landed. The handset's `e` (RA/Dec) and `z` (Az/Alt) replies move as such a mount's would.
+TEST_CASE("SynScan MoveAxis - a cap stop on one axis verifies while the other axis keeps jogging",
+          "[synscan][telescope][goto-safety]") {
+    const bool alt_az = GENERATE(false, true);
+    INFO((alt_az ? "AltAz" : "equatorial"));
+    MoveAxisBoundRig rig(alt_az ? 160 : 50);
+    std::atomic<unsigned> reads{0};  // before the cleanup: the hook uses it until the cleanup clears the hook
+    struct Cleanup {
+        MoveAxisBoundRig& rig;
+        ~Cleanup() {
+            std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+            rig.st->before_reply = nullptr;
+        }
+    } cleanup{rig};
+    rig.start_move(0);
+    rig.advance(std::chrono::seconds(30));
+    rig.start_move(1);  // axis 1 jogs from 30 s; its own cap is due at 90 s
+    {
+        std::lock_guard<std::mutex> lock(rig.st->before_reply_mutex);
+        rig.st->before_reply = [&](const std::string& chunk) {
+            if (chunk.empty() || (chunk[0] != 'e' && chunk[0] != 'z')) return;
+            const unsigned moved = 0x10000000u + (++reads) * 0x00020000u;  // about 63 arcsec a read
+            char reply[32];
+            if (chunk[0] == 'z') {  // azimuth (axis 0) stays; altitude (axis 1) moves; equatorial, both move
+                std::snprintf(reply, sizeof(reply), "%08X,%08X#", alt_az ? 0x40000000u : moved, moved);
+            } else {  // RA (axis 0) stays and Dec (axis 1) moves; AltAz, both move
+                std::snprintf(reply, sizeof(reply), "%08X,%08X#", alt_az ? moved : 0x40000000u, moved);
+            }
+            rig.st->set_position(reply);
+        };
+    }
+    rig.advance(std::chrono::seconds(35));        // 65 s: axis 0's cap fired at 60 s and its stop had 3 s to verify
+    CHECK(rig.stops(kRaMotor) == kStopCommands);  // one stop, verified: never resent
+    CHECK(rig.stops(kDecMotor) == 0);             // axis 1 still jogs
+    std::string message;
+    CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s, the longest allowed; the driver stopped it") != std::string::npos);
+    CHECK(message.find("still reports motion") == std::string::npos);
+    CHECK(rig.warns.load() == 0);
 }
 
 // #2412 follow-up: the verified AbortSlew, the GOTO that never starts, the 16-bit (V3) landing check and the Sync

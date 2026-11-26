@@ -33,6 +33,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -526,6 +527,32 @@ TEST_CASE("run_motion_deadline - a body cancelled before its deadline sends noth
     CHECK_FALSE(slot.last_failure().has_value());
 }
 
+// Falsified by: a body that waits on the clock through a cancel (clock.sleep_for, or ctx.wait_for with its result
+// ignored), so Disconnect's join blocks until the 60 s deadline and each renewal leaves a stale body asleep, until the
+// slot refuses a start (decision 0006, stale bodies). The case advances no virtual time before it checks the return.
+TEST_CASE("run_motion_deadline - a cancel ends the waiting body with no clock advance", "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    std::atomic<bool> returned{false};
+    slot.start([&](OperationContext& ctx) {
+        run_motion_deadline(ctx, clock, deadline, hooks, "expired");
+        returned = true;
+    });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    slot.cancel();
+    const bool ended = alpacacore::test::wait_until([&] { return returned.load(); }, 2000);
+    clock.advance(kMaxMoveAxisDuration);  // lets a body that slept through the cancel finish, so the join cannot hang
+    slot.cancel_all_and_join();
+    CHECK(ended);
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
 // Falsified by: a renewal (a new non-zero MoveAxis starts a new body with a new deadline) that leaves the old body's
 // deadline armed, so a renewed MoveAxis is stopped 60 s after the first call instead of the last.
 TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only the new deadline stops the mount",
@@ -535,11 +562,13 @@ TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only
     const auto hooks = mount.hooks();
     OperationGeneration generation;
     AsyncOperation slot("motion-guards-test", generation, clock);
+    std::atomic<int> returned{0};
     const auto start_move = [&] {
         HoldWindow deadline;
         deadline.arm(clock.now(), kMaxMoveAxisDuration);
-        slot.start([&clock, &hooks, deadline](OperationContext& ctx) {
+        slot.start([&clock, &hooks, &returned, deadline](OperationContext& ctx) {
             run_motion_deadline(ctx, clock, deadline, hooks, "renewed MoveAxis ran 60 s");
+            ++returned;
         });
     };
     start_move();
@@ -547,6 +576,8 @@ TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only
     clock.advance(40s);
     REQUIRE(clock.wait_for_woken_settled(2s));
     start_move();  // the renewal at 40 s
+    // The superseded body wakes from the supersede, not from the clock: no virtual time passes here.
+    CHECK(alpacacore::test::wait_until([&] { return returned.load() == 1; }, 2000));
     REQUIRE(clock.wait_for_waiters(1, 2s));
     clock.advance(21s);  // 61 s: the first deadline has passed
     REQUIRE(clock.wait_for_woken_settled(2s));

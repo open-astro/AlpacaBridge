@@ -1497,6 +1497,32 @@ TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
     driver->set_connected(false);
 }
 
+// #2651: FindHome takes both axes from a MoveAxis, as Park and the slews do, so the jog no longer reports Slewing once
+// the home lands, and the MoveAxis cap sends no stop and raises nothing at the jog's 60 s.
+TEST_CASE("Celestron MoveAxis - a FindHome over a jog reads not slewing once home and leaves no cap",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int axis = GENERATE(0, 1);
+
+    REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+    step_virtual(clock, std::chrono::seconds(5));
+    REQUIRE_NOTHROW(driver->find_home());
+    st->no_motion.store(true);  // the mount that took the home reports no GOTO on L
+    const int stops_before = axis_stop_count(*st, axis);
+    step_virtual(clock, std::chrono::seconds(3));  // the status poll sees MC_LEVEL_DONE
+    REQUIRE(driver->get_at_home());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    step_virtual(clock, std::chrono::seconds(60));  // past the jog's 60 s
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(axis_stop_count(*st, axis) == stops_before);
+    driver->set_connected(false);
+}
+
 // #2409 (#2396 AB-10): a site or time write changes the handset's pointing and limit maths, so none goes out while a
 // motion the driver started runs: a MoveAxis on either axis, or a GOTO.
 TEST_CASE("Celestron site - site and time writes are refused while the mount moves",

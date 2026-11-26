@@ -47,6 +47,7 @@
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #endif
+#include "connect_hold_gate.h"
 #include "fake_ioptron_mount.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
@@ -4547,6 +4548,49 @@ TEST_CASE("iOptron motion bound - a MoveAxis renewed before its dead-man keeps r
 
     advance_polling(clock, std::chrono::seconds(21));
     CHECK(wait_until([&] { return mount.count(":Q#") == 1; }));
+    driver->set_connected(false);
+}
+
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis renewal claims its axis before its rate command, so the dead-man of
+// the move it renews sends no stop while the renewal is on the wire, even when the first move's 60 s passes then. A
+// Dec renewal reads the pier side (:GEP#) inside its exchange; the fake holds that reply on a gate while virtual time
+// passes the first move's 60 s, then releases it.
+TEST_CASE("iOptron motion bound - a renewal that lands as the dead-man fires is not stopped by the old one",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    const double rate = driver->get_axis_rate_range(1).second;
+    const auto stops = [&] { return mount.count(":Q#") + mount.count(":qR#") + mount.count(":qD#"); };
+
+    driver->move_axis(1, rate);
+    advance_polling(clock, std::chrono::seconds(59));
+    REQUIRE(stops() == 0);
+    std::optional<std::string> renewal_error;
+    {
+        alpacacore::test::ConnectHoldGate gate;
+        mount.hold_next_reply(std::chrono::seconds(1));  // waits on the gate, not the second
+        std::thread renewal([&] {
+            try {
+                driver->move_axis(1, rate);
+            } catch (const std::exception& ex) {
+                renewal_error = ex.what();
+            }
+        });
+        const bool held = gate.wait_entered(std::chrono::seconds(5));
+        clock.advance(std::chrono::seconds(2));  // 61 s: the first move's dead-man is due mid-renewal
+        gate.release();
+        renewal.join();
+        REQUIRE(held);
+    }
+    REQUIRE_FALSE(renewal_error.has_value());
+    advance_polling(clock, std::chrono::seconds(5));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(stops() == 0);
+    CHECK(driver->get_slewing());
     driver->set_connected(false);
 }
 
