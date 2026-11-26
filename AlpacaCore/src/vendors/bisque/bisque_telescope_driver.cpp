@@ -1311,7 +1311,8 @@ public:
         slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        cancel_move_axis_caps_locked();
+        // The cap bodies run on until the stop went out and verified: a stop that fails puts the jog back, and the
+        // jog keeps its 60 s cap. A body that wakes meanwhile waits on initiator_mutex_ and finds its flag cleared.
         drop_poll_in_flight_locked();
         // Release the driver mutex before the abort: protocol.abort() waits on
         // the wrapper mutex, which a pending pulse guide holds until TheSkyX
@@ -1336,19 +1337,28 @@ public:
                 // The mount may still be moving: keep reporting it, and raise the failure from Slewing.
                 restore_motion_after_failed_stop_locked(slew_was_active, axes_were_active);
                 motion_error_ = "AbortSlew failed: " + exception_text(error);
+            } else if (session == session_) {
+                cancel_move_axis_caps_locked();
             }
             std::rethrow_exception(error);
         }
         if (!slew_was_active) {
+            lock.lock();
+            if (session == session_) {
+                cancel_move_axis_caps_locked();
+            }
             return;
         }
         // #2396 AB-4: the stop is verified. Abort() is sent again while IsSlewComplete still reads false, at most
         // kAbortRounds in all; a failed read or send ends the rounds (fail closed, and the link may be gone).
         const std::string failure = verify_abort(1);
+        lock.lock();
         if (failure.empty()) {
+            if (session == session_) {
+                cancel_move_axis_caps_locked();  // the stop verified: the jogs it ended need no cap
+            }
             return;
         }
-        lock.lock();
         if (session != session_) {
             throw AlpacaException("AbortSlew: " + failure, AlpacaError::DriverException);
         }
@@ -2055,9 +2065,7 @@ private:
         }
         for (int axis = 0; axis < 2; ++axis) {
             if (axes_active[axis]) {
-                // TODO: a jog flag with no running cap (cap restart where a restored jog flag is set): AbortSlew
-                // cancelled the cap bodies, so a restored jog has no 60 s limit until it is renewed.
-                manual_axis_slewing_[axis] = true;
+                manual_axis_slewing_[axis] = true;  // its cap body still runs: AbortSlew cancels it only once stopped
             }
         }
     }

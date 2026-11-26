@@ -2840,13 +2840,25 @@ public:
             parked_ = false;
             at_home_ = false;
         }
-        if (!stop_goto) {  // the stops above already sent rate 0 to both axes
-            send_motion_locked(
-                lock, [this, &mine] { return !lost_locked(mine); },
-                [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
-        }
         if (moving) {
             cap_window.arm(clock_.now(), util::kMaxMoveAxisDuration);
+        }
+        if (!stop_goto) {  // the stops above already sent rate 0 to both axes
+            try {
+                send_motion_locked(
+                    lock, [this, &mine] { return !lost_locked(mine); },
+                    [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+            } catch (const std::exception&) {
+                // A rate command that threw (a timeout) may still have reached the mount, and Slewing stays true: the
+                // jog keeps its 60 s cap. A cap that cannot start leaves the original error to throw.
+                if (moving) {
+                    try {
+                        start_move_axis_cap(lock, axis, mine, cap_window);
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the send's error is thrown
+                    }
+                }
+                throw;
+            }
         }
         clear_motion_errors_locked();
         if (verify_stop) {
