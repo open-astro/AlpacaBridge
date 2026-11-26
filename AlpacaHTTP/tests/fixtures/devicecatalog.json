@@ -406,6 +406,20 @@
   },
   {
     "vendor": "remotealpaca",
+    "deviceType": "rotator",
+    "displayName": "Remote Alpaca Rotator",
+    "vendorLabel": "Remote Alpaca",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_REMOTEALPACA",
+    "fields": [
+      {"key": "upstreamHost", "type": "string", "default": "", "required": false, "secret": false, "role": "Host"},
+      {"key": "upstreamPort", "type": "int", "default": 32323, "required": false, "secret": false, "role": "Plain"},
+      {"key": "upstreamDeviceNumber", "type": "int", "default": 0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "pollPeriodSeconds", "type": "int", "default": 2, "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
+    "vendor": "remotealpaca",
     "deviceType": "safetymonitor",
     "displayName": "Remote Alpaca Safety Monitor",
     "vendorLabel": "Remote Alpaca",

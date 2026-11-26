@@ -1808,6 +1808,30 @@
                         <small>How often this server reads the other server, 1 to 60 seconds. The safety monitor reads unsafe once the link is lost: at once when the other server refuses the connection, otherwise after 3 poll periods (at least 30 seconds) with no answer. Until then it serves the last answer, and it reports an error after three failed reads in a row.</small>
                     </div>
                   </div>
+                  <div id="remotealpaca-rotator-fields" data-device-type="rotator" style="display: none;">
+                    <h3>Remote Alpaca Rotator</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-rotator-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-rotator-host" name="remoteAlpacaRotatorHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-rotator-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-rotator-port" name="remoteAlpacaRotatorPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-rotator-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-rotator-device-number" name="remoteAlpacaRotatorDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the Rotator device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-rotator-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-rotator-poll-period" name="remoteAlpacaRotatorPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds. IsMoving, Position and MechanicalPosition are the values of the last read; a move reads IsMoving true at once. Halt is sent even while the reads fail.</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),

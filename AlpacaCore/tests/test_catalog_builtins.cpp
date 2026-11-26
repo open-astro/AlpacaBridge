@@ -4318,14 +4318,15 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// remotealpaca ObservingConditions and SafetyMonitor (decision 0023, issue #1753): schema in every build, factory only
-// when built. Each factory is a bind hook: it refuses an upstream that is this server from the listening addresses
-// AlpacaHTTP passes.
+// remotealpaca ObservingConditions, SafetyMonitor and Rotator (decision 0023, issue #1753): schema in every build,
+// factory only when built. Each factory is a bind hook: it refuses an upstream that is this server from the listening
+// addresses AlpacaHTTP passes.
 
 namespace {
 
 const DeviceKey kRemoteAlpacaKey{"remotealpaca", DeviceType::ObservingConditions};
 const DeviceKey kRemoteAlpacaSafetyKey{"remotealpaca", DeviceType::SafetyMonitor};
+const DeviceKey kRemoteAlpacaRotatorKey{"remotealpaca", DeviceType::Rotator};
 
 DeviceConfig remote_config(const std::string& host, std::int64_t port) {
     DeviceConfig config;
@@ -4393,6 +4394,36 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the remotealpaca
     all.set("pollPeriodSeconds", std::int64_t{5});
     all.set("deviceNumber", std::int64_t{4});  // the router's own key, never the upstream's
     const DeviceConfig sanitized = catalog.sanitize(kRemoteAlpacaSafetyKey, all);
+    CHECK(sanitized.has("upstreamHost"));
+    CHECK(sanitized.has("upstreamPort"));
+    CHECK(sanitized.has("upstreamDeviceNumber"));
+    CHECK(sanitized.has("pollPeriodSeconds"));
+    CHECK_FALSE(sanitized.has("deviceNumber"));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the remotealpaca rotator in every build",
+          "[catalog][remotealpaca][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kRemoteAlpacaRotatorKey);
+    REQUIRE(v != nullptr);
+    CHECK(v->display_name == "Remote Alpaca Rotator");
+    CHECK(v->vendor_label == "Remote Alpaca");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_REMOTEALPACA");
+    CHECK_FALSE(v->available);
+    // The same four fields as the other proxied devices: every one takes one upstream.
+    REQUIRE(v->fields.size() == 4);
+    CHECK(std::string_view(v->fields[0].key) == "upstreamHost");
+    CHECK(v->fields[0].role == Role::Host);
+    CHECK(std::string_view(v->fields[1].key) == "upstreamPort");
+    CHECK(std::string_view(v->fields[2].key) == "upstreamDeviceNumber");
+    CHECK(std::string_view(v->fields[3].key) == "pollPeriodSeconds");
+    DeviceConfig all = remote_config("omnisim.local", 32323);
+    all.set("upstreamDeviceNumber", std::int64_t{1});
+    all.set("pollPeriodSeconds", std::int64_t{5});
+    all.set("deviceNumber", std::int64_t{4});  // the router's own key, never the upstream's
+    const DeviceConfig sanitized = catalog.sanitize(kRemoteAlpacaRotatorKey, all);
     CHECK(sanitized.has("upstreamHost"));
     CHECK(sanitized.has("upstreamPort"));
     CHECK(sanitized.has("upstreamDeviceNumber"));
@@ -4472,6 +4503,34 @@ TEST_CASE("Builtin catalog - the remotealpaca safety monitor factory refuses bad
     CHECK(refused.rejection->find("is this server") != std::string::npos);
     CHECK(refused.driver == nullptr);
     CHECK(catalog.bind(kRemoteAlpacaSafetyKey, remote_config("127.0.0.1", 6801), 0, listening_on_6800()).driver !=
+          nullptr);
+}
+
+TEST_CASE("Builtin catalog - the remotealpaca rotator factory refuses bad fields and this server",
+          "[catalog][remotealpaca][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const BindContext context{Source::Api, {}};
+    const auto refusal = [&](const DeviceConfig& config) {
+        return alpacacore::test::alpaca_error_message(
+            [&] { (void)catalog.bind(kRemoteAlpacaRotatorKey, config, 0, context); }, AlpacaError::InvalidValue);
+    };
+    CHECK(refusal(DeviceConfig{}) == "Remote Alpaca rotator requires upstreamHost");
+    CHECK(refusal(remote_config("127.0.0.1", 0)) == "upstreamPort must be from 1 to 65535");
+    DeviceConfig poll = remote_config("127.0.0.1", 32323);
+    poll.set("pollPeriodSeconds", std::int64_t{0});
+    CHECK(refusal(poll) == "pollPeriodSeconds must be from 1 to 60");
+    // In range: a Rotator, built touching no network.
+    const BindResult built = catalog.bind(kRemoteAlpacaRotatorKey, remote_config("127.0.0.1", 32323), 5, context);
+    REQUIRE(built.driver != nullptr);
+    CHECK(built.driver->get_device_type() == DeviceType::Rotator);
+    CHECK_FALSE(built.driver->get_connected());
+    // Decision 0023 rule 4 at configure, as for the other proxied devices.
+    const BindResult refused =
+        catalog.bind(kRemoteAlpacaRotatorKey, remote_config("localhost", 6800), 0, listening_on_6800());
+    REQUIRE(refused.rejection.has_value());
+    CHECK(refused.rejection->find("is this server") != std::string::npos);
+    CHECK(refused.driver == nullptr);
+    CHECK(catalog.bind(kRemoteAlpacaRotatorKey, remote_config("127.0.0.1", 6801), 0, listening_on_6800()).driver !=
           nullptr);
 }
 #endif
