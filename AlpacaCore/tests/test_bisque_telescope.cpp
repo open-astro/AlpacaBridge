@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
@@ -130,6 +131,23 @@ struct ClockedBisque {
     // Virtual time that passed since the connect: it moves only when the
     // driver slept on the clock, so a wait on real time leaves it at zero.
     std::chrono::nanoseconds virtual_elapsed() const { return clock.now() - start; }
+    // A non-zero MoveAxis, then waits until its cap body waits on the clock: a replaced body may still be registered
+    // for a moment, so the rendezvous is the wait count, which only the new body's wait raises (#2651).
+    void move(int axis, double rate) {
+        const auto before = clock.wait_count();
+        REQUIRE_NOTHROW(driver->move_axis(axis, rate));
+        REQUIRE(clock.wait_for_wait_count(before + 1, std::chrono::seconds(5)));
+    }
+    // Moves virtual time by `jump`, then 4 s more in 500 ms steps, each settled: a cap body's verified stop reads once
+    // per step (#2651).
+    void advance_caps(std::chrono::nanoseconds jump) {
+        clock.advance(jump);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        for (int i = 0; i < 8; ++i) {
+            clock.advance(std::chrono::milliseconds(500));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        }
+    }
     ~ClockedBisque() { driver->set_connected(false); }
 };
 
@@ -2175,16 +2193,15 @@ TEST_CASE("Bisque MoveAxis - a move not renewed within 60 s is stopped, and Slew
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
     BisqueLogCount logs("ran 60 s");
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.move(0, 0.5);
     rig.clock.advance(std::chrono::seconds(59));
     poll_now(*rig.driver);
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));  // renews the 60 s
+    rig.move(0, 0.5);  // renews the 60 s
     rig.clock.advance(std::chrono::seconds(59));
     poll_now(*rig.driver);
     CHECK(rig.mount.move_stops.load() == 0);
     CHECK(rig.driver->get_slewing());
-    rig.clock.advance(std::chrono::seconds(2));
-    poll_now(*rig.driver);
+    rig.advance_caps(std::chrono::seconds(2));
     CHECK(rig.mount.move_stops.load() == 1);
     CHECK(rig.mount.move_starts.load() == 2);
     CHECK(contains(slewing_failure(*rig.driver),
@@ -2194,23 +2211,20 @@ TEST_CASE("Bisque MoveAxis - a move not renewed within 60 s is stopped, and Slew
     CHECK(logs.warn_or_worse.load() == 0);
 }
 
-TEST_CASE("Bisque MoveAxis - a cap stop that fails keeps the axis moving, sends no start and is retried 10 s later",
+TEST_CASE("Bisque MoveAxis - a cap stop that fails keeps the axis moving, sends no start and is sent 3 times",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
     rig.mount.fail_move_stop = true;
-    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
-    poll_now(*rig.driver);
-    CHECK(rig.mount.move_stops.load() == 1);
+    rig.mount.drift_ra_step_hours = 0.01;  // the mount keeps moving through every stop
+    rig.move(1, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
+    CHECK(rig.mount.move_stops.load() == 3);  // the guard's 3 stops in 3 s (#2651)
     CHECK(contains(slewing_failure(*rig.driver), "stopping it failed"));
-    poll_now(*rig.driver);
-    poll_now(*rig.driver);
-    CHECK(rig.mount.move_stops.load() == 1);  // no tight retry
-    rig.clock.advance(std::chrono::seconds(10));
-    poll_now(*rig.driver);
-    CHECK(rig.mount.move_stops.load() == 2);
+    rig.advance_caps(std::chrono::seconds(10));
+    CHECK(rig.mount.move_stops.load() == 3);  // no retry from the cap after the third
     CHECK(rig.mount.move_starts.load() == 1);
     rig.mount.fail_move_stop = false;
+    rig.mount.drift_ra_step_hours = 0.0;
 }
 
 // #2651 (decision 0006 rules 3 and 6): a MoveAxis renewal claims its axis before its start command, so the cap of the
@@ -2238,9 +2252,8 @@ TEST_CASE("Bisque MoveAxis - a renewal that lands as the cap fires is not stoppe
 TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motion command and at a reconnect",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
-    poll_now(*rig.driver);
+    rig.move(0, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
     REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
     REQUIRE_NOTHROW(rig.driver->set_connected(false));
     REQUIRE_NOTHROW(rig.driver->set_connected(true));
@@ -2248,9 +2261,8 @@ TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motio
     CHECK(slewing_failure(*rig.driver).empty());
     CHECK_FALSE(rig.driver->get_slewing());
 
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
-    poll_now(*rig.driver);
+    rig.move(0, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
     REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(slewing_failure(*rig.driver).empty());
@@ -2258,15 +2270,13 @@ TEST_CASE("Bisque motion safety - a stored motion failure ends at the next motio
 
     // FindHome and Park are motion commands too.
     REQUIRE_NOTHROW(rig.driver->abort_slew());
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
-    poll_now(*rig.driver);
+    rig.move(0, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
     REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
     REQUIRE_NOTHROW(rig.driver->find_home());
     CHECK(slewing_failure(*rig.driver).empty());
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
-    poll_now(*rig.driver);
+    rig.move(0, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
     REQUIRE_FALSE(slewing_failure(*rig.driver).empty());
     REQUIRE_NOTHROW(rig.driver->park());
     CHECK(slewing_failure(*rig.driver).empty());
@@ -2529,15 +2539,92 @@ TEST_CASE("Bisque AbortSlew - a running MoveAxis is stopped too", "[bisque][tele
 TEST_CASE("Bisque MoveAxis - a cap stop on one axis clears both, since DoCommand(10) stops both",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.move(0, 0.5);
     rig.clock.advance(std::chrono::seconds(30));
-    REQUIRE_NOTHROW(rig.driver->move_axis(1, 0.5));
-    rig.clock.advance(std::chrono::seconds(31));
-    poll_now(*rig.driver);  // axis 0 is past its cap
+    rig.move(1, 0.5);
+    rig.advance_caps(std::chrono::seconds(31));  // axis 0 is past its cap
     CHECK(rig.mount.move_stops.load() == 1);
-    rig.clock.advance(std::chrono::seconds(30));
-    poll_now(*rig.driver);  // axis 1's cap would have passed: no second stop
+    rig.advance_caps(std::chrono::seconds(30));  // axis 1's cap would have passed: no second stop
     CHECK(rig.mount.move_stops.load() == 1);
+}
+
+// #2651: the cap body is joined by a disconnect, so a cap whose verified stop is still running when the session ends
+// writes nothing into the next one.
+TEST_CASE("Bisque MoveAxis - a disconnect during the cap's verified stop writes nothing into the new session",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.move(0, 0.5);
+    rig.clock.advance(std::chrono::seconds(61));  // the cap's first stop goes out; its verify rounds wait
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(rig.mount.move_stops.load() == 1);
+    REQUIRE_NOTHROW(rig.driver->set_connected(false));
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    rig.advance_caps(std::chrono::seconds(1));
+    CHECK(slewing_failure(*rig.driver).empty());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2651: the stop a cap sends is verified, and a mount that keeps moving through it is stopped 3 times, then Slewing
+// raises the kept error and nothing more goes out for this move.
+TEST_CASE("Bisque MoveAxis - a cap stop the mount ignores is sent 3 times and Slewing raises it",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    BisqueLogCount logs("ran 60 s");
+    rig.mount.drift_ra_step_hours = 0.01;
+    rig.move(0, 0.5);
+    rig.advance_caps(std::chrono::seconds(61));
+    CHECK(rig.mount.move_stops.load() == 3);
+    const std::string failure = slewing_failure(*rig.driver);
+    CHECK(contains(failure, "MoveAxis on axis 0 ran 60 s, the longest allowed"));
+    CHECK(contains(failure, alpacacore::util::kStopNotVerifiedText));
+    CHECK(logs.warn_or_worse.load() == 1);
+    CHECK(logs.info.load() == 0);
+    rig.advance_caps(std::chrono::seconds(30));
+    CHECK(rig.mount.move_stops.load() == 3);  // no retry from the cap
+    rig.mount.drift_ra_step_hours = 0.0;
+}
+
+// #2651: a move whose cap the slot cannot start is stopped and the MoveAxis fails (fail closed).
+TEST_CASE("Bisque MoveAxis - a cap the slot cannot start stops the axis and fails the MoveAxis",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    alpacacore::vendor::bisque::set_move_axis_cap_spawn_for_testing(
+        *rig.driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    try {
+        rig.driver->move_axis(0, 0.5);
+        FAIL("Expected the MoveAxis to fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "the cap on the move could not start"));
+    }
+    CHECK(rig.mount.move_starts.load() == 1);
+    CHECK(rig.mount.move_stops.load() == 1);  // the axis is stopped
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2651: the cap stop is DoCommand(10), which stops both axes, so a MoveAxis(axis, 0) that lands as the cap fires gets
+// no cap stop after it (decision 0006 rules 3 and 6): the stop takes the initiator lock the MoveAxis holds, then
+// finds its slot cancelled.
+TEST_CASE("Bisque MoveAxis - a MoveAxis(axis, 0) that lands as the cap fires gets no cap stop after it",
+          "[bisque][telescope][goto-safety][taskclock]") {
+    ClockedBisque rig;
+    rig.move(0, 0.5);
+    rig.clock.advance(std::chrono::seconds(59));
+    poll_now(*rig.driver);
+    // The client's stop goes out first; the cap's 60 s passes while it is on the wire, so the cap wakes behind it.
+    std::atomic<bool> fired{false};
+    rig.mount.on_stop = [&] {
+        if (!fired.exchange(true)) rig.clock.advance(std::chrono::seconds(2));  // 61 s, mid-stop
+    };
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.0));
+    rig.mount.on_stop = nullptr;
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    rig.advance_caps(std::chrono::seconds(1));
+    CHECK(rig.mount.move_stops.load() == 1);  // the client's own
+    CHECK(slewing_failure(*rig.driver).empty());
 }
 
 TEST_CASE("Bisque motion safety - a stop whose session ended meanwhile writes nothing into the new session",
@@ -2572,7 +2659,7 @@ TEST_CASE("Bisque motion safety - a stop whose session ended meanwhile writes no
     rig.mount.ignore_aborts = 0;
 }
 
-TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session ended meanwhile writes nothing",
+TEST_CASE("Bisque motion safety - a slew bound stop or an AbortSlew whose session ended meanwhile writes nothing",
           "[bisque][telescope][goto-safety][taskclock]") {
     ClockedBisque rig;
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
@@ -2586,14 +2673,6 @@ TEST_CASE("Bisque motion safety - a bound stop or an AbortSlew whose session end
     // The 300 s bound: its tick ends quietly.
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     rig.clock.advance(std::chrono::seconds(301));
-    poll_now(*rig.driver);
-    CHECK(slewing_failure(*rig.driver).empty());
-    CHECK_FALSE(rig.driver->get_slewing());
-
-    // The MoveAxis cap: the stop works, and the old session's "stopped it" is not written into the new one. (The
-    // disconnect sends its own stop for the running axis first.)
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
-    rig.clock.advance(std::chrono::seconds(61));
     poll_now(*rig.driver);
     CHECK(slewing_failure(*rig.driver).empty());
     CHECK_FALSE(rig.driver->get_slewing());
@@ -2744,10 +2823,12 @@ TEST_CASE("Bisque sync slew - a MoveAxis cap stop during the slew does not fail 
     rig.mount.slew_polls_needed = 100000;
     auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
     REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    rig.move(0, 0.5);
     advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(61); }, 70);
-    poll_now(*rig.driver);
-    CHECK(rig.mount.move_stops.load() == 1);
+    rig.advance_caps(std::chrono::seconds(0));
+    // The slew still runs, so IsSlewComplete never reads complete and the cap stop cannot verify (fail closed): the
+    // 3 stops of the guard, and a kept failure naming the axis. The slew itself is not failed by it.
+    CHECK(rig.mount.move_stops.load() == 3);
     CHECK(contains(slewing_failure(*rig.driver), "MoveAxis on axis 0"));
     rig.mount.slew_polls_needed = 0;
     CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));

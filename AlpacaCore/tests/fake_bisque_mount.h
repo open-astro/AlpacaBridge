@@ -97,6 +97,7 @@ public:
     std::function<void()> on_slew_command;
     std::function<void()> on_position_read;
     std::function<void()> on_move_start;  // server thread, mid-answer: no wire I/O in it (see above)
+    std::function<void()> on_stop;        // the same, for DoCommand(10) (a MoveAxis stop)
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -130,6 +131,8 @@ public:
     std::atomic<bool> land_on_target{false};
     /// Added to the reported RA by every DirectGuide pulse, as a guide pulse moves the mount.
     std::atomic<double> guide_ra_step_hours{0.0};
+    /// Added to the reported RA by every GetRaDec read, as a mount that keeps moving through a stop does (#2651).
+    std::atomic<double> drift_ra_step_hours{0.0};
     std::atomic<int> abort_commands{0};
     std::atomic<int> ignore_aborts{0};
     std::atomic<bool> fail_abort{false};
@@ -191,6 +194,7 @@ private:
         if (has(command, "DoCommand(10,")) {
             ++move_stops;
             note("MoveStop");
+            if (on_stop) on_stop();
             return fail_move_stop ? "|No error. Error = 1.stop refused#" : "|No error. Error = 0.OK#";
         }
         if (has(command, "sky6StarChart.DocumentProperty(5)") && has(command, "new Date().getTime()")) {
@@ -222,6 +226,7 @@ private:
             if (on_position_read) on_position_read();
             if (position_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(position_ms.load()));
             ++position_reads;
+            if (drift_ra_step_hours.load() != 0.0) ra_hours = ra_hours.load() + drift_ra_step_hours.load();
             return "|No error. Error = 0." + std::to_string(ra_hours.load()) + "," +
                    std::to_string(dec_degrees.load()) + "#";
         }
