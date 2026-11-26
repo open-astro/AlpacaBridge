@@ -1670,8 +1670,8 @@ TEST_CASE("SynScan Link - a bound stop the link loss refused is sent by the next
     auto& driver = rig.driver();
     connect_serial(rig);
     REQUIRE_NOTHROW(driver.move_axis(1, 1.0));
-    REQUIRE(rig.clock().wait_for_waiters(2, kSettle));  // the paused poll and the MoveAxis bound
-    rig.fake().handset->unplug_on(on_command('P'));     // the bound's stop meets the pulled cable
+    REQUIRE(rig.clock().wait_for_waiters(2, kSettle));  // the paused poll and the MoveAxis cap
+    rig.fake().handset->unplug_on(on_command('P'));     // the cap's stop meets the pulled cable
     advance_settled(rig, seconds(61));
     CHECK(rig.fake().handset->unplugged());
     rig.fake().replug();

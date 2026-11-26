@@ -2350,9 +2350,9 @@ TEST_CASE("SynScan async - a deadline stop that fails says the mount may still b
     driver->set_connected(false);
 }
 
-// #2412 (#2396 AB-9): the MoveAxis bound. A MoveAxis that no new non-zero MoveAxis renews within 60 s is stopped by
+// #2412 (#2396 AB-9): the MoveAxis cap. A MoveAxis that no new non-zero MoveAxis renews within 60 s is stopped by
 // the driver on its own slot (no client needs to poll), and Slewing raises it until the next motion command or a
-// reconnect. The status poll is paused, so the bound body is the only thing on the task clock.
+// reconnect. The status poll is paused, so the cap body is the only thing on the task clock.
 namespace {
 
 namespace sc_bound = alpacacore::vendor::synscan;
@@ -2365,14 +2365,17 @@ struct MoveAxisBoundRig {
     std::atomic<int> infos{0};
     std::atomic<int> warns{0};
     alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
-    std::atomic<std::thread::id> bound_thread{};
+    std::atomic<std::thread::id> bound_thread{};  // the cap body spawned last
+    std::atomic<int> bound_spawns{0};
 
     // `model_id` is the handset's `m` reply, set before the connect: 50 equatorial, 160 an AZ GOTO (AltAz).
     explicit MoveAxisBoundRig(unsigned char model_id = 50) {
         st->model_id.store(model_id);
         alpacacore::logging::set_log_sink(
             [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
-                if (component != "SynScan" || message.find("MoveAxis on axis") == std::string_view::npos) return;
+                // The driver's own lines, and the guard's note that a stop could not be sent.
+                const bool driver_line = component == "SynScan" && message.find("MoveAxis on axis") != std::string_view::npos;
+                if (!driver_line && component != "MotionGuards") return;
                 if (level == alpacacore::logging::LogLevel::Info) ++infos;
                 if (level == alpacacore::logging::LogLevel::Warn || level == alpacacore::logging::LogLevel::Error) {
                     ++warns;
@@ -2382,10 +2385,11 @@ struct MoveAxisBoundRig {
         driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         sc_bound::set_status_poll_paused_for_testing(*driver, true);
-        // Names the bound body's thread, so start_move() waits for that body (not any waiter) to park.
-        sc_bound::set_motion_bound_spawn_for_testing(*driver, [this](std::function<void()> body) {
+        // Names the cap body's thread, so start_move() waits for that body (not any waiter) to park.
+        sc_bound::set_move_axis_cap_spawn_for_testing(*driver, [this](std::function<void()> body) {
             std::thread thread(std::move(body));
             bound_thread.store(thread.get_id());
+            ++bound_spawns;
             return thread;
         });
     }
@@ -2401,9 +2405,10 @@ struct MoveAxisBoundRig {
     // paused status poll parks and wakes on the same clock, so a count can be met before the bound body waits, and a
     // step that lands between its read of the clock and its wait moves its deadline.
     void start_move(int axis) {
+        const int spawned = bound_spawns.load();
         REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (bound_thread.load() == std::thread::id{} && std::chrono::steady_clock::now() < deadline) {
+        while (bound_spawns.load() == spawned && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         REQUIRE(clock.wait_for_waiter_thread(bound_thread.load(), std::chrono::seconds(5)));
@@ -2480,8 +2485,8 @@ TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][t
     }
     REQUIRE(rig.bound_thread.load() != std::thread::id{});  // the bound watches the axis
     REQUIRE(rig.clock.wait_for_waiter_thread(rig.bound_thread.load(), std::chrono::seconds(5)));
-    rig.advance(std::chrono::seconds(61));
-    CHECK(rig.warns.load() == 1);  // at 60 s it tried the axis's stop (the dropped link refused it)
+    rig.advance(std::chrono::seconds(65));
+    CHECK(rig.warns.load() == 4);  // at 60 s it tried the axis's stop 3 times (the dropped link refused each), then kept the failure
 }
 
 // A stop the handset answered is known to have landed: only its tracking restore failed. The axis is not put back
@@ -2508,8 +2513,8 @@ TEST_CASE("SynScan MoveAxis - a stop that threw leaves the axis bounded", "[syns
     rig.advance(std::chrono::seconds(30));
     REQUIRE(rig.server.drop_connections());
     CHECK_THROWS_AS(rig.driver->move_axis(1, 0.0), alpacacore::AlpacaException);
-    rig.advance(std::chrono::seconds(61));
-    CHECK(rig.warns.load() == 1);  // the bound still tried the axis's stop
+    rig.advance(std::chrono::seconds(65));
+    CHECK(rig.warns.load() == 4);  // the cap still tried the axis's stop 3 times, then kept the failure
 }
 
 TEST_CASE("SynScan MoveAxis - each non-zero MoveAxis restarts the 60 s bound", "[synscan][telescope][goto-safety]") {
@@ -2531,9 +2536,9 @@ TEST_CASE("SynScan MoveAxis - a bound stop that fails is not retried and sends n
     rig.start_move(0);
     const int starts = rig.starts(kRaMotor);
     REQUIRE(rig.server.drop_connections());  // the stop's write meets a dropped link
-    rig.advance(std::chrono::seconds(61));
+    rig.advance(std::chrono::seconds(65));
     require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
-    CHECK(rig.warns.load() == 1);  // a stop that could not be sent is a device failure
+    CHECK(rig.warns.load() == 4);  // 3 stops that could not be sent are device failures, then the kept failure
     CHECK(rig.infos.load() == 0);
     const int requests = rig.st->requests.load();
     rig.advance(std::chrono::seconds(120));
@@ -2645,7 +2650,7 @@ TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew whi
 TEST_CASE("SynScan MoveAxis - a bound the slot cannot start stops the axis and fails the MoveAxis",
           "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
-    sc_bound::set_motion_bound_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+    sc_bound::set_move_axis_cap_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
     try {
@@ -3118,7 +3123,7 @@ TEST_CASE("SynScan async - a refused start whose stop the mount ignores leaves S
 TEST_CASE("SynScan MoveAxis - a 60 s bound stop the mount ignores fails after 3 stops",
           "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
-    rig.start_move(1);
+    rig.start_move(0);  // RA: the fake handset drifts the RA field only
     rig.advance(std::chrono::seconds(55));
     rig.st->drift_counts.store(1000);  // the mount keeps moving through every stop
     for (int i = 0; i < 80; ++i) {     // 20 s in 250 ms steps, polling after each: the verify's reads land in rounds
@@ -3126,7 +3131,7 @@ TEST_CASE("SynScan MoveAxis - a 60 s bound stop the mount ignores fails after 3 
         REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(10)));
         sc_bound::poll_status_now_for_testing(*rig.driver);
     }
-    CHECK(rig.stops(kDecMotor) == 3 * kStopCommands);
+    CHECK(rig.stops(kRaMotor) == 3 * kStopCommands);
     std::string message;
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
     CHECK(message.find(kStopNotVerified) != std::string::npos);
