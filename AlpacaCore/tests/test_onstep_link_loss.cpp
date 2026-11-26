@@ -61,6 +61,7 @@
 namespace {
 
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::SilentListener;
 using alpacacore::vendor::onstep::ConnectionInfo;
 using alpacacore::vendor::onstep::ConnectionType;
 using alpacacore::vendor::onstep::OnStepProtocolWrapper;
@@ -1617,49 +1618,6 @@ Thrown thrown_by(const std::function<void()>& fn) {
     t.took = std::chrono::steady_clock::now() - start;
     return t;
 }
-
-// A loopback listener that answers no new connect: its accept queue (backlog 0) is filled by connects that are never
-// accepted, so the kernel drops the next SYN and a connect to it waits, as one to a controller that is off the
-// network does. ok() is false when the queue could not be seen to fill.
-class SilentListener {
-public:
-    SilentListener() {
-        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        socklen_t len = sizeof(addr);
-        if (listen_fd_ < 0 || ::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-            ::listen(listen_fd_, 0) != 0 || ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-            return;
-        }
-        port_ = ntohs(addr.sin_port);
-        for (int i = 0; i < 8 && !full_; ++i) {
-            const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-            if (fd < 0) return;
-            fillers_.push_back(fd);
-            (void)::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-            struct pollfd pfd {};
-            pfd.fd = fd;
-            pfd.events = POLLOUT;
-            full_ = ::poll(&pfd, 1, 300) == 0;  // this one got no answer: the queue is full
-        }
-    }
-    ~SilentListener() {
-        for (const int fd : fillers_) ::close(fd);
-        if (listen_fd_ >= 0) ::close(listen_fd_);
-    }
-    SilentListener(const SilentListener&) = delete;
-    SilentListener& operator=(const SilentListener&) = delete;
-    bool ok() const { return full_; }
-    int port() const { return port_; }
-
-private:
-    int listen_fd_ = -1;
-    int port_ = 0;
-    bool full_ = false;
-    std::vector<int> fillers_;
-};
 
 const alpacacore::catalog::DeviceKey kOnStepTelescope{"onstep", alpacacore::DeviceType::Telescope};
 
