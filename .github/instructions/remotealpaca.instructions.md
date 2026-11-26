@@ -72,4 +72,6 @@ counts calls. The ObservingConditions tests (`test_remotealpaca_observingconditi
 `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
 (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`) with the poll on `FakeTaskClock`.
 
-ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI.
+ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row
+(`scripts/conformu_fake_runs.tsv`, #2696) runs the driver over `AlpacaUpstreamScript` through `FakeHttpClient`
+(`conformu_observingconditions_factories.h`), with the poll on the real task clock; it is fake evidence only.

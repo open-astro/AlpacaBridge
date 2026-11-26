@@ -9,8 +9,8 @@
 # `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
-# Pro flat panel and the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches since slice 6; a row runs
+# Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
+# switches and the remotealpaca ObservingConditions since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -55,6 +55,8 @@ on:
       - "AlpacaCore/src/vendors/gphoto/**"
       - "AlpacaCore/include/alpacacore/vendor/gphoto/**"
       - "scripts/build_bundled_gphoto.sh"
+      - "AlpacaCore/src/vendors/remotealpaca/**"
+      - "AlpacaCore/include/alpacacore/vendor/remotealpaca/**"
       # The fakes, clocks and ConformU factories that fake_conformu_server
       # includes.
       - "AlpacaCore/tests/fake_skywatcher_*.h"
@@ -88,7 +90,11 @@ on:
       - "AlpacaCore/tests/fake_gphoto_sdk.h"
       - "AlpacaCore/tests/locked_gphoto_sdk.h"
       - "AlpacaCore/tests/fake_raw_decoder.h"
+      - "AlpacaCore/tests/conformu_observingconditions_factories.h"
+      - "AlpacaCore/tests/fake_http_client.h"
+      - "AlpacaCore/tests/alpaca_upstream_script.h"
       - "AlpacaCore/tests/fake_pty_write.h"
+      - "AlpacaCore/tests/connect_hold_gate.h"
       - "AlpacaCore/tests/fake_task_clock.h"
       # The test-only server target and the CMake that builds it.
       - "AlpacaHTTP/tests/fake_conformu_server.cpp"
@@ -102,6 +108,7 @@ on:
       - "AlpacaCore/include/alpacacore/rotator_driver.h"
       - "AlpacaCore/include/alpacacore/covercalibrator_driver.h"
       - "AlpacaCore/include/alpacacore/switch_driver.h"
+      - "AlpacaCore/include/alpacacore/observingconditions_driver.h"
       - "AlpacaCore/include/alpacacore/alpaca_defs.h"
       - "AlpacaCore/include/alpacacore/alpaca_errors.h"
       - "AlpacaCore/include/alpacacore/alpacadriver.h"
@@ -192,7 +199,7 @@ jobs:
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
-                         "altair": "Altair"}
+                         "altair": "Altair", "remotealpaca": "Remote Alpaca"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
           # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
           # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
@@ -204,7 +211,9 @@ jobs:
                           "AlpacaCore/tests/locked_iguider_v4l2.h": "ioptron",
                           "AlpacaCore/tests/locked_gphoto_sdk.h": "gphoto",
                           "AlpacaCore/tests/fake_raw_decoder.h": "gphoto",
-                          "scripts/build_bundled_gphoto.sh": "gphoto"}
+                          "scripts/build_bundled_gphoto.sh": "gphoto",
+                          "AlpacaCore/tests/conformu_observingconditions_factories.h": "remotealpaca",
+                          "AlpacaCore/tests/alpaca_upstream_script.h": "remotealpaca"}
           changed_path = os.path.join(os.environ["RUNNER_TEMP"], "changed.txt")
           changed = None
           if os.path.exists(changed_path):
