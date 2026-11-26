@@ -643,19 +643,44 @@ TEST_CASE("ZWO mount network - cancellation during Auto discovery prevents final
 }
 
 // Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() calling a blocking ::connect() on the explicit-host
-// path (the Connect waits out the kernel's TCP timeout, about 127 s, holding the wrapper mutex)
-TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers ends within 10 s", "[zwo][network]") {
+// path (the Connect waits out the kernel's TCP timeout, about 127 s, holding the wrapper mutex), or dropping the reason
+TEST_CASE("ZWO mount network - an explicit Connect to a mount that never answers fails within 7 s, saying why",
+          "[zwo][network]") {
     auto silent = std::make_unique<alpacacore::test::SilentListener>();
     REQUIRE(silent->ok());  // the accept queue filled: a connect to it gets no answer
     ZWOMountProtocolWrapper wrapper;
+    const auto start = std::chrono::steady_clock::now();
     auto connected =
         std::async(std::launch::async, [&] { return wrapper.connect(network_info("127.0.0.1", silent->port())); });
-    const bool ended = connected.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    const bool ended = connected.wait_for(std::chrono::milliseconds(8500)) == std::future_status::ready;
+    const auto took = std::chrono::steady_clock::now() - start;
     CHECK(ended);
     // Closing the listener makes the kernel refuse the next SYN retry, so a connect still pending returns and the
     // case can join it.
     silent.reset();
     CHECK_FALSE(connected.get());
+    CHECK(took >= std::chrono::milliseconds(6900));
+    const std::string error = wrapper.last_connect_error();
+    INFO("last_connect_error: " << error);
+    CHECK(error.find("could not connect to 127.0.0.1:") != std::string::npos);
+    CHECK(error.find("no answer within 7000 ms") != std::string::npos);
+}
+
+// Falsified by: zwo_mount_protocol_wrapper.cpp connect_network() not passing closing_ to the bounded connect (a
+// Disconnect waits out the 7 s connect deadline)
+TEST_CASE("ZWO mount network - a cancel ends an explicit Connect to a mount that never answers", "[zwo][network]") {
+    alpacacore::test::SilentListener silent;
+    REQUIRE(silent.ok());
+    ZWOMountProtocolWrapper wrapper;
+    const auto start = std::chrono::steady_clock::now();
+    auto connected =
+        std::async(std::launch::async, [&] { return wrapper.connect(network_info("127.0.0.1", silent.port())); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    wrapper.cancel_pending_io();
+    CHECK(connected.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK_FALSE(connected.get());
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    CHECK(wrapper.last_connect_error().find("cancelled") != std::string::npos);
 }
 
 #endif  // !_WIN32

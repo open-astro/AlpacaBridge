@@ -97,6 +97,12 @@ POSIX serial and socket code has several easy-to-get-wrong patterns that must no
 be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
 included inside the existing `#ifndef _WIN32` branches):
 
+- **`util::connect_tcp()`** (`util/tcp_connect.h`) for every outbound TCP connect in a
+  wrapper, or `util::lookup_tcp_host()` + `util::connect_tcp_address()` when the address
+  is needed between the two (ZWO's endpoint claim). The host name lookup and the
+  non-blocking connect end by one deadline, a cancel flag is checked every 50 ms, and
+  every failure has a reason text. A bare blocking `connect()` to a host that never
+  answers waits the kernel's ~127 s TCP timeout with the wrapper's lock held (#2711).
 - **`util::write_all(fd, data, len)`** instead of a bare `write()`. `write()` may
   satisfy only part of the payload (`0 < n < len`) or be interrupted (`EINTR`);
   treating any non-negative return as success silently drops trailing bytes (e.g.

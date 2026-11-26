@@ -17,6 +17,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/tcp_connect.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -75,6 +76,8 @@ constexpr std::size_t kMaxReplyLen = 65536;
 constexpr int kOwedReplyBoundMs = 600;
 // Once the owed reply's terminator has arrived, the fence waits this long for the line to go quiet.
 constexpr int kOwedReplyQuietMs = 30;
+// An explicit network Connect ends within this, as the SynScan, Celestron, iOptron and Bisque connects do (#2711).
+constexpr int kNetworkConnectTimeoutMs = 7000;
 
 // The twelve hexadecimal characters ZWO ASCOM 6.5.37 GetMountSN validates from :GMA#.
 bool is_zwo_mount_serial(const std::string& reply) {
@@ -460,17 +463,13 @@ private:
     }
 };
 
-bool resolve_network_endpoint(const std::string& host, int port, sockaddr_in& address) {
-    if (port < 1 || port > 65535) return false;
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* result = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) return false;
-    address = *reinterpret_cast<sockaddr_in*>(result->ai_addr);
-    address.sin_port = htons(static_cast<uint16_t>(port));
-    freeaddrinfo(result);
-    return true;
+// The IPv4 address the endpoint claim is keyed on, looked up by @p deadline (#2711). "" or why there is none.
+std::string resolve_network_endpoint(const std::string& host, int port, sockaddr_in& address,
+                                     const util::TcpDeadline& deadline, const std::atomic<bool>* cancel = nullptr) {
+    const util::TcpLookup lookup = util::lookup_tcp_host(host, port, AF_INET, deadline, cancel);
+    if (!lookup.error.empty()) return lookup.error;
+    std::memcpy(&address, &lookup.addresses.front().storage, sizeof(address));
+    return "";
 }
 
 // Issue #1202: whether the scan may probe @p port. A port another connected
@@ -559,48 +558,26 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     (void)timeout_ms;
     return "";
 #else
+    const auto deadline = util::TcpDeadline::in(timeout_ms);
     sockaddr_in addr{};
-    if (!resolve_network_endpoint(host, port, addr)) return "";
+    if (!resolve_network_endpoint(host, port, addr, deadline).empty()) return "";
     NetworkEndpointClaim claim;
     if (claim.claim(addr, NetworkEndpointClaim::Kind::Probe) != NetworkEndpointClaim::Result::Acquired) {
         ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping held network endpoint " + host + ":" + std::to_string(port));
         return "";
     }
-    const int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    util::TcpAddress address;
+    std::memcpy(&address.storage, &addr, sizeof(addr));
+    address.length = sizeof(addr);
+    const util::TcpConnectResult connected = util::connect_tcp_address(address, deadline);
+    if (connected.fd < 0) {
         return "";
     }
+    const int sock = connected.fd;
     struct SocketCloser {
         int fd;
         ~SocketCloser() { ::close(fd); }
     } closer{sock};  // closes before the endpoint claim releases, including on exceptions
-
-    // Non-blocking connect so an unreachable host fails within the probe timeout.
-    if (!util::set_nonblocking(sock)) {
-        return "";
-    }
-    const int rc = ::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (rc < 0 && errno != EINPROGRESS) {
-        return "";
-    }
-    fd_set wfds;
-    FD_ZERO(&wfds);
-    FD_SET(sock, &wfds);
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
-    if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
-        return "";
-    }
-    int so_error = 0;
-    socklen_t len = sizeof(so_error);
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
-        return "";
-    }
-    // Restore blocking mode (SO_RCVTIMEO below bounds the read loop).
-    if (!util::clear_nonblocking(sock)) {
-        return "";
-    }
 
     // Bound the receive side so recv() cannot block past the probe timeout:
     // a peer that accepts the TCP connection but never answers :GVP (firewalled
@@ -1304,8 +1281,17 @@ private:
         ioctlsocket(socket_handle_, FIONBIO, &mode);
         return true;
 #else
+        const std::string endpoint = host + ":" + std::to_string(port);
+        const auto fail = [&](const std::string& why) {
+            last_connect_error_ = "could not connect to " + endpoint + ": " + why;
+            ALPACA_LOG_ERROR("ZWO", "Network connect failed: " + last_connect_error_);
+            return false;
+        };
+        // One deadline for the lookup, the claim wait and the TCP connect (#2711).
+        const auto deadline = util::TcpDeadline::in(kNetworkConnectTimeoutMs);
         sockaddr_in addr{};
-        if (!resolve_network_endpoint(host, port, addr)) return false;
+        const std::string lookup_error = resolve_network_endpoint(host, port, addr, deadline, &closing_);
+        if (!lookup_error.empty()) return fail(lookup_error);
         auto claim = std::make_unique<NetworkEndpointClaim>();
         const auto result = claim->claim(
             addr, automatic ? NetworkEndpointClaim::Kind::AutoLink : NetworkEndpointClaim::Kind::ExplicitLink,
@@ -1325,16 +1311,12 @@ private:
             last_connect_error_ = "ZWO mount connection cancelled";
             return false;
         }
-        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (socket_fd_ < 0) {
-            return false;
-        }
-
-        if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
+        util::TcpAddress address;
+        std::memcpy(&address.storage, &addr, sizeof(addr));
+        address.length = sizeof(addr);
+        const util::TcpConnectResult connected = util::connect_tcp_address(address, deadline, &closing_);
+        if (connected.fd < 0) return fail(connected.error);
+        socket_fd_ = connected.fd;
 
         configure_network_timeouts();
         network_claim_ = std::move(claim);

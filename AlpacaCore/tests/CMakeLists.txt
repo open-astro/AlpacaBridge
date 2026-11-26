@@ -42,6 +42,8 @@ set(TEST_SOURCES
     test_unique_id.cpp
     test_polled_state.cpp
     test_link_epoch.cpp
+    # The bounded outbound TCP connect the mount wrappers share (#2711).
+    test_tcp_connect.cpp
     # SDK-free ZWO open bookkeeping (issue #1500): runs on every host.
     test_zwo_shared_open_table.cpp
     test_state_snapshot.cpp

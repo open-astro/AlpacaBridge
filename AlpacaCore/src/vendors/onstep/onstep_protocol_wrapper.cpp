@@ -19,6 +19,7 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/tcp_connect.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1227,60 +1228,17 @@ private:
     // Network path is a test-seam only (see ConnectionType::Network) —
     // exercised by the concurrency stress test against FakeMountServer, never
     // reachable through AlpacaHTTP's router or web UI for OnStep.
+    // The TCP command channel: the lookup and the connect end within kConnectTimeoutMs (#2711), and a failure
+    // names the host, the port and why in last_connect_error_.
     bool connect_network(const std::string& host, int port) {
         constexpr int kConnectTimeoutMs = 7000;
-        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (socket_fd_ < 0) {
+        const util::TcpConnectResult connected = util::connect_tcp(host, port, kConnectTimeoutMs, nullptr, {}, AF_INET);
+        if (connected.fd < 0) {
+            last_connect_error_ = "could not connect to " + host + ":" + std::to_string(port) + ": " + connected.error;
+            ALPACA_LOG_ERROR("OnStep", "Network connect failed: " + last_connect_error_);
             return false;
         }
-
-        sockaddr_in addr{};
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
-        if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-            addrinfo hints{};
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-            addrinfo* result = nullptr;
-            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
-                close(socket_fd_);
-                socket_fd_ = -1;
-                return false;
-            }
-            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-            freeaddrinfo(result);
-        }
-
-        if (!util::set_nonblocking(socket_fd_)) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
-        int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-        if (rc < 0 && errno != EINPROGRESS) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
-        if (rc < 0) {
-            struct pollfd pfd {};
-            pfd.fd = socket_fd_;
-            pfd.events = POLLOUT;
-            int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
-            int sock_err = 0;
-            socklen_t len = sizeof(sock_err);
-            if (poll_rc <= 0 || getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0 || sock_err != 0) {
-                close(socket_fd_);
-                socket_fd_ = -1;
-                return false;
-            }
-        }
-        if (!util::clear_nonblocking(socket_fd_)) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
+        socket_fd_ = connected.fd;
 
         timeval timeout{};
         timeout.tv_sec = 0;
