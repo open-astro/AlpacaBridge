@@ -475,6 +475,112 @@ TEST_CASE("enforce_motion_deadline - a MoveAxis past its cap whose stop does not
     CHECK(mount.stops == 3);
 }
 
+// ── A timed motion's own slot body: run_motion_deadline ──────────────────────────────────────────────────────
+
+// #2651: the MoveAxis cap of every mount runs in a slot of its own, one body per MoveAxis, through one shared body.
+// Falsified by: a body that sends its stop before the deadline, or one that raises without the verified stop.
+TEST_CASE("run_motion_deadline - waits until the deadline, then stops, verifies and raises", "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) {
+        run_motion_deadline(ctx, clock, deadline, hooks, "MoveAxis on axis 0 ran 60 s, the longest allowed");
+    });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(kMaxMoveAxisDuration - 1ms);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    CHECK(mount.stops == 0);
+    clock.advance(1ms);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    CHECK(mount.stops == 1);
+    step_until_returned(clock, slot);
+    REQUIRE(slot.last_failure().has_value());
+    CHECK(*slot.last_failure() == "MoveAxis on axis 0 ran 60 s, the longest allowed");
+    CHECK(mount.stops == 1);
+}
+
+// Falsified by: a body that sends its stop at the deadline after MoveAxis(axis, 0), AbortSlew or a disconnect cancelled
+// it, so a stop reaches a mount that a newer command owns.
+TEST_CASE("run_motion_deadline - a body cancelled before its deadline sends nothing and raises nothing",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) { run_motion_deadline(ctx, clock, deadline, hooks, "expired"); });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(30s);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    slot.cancel();
+    clock.advance(kMaxMoveAxisDuration);
+    slot.cancel_all_and_join();
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
+// Falsified by: a renewal (a new non-zero MoveAxis starts a new body with a new deadline) that leaves the old body's
+// deadline armed, so a renewed MoveAxis is stopped 60 s after the first call instead of the last.
+TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only the new deadline stops the mount",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    const auto start_move = [&] {
+        HoldWindow deadline;
+        deadline.arm(clock.now(), kMaxMoveAxisDuration);
+        slot.start([&clock, &hooks, deadline](OperationContext& ctx) {
+            run_motion_deadline(ctx, clock, deadline, hooks, "renewed MoveAxis ran 60 s");
+        });
+    };
+    start_move();
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(40s);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    start_move();  // the renewal at 40 s
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(21s);  // 61 s: the first deadline has passed
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    CHECK(mount.stops == 0);
+    clock.advance(39s);  // 100 s: the renewal's deadline
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    CHECK(mount.stops == 1);
+    step_until_returned(clock, slot);
+    REQUIRE(slot.last_failure().has_value());
+    CHECK(*slot.last_failure() == "renewed MoveAxis ran 60 s");
+}
+
+// Falsified by: a body that sends its stop after another motion command claimed the mount by bumping the shared
+// generation (decision 0006 rule 3: a slew supersedes the MoveAxis without a join).
+TEST_CASE("run_motion_deadline - a body superseded through the shared generation sends nothing at its deadline",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) { run_motion_deadline(ctx, clock, deadline, hooks, "expired"); });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    generation.bump();  // a slew claims the mount; a bump elsewhere does not wake the body
+    clock.advance(kMaxMoveAxisDuration);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    slot.cancel_all_and_join();
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
 // ── Landing gate ──────────────────────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("LandingGate - landed only after two reads 500 ms apart agree within 30 arcsec", "[motion-guards]") {
