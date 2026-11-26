@@ -3195,6 +3195,78 @@ TEST_CASE("QHY Camera Driver - StartExposure is refused while a cancelled body s
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
+// #2721 (decision 0020 rule 5): GetQHYCCDSingleFrame has no timeout and blocks until the exposure ends, and
+// cancel_exposure() need not wake it. The body polls GetQHYCCDExposureRemaining on the task clock and calls the frame
+// call only once the exposure is over, so an AbortExposure or a Disconnect during the exposure returns without that
+// call ever being released. The gate below holds the frame call and the cancel does not release it.
+namespace {
+
+// Runs `stop` on a helper thread; true when it returned within 5 s of real time without the gate being released.
+bool stop_returns_while_frame_held(FakeTaskClock& clock, SdkGate& gate, const std::function<void()>& stop) {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    std::thread t([&] {
+        stop();
+        std::lock_guard<std::mutex> lock(m);
+        done = true;
+        cv.notify_all();
+    });
+    JoinPumped joiner{clock, t, &gate};
+    std::unique_lock<std::mutex> lock(m);
+    return cv.wait_for(lock, seconds(5), [&] { return done; });
+}
+
+}  // namespace
+
+TEST_CASE("QHY Camera Driver - AbortExposure during a long exposure does not wait for the frame call (#2721)",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    fake.exposure_remaining = 3'600'000;  // the SDK reports the exposure still running
+    gate.arm(fake, "get_single_frame");  // the cancel does not release it
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    driver->start_exposure(3600.0, true);
+    // The body is parked: inside the frame call, or in its wait on the task clock.
+    REQUIRE(eventually([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
+    clock.advance(seconds(10));  // mid-exposure
+
+    CHECK(stop_returns_while_frame_held(clock, gate, [&] { driver->abort_exposure(); }));
+    CHECK_FALSE(gate.entered.load());
+    CHECK(fake.call_count("get_single_frame") == 0);
+    CHECK(fake.call_count("cancel_exposure") >= 1);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+}
+
+TEST_CASE("QHY Camera Driver - Disconnect during a long exposure does not wait for the frame call (#2721)",
+          "[qhy][camera][unit][taskclock]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    fake.exposure_remaining = 3'600'000;  // the SDK reports the exposure still running
+    gate.arm(fake, "get_single_frame");  // the cancel does not release it
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    driver->start_exposure(3600.0, true);
+    REQUIRE(eventually([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
+    clock.advance(seconds(10));  // mid-exposure
+
+    CHECK(stop_returns_while_frame_held(clock, gate, [&] { driver->set_connected(false); }));
+    CHECK_FALSE(gate.entered.load());
+    CHECK(fake.call_count("get_single_frame") == 0);
+    CHECK(fake.call_count("cancel_exposure") >= 1);
+    CHECK_FALSE(driver->get_connected());
+}
+
 // Decision 0020 rule 2 (#2259 step 5): a second StartExposure while one exposes is refused; it neither cancels nor
 // re-arms the exposure in flight, which goes on to deliver its frame. The driver used to supersede it.
 TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is InvalidOperation and arms nothing",
