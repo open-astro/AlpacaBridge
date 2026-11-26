@@ -1,0 +1,3 @@
+### Changed (internal)
+
+- **AlpacaHTTP router: the Telescope method dispatch moves to its own source**, issue #2081, the last of the ten device types. `Router::dispatch_telescope_method` now lives in `AlpacaHTTP/src/http/routes/telescope_routes.cpp`, byte-identical; `dispatch_device_method` stays in the router. The three router helpers it calls (`require_can_slew`, `wait_for_slew_end`, `reject_cross_origin_request`) are declared once in the internal `src/http/router_helpers.h` and still defined only in `router.cpp`. Decision 0007 rule 2's scope now names the `routes/` sources too. No request, response or error text changes.

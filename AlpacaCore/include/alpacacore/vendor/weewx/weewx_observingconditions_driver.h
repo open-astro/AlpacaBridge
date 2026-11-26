@@ -13,9 +13,10 @@
 #pragma once
 
 #include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/util/http_client.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <chrono>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -40,14 +41,6 @@ struct WeeWxCurrentValues {
 };
 
 /**
- * @brief Fetches the WeeWX JSON feed body for `url`, throwing on failure.
- *
- * Production uses the libcurl implementation; tests inject a scripted one.
- * It runs on the connect thread and the poll thread, so it must be thread-safe.
- */
-using WeeWxFetcher = std::function<std::string(const std::string& url, std::chrono::milliseconds timeout)>;
-
-/**
  * @brief Parse the WeeWX current JSON payload into Alpaca ObservingConditions units.
  *
  * This parser is intentionally tolerant of invalid JSON outside the current block.
@@ -60,19 +53,30 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload);
  *
  * @param device_number Alpaca device number
  * @param config HTTP configuration for WeeWX JSON feed
+ * @param clock The poll's wait, the link-fault stamp and the loss bound (decision 0005; a test seam, the
+ *              clock must outlive the driver)
  * @return Unique pointer to observing conditions driver
  */
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
-    int device_number,
-    const WeeWxHttpConfig& config);
+    int device_number, const WeeWxHttpConfig& config, util::TaskClock& clock = util::default_task_clock());
 
 /**
- * @brief As above, but fetching the feed through `fetcher` instead of libcurl.
+ * @brief As above, but fetching the feed through `http` instead of the libcurl client.
  *
- * A test seam: the production overload delegates here with the libcurl fetch.
+ * A test seam (decision 0015): the production overload delegates here with util::make_curl_http_client(). The
+ * driver calls `http` from the connect thread and the poll thread, so it must be thread-safe.
  */
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
-                                                                            WeeWxFetcher fetcher);
+                                                                            std::shared_ptr<util::HttpClient> http);
+
+/**
+ * @brief As above, with the poll, the link-fault stamp and the loss bound on `clock` (a test seam; the clock must
+ *        outlive the driver).
+ */
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            std::shared_ptr<util::HttpClient> http,
+                                                                            util::TaskClock& clock);
 
 } // namespace alpacacore::vendor::weewx

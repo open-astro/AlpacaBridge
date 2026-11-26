@@ -24,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_astroasis_hid.h"
 #include "fake_task_clock.h"
@@ -194,8 +196,9 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
         std::lock_guard<std::mutex> lock(state->mutex);
         state->position = 5555;
     }
-    act_during_poll(state, rig.clock(), 0x36,
-                    [&] { CHECK_THROWS_AS(rig.driver().move(2000), alpacacore::AlpacaException); });
+    act_during_poll(state, rig.clock(), 0x36, [&] {
+        require_alpaca_error([&] { rig.driver().move(2000); }, alpacacore::AlpacaError::InvalidValue);
+    });
     const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     rig.tick();
@@ -220,7 +223,7 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
         state->position = 5555;
     }
     act_during_poll(state, rig.clock(), 0x37,
-                    [&] { CHECK_THROWS_AS(rig.driver().halt(), alpacacore::AlpacaException); });
+                    [&] { require_alpaca_error([&] { rig.driver().halt(); }, alpacacore::AlpacaError::InvalidValue); });
     const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     rig.tick();
@@ -254,7 +257,7 @@ TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the 
     AstroasisRig rig;
     const auto& state = rig.fake().state;
     state->fail_config = true;
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
     CHECK_FALSE(rig.driver().get_connected());
     {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -388,7 +391,7 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
     rig.clock().advance(std::chrono::seconds(31));
     REQUIRE(rig.clock().wait_for_woken_settled(kBound));
     CHECK_FALSE(rig.driver().get_connected());
-    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
     try {
         (void)rig.driver().get_is_moving();
         FAIL("expected a throw");
@@ -510,7 +513,7 @@ TEST_CASE("Astroasis Focuser Driver - disconnect stops the poll", "[astroasis][f
     const int reads = state->status_reads;
     rig.clock().advance(kTick);
     CHECK(state->status_reads == reads);
-    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Astroasis Focuser Driver - Defaults", "[astroasis][focuser][unit]") {
@@ -681,7 +684,7 @@ TEST_CASE("Astroasis Focuser Driver - a getter after a successful connect never 
     state->fail_status = true;
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK(state->closes == 1);  // the refused connect released the transport
     state->fail_status = false;
@@ -706,4 +709,108 @@ TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once 
     rig.tick();
     CHECK_FALSE(rig.driver().get_connected());
     require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1757 slice 2a: the tier-2 contract sweep cannot hold this driver's connect open (FakeHidTransport answers
+// in-process with no delay), so the sweep's "Disconnect during a connect returns at once" case runs here over the
+// fake's gate instead: the connect's first status exchange (0x32) is held. Before, disconnect() joined the connect
+// thread and tore down before it returned (commit 3ded11bd), so it waited for the held exchange.
+// Falsified by: astroasis_focuser_driver.cpp disconnect() going back to stop_connection_thread() plus
+// set_connected(false).
+TEST_CASE("Astroasis Focuser Driver - a Disconnect during a connect returns at once (#1757)",
+          "[astroasis][focuser][unit][issue1757]") {
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0x32;
+        state->gate_entered = false;
+    }
+    rig.driver().connect();
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    REQUIRE(rig.driver().get_connecting());
+    // The test opens the gate once it has read Connecting, not after a fixed time: a timed opener could fire in a
+    // scheduler pause before disconnect() ran, and Connecting then read false with a correct driver. A disconnect
+    // that waits for the connect never lets the test get there, so the opener also fires on its own after
+    // ConnectHoldGate::kCap (connect_hold_gate.h): that disconnect returns late and fails the timing check.
+    std::promise<void> checked;
+    std::thread opener([&state, done = checked.get_future()] {
+        (void)done.wait_for(alpacacore::test::ConnectHoldGate::kCap);
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->gate_cmd = 0;
+        }
+        state->cv.notify_all();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver().disconnect();
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = rig.driver().get_connecting();
+    checked.set_value();
+    opener.join();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver().get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(rig.driver().get_connecting());
+    CHECK_FALSE(rig.driver().get_connected());
+}
+
+// Falsified by: fake_astroasis_hid.h:advance_travel() jumps position to travel_target at once (the mid-travel check
+// fails) or never clears `moving` (the arrival checks fail).
+TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Move travels to its target over time",
+          "[astroasis][focuser][unit]") {
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    state->travel_rate = 1000;
+    REQUIRE(rig.connect());
+
+    rig.driver().move(5000);  // 3766 steps from 1234: 3.8 s at this rate
+    // real time the fake's motor travels first
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    rig.tick();
+    CHECK(rig.driver().get_is_moving());
+    CHECK(rig.driver().get_position() > 1234);
+    CHECK(rig.driver().get_position() < 5000);
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->travel_rate = 1000000;  // the rest of the way in a few ms
+    }
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver().get_is_moving() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        rig.tick();
+    }
+    CHECK_FALSE(rig.driver().get_is_moving());
+    CHECK(rig.driver().get_position() == 5000);
+}
+
+// Falsified by: fake_astroasis_hid.h case 0x37 clears `moving` without first calling advance_travel() (the halt
+// leaves the position at its start).
+TEST_CASE("Astroasis Focuser Driver - FakeHidTransport travel mode: a Halt stops the travelling motor where it is",
+          "[astroasis][focuser][unit]") {
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    state->travel_rate = 1000;
+    REQUIRE(rig.connect());
+
+    rig.driver().move(5000);
+    // real time the motor travels before the halt
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    rig.driver().halt();
+    rig.tick();
+    CHECK_FALSE(rig.driver().get_is_moving());
+    const int stopped = rig.driver().get_position();
+    CHECK(stopped > 1234);
+    CHECK(stopped < 5000);
+    // real time a running motor would travel
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    rig.tick();
+    CHECK(rig.driver().get_position() == stopped);
 }

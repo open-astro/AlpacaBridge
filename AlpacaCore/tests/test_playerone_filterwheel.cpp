@@ -131,7 +131,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - connects over an injected SDK",
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(fake.open_count() == 1);
-    CHECK(driver->get_name() == "FakePhoenixWheel");
+    CHECK(driver->get_name() == "Player One FakePhoenixWheel");
     CHECK(driver->get_unique_id() == "PlayerOne_PW_SN_fake-pw-41");
     // Aliases and offsets come from the wheel; an empty alias gets the ASCOM default.
     CHECK(driver->get_names() == std::vector<std::string>{"Slot1", "Slot2", "Filter 3", "Slot4", "Slot5"});
@@ -181,6 +181,31 @@ TEST_CASE("Player One PW Filter Wheel Driver - Position is -1 while the wheel mo
     // Moving to the slot the wheel is already on never reports motion.
     driver->set_position(3);
     CHECK(driver->get_position() == 3);
+    driver->set_connected(false);
+}
+
+// Required case 7 (issue #1863). Position is NotConnected while disconnected, the wheel's slot while idle, the ASCOM
+// moving sentinel -1 while a move runs and the target once it ends; a reconnect reads the slot the wheel stayed on.
+// The moving window alone is also pinned by "Position is -1 while the wheel moves" above; this case runs the whole
+// cycle across a Disconnect and a Connect.
+TEST_CASE("Player One PW Filter Wheel Driver - State machine", "[playerone][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+    fake.set_moving_reads(2);
+    driver->set_position(4);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 4);
+    CHECK(driver->get_position() == 4);
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 4);
     driver->set_connected(false);
 }
 
@@ -385,7 +410,8 @@ TEST_CASE("Player One PW Filter Wheel Driver - a reconnect drops the cached Posi
 
 // Falsified by: playerone_filterwheel_driver.cpp reading Position without the cache's fault threshold (the
 // third failed read throws the raw scripted failure, not "Player One PW communications compromised"), or serving
-// the last good frame after a failed refill (the first failed read returns 0).
+// the last good frame after a failed refill (the first failed read returns 0), or dropping its get_link_fault()
+// override (decision 0009 rule 5: the latched fault text reads empty).
 TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not served and latch a link fault",
           "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
     alpacacore::test::FakePlayerOnePWSDK fake;
@@ -411,11 +437,15 @@ TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not ser
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        // Decision 0009 rule 5: get_link_fault() is the one fault text, the one the getter throws.
+        REQUIRE_FALSE(driver->get_link_fault().empty());
+        CHECK(std::string(ex.what()).find(driver->get_link_fault()) != std::string::npos);
     }
 
     // A good refill clears the latch with no reconnect, and its frame is served again.
     const int before = fake.call_count("get_position");
     CHECK(driver->get_position() == 0);
+    CHECK(driver->get_link_fault().empty());
     CHECK(driver->get_position() == 0);
     CHECK(fake.call_count("get_position") == before + 1);
     driver->set_connected(false);
@@ -475,7 +505,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a 
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(driver->get_names().size() == 5);
-    CHECK(driver->get_name() == "FakePhoenixWheel");
+    CHECK(driver->get_name() == "Player One FakePhoenixWheel");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
     driver->set_connected(false);
@@ -494,7 +524,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - a failed set_position invalidates
     const int before = fake.call_count("get_position");
 
     fake.fail_next("goto_position");
-    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_position() == 0);
     CHECK(fake.call_count("get_position") == before + 1);
     driver->set_connected(false);
@@ -525,15 +555,40 @@ TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a 
 // Decision 0016 rule 3: identity and limits publish at the end of connect, so a connect that throws after the
 // enumeration leaves the pre-connect values.
 // Falsified by: playerone_filterwheel_driver.cpp resolve_handle() storing wheel_info_/wheel_info_valid_ again after
-// the enumeration (get_name() reports "FakePhoenixWheel" and set_names() with 3 names is rejected for 5 positions).
+// the enumeration (get_name() reports "Player One FakePhoenixWheel" and set_names() with 3 names is rejected for 5
+// positions).
 TEST_CASE("Player One PW Filter Wheel Driver - a failed connect leaves the pre-connect name and slot limits",
           "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
     alpacacore::test::FakePlayerOnePWSDK fake;
     auto driver = create_playerone_filterwheel(0, 0, fake);
     fake.fail_next("open_wheel");
-    REQUIRE_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_name() == "Player One Phoenix Wheel");
     CHECK_NOTHROW(driver->set_names({"A", "B", "C"}));
     CHECK(driver->get_names().size() == 3);
+}
+
+// Issue #1991 spec rules 2, 4, 6 and 8: a connected wheel expands a lone shorthand token and checks the length, and
+// a disconnect returns the slot count to unknown.
+// Falsified by: playerone_filterwheel_driver.cpp seed_slot_data() dropping slots_.publish_slot_count() (the count
+// stays unknown: the lone LRGBH token stays one name).
+TEST_CASE("Player One PW Filter Wheel Driver - a connected wheel expands shorthand and checks the names length",
+          "[playerone][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == 5);
+
+    driver->set_names({"LRGBH"});
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+    require_alpaca_error([&] { driver->set_names({"L", "R", "G", "B"}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_focus_offsets({1, 2}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
 }

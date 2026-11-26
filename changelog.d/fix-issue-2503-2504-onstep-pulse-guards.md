@@ -1,0 +1,3 @@
+### Fixed
+- **OnStep: PulseGuide refused while a GOTO, Park or FindHome runs** (AlpacaCore, issue #2504): a guide pulse sent during the driver's own slew, park or home went to the mount and changed the motion it was running; it is now refused with InvalidOperation before anything is sent, from the command until the mount shows the motion ended. A Park that has ended still answers InvalidWhileParked.
+- **OnStep: PulseGuide refused on an axis MoveAxis is moving** (AlpacaCore, issue #2503): a guide pulse on the axis a non-zero MoveAxis drives sent `:Mg` into the running jog; it is now refused with InvalidOperation and the jog runs on. A pulse on the other axis is still accepted.

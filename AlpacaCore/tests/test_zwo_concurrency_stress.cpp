@@ -42,6 +42,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
@@ -53,6 +54,7 @@
 #include "locked_zwo_efw_sdk.h"
 #include "locked_zwo_sdk.h"
 #include "rotator_sync_offset_test_dir.h"
+#include "zwo_exposure_wait.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -126,6 +128,12 @@ TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][came
     auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
 
+    // Undisturbed exposure first: under CPU starvation the storm below can end before its one exposure body reaches the
+    // download, so the get_data_after_exposure coverage check must not depend on the storm (#2099).
+    driver->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*driver, std::chrono::seconds(30)));
+    REQUIRE(driver->get_image_ready());
+
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
@@ -155,6 +163,11 @@ TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][
     alpacacore::test::LockedZWOSDK sdk(fake);
     auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, sdk);
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    // Undisturbed exposure first, as in the case above (#2099).
+    driver->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*driver, std::chrono::seconds(30)));
+    REQUIRE(driver->get_image_ready());
 
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
@@ -321,6 +334,23 @@ TEST_CASE("ZWO EAF focuser - staleness losses race connects and reads behind Loc
             }
         });
 
+    // One undisturbed loss first: under CPU starvation the storm below can end before one session gets three failing
+    // reads plus an aged read, so the loss coverage check must not depend on the storm (#2099).
+    const auto read_position = [&] {
+        try {
+            static_cast<void>(static_cast<alpacacore::FocuserDriver&>(*driver).get_position());
+        } catch (const alpacacore::AlpacaException&) {  // the failing fake read: expected
+        }
+    };
+    for (int i = 0; i < 3; ++i) {
+        read_position();
+        clock.advance(std::chrono::milliseconds(150));  // past the status cache's age, so each read refills
+    }
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    read_position();
+    REQUIRE(losses.load() == 1);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
     std::atomic<bool> stop_clock{false};
     std::thread ager([&] {
         while (!stop_clock.load()) {
@@ -397,10 +427,9 @@ TEST_CASE("ZWO CAA rotator - connected lifecycle stress behind LockedZWOCAASDK",
 // Dew heater switch stress (#271): same shape — the dew heater switch wraps
 // a camera SDK handle (ASIGetControlValue/ASISetControlValue for the heater
 // duty cycle), so it fails fast at camera enumeration on a hardware-free
-// host exactly like the ZWO camera driver above. This is the representative
-// case for the [zwo][switch] pair: the two GPIO-backed ASIAIR switch drivers
-// (zwo_asiair_switch_driver.h, zwo_asiair_plus_switch_driver.h) are a
-// separate seam (libgpiod, not this SDK) and are not covered by this case.
+// host exactly like the ZWO camera driver above. The two GPIO-backed ASIAIR
+// switch drivers have their own connected storms over the libgpiod and ioctl
+// stubs, in test_zwo_asiair_concurrency_stress.cpp (#1862).
 TEST_CASE("ZWO dew heater switch - concurrent connect/disconnect/operate stress", "[zwo][switch][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
 
@@ -486,7 +515,7 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-fligh
 // review findings were detached-thread lifecycle bugs — the GOTO setup
 // thread, the async disconnect teardown thread, and the poll/pulse threads
 // racing set_connected(false) and destruction. Those bodies now run in
-// operation slots (goto_slot_, teardown_slot_, poll_operation_, pulse_slot_)
+// operation slots (goto_slot_, teardown_slot_, poll_operation_, pulse_slot_[2])
 // that only start on a CONNECTED driver, so these tests connect through a
 // FakeZwoMount (the mount supplies the mandatory AM identity and valid
 // telemetry).
@@ -555,7 +584,7 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
         guard([&] { static_cast<void>(scope.get_guide_rate()); });
         guard([&] { scope.set_utc_date(std::chrono::system_clock::now()); });
         // The slot-run paths: async GOTO (goto_slot_) and pulse guiding
-        // (pulse_slot_ queue drain) issued while other threads disconnect.
+        // (the per-axis pulse_slot_ queue drains) issued while other threads disconnect.
         guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
         guard([&] { scope.sync_to_coordinates(6.0, 25.0); });
         guard([&] { scope.set_target_declination(30.0); });
@@ -654,8 +683,9 @@ TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[z
     for (int i = 0; i < 25; ++i) {
         auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
+        // The pulse first: a PulseGuide during the GOTO is refused (#2263), and the GOTO supersedes the drain.
         REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
         if ((i % 2) != 0) {
             // Half the time the disconnect teardown body is also live at
             // destruction — the destructor must reap the GOTO, teardown, pulse
@@ -663,6 +693,29 @@ TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[z
             driver->disconnect();
         }
         driver.reset();
+    }
+}
+
+// #2459: destruction while both axes' pulse drains wait inside a 3 s step (and, every other time, the disconnect
+// teardown runs too). The destructor cancels the drains' clock waits instead of waiting the steps out.
+// Falsified by: zwo_telescope_driver.cpp run_pulse_task(): an uncancellable clock_.sleep_for(step) in place of
+// ctx.wait_for(step), so the destructor's join waits for the step to end.
+TEST_CASE("ZWO mount - destruction with live pulse drains on both axes", "[zwo][telescope][stress]") {
+    alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
+    configure_storm_mount(mount);
+    REQUIRE(mount.ok());
+
+    for (int i = 0; i < 25; ++i) {
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE_NOTHROW(driver->pulse_guide(2, 3000));
+        REQUIRE_NOTHROW(driver->pulse_guide(0, 3000));
+        // Cumulative counts: both of this iteration's steps reached the mount, so both drains wait in their step.
+        REQUIRE(mount.wait_for_count(":Mge", i + 1, std::chrono::milliseconds(2000)));
+        REQUIRE(mount.wait_for_count(":Mgn", i + 1, std::chrono::milliseconds(2000)));
+        if ((i % 2) != 0) driver->disconnect();  // the teardown body is live at destruction too
+        const auto elapsed = alpacacore::test::timed([&] { driver.reset(); });
+        CHECK(elapsed < std::chrono::milliseconds(1500));  // half a step: a destructor that waits one out fails
     }
 }
 

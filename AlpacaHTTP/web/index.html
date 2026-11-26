@@ -19,31 +19,47 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=34">
+    <script>
+        // Issue #1764 item 6: a stored night theme is set before the first paint, so the page never flashes
+        // the default colours. The key is THEME_STORAGE_KEY in format.js. Blocked storage leaves the default.
+        try {
+            if (localStorage.getItem('alpacabridge.theme') === 'night') {
+                document.documentElement.setAttribute('data-theme', 'night');
+            }
+        } catch (e) {
+            // No storage: the default theme.
+        }
+    </script>
+    <link rel="stylesheet" href="/web/style.css?v=40">
 </head>
 <body>
     <div class="container">
         <header>
             <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><a id="header-build-badge" class="build-badge" hidden title="" href="#" target="_blank" rel="noopener"></a><span id="header-profile" class="profile-name"></span></h1>
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
+            <button type="button" id="theme-toggle" class="btn btn-small theme-toggle" aria-pressed="false" title="Red night theme, to keep your eyes dark-adapted">Night</button>
         </header>
 
-        <nav class="tabs">
-            <button class="tab active" onclick="showTab('devices')">Devices</button>
-            <button class="tab" onclick="showTab('configure')">Configure</button>
-            <button class="tab" onclick="showTab('server')">Server Info</button>
+        <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
+             when the bridge stops answering; a polite live region. -->
+        <div id="link-banner" class="link-banner" role="status" aria-live="polite" hidden></div>
+
+        <nav class="tabs" role="tablist" aria-label="Sections">
+            <button class="tab active" type="button" role="tab" id="devices-tab-button" data-tab="devices" aria-selected="true" aria-controls="devices-tab" onclick="showTab('devices')">Devices</button>
+            <button class="tab" type="button" role="tab" id="configure-tab-button" data-tab="configure" aria-selected="false" aria-controls="configure-tab" tabindex="-1" onclick="showTab('configure')">Configure</button>
+            <button class="tab" type="button" role="tab" id="server-tab-button" data-tab="server" aria-selected="false" aria-controls="server-tab" tabindex="-1" onclick="showTab('server')">Server Info</button>
         </nav>
 
         <!-- Devices Tab -->
-        <div id="devices-tab" class="tab-content active">
+        <div id="devices-tab" class="tab-content active" role="tabpanel" aria-labelledby="devices-tab-button">
             <h2>Configured Devices</h2>
             <div id="devices-list" class="devices-list">
-                <p class="loading">Loading devices...</p>
+                <div class="device-card skeleton" role="status" aria-busy="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="visually-hidden">Loading devices</span></div>
             </div>
         </div>
 
         <!-- Configure Tab -->
-        <div id="configure-tab" class="tab-content">
+        <div id="configure-tab" class="tab-content" role="tabpanel" aria-labelledby="configure-tab-button">
             <h2 id="configure-title">Add Device</h2>
             <form id="device-form" class="device-form">
                 <div class="form-group">
@@ -85,6 +101,7 @@
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
+                        <option value="remotealpaca">Remote Alpaca</option>
                         <option value="synscan">Sky-Watcher</option>
                         <option value="skywatcher">Sky-Watcher</option>
                         <option value="svbony">SVBONY</option>
@@ -208,14 +225,14 @@
                         </select>
                         <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                     </div>
-                    <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
-                    <small style="color: #666;">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
-                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                    <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>DC Power Ports</strong></p>
+                    <small style="color: var(--form-note-text);">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
+                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                         <thead>
                             <tr>
-                                <th style="text-align: left; padding: 4px; color: #333;">DC port</th>
-                                <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
-                                <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">DC port</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO line</th>
+                                <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -232,7 +249,7 @@
                             <tr>
                                 <td style="padding: 4px;">DC3</td>
                                 <td style="padding: 4px;">&mdash; always on</td>
-                                <td style="padding: 4px; color: #999;">n/a</td>
+                                <td style="padding: 4px; color: var(--form-muted-text);">n/a</td>
                             </tr>
                         </tbody>
                     </table>
@@ -240,7 +257,7 @@
 
                   <div id="ioptron-camera-config" data-device-type="camera" style="display: none;">
                     <h3>iOptron iCAM Camera Configuration</h3>
-                    <small style="color: #666;">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
+                    <small style="color: var(--form-note-text);">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
                     <div class="form-group">
                         <label for="ioptron-camera-index">Camera Index:</label>
                         <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" data-config-key="cameraIndex" value="0" min="0">
@@ -250,7 +267,7 @@
 
                   <div id="ioptron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>iOptron iEAF / iAFS2/3 Focuser Configuration</h3>
-                    <small style="color: #666;">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+                    <small style="color: var(--form-note-text);">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-ieaf-model">Model:</label>
@@ -288,7 +305,7 @@
 
                   <div id="ioptron-filterwheel-config" data-device-type="filterwheel" style="display: none;">
                     <h3>iOptron iEFW Filter Wheel Configuration</h3>
-                    <small style="color: #666;">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+                    <small style="color: var(--form-note-text);">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-filterwheel-model">Model:</label>
@@ -549,8 +566,135 @@
                     </div>
                 </div>
 
-                <!-- OnStep Telescope Configuration -->
-                <div id="onstep-config" data-vendor="onstep" data-device-type="telescope" class="vendor-config" style="display: none;">
+                <!-- OnStep Configuration: the telescope, and a focuser, the rotator or the auxiliary features on the same controller (#2223, #2221, #2222) -->
+                <div id="onstep-config" data-vendor="onstep" class="vendor-config" style="display: none;">
+                  <div id="onstep-focuser-config" data-device-type="focuser" style="display: none;">
+                    <h3>OnStep Focuser Configuration</h3>
+                    <small style="color: var(--form-note-text);">A focuser wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-focuser-number">Focuser Number:</label>
+                        <input type="number" id="onstep-focuser-number" name="onstepFocuserNumber" data-config-key="focuserNumber" value="1" min="1" max="6">
+                        <small>Which of the controller's focusers (1 to 6) this device drives. Add one device per focuser.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="onstep-focuser-connection-type">Connection Type:</label>
+                        <select id="onstep-focuser-connection-type" name="onstepFocuserConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-focuser-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-focuser-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-focuser-port-path" name="onstepFocuserPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-focuser-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-focuser-baud-rate" name="onstepFocuserBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-focuser-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-focuser-host">IP Address:</label>
+                            <input type="text" id="onstep-focuser-host" name="onstepFocuserHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-focuser-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-focuser-tcp-port" name="onstepFocuserTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-rotator-config" data-device-type="rotator" style="display: none;">
+                    <h3>OnStep Rotator Configuration</h3>
+                    <small style="color: var(--form-note-text);">The rotator wired to the OnStepX controller. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. Moves stay inside the travel set in the firmware and are refused while the firmware's derotation is on. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-rotator-connection-type">Connection Type:</label>
+                        <select id="onstep-rotator-connection-type" name="onstepRotatorConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-rotator-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-rotator-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-rotator-port-path" name="onstepRotatorPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-rotator-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-rotator-baud-rate" name="onstepRotatorBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-rotator-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-rotator-host">IP Address:</label>
+                            <input type="text" id="onstep-rotator-host" name="onstepRotatorHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-rotator-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-rotator-tcp-port" name="onstepRotatorTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-switch-config" data-device-type="switch" style="display: none;">
+                    <h3>OnStep Switch Configuration</h3>
+                    <small style="color: var(--form-note-text);">The auxiliary features of the OnStepX controller (power switches, PWM outputs, dew heaters) as one Switch device, each under its firmware name. It shares the controller's link with the OnStep telescope, so give it the same connection as the telescope; either can be connected without the other. The feature list is read at each connect. Requires OnStepX firmware.</small>
+
+                    <div class="form-group">
+                        <label for="onstep-switch-connection-type">Connection Type:</label>
+                        <select id="onstep-switch-connection-type" name="onstepSwitchConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                        <small>Auto-Detect scans the USB serial ports and finds the same controller as the telescope's Auto-Detect.</small>
+                    </div>
+
+                    <div id="onstep-switch-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-switch-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-switch-port-path" name="onstepSwitchPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
+                            <small>The telescope's port.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-switch-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-switch-baud-rate" name="onstepSwitchBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <div id="onstep-switch-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-switch-host">IP Address:</label>
+                            <input type="text" id="onstep-switch-host" name="onstepSwitchHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The telescope's address.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-switch-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-switch-tcp-port" name="onstepSwitchTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>The telescope's port. Default: 9998, a persistent command channel.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="onstep-telescope-config" data-device-type="telescope">
                     <h3>OnStep Telescope Configuration</h3>
 
                     <div class="form-group">
@@ -558,8 +702,9 @@
                         <select id="onstep-connection-type" name="onstepConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
                         </select>
-                        <small>OnStep controllers connect over USB serial only.</small>
+                        <small>Auto-Detect scans the USB serial ports only. Choose Network for a WiFi or Ethernet OnStepX (ESP32, or the Smart Web Server add-on) and enter its address.</small>
                     </div>
 
                     <!-- Serial Connection -->
@@ -572,6 +717,20 @@
                         <div class="form-group">
                             <label for="onstep-baud-rate">Baud Rate:</label>
                             <input type="number" id="onstep-baud-rate" name="onstepBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <!-- Network Connection -->
+                    <div id="onstep-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-host">IP Address:</label>
+                            <input type="text" id="onstep-host" name="onstepHost" data-config-key="host" placeholder="192.168.0.1">
+                            <small>The controller's address on your network. It is not discovered automatically.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-tcp-port">TCP Port:</label>
+                            <input type="number" id="onstep-tcp-port" name="onstepTcpPort" data-config-key="tcpPort" value="9998" min="1" max="65535">
+                            <small>Default: 9998, a persistent command channel. Port 9999 closes the connection 2 seconds after it opens.</small>
                         </div>
                     </div>
 
@@ -591,13 +750,14 @@
                         <input type="number" id="onstep-focal-length" name="onstepFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="1000">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
                 </div>
 
                 <!-- Celestron NexStar Telescope Configuration -->
                 <div id="celestron-config" data-vendor="celestron" class="vendor-config" style="display: none;">
                   <div id="celestron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>Celestron Focus Motor Configuration</h3>
-                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
+                    <small style="color: var(--form-note-text);">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
                         <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" data-config-key="portPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
@@ -612,7 +772,7 @@
                         <label for="celestron-protocol">Mount Connection:</label>
                         <select id="celestron-protocol" name="celestronProtocol" data-config-key="protocol" required>
                             <option value="nexstar">NexStar hand controller</option>
-                            <option value="cgx-aux">CGX / CGX-L direct USB (no hand controller)</option>
+                            <option value="cgx-aux">CGX / CGX-L direct, USB or SkyPortal WiFi (no hand controller)</option>
                         </select>
                     </div>
 
@@ -627,6 +787,8 @@
                         <small>For a fork mount on a wedge, pick Equatorial. German equatorial mounts ignore this.</small>
                     </div>
 
+                    </div>
+
                     <div class="form-group">
                         <label for="celestron-connection-type">Connection Type:</label>
                         <select id="celestron-connection-type" name="celestronConnectionType" data-config-key="connectionType" data-config-fill="manual" required>
@@ -634,7 +796,7 @@
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
                         </select>
-                    </div>
+                        <small id="celestron-connection-help" style="display: none;">USB: the mount's own USB port. WiFi: a SkyPortal WiFi adapter on the mount's AUX port, with this board joined to the adapter's own network (Celestron-XXXX).</small>
                     </div>
 
                     <!-- Serial Connection -->
@@ -651,7 +813,7 @@
                     </div>
 
                     <div id="celestron-cgx-site-config" style="display: none;">
-                        <h4>Direct USB Site</h4>
+                        <h4>CGX Site</h4>
                         <div class="form-group">
                             <label for="celestron-cgx-site-latitude">Site Latitude (degrees):</label>
                             <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude" data-config-key="siteLatitude"
@@ -678,7 +840,13 @@
                         <div class="form-group">
                             <label for="celestron-tcp-port">TCP Port:</label>
                             <input type="number" id="celestron-tcp-port" name="celestronTcpPort" data-config-key="tcpPort" value="2000" min="1" max="65535">
-                            <small>Default port for NexStar WiFi bridges.</small>
+                            <small id="celestron-tcp-port-help">Default port for NexStar WiFi bridges.</small>
+                        </div>
+                        <!-- CGX over WiFi: listen 5 s for the SkyPortal adapter's beacon. The select has no name, so it never reaches the submitted form; a pick fills the IP Address. -->
+                        <div id="celestron-cgx-find" class="form-group" style="display: none;">
+                            <button id="celestron-cgx-find-button" class="btn btn-secondary btn-small" type="button">Find adapter</button>
+                            <select id="celestron-cgx-adapters" style="display: none;"></select>
+                            <small id="celestron-cgx-find-status">Listens 5 s for the SkyPortal adapter on the networks this board has joined.</small>
                         </div>
                     </div>
 
@@ -843,14 +1011,14 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
-                        <small style="color: #666;">Defaults match the Pi 4 ASIAIR Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
-                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">Defaults match the Pi 4 ASIAIR Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -893,13 +1061,13 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
-                        <small style="color: #666;">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
-                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1184,7 +1352,7 @@
 
                     <!-- Q-Focuser: USB CDC-ACM serial JSON protocol, no SDK. -->
                     <div id="qhy-focuser-fields" data-device-type="focuser" style="display: none;">
-                        <small style="color: #666;">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
+                        <small style="color: var(--form-note-text);">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
 
                         <div class="form-group">
                             <label for="qhy-focuser-connection-type">Connection Type:</label>
@@ -1245,7 +1413,7 @@
 
                         <details>
                             <summary>Advanced: 12 V hold torque</summary>
-                            <small style="color: #666;">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
+                            <small style="color: var(--form-note-text);">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
                             <div class="form-group">
                                 <label><input type="checkbox" id="qhy-focuser-hold-force" name="qhyFocuserHoldForce" data-config-key="holdForce"> Enable hold force</label>
                             </div>
@@ -1290,7 +1458,7 @@
                 <!-- iOptron iGuider Guide Camera Configuration -->
                 <div id="iguider-config" data-vendor="iguider" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>iOptron iGuider Guide Camera Configuration</h3>
-                    <small style="color: #666;">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
+                    <small style="color: var(--form-note-text);">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
 
                     <div class="form-group">
                         <label for="iguider-device-path">Device Path (optional):</label>
@@ -1304,7 +1472,7 @@
                 <div id="ifr-config" data-vendor="ifr" class="vendor-config" style="display: none;">
                   <div id="ifr-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>iOptron iFR Focuser Configuration</h3>
-                    <small style="color: #666;">The iFR is a focuser and a camera rotator in one unit, on one USB link. Add it twice, once as a Focuser and once as a Rotator: both connect over the same port and can be used independently. Either of its two Type-C ports works; plug in one. Fixed 115200 baud; auto-detect checks the unit's handshake.</small>
+                    <small style="color: var(--form-note-text);">The iFR is a focuser and a camera rotator in one unit, on one USB link. Add it twice, once as a Focuser and once as a Rotator: both connect over the same port and can be used independently. Either of its two Type-C ports works; plug in one. Fixed 115200 baud; auto-detect checks the unit's handshake.</small>
 
                     <div class="form-group">
                         <label for="ifr-focuser-model">Model:</label>
@@ -1343,7 +1511,7 @@
 
                   <div id="ifr-rotator-config" data-device-type="rotator" style="display: none;">
                     <h3>iOptron iFR Rotator Configuration</h3>
-                    <small style="color: #666;">The rotator (CAA) half of the iFR. It shares the unit's USB link with the iFR Focuser. Sync is stored in the iFR itself and survives a power cycle.</small>
+                    <small style="color: var(--form-note-text);">The rotator (CAA) half of the iFR. It shares the unit's USB link with the iFR Focuser. Sync is stored in the iFR itself and survives a power cycle.</small>
 
                     <div class="form-group">
                         <label for="ifr-rotator-model">Model:</label>
@@ -1494,14 +1662,14 @@
                             </select>
                             <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
-                        <small style="color: #666;">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>
-                        <table class="touptek-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <p style="margin: 12px 0 4px 0; color: var(--form-table-text);"><strong>DC Power Ports</strong></p>
+                        <small style="color: var(--form-note-text);">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>
+                        <table class="touptek-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: var(--form-table-text);">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px; color: #333;">Port</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
-                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">Port</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">GPIO line</th>
+                                    <th style="text-align: left; padding: 4px; color: var(--form-table-text);">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1585,6 +1753,32 @@
                     <div class="form-group">
                         <label for="weewx-timeout">HTTP Timeout (ms):</label>
                         <input type="number" id="weewx-timeout" name="timeoutMs" data-config-key="timeoutMs" value="5000" min="1000">
+                    </div>
+                </div>
+
+                <!-- Remote Alpaca: a device of another Alpaca server (the upstream), served here as a device of this server -->
+                <div id="remotealpaca-config" data-vendor="remotealpaca" data-device-type="observingconditions" class="vendor-config" style="display: none;">
+                    <h3>Remote Alpaca Observing Conditions</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-host" name="remoteAlpacaHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-port" name="remoteAlpacaPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-device-number" name="remoteAlpacaDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the ObservingConditions device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-poll-period" name="remoteAlpacaPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds.</small>
                     </div>
                 </div>
 
@@ -2005,7 +2199,7 @@
         </div>
 
         <!-- Server Info Tab -->
-        <div id="server-tab" class="tab-content">
+        <div id="server-tab" class="tab-content" role="tabpanel" aria-labelledby="server-tab-button">
             <h2>Server Information</h2>
             <div id="server-info-section" class="section-card collapsed">
                 <div class="section-card-header">
@@ -2020,6 +2214,21 @@
                         <p class="loading">Loading server information...</p>
                     </div>
                     <p id="server-info-status" class="server-status"></p>
+                </div>
+            </div>
+            <!-- Issue #1764 item 1: Shutdown sits in its own row, apart from Restart and the screen edge. -->
+            <div id="server-actions-section" class="section-card">
+                <div class="section-card-header">
+                    <h3>Server Actions</h3>
+                </div>
+                <div class="section-card-body">
+                    <div class="server-actions server-actions-card">
+                        <button class="btn btn-secondary" type="button" onclick="syncTime()">Sync Time</button>
+                        <button class="btn btn-secondary" type="button" onclick="restartServer()">Restart Server</button>
+                    </div>
+                    <div class="server-actions server-actions-danger">
+                        <button class="btn btn-danger" type="button" onclick="shutdownServer()">Shutdown Server</button>
+                    </div>
                 </div>
             </div>
             <div id="update-section" class="section-card collapsed">
@@ -2124,6 +2333,16 @@
                         <select id="wifi-country" class="wifi-country-select"></select>
                     </div>
 
+                    <!-- Issue #856: the radio that joins networks, stored as its permanent MAC. -->
+                    <div class="wifi-row">
+                        <div class="wifi-row-label">
+                            <span>Client adapter</span>
+                            <small>The radio that joins networks</small>
+                            <button class="info-btn" type="button" aria-label="About the client adapter" data-info-title="Client adapter" data-info-text="On a board with more than one WiFi radio, pick the one that joins your networks, for example a USB adapter, while the hotspot stays where it is. The choice is the adapter's hardware address, so it survives a reboot or a different USB port. Every saved network is pinned to it. If the adapter is unplugged, the device picks one itself.">i</button>
+                        </div>
+                        <select id="wifi-adapter" class="wifi-country-select" aria-label="Client adapter"></select>
+                    </div>
+
                     <div class="wifi-group-title">Join a Network<button class="info-btn" type="button" aria-label="About joining a network" data-info-title="Join a Network" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
                     <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see nearby networks.</p></div>
                     <div class="wifi-actions-right"><button class="btn btn-secondary btn-small" type="button" onclick="wifiScanClicked()">Scan Again</button></div>
@@ -2178,16 +2397,31 @@
             </div>
         </div>
 
+        <!-- Issue #1764 item 1: only Refresh stays in the bar; the server actions are a card on Server Info. -->
         <div class="server-actions global-actions">
             <button id="global-refresh" class="btn btn-primary" onclick="globalRefresh()">Refresh</button>
-            <button class="btn btn-secondary" onclick="syncTime()">Sync Time</button>
-            <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
-            <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
         </div>
     </div>
 
-    <script src="/web/format.js?v=17"></script>
+    <!-- Issue #1764: the page's own dialog and toasts, never a native alert/confirm/prompt. -->
+    <dialog id="ui-dialog" class="ui-dialog" aria-labelledby="ui-dialog-title" aria-describedby="ui-dialog-body">
+        <form method="dialog" class="ui-dialog-form">
+            <h2 id="ui-dialog-title" class="ui-dialog-title"></h2>
+            <p id="ui-dialog-body" class="ui-dialog-body"></p>
+            <label id="ui-dialog-field" class="ui-dialog-field" hidden>
+                <span id="ui-dialog-input-label"></span>
+                <input id="ui-dialog-input" type="text" autocomplete="off">
+            </label>
+            <div class="ui-dialog-actions">
+                <button id="ui-dialog-cancel" class="btn btn-secondary" type="button">Cancel</button>
+                <button id="ui-dialog-confirm" class="btn btn-primary" type="submit" value="confirm">OK</button>
+            </div>
+        </form>
+    </dialog>
+    <div id="toast-region" class="toast-region"></div>
+
+    <script src="/web/format.js?v=23"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=50"></script>
+    <script src="/web/app.js?v=58"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@
 #include <alpacacore/util/task_clock.h>
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -119,8 +121,8 @@ struct OperationContext::Body {
  * The slot never runs a body, a log call or a user callback while holding its
  * mutex. start() and cancel_all_and_join() must be called WITHOUT the driver
  * mutex held, since a stale body may need it to return (the Sky-Watcher
- * slew body takes it to clean up); cancel(), running(), stale_count() and
- * last_failure() may be called with it held.
+ * slew body takes it to clean up); cancel(), running(), live(), stale_count()
+ * and last_failure() may be called with it held.
  *
  * Neither start() nor cancel_all_and_join() may be called from inside a body
  * of the same slot. cancel_all_and_join() from a body takes that body and
@@ -142,7 +144,12 @@ public:
     static constexpr std::chrono::milliseconds kStaleReapTimeout{2000};
 
     AsyncOperation(std::string name, OperationGeneration& generation, TaskClock& clock = default_task_clock())
-        : name_(std::move(name)), generation_(generation), clock_(clock) {}
+        : name_(std::move(name)), generation_(generation), clock_(clock) {
+        // start() moves the current body into stale_ after the new thread exists;
+        // a reallocation there could throw and destroy a joinable thread
+        // (std::terminate). Rule 3 keeps stale_ at kMaxStaleBodies after a push.
+        stale_.reserve(kMaxStaleBodies + 1);
+    }
 
     AsyncOperation(const AsyncOperation&) = delete;
     AsyncOperation& operator=(const AsyncOperation&) = delete;
@@ -207,11 +214,15 @@ public:
         // failure as they were. The thread's first action is to lock mutex_,
         // which start() holds until it returns: the body cannot run, and
         // `token` cannot be read, before the bookkeeping below is done.
-        auto next = std::make_unique<OperationContext::Body>();
-        OperationContext::Body* raw = next.get();
+        std::unique_ptr<OperationContext::Body> next;
         try {
+            next = std::make_unique<OperationContext::Body>();
+            OperationContext::Body* raw = next.get();
             next->thread = spawn_([this, raw, fn = std::move(body)]() mutable { run(*raw, fn); });
         } catch (const std::system_error& e) {
+            throw AlpacaException(name_ + ": could not start a background thread: " + e.what(),
+                                  AlpacaError::DriverException);
+        } catch (const std::bad_alloc& e) {
             throw AlpacaException(name_ + ": could not start a background thread: " + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -224,6 +235,8 @@ public:
             if (current_->returned) {
                 current_->thread.join();
             } else {
+                // reserve(kMaxStaleBodies + 1) in the constructor: a push must not reallocate.
+                assert(stale_.size() < stale_.capacity());
                 stale_.push_back(std::move(current_));
             }
             current_.reset();
@@ -304,6 +317,15 @@ public:
     bool running() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return current_ && !current_->returned;
+    }
+
+    /// True while the current body has not returned and has not been told to
+    /// stop: its stop reason is None. A body that was cancelled or superseded
+    /// and is only winding down is running() but not live (#2586). May be
+    /// called with the driver mutex held (rule 10).
+    bool live() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return current_ && !current_->returned && stop_reason_locked(*current_) == StopReason::None;
     }
 
     /// Replaced bodies not yet joined. May be called with the driver mutex

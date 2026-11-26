@@ -512,6 +512,65 @@ TEST_CASE("ZWO CAA Rotator Driver - Halt drops the cached frame", "[zwo][rotator
     CHECK(driver->get_is_moving() == false);
 }
 
+// Required case 7 (issue #1863). IsMoving is NotConnected while disconnected, false while idle, true as soon as
+// MoveAbsolute returns while the unit reports motion (TargetPosition is then the target), and false after Halt;
+// NotConnected again after a Disconnect. The fake task clock never ages the 100 ms status frame, so only the
+// driver's own invalidation lets a read see a new state.
+TEST_CASE("ZWO CAA Rotator Driver - State machine", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk, clock);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_is_moving());
+    CHECK(driver->get_position() == 10.0);
+
+    sdk.moving = true;  // the fake settles a move at once; the unit reports the motion it is still making
+    driver->move_absolute(90.0);
+    CHECK(driver->get_is_moving());
+    CHECK(driver->get_target_position() == 90.0);
+
+    driver->halt();
+    CHECK_FALSE(sdk.moving.load());
+    CHECK_FALSE(driver->get_is_moving());
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// The fake's scripted move (the ConformU host sets moving_reads, conformu_rotator_factories.h): IsMoving stays true
+// for that many status reads after a move of any kind, then the unit has arrived; Halt ends the window.
+// Falsified by: fake_zwo_caa_sdk.h get_motion_status() dropping its moving_left_ decrement (IsMoving never ends), or
+// move_mechanical() dropping its moving_left_ = moving_reads (a mechanical move reports not moving).
+TEST_CASE("FakeZWOCAASDK - moving_reads holds IsMoving for N status reads", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    alpacacore::test::FakeTaskClock clock;
+    FakeCAASDK sdk;
+    sdk.moving_reads = 2;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk, clock);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_is_moving());
+
+    driver->move_absolute(90.0);
+    CHECK(driver->get_is_moving());  // read 1
+    clock.advance(std::chrono::milliseconds(150));
+    CHECK(driver->get_is_moving());  // read 2
+    clock.advance(std::chrono::milliseconds(150));
+    CHECK_FALSE(driver->get_is_moving());  // the unit has arrived
+    CHECK(driver->get_position() == 90.0);
+
+    driver->move_absolute(10.0);
+    CHECK(driver->get_is_moving());
+    driver->halt();
+    CHECK_FALSE(driver->get_is_moving());
+
+    driver->move_mechanical(45.0);
+    CHECK(driver->get_is_moving());
+}
+
 // Falsified by: zwo_rotator_driver.cpp move_mechanical() dropping its
 // status_cache_.invalidate() (Position keeps the pre-move angle for a TTL).
 TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
@@ -545,7 +604,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Name and UniqueID answer while a connect hol
     CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
 
     REQUIRE(wait_until_connected(*driver));
-    CHECK(driver->get_name() == "CAA");
+    CHECK(driver->get_name() == "ZWO CAA");
     CHECK(driver->get_unique_id() == "ZWO_CAA_SN_CAA-SN-1");
     driver->set_connected(false);
 }

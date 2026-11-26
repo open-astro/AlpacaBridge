@@ -23,8 +23,10 @@ Two modes:
            the review bot's gate before it posts: SCOPE holds the --list
            output ("none" when nothing is in scope) and REVIEW the bot's
            review-comment.md. Every listed rule needs a checklist line
-           `- <record file> rule <n>: pass|defect|n/a: <reason>`, a rule may
-           not get two verdicts, and a defect line needs the "Issues found"
+           `- <record file> rule <n>: pass|defect|n/a: <reason>` (a period, an en
+           dash or an em dash in place of the colon after the verdict also
+           counts, and so does the skeleton's `VERDICT:` kept before the
+           verdict), a rule may not get two verdicts, and a defect line needs the "Issues found"
            sign-off as the last line (bold, italics or a closing period or
            exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
@@ -60,7 +62,9 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
 # Consumers: the workflow step "Fold the decision-record checklist" in .github/workflows/claude-review.yml
 # imports fold_checklist (and through it CHECKLIST_RE, sign_off and the sign-off constants); rename them there too.
-CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*:\s*\S", re.I)
+# Before the verdict: an optional `VERDICT:`, the skeleton's placeholder word the agent sometimes keeps (#2592).
+# After the verdict: a colon, a period (PR #2315), or an en or em dash the agent writes anyway (#2460).
+CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(?:verdict\s*:\s*)?(pass|defect|n/a)\s*[:.\u2013\u2014]\s*\S", re.I)
 ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
 APPROVED_SIGN_OFF = "\u2705 Approved"
 
@@ -334,6 +338,49 @@ def self_test():
     expect(f == ["the review has no checklist line for 0005-task-clock.md rule 2"], "a missing rule is reported: %r" % f)
     f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a"))
     expect(any("rule 2" in x for x in f), "a verdict with no reason does not count")
+    f = checklist_findings(scope, full.replace("rule 3: pass:", "rule 3: pass.").replace("rule 1: n/a:", "rule 1: n/a."))
+    expect(f == [], "a period after the verdict in place of the colon still counts (PR #2315): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 3: pass:", "rule 3: pass \u2014").replace("rule 1: n/a:", "rule 1: n/a \u2013"))
+    expect(f == [], "an em or en dash after the verdict in place of the colon still counts (#2460): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a \u2014"))
+    expect(any("rule 2" in x for x in f), "a verdict and dash with no reason does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO", "rule 2: n/a the ZWO"))
+    expect(any("rule 2" in x for x in f), "a verdict with no separator before its reason does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a."))
+    expect(any("rule 2" in x for x in f), "a verdict and period with no reason does not count")
+    # The skeleton's VERDICT word kept in front of the verdict, as the agent wrote it (#2592):
+    # the PR #2559 lines (run 45067237324) and the PR #2590 lines (run 45104172592).
+    pr2559 = ("## Defects\n\n- a parked case polls with a real-time sleep_for\n\n## Decision records\n"
+              "- 0003-docs-drift-gates.md rule 3: VERDICT: pass — the new comments in "
+              "`AlpacaCore/tests/test_contract_sweep.cpp:1507-1510` and `:1911-1912` cite no decision record, "
+              "and every file they name exists.\n"
+              "- 0005-task-clock.md rule 1: VERDICT: n/a — no driver file changed\n"
+              "- 0005-task-clock.md rule 2: VERDICT: defect — `AlpacaCore/tests/test_contract_sweep.cpp:1527-1529`: "
+              "the ZWO and OnStep drivers are adopted, and the parked case now waits for their park timers with a "
+              "real-time `sleep_for` poll.\n\n" + ISSUES_SIGN_OFF + "\n")
+    f = checklist_findings(scope, pr2559)
+    expect(f == [], "a VERDICT: token before a dash-separated verdict still counts (#2592, PR #2559): %r" % f)
+    f = checklist_findings(scope, full.replace(
+        "rule 3: pass: no gate text changed",
+        "rule 3: VERDICT: n/a: the rule covers repo paths named in instruction files, memory records, or "
+        "first-party code comments \"that cite a record\""))
+    expect(f == [], "a VERDICT: token before a colon-separated verdict still counts (#2592, PR #2590): %r" % f)
+    f = checklist_findings(scope, full.replace(
+        "rule 3: pass: no gate text changed",
+        "rule 3: VERDICT: pass. The new comments at `AlpacaHTTP/tests/test_software_update.cpp:48-49` and "
+        "`scripts/ci_preflight.sh:1018` cite only issue #2581"))
+    expect(f == [], "a VERDICT: token before a period-separated verdict still counts (#2592, PR #2590): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 1: n/a:", "rule 1: verdict : n/a:"))
+    expect(f == [], "the VERDICT: token is matched case-insensitively (#2592): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: VERDICT:"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token with no verdict does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: VERDICT: pass"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token and a verdict with no reason does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO", "rule 2: VERDICT: the ZWO"))
+    expect(any("rule 2" in x for x in f), "a VERDICT: token followed by a reason and no verdict does not count")
+    out = fold_checklist(pr2559)
+    expect("<summary>3 rules: 1 defect, 1 pass, 1 n/a</summary>" in out,
+           "the fold step counts VERDICT:-token lines by their verdict (#2592): %r" % out)
     f = checklist_findings(scope, full.replace("rule 2: n/a", "rule 2: defect"))
     expect(any("as a defect" in x for x in f), "a defect under an Approved sign-off is reported")
     issues = full.replace("rule 2: n/a", "rule 2: defect").replace(ok, ISSUES_SIGN_OFF)

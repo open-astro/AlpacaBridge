@@ -149,8 +149,7 @@ namespace {
 bool raw_port_looks_like_ieaf_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor,
-                                                        {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, ieaf_usb_tokens());
 }
 }  // namespace
 #endif
@@ -341,20 +340,7 @@ public:
 
     IeafStatus get_status() {
         std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        std::string resp = send_command_locked(":FI#");
-        // "%7d%1d%5d%1d#": position, moving flag, temperature (Kelvin x 100),
-        // direction flag (0 = reversed).
-        int pos = 0, moving = 0, temp = 0, dir = 0;
-        if (std::sscanf(resp.c_str(), "%7d%1d%5d%1d", &pos, &moving, &temp, &dir) != 4) {
-            throw AlpacaException("Failed to parse iEAF status: " + resp, AlpacaError::DriverException);
-        }
-        IeafStatus status;
-        status.position = pos;
-        status.moving = moving != 0;
-        status.temperature_c = temp / 100.0 - 273.15;
-        status.reversed = dir == 0;
-        return status;
+        return status_locked();
     }
 
     void move_to(std::int32_t position) {
@@ -377,11 +363,33 @@ public:
 
     void set_zero() {
         std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
+        // Checked in the same hold as :FZ#, so no :FM from another caller starts the motor between them.
+        if (status_locked().moving) {
+            throw AlpacaException("Cannot set zero while the focuser is moving; Halt or wait for the move",
+                                  AlpacaError::InvalidOperation);
+        }
         send_command_blind_locked(":FZ#");
     }
 
 private:
+    // Caller holds mutex_.
+    IeafStatus status_locked() {
+        ensure_connected_locked();
+        std::string resp = send_command_locked(":FI#");
+        // "%7d%1d%5d%1d#": position, moving flag, temperature (Kelvin x 100),
+        // direction flag (0 = reversed).
+        int pos = 0, moving = 0, temp = 0, dir = 0;
+        if (std::sscanf(resp.c_str(), "%7d%1d%5d%1d", &pos, &moving, &temp, &dir) != 4) {
+            throw AlpacaException("Failed to parse iEAF status: " + resp, AlpacaError::DriverException);
+        }
+        IeafStatus status;
+        status.position = pos;
+        status.moving = moving != 0;
+        status.temperature_c = temp / 100.0 - 273.15;
+        status.reversed = dir == 0;
+        return status;
+    }
+
     void ensure_connected_locked() const {
         if (!connected_) {
             throw AlpacaException("iEAF not connected", AlpacaError::NotConnected);
@@ -417,8 +425,8 @@ private:
         fault_ = text;
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd: the util::SerialLink verdict, #2262):
+    // decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
     // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
     // latched: the handshake retries and connect() closes the port itself.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
@@ -442,9 +450,9 @@ private:
 
     void write_data(const std::string& data) {
 #ifndef _WIN32
-        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
+        if (!link_.write_all(data)) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV) {
+            if (link_.lost()) {
                 fail_link_locked("iEAF serial link lost (errno " + std::to_string(err) + ")");
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
@@ -460,8 +468,7 @@ private:
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
         const auto r = util::read_until(
-            link_.fd(), spec,
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
         switch (r.outcome) {
             case util::ReadOutcome::Terminator:
                 response = r.bytes;
@@ -508,7 +515,7 @@ private:
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
         const auto r = util::read_until(
-            link_.fd(), spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
+            link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
         if (r.outcome == util::ReadOutcome::Length) {
             if (r.bytes != "1") {
                 ALPACA_LOG_WARN("iOptron", std::string("iEAF unexpected ack byte: ") + r.bytes);
@@ -559,5 +566,10 @@ void IeafProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(positi
 void IeafProtocolWrapper::halt() { impl_->halt(); }
 
 void IeafProtocolWrapper::set_zero() { impl_->set_zero(); }
+
+const std::vector<std::string>& ieaf_usb_tokens() {
+    static const std::vector<std::string> tokens{"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::ioptron

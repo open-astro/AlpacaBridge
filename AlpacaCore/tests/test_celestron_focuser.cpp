@@ -16,11 +16,13 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -35,6 +37,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 
 #ifndef _WIN32
@@ -43,6 +46,7 @@
 #include <unistd.h>
 
 #include "fake_celestron_focuser.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #endif
 
@@ -116,7 +120,7 @@ TEST_CASE("Celestron Focuser Driver - Unsupported actions", "[celestron][focuser
 
 TEST_CASE("Celestron Focuser Driver - Connect to a missing port fails", "[celestron][focuser][unit]") {
     auto driver = create_celestron_focuser(0, "/dev/alpacabridge-no-such-celestron-focuser");
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
 }
 
@@ -219,6 +223,29 @@ TEST_CASE("Celestron Focuser Driver - Move sends the raw target and IsMoving fol
     rig.fake().complete_move();
     rig.tick();
     CHECK(rig.driver().get_is_moving() == false);
+    CHECK(rig.driver().get_position() == 5000);
+}
+
+// Issue #2580: the motor arrives between the poll's position read and its slew-done read. A frame that says stopped
+// must carry a position read after the arrival, so once IsMoving reads false Position is the target.
+TEST_CASE("Celestron Focuser Driver - a motor arriving mid-poll never serves IsMoving false with a mid-travel Position",
+          "[celestron][focuser][unit][fake]") {
+    CelestronRig rig;
+    REQUIRE(rig.fake().ok());
+    rig.fake().set_limits(1000, 61000);
+    rig.fake().set_raw_position(30000);  // Position 31000
+    REQUIRE(rig.connect());
+
+    rig.driver().move(5000);  // raw 56000
+    rig.tick();
+    REQUIRE(rig.driver().get_is_moving());
+    REQUIRE(rig.driver().get_position() == 31000);  // the explicit fake has not moved the encoder yet
+
+    rig.fake().complete_move_after_position_reply();
+    // A client polls IsMoving and reads Position once it is false, as the travel-mode case does.
+    for (int i = 0; i < 3 && rig.driver().get_is_moving(); ++i) rig.tick();
+    CHECK_FALSE(rig.fake().moving());
+    CHECK_FALSE(rig.driver().get_is_moving());
     CHECK(rig.driver().get_position() == 5000);
 }
 
@@ -636,7 +663,7 @@ TEST_CASE("Celestron Focuser Driver - a getter after a successful connect never 
     rig.fake().drop_next_reply(0x13, 2);  // the connect poll and its retry
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK_FALSE(rig.driver().get_device_firmware().has_value());
     // The port was released: a connect with replies back succeeds and serves a frame.
@@ -780,14 +807,8 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     REQUIRE(alpacacore::util::is_serial_port_in_use(rig.node));
 
     rig.fake->gate_next(0x02);  // the GOTO's reply never comes: the cable is pulled first
-    auto move = std::async(std::launch::async, [&] {
-        try {
-            rig.driver->move(5000);
-            return 0;
-        } catch (const alpacacore::AlpacaException& error) {
-            return error.error_code();
-        }
-    });
+    auto move = std::async(std::launch::async,
+                           [&] { return alpacacore::test::error_code_of([&] { rig.driver->move(5000); }); });
     REQUIRE(rig.fake->wait_gate_reached(kBound));
     rig.fake->sever_link();
     REQUIRE(move.wait_for(1000ms) == std::future_status::ready);  // the exchange's own timeout is 1 s
@@ -811,6 +832,27 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     CHECK(rig.driver->get_connected());
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_position() == 31000);
+}
+
+// Issue #2262: EBADF on the focus motor's own fd is a lost link, as on every serial vendor (the AUX link feeds the
+// errno to the shared util::SerialLink verdict). Before #2262 the wrapper's own list was EIO/ENXIO/ENODEV: the Move
+// failed with DriverException and Connected kept reading true.
+TEST_CASE("Celestron Focuser Driver - EBADF on a Move's write loses the link at once",
+          "[celestron][focuser][unit][fake][link-lost][issue2262]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    const auto before = alpacacore::test::fds_open_on(rig.node);
+    REQUIRE(alpacacore::test::connect_and_park(*rig.driver, rig.clock, kBound));  // the poll waits on the clock
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(rig.node));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { rig.driver->move(5000); }, AlpacaError::NotConnected);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(write: " + alpacacore::util::errno_string(EBADF) + ")") !=
+          std::string::npos);
+    rig.driver->set_connected(false);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 
 TEST_CASE("Celestron Focuser Driver - a cable pulled during the state poll ends the poll in that tick",
@@ -841,14 +883,8 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during the connect fails th
     REQUIRE(rig.fake->ok());
     SECTION("the limits read") { rig.fake->gate_next(0x2C); }
     SECTION("the firmware read, whose failure the connect does without") { rig.fake->gate_next(0xFE); }
-    auto connect = std::async(std::launch::async, [&] {
-        try {
-            rig.driver->set_connected(true);
-            return 0;
-        } catch (const alpacacore::AlpacaException& error) {
-            return error.error_code();
-        }
-    });
+    auto connect = std::async(
+        std::launch::async, [&] { return alpacacore::test::error_code_of([&] { rig.driver->set_connected(true); }); });
     REQUIRE(rig.fake->wait_gate_reached(kBound));
     rig.fake->sever_link();
     REQUIRE(connect.wait_for(kBound) == std::future_status::ready);
@@ -858,6 +894,97 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during the connect fails th
     rig.replug();
     rig.driver->set_connected(true);
     CHECK(rig.driver->get_connected());
+}
+
+// Issue #1757 slice 2a: the tier-2 contract sweep cannot hold this driver's connect open (the fake has no delay knob),
+// so the sweep's "Disconnect during a connect returns at once" case runs here over the fake's gate: the connect's
+// limits read (0x2C) is held. Before, disconnect() joined the connect thread and tore down before it returned (commit
+// 3ded11bd), so it waited for the held read.
+// Falsified by: celestron_focuser_driver.cpp disconnect() going back to stop_connection_thread() plus
+// set_connected(false).
+TEST_CASE("Celestron Focuser Driver - a Disconnect during a connect returns at once (#1757)",
+          "[celestron][focuser][unit][fake][issue1757]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    rig.fake->gate_next(0x2C);
+    rig.driver->connect();
+    REQUIRE(rig.driver->get_connecting());  // read before the gate wait: the held read times out (500 ms) on its own
+    REQUIRE(rig.fake->wait_gate_reached(kBound));
+    // The test opens the gate once it has read Connecting, not after a fixed time: a timed opener could fire in a
+    // scheduler pause before disconnect() ran, and Connecting then read false with a correct driver. A disconnect
+    // that waits for the connect never lets the test get there, so the opener also fires on its own after
+    // ConnectHoldGate::kCap (connect_hold_gate.h): that disconnect returns late and fails the timing check.
+    std::promise<void> checked;
+    std::thread opener([&rig, done = checked.get_future()] {
+        (void)done.wait_for(alpacacore::test::ConnectHoldGate::kCap);
+        rig.fake->release_gate();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver->disconnect();
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = rig.driver->get_connecting();
+    checked.set_value();
+    opener.join();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(rig.driver->get_connecting());
+    CHECK_FALSE(rig.driver->get_connected());
+}
+
+// Falsified by: fake_celestron_focuser.h:advance_locked() jumps raw_ to the target at once (the mid-travel position
+// check fails) or never reaches it (the arrival checks fail).
+TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Move travels to its target over time",
+          "[celestron][focuser][unit][fake]") {
+    CelestronRig rig;
+    REQUIRE(rig.fake().ok());
+    rig.fake().set_limits(1000, 61000);
+    rig.fake().set_travel_rate(10000);
+    REQUIRE(rig.connect());
+    const std::uint32_t start = rig.fake().raw_position();
+
+    rig.driver().move(5000);  // raw 56000, 26000 counts away: 2.6 s at this rate
+    // real time the fake's motor travels before the mid-travel check
+    std::this_thread::sleep_for(100ms);
+    CHECK(rig.fake().moving());
+    CHECK(rig.fake().raw_position() > start);
+    CHECK(rig.fake().raw_position() < 56000U);
+
+    rig.fake().set_travel_rate(1000000);  // the rest of the way in a few ms
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver().get_is_moving() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+        rig.tick();
+    }
+    CHECK_FALSE(rig.driver().get_is_moving());
+    CHECK(rig.driver().get_position() == 5000);
+}
+
+// Falsified by: fake_celestron_focuser.h:respond() case 0x24 clears target_ without first calling advance_locked()
+// (the halt leaves the encoder at its start) or leaves target_ set (the motor keeps travelling).
+TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Halt stops the travelling motor where it is",
+          "[celestron][focuser][unit][fake]") {
+    CelestronRig rig;
+    REQUIRE(rig.fake().ok());
+    rig.fake().set_limits(1000, 61000);
+    rig.fake().set_travel_rate(10000);
+    REQUIRE(rig.connect());
+    const std::uint32_t start = rig.fake().raw_position();
+
+    rig.driver().move(5000);
+    // real time the motor travels before the halt
+    std::this_thread::sleep_for(100ms);
+    rig.driver().halt();
+    CHECK_FALSE(rig.fake().moving());
+    const std::uint32_t stopped = rig.fake().raw_position();
+    CHECK(stopped > start);
+    CHECK(stopped < 56000U);
+    // real time a running motor would travel
+    std::this_thread::sleep_for(50ms);
+    CHECK(rig.fake().raw_position() == stopped);
 }
 
 #endif  // _WIN32

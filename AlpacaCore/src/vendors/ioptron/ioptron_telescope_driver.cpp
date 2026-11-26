@@ -22,11 +22,16 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock_trust.h>
+#include <alpacacore/util/host_clock_write_gate.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
+#include <alpacacore/util/motion_owner.h>
 #include <alpacacore/util/pointing.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
@@ -52,6 +57,69 @@
 
 namespace alpacacore::vendor::ioptron {
 
+// iOptron's limits for the telescope command gate (#2258). PulseGuide takes up to 99999 ms (the protocol's 5-digit
+// duration field); MoveAxis moves axes 0 and 1, and its discrete arrow speeds stay the driver's check after the gate.
+// The guide-rate static check is finite and greater than 0 (denorm_min is the smallest double above 0); the mount's
+// range is validate_guide_rate_value()'s check, which also runs before the connection check (#2257).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = 99999;
+    limits.move_axis_axes = 2;
+    limits.guide_rate_ra_min = std::numeric_limits<double>::denorm_min();
+    limits.guide_rate_dec_min = std::numeric_limits<double>::denorm_min();
+    limits.texts.pulse_direction = "PulseGuide direction must be 0-3";
+    limits.texts.pulse_duration = "PulseGuide duration must be 0-99999 ms";
+    limits.texts.move_axis_axis = "Axis must be 0 (Primary) or 1 (Secondary)";
+    limits.texts.move_axis_rate_not_finite = "Axis rate out of range";
+    limits.texts.guide_rate_not_finite = "GuideRate must be a finite number greater than 0";
+    limits.texts.guide_rate_range = "GuideRate must be a finite number greater than 0";
+    limits.tracking_rate_max = 4;  // DriveRates 0-3 and 4, the custom rate
+    limits.texts.tracking_rate = "Invalid tracking rate";
+    // The Alt/Az slews check the site before the parked state; azimuth 360 is refused.
+    limits.alt_az_azimuth_360 = false;
+    limits.alt_az_site_first = true;
+    limits.texts.altitude_range = "altitude must be in [-90, 90] degrees";
+    limits.texts.azimuth_range = "azimuth must be in [0, 360) degrees";
+    limits.texts.alt_az_texts_name_member = true;
+    return limits;
+}();
+
+// Decision 0010, iOptron adoption (#2491). One poll body reads :GLS#, :GEP# and :GAC# every kStatePollPeriod (start to
+// start; ticks a slow probe ran over are skipped, never made up) and publishes them as one frame; the getters read the
+// frame and send nothing. kSnapshotMaxAge is the FRESHNESS bound: a frame older than it reads stale and is still
+// served. It is not the bound at which a getter refuses: that is the link-loss policy of decision 0009
+// (util::kLinkStalenessBound).
+constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
+constexpr auto kSnapshotMaxAge = std::chrono::milliseconds(1000);
+constexpr int kStatePollFaultThreshold = 3;
+static_assert(kSnapshotMaxAge >= 2 * kStatePollPeriod, "two poll periods, or a healthy link reads stale");
+static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
+// After a :GAC# that timed out, Alt/Az is read on every this-many-th tick until it answers again (the status and the
+// position are read on every tick), so a mount that never answers it adds one reply timeout per four probes.
+constexpr int kAltAzBackoffTicks = 4;
+
+// One polled frame (decision 0010). Raw, as the mount said it: the Sync offsets, the pulse holds and the read-back
+// windows of a client's write stay driver state and are applied when a getter serves it. Small and copyable.
+struct PolledFrame {
+    bool position_known = false;
+    double ra_hours = 0.0;  // :GEP#, with no Sync offset
+    double dec_degrees = 0.0;
+    int side_of_pier = -1;
+    bool altaz_known = false;  // :GAC# is optional: a mount that answers the other two is alive
+    double alt_degrees = 0.0;
+    double az_degrees = 0.0;
+    bool status_known = false;
+    MountStatus status{};  // :GLS#, with no read-back overlay
+    // Task clock, when the status exchange began: a status sampled inside a slew hold never ends it (decision 0022).
+    std::chrono::steady_clock::time_point status_sampled_at{};
+};
+
+namespace {
+// The driver whose state poll is running on this thread, null elsewhere. The poll's stop flag (poll_stop_) refuses the
+// exchanges of that probe only: a watchdog's or a command's :Q# runs on its own thread and is never refused for it.
+thread_local const void* tl_state_poll_driver = nullptr;
+}  // namespace
+
 /**
  * @brief iOptron mount telescope driver implementation.
  *
@@ -62,8 +130,8 @@ class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::Asy
     // Decision 0016 (#1829): getters never wait on device I/O. Two driver locks, in this order:
     //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
     // io_mutex_ keeps one command's exchanges and state writes together: every member that reaches the mount
-    // (a command, a getter whose TTL cache has lapsed, the connect and the close) holds it for the whole call.
-    // Some sequences must not be split: :SRA#/:Sd# set the target the :MS1# after them uses, and a
+    // (a command, a site getter whose TTL cache has lapsed, the poll's probe, the connect and the close) holds it for
+    // the whole call. Some sequences must not be split: :SRA#/:Sd# set the target the :MS1# after them uses, and a
     // Park's :MP1# is followed by its park-position read. mutex_ is never held ACROSS an exchange: every call
     // through Wire drops it for the exchange and takes it back after. The protocol wrapper's own lock
     // serialises the wire itself; the slew and clock-sync bodies take the two locks like a command does.
@@ -104,6 +172,11 @@ private:
                 throw AlpacaException("iOptron: a mount exchange without the operation lock",
                                       AlpacaError::DriverException);
             }
+            // A probe the Disconnect asked to stop sends nothing more (decision 0016 item 4): the exchange in
+            // flight finishes, the next one is refused here, whichever effect of the probe asks for it.
+            if (tl_state_poll_driver == &driver_ && driver_.poll_stop_.load()) {
+                throw AlpacaException("iOptron state poll stopped", AlpacaError::DriverException);
+            }
             return gate.exchange([&]() -> decltype(auto) { return f(wrapper); });
         }
 
@@ -136,6 +209,9 @@ private:
         SiteInfo get_site_info() const {
             return call([](auto& p) { return p.get_site_info(); });
         }
+        SiteInfo get_site_info(const std::string& gut_reply) const {
+            return call([&](auto& p) { return p.get_site_info(gut_reply); });
+        }
         SiteInfo get_site_location() const {
             return call([](auto& p) { return p.get_site_location(); });
         }
@@ -144,6 +220,9 @@ private:
         }
         std::chrono::system_clock::time_point get_utc_time() const {
             return call([](auto& p) { return p.get_utc_time(); });
+        }
+        std::string read_utc_reply() const {
+            return call([](auto& p) { return p.read_utc_reply(); });
         }
         void set_target_ra(double ra_hours) const {
             call([&](auto& p) { p.set_target_ra(ra_hours); });
@@ -258,20 +337,8 @@ public:
           timezone_offset_valid_(false),
           dst_observed_(false),
           last_site_info_fetch_(clock_.now()),
-          cached_ra_hours_(0.0),
-          cached_dec_degrees_(0.0),
-          cached_side_of_pier_(-1),
-          position_cache_valid_(false),
-          last_position_update_(clock_.now()),
-          cached_alt_degrees_(0.0),
-          cached_az_degrees_(0.0),
-          altaz_cache_valid_(false),
-          last_altaz_update_(clock_.now()),
           cached_guide_rate_(),
           guide_rate_valid_(false),
-          cached_status_(),
-          status_cache_valid_(false),
-          last_status_update_(clock_.now()),
           utc_query_supported_(true),
           fast_cache_until_(std::chrono::steady_clock::time_point{}),
           pending_site_latitude_(site_latitude_deg),
@@ -291,6 +358,9 @@ public:
         // Cancel and join the async slew dispatch (slew slot) before any member it touches is
         // destroyed. Must run WITHOUT mutex_ held (the thread takes mutex_).
         reap_slew_dispatch();
+        // The state poll too: it takes both locks, so it ends before the disconnect below closes the port, and a
+        // probe the flag stopped sends nothing more.
+        stop_state_poll();
         if (connected_) {
             // Destructors are implicitly noexcept; a throw from set_connected()
             // would call std::terminate(). Swallow any error during teardown.
@@ -317,6 +387,7 @@ public:
         stop_clock_sync();
         stop_zero_search_watchdog();
         stop_motion_bound_watchdog();
+        stop_move_axis_caps();
         reap_slew_dispatch();
     }
     
@@ -366,17 +437,16 @@ public:
     // (decision 0009: the wrapper's lock-free latch) reads false at once.
     bool get_connected() const override { return published_connected_.load() && !link_lost(); }
 
-    // Reads only the published copy under its own narrow mutex, never the coarse
-    // mutex_ that set_connected() holds across the connect. After a lost link, the
-    // wrapper's loss reason, kept until the next Connect or Disconnect (decision 0009
-    // rule 5); the wrapper's text mutex is a leaf no exchange holds.
+    // Takes no driver lock, never the coarse mutex_ that set_connected() holds across the connect. After a lost link,
+    // the wrapper's loss reason, kept until the next Connect or Disconnect (decision 0009 rule 5); otherwise the poll's
+    // latched fault, empty when none. The wrapper's text mutex and the module's health mutex are leaves no exchange
+    // holds.
     std::string get_link_fault() const override {
         std::string lost = iOptronProtocolWrapper::instance().link_fault();
         if (!lost.empty()) {
             return lost;
         }
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        return link_fault_text_;
+        return polled_.fault();
     }
 
     // Base always spawns (the old spawn-skip `if (connect == get_connected())`
@@ -391,15 +461,7 @@ public:
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
     // and the destructor serialize behind it for the duration. Deliberate
     // (base class "COST" note); this driver is the worst case of it.
-    void connect() override {
-        start_connection_task(true);
-    }
-
-    void disconnect() override {
-        start_connection_task(false);
-    }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     // The auto-detect factories need the driver's unique id inside the resolver,
     // and the id is assigned only after the driver exists. Call before the first connect.
@@ -455,10 +517,13 @@ public:
             // join under either would deadlock, and a body mid-exchange must finish that exchange and then see
             // its stop before this call takes the operation lock, so it sends nothing more (the clock-sync
             // slot cases). transition_mutex_ keeps every other connect and disconnect out meanwhile. The zero
-            // search watchdog takes both locks the same way (#2432).
+            // search watchdog takes both locks the same way (#2432), and so does the state poll: it is stopped first,
+            // so a probe mid-exchange finishes that exchange and sends nothing more (poll_stop_).
+            stop_state_poll();
             stop_clock_sync();
             stop_zero_search_watchdog();
             stop_motion_bound_watchdog();
+            stop_move_axis_caps();
             {
                 std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
                 reap_slew_dispatch();
@@ -551,17 +616,15 @@ public:
                 }
             }
             site_info_valid_ = false;
-            position_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            status_cache_valid_ = false;
             guide_rate_valid_ = false;
             utc_offset_.clear();
             clock_sync_connect_pass_done_ = false;
             client_disagreement_warned_ = false;
-            device_faulted_ = false;
-            device_fault_count_ = 0;
-            last_device_error_.clear();
-            publish_link_fault_locked();
+            // The frame, the fault and the loss latch of the last session go, and the poll may run again (the stop
+            // flag is only ever set with the poll joined).
+            polled_.reset();
+            poll_stop_ = false;
+            altaz_skip_ticks_ = 0;
             dec_guide_calibration_attempted_ = false;
             dec_guide_calibrated_ = false;
             dec_guide_inverted_ = true;
@@ -572,6 +635,7 @@ public:
             tracking_state_before_move_.reset();
             park_override_until_ = std::chrono::steady_clock::time_point{};
             park_finalize_pending_ = false;
+            tracking_override_until_ = std::chrono::steady_clock::time_point{};
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             clear_hold_windows_locked();
             slew_in_progress_ = false;
@@ -594,19 +658,29 @@ public:
             target_dec_degrees_ = 0.0;
             sync_offset_ra_hours_ = 0.0;
             sync_offset_dec_degrees_ = 0.0;
+            motion_owner_.cancel(util::MotionOwner::kBothAxes);
             invalidate_slew_error_locked();
-            // The mount clock is sampled once, before Connected is published (the getter makes no exchange).
-            util::UtcOffset mount_time;
+            // The mount clock is sampled once, before Connected is published (the getter makes no exchange). The
+            // one :GUT# reply also gives the site's timezone and DST to the prefetch below, so the connect sends
+            // :GUT# once (#1784). The two fields are judged apart: an unusable UTC still leaves usable site fields.
+            std::optional<std::string> gut_reply;
             try {
-                const auto utc = protocol.get_utc_time();
-                mount_time.set(utc, clock_.now());
+                gut_reply = protocol.read_utc_reply();
             } catch (const std::exception& e) {
                 ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
             }
+            util::UtcOffset mount_time;
+            if (gut_reply) {
+                try {
+                    mount_time.set(iOptronProtocolWrapper::parse_utc_time(*gut_reply), clock_.now());
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+                }
+            }
             utc_offset_ = mount_time;
-            // The caches are primed before connected_ is published: a getter that arrives during these reads
+            // The site cache is primed before connected_ is published: a getter that arrives during these reads
             // answers NotConnected at once (check_connected_before_lock()) instead of waiting behind them.
-            prefetch_mount_state_locked();
+            prefetch_site_locked(gut_reply ? &*gut_reply : nullptr);
             read_guide_rate_locked();
             try {
                 mount_info_ = protocol.get_mount_info();
@@ -616,10 +690,46 @@ public:
             // The reads above log and carry on when they fail; a cable pulled during them lost
             // the link (the wrapper released the port), so this Connect fails rather than
             // publishing a mount that is gone. The reason goes with the failure and is not kept.
-            if (link_lost()) {
+            const auto fail_on_lost_link = [&] {
+                if (!link_lost()) return;
                 const std::string reason = protocol.link_fault();
+                if (lock.owns_lock()) lock.unlock();
+                stop_state_poll();  // with no driver lock held: it takes both
+                polled_.reset();
+                lock.lock();
                 protocol.disconnect();
                 throw AlpacaException("Failed to connect to iOptron mount: " + reason, AlpacaError::NotConnected);
+            };
+            fail_on_lost_link();
+            // The first frame: the poll's first probe is the seed. It publishes a frame even when the mount answers
+            // the connect's reads but not these (the getters then say "not known yet"), so a connect does not fail for
+            // it. The poll starts with no driver lock held (AsyncOperation rule 10); it takes both for its reads, and
+            // Connected is published only once a frame exists, so a getter never meets "no state frame" while
+            // Connected is true.
+            lock.unlock();
+            seeding_ = true;
+            bool poll_started = false;
+            try {
+                poll_started = polled_.start();
+            } catch (...) {
+                seeding_ = false;
+                stop_state_poll();
+                polled_.reset();
+                lock.lock();
+                protocol.disconnect();
+                throw;
+            }
+            seeding_ = false;
+            lock.lock();
+            fail_on_lost_link();  // a pull the seed or an earlier read met: NotConnected, not "did not start"
+            if (!poll_started) {
+                lock.unlock();
+                stop_state_poll();
+                polled_.reset();
+                lock.lock();
+                protocol.disconnect();
+                throw AlpacaException("Failed to connect to iOptron mount: the state poll did not start",
+                                      AlpacaError::DriverException);
             }
             connected_ = true;
             fast_cache_until_ = clock_.now() + kFastCacheGrace;
@@ -632,8 +742,9 @@ public:
             published_connected_ = true;  // the connect is complete (#910)
             lock.unlock();
             // The connect's body reads the host clock's trust itself, so a change seen during the connect needs
-            // no re-sync of its own (#2419).
-            resync_pending_.store(false);
+            // no re-sync of its own (#2419), and its decision is this connection's first (#2480).
+            host_clock_gate_.drop_owed();
+            host_clock_gate_.begin_connect();
             // After the locks are released: the body takes both.
             start_clock_sync();
             return;
@@ -646,15 +757,10 @@ public:
         published_connected_ = false;
         connected_ = false;
         site_info_valid_ = false;
-        position_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-        status_cache_valid_ = false;
         guide_rate_valid_ = false;
         utc_offset_.clear();
-        device_faulted_ = false;
-        device_fault_count_ = 0;
-        last_device_error_.clear();
-        publish_link_fault_locked();
+        polled_.reset();  // the poll was joined above
+        altaz_skip_ticks_ = 0;
         dec_guide_calibration_attempted_ = false;
         dec_guide_calibrated_ = false;
         dec_guide_inverted_ = true;
@@ -669,6 +775,7 @@ public:
         tracking_state_before_move_.reset();
         park_override_until_ = std::chrono::steady_clock::time_point{};
         park_finalize_pending_ = false;
+        tracking_override_until_ = std::chrono::steady_clock::time_point{};
         tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
         clear_hold_windows_locked();
         slew_in_progress_ = false;
@@ -688,6 +795,7 @@ public:
         target_dec_set_ = false;
         target_ra_hours_ = 0.0;
         target_dec_degrees_ = 0.0;
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
         invalidate_slew_error_locked();
         protocol.disconnect();
         ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
@@ -786,71 +894,59 @@ public:
         // iOptron mounts are equatorial (German Polar)
         return AlignmentMode::GermanPolar;
     }
-    
+
+    // Decision 0010 rule 6, per getter: every getter of the poll's frame (Altitude, Azimuth, RightAscension,
+    // Declination, SideOfPier, AtHome, AtPark, Slewing, Tracking, TrackingRate) answers from the frame under mutex_
+    // alone and sends nothing. A frame older than kSnapshotMaxAge is served as it stands (stale is not lost); one older
+    // than util::kLinkStalenessBound, or a latched fault, is the module's NotConnected / DriverException. A value the
+    // frame does not hold yet (the seed's reads failed, or :GAC# never answered) is DriverException, never
+    // InvalidOperation.
     double get_altitude() const override {
-        return serve_cached_or_refill([&] { return altaz_cache_fresh_locked(); },
-                                      [&] {
-                                          refresh_altaz_cache_locked();
-                                          return cached_alt_degrees_;
-                                      });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return require_altaz(served_frame_locked()).alt_degrees;
     }
-    
+
+    // The optics and SlewSettleTime are the client's values, not the mount's: no lock, no fault refusal, but
+    // NotConnected while disconnected, connecting or lost like every other member (ASCOM contract precedence). The
+    // optics setters are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with
+    // them, connected or not.
     double get_aperture_diameter() const override {
+        check_connected_lock_free();
         return aperture_diameter_m_;
     }
 
     void set_aperture_diameter(double meters) override { aperture_diameter_m_ = meters; }
 
     double get_aperture_area() const override {
+        check_connected_lock_free();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
     }
     
     bool get_at_home() const override {
-        return serve_cached_or_refill(
-            [&] { return status_cache_fresh_locked() && !zero_search_start_check_due_locked(clock_.now()); },
-            [&] {
-                if (!lock_gate_.holds_io() && zero_search_start_check_due_locked(clock_.now())) {
-                    throw RefillNeedsOperationLock{};
-                }
-                refresh_status_cache_locked();
-                if (lock_gate_.holds_io()) {
-                    check_zero_search_started_locked(clock_.now());
-                }
-                // Issue #2420: the status 7 a zero search starts from is the false zero
-                // it is there to correct. AtHome only once the search has landed.
-                return driver_motion_ != DriverMotion::HomeSearch && cached_status_.is_at_home &&
-                       !home_search_unconfirmed_;
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const MountStatus status = status_of_locked(served_frame_locked());
+        // Issue #2420: the status 7 a zero search starts from is the false zero
+        // it is there to correct. AtHome only once the search has landed.
+        return driver_motion_ != DriverMotion::HomeSearch && status.is_at_home && !home_search_unconfirmed_;
     }
-    
+
     bool get_at_park() const override {
-        return serve_cached_or_refill(
-            [&] { return park_override_until_ > clock_.now() || status_cache_fresh_locked(); },
-            [&] {
-                auto now = clock_.now();
-                if (park_override_until_ > now) {
-                    return false;
-                }
-                // The Unpark override closed between the freshness check and the read of `now` above (the
-                // Slewing landing's sibling): a status from inside the window is not served as the answer.
-                if (!lock_gate_.holds_io() && !status_cache_fresh_locked()) {
-                    throw RefillNeedsOperationLock{};
-                }
-                refresh_status_cache_locked();
-                return cached_status_.is_parked;
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const PolledFrame frame = served_frame_locked();
+        // The Unpark read-back window answers false whatever the firmware still says (kUnparkGrace).
+        if (park_override_until_ > clock_.now()) {
+            return false;
+        }
+        return status_of_locked(frame).is_parked;
     }
-    
+
     double get_azimuth() const override {
-        return serve_cached_or_refill([&] { return altaz_cache_fresh_locked(); },
-                                      [&] {
-                                          refresh_altaz_cache_locked();
-                                          return cached_az_degrees_;
-                                      });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return require_altaz(served_frame_locked()).az_degrees;
     }
-    
+
     bool get_can_find_home() const override {
         return true;
     }
@@ -867,14 +963,11 @@ public:
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
-        // Lock-free like the rest of this getter: the loss latch and the fault flag are atomics and the fault
-        // text has its own leaf mutex (decision 0009 rules 1 and 3). It does not run the staleness loss (rule 2b):
-        // lose_link() takes the wrapper mutex, which every serial exchange holds, so the next check_connected() call
-        // finds a stale fault instead.
+        // Lock-free like the rest of this getter: the loss latch is an atomic and the poll's fault text has its own
+        // leaf mutex (decision 0009 rules 1 and 3). The staleness loss is the poll's (rule 2b).
         throw_if_link_lost();
-        if (device_faulted_.load()) {
-            throw AlpacaException("Mount communications compromised: " + published_fault_text(),
-                                  AlpacaError::DriverException);
+        if (const std::string fault = polled_.fault(); !fault.empty()) {
+            throw AlpacaException("iOptron mount communications compromised: " + fault, AlpacaError::DriverException);
         }
         return pulse_window_open();
     }
@@ -935,30 +1028,28 @@ public:
     }
     
     double get_declination() const override {
-        return serve_cached_or_refill(
-            [&] { return pulse_position_hold_[kDecAxis].active(clock_.now()) || position_cache_fresh_locked(); },
-            [&] {
-                double dec_value = 0.0;
-                if (pulse_position_hold_[kDecAxis].active(clock_.now())) {
-                    dec_value = pulse_guiding_hold_dec_degrees_;
-                } else {
-                    refresh_position_cache_locked();
-                    dec_value = cached_dec_degrees_;
-                }
-                // The first read after a Dec pulse serves the predicted position; any later read is live.
-                if (pulse_position_correction_[kDecAxis].active(clock_.now())) {
-                    dec_value = pulse_guiding_dec_baseline_degrees_ + pulse_guiding_dec_expected_delta_degrees_;
-                }
-                pulse_position_correction_[kDecAxis].clear();
-                last_dec_read_degrees_ = dec_value;
-                last_dec_read_valid_ = true;
-                // The Sync offset model adds a constant, so at the pole it would report past +-90 (Dec 90.71 at the
-                // HAE29C's home after a plate-solve Sync, 2026-11-22). Declination is -90 to 90 (ASCOM); a slew target
-                // past the pole is already clamped where the wrapper writes :Sd (set_target_dec()).
-                return std::clamp(dec_value + sync_offset_dec_degrees_, -90.0, 90.0);
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const PolledFrame frame = served_frame_locked();
+        const auto now = clock_.now();
+        double dec_value = 0.0;
+        if (pulse_position_hold_[kDecAxis].active(now)) {
+            dec_value = pulse_guiding_hold_dec_degrees_;
+        } else {
+            dec_value = require_position(frame).dec_degrees;
+        }
+        // The first read after a Dec pulse serves the predicted position; any later read is live.
+        if (pulse_position_correction_[kDecAxis].active(now)) {
+            dec_value = pulse_guiding_dec_baseline_degrees_ + pulse_guiding_dec_expected_delta_degrees_;
+        }
+        pulse_position_correction_[kDecAxis].clear();
+        last_dec_read_degrees_ = dec_value;
+        last_dec_read_valid_ = true;
+        // The Sync offset model adds a constant, so at the pole it would report past +-90 (Dec 90.71 at the
+        // HAE29C's home after a plate-solve Sync, 2026-11-22). Declination is -90 to 90 (ASCOM); a slew target
+        // past the pole is already clamped where the wrapper writes :Sd (set_target_dec()).
+        return std::clamp(dec_value + sync_offset_dec_degrees_, -90.0, 90.0);
     }
-    
+
     double get_declination_rate() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
@@ -978,13 +1069,10 @@ public:
     }
     
     bool get_tracking() const override {
-        return serve_cached_or_refill(
-            [&] {
-                return (tracking_override_until_ > clock_.now() && status_cache_valid_) || status_cache_fresh_locked();
-            },
-            [&] { return get_tracking_locked(); });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return status_of_locked(served_frame_locked()).is_tracking;
     }
-    
+
     void set_tracking(bool tracking) override {
         StateLock lock(lock_gate_);
         check_connected();
@@ -997,18 +1085,16 @@ public:
         } else {
             protocol.stop_tracking();
         }
-        cached_status_.is_tracking = tracking;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
-        tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
+        write_tracking_locked(tracking);
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
         } else {
             tracking_state_before_move_.reset();
         }
     }
-    
+
     double get_focal_length() const override {
+        check_connected_lock_free();
         return focal_length_m_;
     }
     
@@ -1033,9 +1119,8 @@ public:
     // of range is refused, never clamped. The range is 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate;
     // kEps absorbs rounding at a bound, which set_guide_rate_locked() then clamps inside it.
     static void validate_guide_rate_value(double value, bool ra_axis) {
-        if (!std::isfinite(value) || value <= 0.0) {
-            throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
-        }
+        util::check_guide_rate_arguments(
+            kCommandLimits, ra_axis ? util::GuideRateAxis::RightAscension : util::GuideRateAxis::Declination, value);
         constexpr double kEps = 1e-9;
         const double fraction = value / kSiderealRateDegPerSec;
         const double low = ra_axis ? 0.01 : 0.10;
@@ -1050,7 +1135,7 @@ public:
         validate_guide_rate_value(rate.ra, true);
         validate_guide_rate_value(rate.dec, false);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_guide_rate_state(kCommandLimits, GateChecks{*this, "GuideRate"});
         set_guide_rate_locked(rate);
     }
 
@@ -1063,7 +1148,8 @@ public:
     void set_one_guide_rate_axis(bool ra_axis, double value) {
         validate_guide_rate_value(value, ra_axis);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_guide_rate_state(kCommandLimits,
+                                     GateChecks{*this, ra_axis ? "GuideRateRightAscension" : "GuideRateDeclination"});
         if (!guide_rate_valid_) read_guide_rate_locked();
         // A serial hangup during the re-read lost the link: NotConnected, not "unknown". Here and not in
         // read_guide_rate_locked(), whose connect-path caller closes the port on a lost link before it throws.
@@ -1094,26 +1180,23 @@ public:
     }
 
     double get_right_ascension() const override {
-        return serve_cached_or_refill(
-            [&] { return pulse_position_hold_[kRaAxis].active(clock_.now()) || position_cache_fresh_locked(); },
-            [&] {
-                double ra_value = 0.0;
-                if (pulse_position_hold_[kRaAxis].active(clock_.now())) {
-                    ra_value = pulse_guiding_hold_ra_hours_;
-                } else {
-                    refresh_position_cache_locked();
-                    ra_value = cached_ra_hours_;
-                }
-                // The first read after an RA pulse serves the predicted position; any later read is live.
-                if (pulse_position_correction_[kRaAxis].active(clock_.now())) {
-                    ra_value =
-                        util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
-                }
-                pulse_position_correction_[kRaAxis].clear();
-                last_ra_read_hours_ = ra_value;
-                last_ra_read_valid_ = true;
-                return util::wrap_hours(ra_value + sync_offset_ra_hours_);
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const PolledFrame frame = served_frame_locked();
+        const auto now = clock_.now();
+        double ra_value = 0.0;
+        if (pulse_position_hold_[kRaAxis].active(now)) {
+            ra_value = pulse_guiding_hold_ra_hours_;
+        } else {
+            ra_value = require_position(frame).ra_hours;
+        }
+        // The first read after an RA pulse serves the predicted position; any later read is live.
+        if (pulse_position_correction_[kRaAxis].active(now)) {
+            ra_value = util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
+        }
+        pulse_position_correction_[kRaAxis].clear();
+        last_ra_read_hours_ = ra_value;
+        last_ra_read_valid_ = true;
+        return util::wrap_hours(ra_value + sync_offset_ra_hours_);
     }
 
     double get_right_ascension_rate() const override {
@@ -1137,52 +1220,21 @@ public:
     }
     
     int get_side_of_pier() const override {
-        return serve_cached_or_refill(
-            [&] {
-                return position_cache_valid_ && !slew_in_progress_ && !cached_status_.is_slewing &&
-                       (clock_.now() - last_position_update_) < kSideOfPierPositionTtl && site_info_valid_;
-            },
-            [&] {
-                // Pier side only changes across a slew, flip, park or home, and every
-                // motion initiator invalidates the position cache, so a position a
-                // few seconds old is authoritative here. One :GEP# round trip costs
-                // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
-                // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
-                // lapsed), so this read tolerates a longer staleness than RA/Dec.
-                // slew_in_progress_ (set by every GOTO initiator, cleared once
-                // Slewing has observed completion) is the authoritative "a move may
-                // be changing pier side" signal here: cached_status_.is_slewing is
-                // only refreshed when someone polls Slewing/DeviceState, so a client
-                // that polls SideOfPier alone across a flip would otherwise ride the
-                // 5 s window on pre-flip data (PR #228 review). While a slew is in
-                // flight every read goes live. The flag is sticky until the next
-                // Slewing/DeviceState poll observes completion, so a client that
-                // polls SideOfPier alone keeps live reads after the move as well:
-                // never stale, just uncached until it asks whether the slew ended.
-                const auto now = clock_.now();
-                if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
-                    (now - last_position_update_) >= kSideOfPierPositionTtl) {
-                    refresh_position_cache_locked();
-                }
-                if (!site_info_valid_) {
-                    ensure_site_info_cached_locked();
-                    // ensure_site_info_cached_locked() sets site_info_valid_ on success;
-                    // this re-check detects a failed cache populate, not a dead condition.
-                    // cppcheck-suppress identicalInnerCondition
-                    if (!site_info_valid_) {
-                        return normalize_side_of_pier_value(cached_side_of_pier_);
-                    }
-                }
-
-                const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
-                const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
-                const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
-                return util::pier_side_for_hour_angle(hour_angle);
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const PolledFrame frame = require_position(served_frame_locked());
+        // No site cached: the pier digit the mount reported, normalized (the site is not read here: it is not part of
+        // the frame, #2491 rule 9).
+        if (!site_info_valid_) {
+            return normalize_side_of_pier_value(frame.side_of_pier);
+        }
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double synced_ra = util::wrap_hours(frame.ra_hours + sync_offset_ra_hours_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::check_destination_side_of_pier_arguments(ra, dec);
         return serve_cached_or_refill([&] { return site_info_valid_; },
                                       [&] {
                                           if (!site_info_valid_) {
@@ -1191,7 +1243,7 @@ public:
                                               // this re-check detects a failed cache populate, not a dead condition.
                                               // cppcheck-suppress identicalInnerCondition
                                               if (!site_info_valid_) {
-                                                  return normalize_side_of_pier_value(cached_side_of_pier_);
+                                                  return normalize_side_of_pier_value(held_side_of_pier_locked());
                                               }
                                           }
 
@@ -1221,6 +1273,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected_lock_free();
         return slew_settle_time_seconds_;
     }
 
@@ -1231,6 +1284,7 @@ public:
                 AlpacaError::InvalidValue
             );
         }
+        check_connected_lock_free();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
     
@@ -1323,25 +1377,22 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        move_axis_under_lock(axis, rate);
-        // Issue #2396 (AB-9): every MoveAxis with a non-zero rate restarts the dead-man (kMaxMoveAxisDuration).
-        if (rate != 0.0) start_motion_bound_watchdog();
+        const std::optional<util::HoldWindow> cap = move_axis_under_lock(axis, rate);
+        // Issue #2396 (AB-9), #2651: every MoveAxis with a non-zero rate restarts the cap of its own axis
+        // (util::kMaxMoveAxisDuration), once the locks are released (decision 0006 rule 4).
+        if (cap) start_move_axis_cap(axis, *cap);
     }
 
-    void move_axis_under_lock(int axis, double rate) {
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
-                                  AlpacaError::InvalidValue);
-        }
-
+    // Returns the cap's window when the move runs (a non-zero rate), armed when the rate command was accepted.
+    std::optional<util::HoldWindow> move_axis_under_lock(int axis, double rate) {
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         double abs_rate = std::abs(rate);
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
+        util::check_move_axis_state(kCommandLimits, abs_rate == 0.0, GateChecks{*this, "MoveAxis"});
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         const Wire protocol = wire();
@@ -1372,8 +1423,9 @@ public:
                 // side 1. Confirmed on the HAE29C on both pier sides (#2424, 2026-11-20).
                 bool north = (rate > 0.0);
                 bool invert_dec = dec_guide_inverted_;
-                refresh_position_cache_locked();
-                if (should_flip_dec_for_pier_locked()) {
+                // A command reads the mount itself: a pier digit up to one poll old, just after a meridian flip, would
+                // invert the Dec direction (#2491 rule 8).
+                if (should_flip_dec_for_pier(read_position_direct_locked().side_of_pier)) {
                     invert_dec = !invert_dec;
                 }
                 if (invert_dec) {
@@ -1385,27 +1437,19 @@ public:
             }
         }
 
-        status_cache_valid_ = false;
+        // The cap this move replaces or ends sends no stop from here on (decision 0006 rules 3 and 6). Its stop runs
+        // under the operation lock this call holds, and checks its stop reason there, so a body that woke at its
+        // deadline while the rate command was on the wire finds itself cancelled. A rate command that threw never
+        // gets here, and leaves the cap that was running.
+        move_axis_cap_[axis].cancel();
+        std::optional<util::HoldWindow> cap;
         if (rate == 0.0) {
             if (axis == 0) {
                 axis_move_active_primary_ = false;
             } else {
                 axis_move_active_secondary_ = false;
             }
-            if (!axis_move_active_primary_ && !axis_move_active_secondary_ &&
-                tracking_state_before_move_.has_value()) {
-                const bool desired_tracking = tracking_state_before_move_.value();
-                if (desired_tracking) {
-                    protocol.start_tracking();
-                } else {
-                    protocol.stop_tracking();
-                }
-                cached_status_.is_tracking = desired_tracking;
-                status_cache_valid_ = true;
-                last_status_update_ = clock_.now();
-                tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
-                tracking_state_before_move_.reset();
-            }
+            restore_tracking_when_axes_idle_locked();
         } else {
             if (axis == 0) {
                 axis_move_active_primary_ = true;
@@ -1413,15 +1457,23 @@ public:
                 axis_move_active_secondary_ = true;
             }
             if (!was_any_axis_active && !tracking_state_before_move_.has_value()) {
-                tracking_state_before_move_ = cached_status_.is_tracking;
+                tracking_state_before_move_ = known_status_locked().value_or(MountStatus{}).is_tracking;
             }
-            move_axis_deadline_ = clock_.now() + kMaxMoveAxisDuration;
+            cap.emplace();
+            cap->arm(clock_.now(), util::kMaxMoveAxisDuration);
         }
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
         // A GOTO a status refresh already saw stopped is finished (issue #2063), not driver motion.
         const DriverMotion motion = (slew_in_progress_ && !goto_seen_stopped_) ? DriverMotion::Goto : driver_motion_;
+        // Issue #2522: a moving MoveAxis claims its own axis and a stop cancels it, so a slew, Park or FindHome body,
+        // which owns both axes, stands down either way; a PulseGuide claims nothing (see motion_owner_).
+        if (rate == 0.0) {
+            motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+        } else {
+            motion_owner_.claim(util::MotionCommand::MoveAxis, axis);
+        }
         supersede_slew_dispatch_locked();
         clear_slew_hold_locked();  // MoveAxis starts no GOTO: Slewing follows the axis flags and the mount
         // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
@@ -1429,6 +1481,23 @@ public:
         // MoveAxis. Keep it as driver motion (a jog too: the protocol does not say it ends one) so a PulseGuide
         // does not mask it; the next fresh no-motion status ends it, the override being cleared above.
         driver_motion_ = motion;
+        return cap;
+    }
+
+    // Both axes idle: the tracking state from before the first MoveAxis comes back (a MoveAxis stop and a cap stop
+    // end the move the same way). Throws what the tracking command throws.
+    void restore_tracking_when_axes_idle_locked() const {
+        if (axis_move_active_primary_ || axis_move_active_secondary_ || !tracking_state_before_move_.has_value()) {
+            return;
+        }
+        const bool desired_tracking = tracking_state_before_move_.value();
+        if (desired_tracking) {
+            wire().start_tracking();
+        } else {
+            wire().stop_tracking();
+        }
+        write_tracking_locked(desired_tracking);
+        tracking_state_before_move_.reset();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1457,158 +1526,134 @@ public:
     }
 
     bool get_slewing() const override {
-        return serve_cached_or_refill(
-            [&] {
-                return !last_slew_error_.empty() || axis_move_active_primary_ || axis_move_active_secondary_ ||
-                       slew_hold_.active(clock_.now()) ||
-                       (status_cache_fresh_locked() && !zero_search_start_check_due_locked(clock_.now()) &&
-                        !(slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines));
-            },
-            [&] {
-                // open-astro#575: surface a stored async-slew failure as an error
-                // instead of a silent false, until AbortSlew or a new slew initiator
-                // clears it (see last_slew_error_).
-                if (!last_slew_error_.empty()) {
-                    throw AlpacaException(last_slew_error_);
-                }
-                if (axis_move_active_primary_ || axis_move_active_secondary_) {
-                    return true;
-                }
-                auto now = clock_.now();
-                if (slew_hold_.active(now)) {
-                    return true;
-                }
-                // The hold closed between the freshness check and the read of `now` above, and the status the
-                // state lock could serve as it stands predates the hold. The mount, not the window, says when
-                // the slew ended (decision 0022): ask it, under the operation lock.
-                if (!lock_gate_.holds_io() &&
-                    (!status_cache_fresh_locked() || zero_search_start_check_due_locked(now))) {
-                    throw RefillNeedsOperationLock{};
-                }
-                refresh_status_cache_locked();
-                if (lock_gate_.holds_io()) {
-                    check_zero_search_started_locked(now);
-                }
-                // Issue #2420: a zero sensor search moves until a fresh status past its hold reads 7 (the refresh
-                // above ends it then) or its bound stops it with a stored error, whatever status it reports meanwhile.
-                if (!last_slew_error_.empty()) {
-                    throw AlpacaException(last_slew_error_);
-                }
-                if (driver_motion_ == DriverMotion::HomeSearch) {
-                    return true;
-                }
-                if (cached_status_.is_slewing) {
-                    // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
-                    // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
-                    // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
-                    // dispatching and no Park/FindHome still moving (driver_motion_).
-                    return !(pulse_window_open() && (!slew_in_progress_ || goto_seen_stopped_) &&
-                             driver_motion_ == DriverMotion::None);
-                }
-                // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
-                // compensating sidereal motion during its final ~1 s approach, so
-                // slews settle a consistent ~11-16 arcsec east of the RA target
-                // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
-                // the firmware deadbands slews shorter than ~15". Instead, close the
-                // residual with a duration-computed pulse-guide trim (guide rate is
-                // known, so err/rate gives the exact pulse length), re-measuring and
-                // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
-                // on this firmware and Dec pulse polarity flips with pier side.
-                // Slewing stays true while a trim pulse runs.
-                // Issue #2063: the client's pulse takes over from the trim of a GOTO the mount already finished.
-                if (pulse_window_open() && goto_seen_stopped_) {
-                    return false;
-                }
-                if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
-                    // The trim reads the position itself. Under the state lock alone (the slew hold closed
-                    // between the freshness check and the read of `now` above) the refused exchange would be
-                    // taken for a failed trim and the GOTO reported landed with its RA error: run again under
-                    // the operation lock instead.
-                    if (!lock_gate_.holds_io()) {
-                        throw RefillNeedsOperationLock{};
-                    }
-                    ++slew_refine_count_;
-                    try {
-                        const Wire protocol = wire();
-                        Position pos = protocol.get_position();
-                        double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
-                        if (ra_err_hours > 12.0) {
-                            ra_err_hours -= 24.0;
-                        } else if (ra_err_hours < -12.0) {
-                            ra_err_hours += 24.0;
-                        }
-                        const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
-                        constexpr double kTrimMinArcsec = 5.0;    // below this: on target
-                        constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
-                        if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
-                            double guide_fraction = kDefaultGuideRateFraction;
-                            try {
-                                guide_fraction = protocol.get_guide_rates().first;
-                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                                // Unreadable guide rate — fall back to the default fraction.
-                            }
-                            if (guide_fraction < 0.1 || guide_fraction > 1.0) {
-                                guide_fraction = kDefaultGuideRateFraction;
-                            }
-                            const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
-                            int duration_ms =
-                                static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
-                            duration_ms = std::clamp(duration_ms, 100, 8000);
-                            // Reported RA too large -> mount is east of target -> pulse
-                            // west (RA-, direction 3); too small -> east (RA+, 2).
-                            const int direction = ra_err_arcsec > 0 ? 3 : 2;
-                            ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
-                                                           " arcsec from RA target; pulse-guide trim " +
-                                                           std::to_string(slew_refine_count_) + "/" +
-                                                           std::to_string(kMaxSlewRefines) + " (" +
-                                                           std::to_string(duration_ms) +
-                                                           " ms, final-approach firmware quirk)");
-                            send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
-                                                       [&] { protocol.pulse_guide(direction, duration_ms); });
-                            goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
-                            status_cache_valid_ = false;
-                            position_cache_valid_ = false;
-                            return true;
-                        }
-                    } catch (const std::exception&) {
-                        // Best-effort trim; fall through and report slew complete, unless the link was lost: then
-                        // NotConnected, never a "not slewing" from a mount that is gone.
-                        throw_if_link_lost();
-                    }
-                }
-                // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
-                if (slew_in_progress_ && equatorial_slew_ && landing_gate_generation_ != 0 &&
-                    landing_gate_generation_ == slew_operation_generation_) {
-                    if (!lock_gate_.holds_io()) {
-                        throw RefillNeedsOperationLock{};
-                    }
-                    if (!async_goto_landed_locked(now)) {
-                        return true;
-                    }
-                }
-                slew_in_progress_ = false;
-                return false;
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        const PolledFrame frame = served_frame_locked();
+        // open-astro#575: surface a stored async-slew failure as an error
+        // instead of a silent false, until AbortSlew or a new slew initiator
+        // clears it (see last_slew_error_).
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
+        if (axis_move_active_primary_ || axis_move_active_secondary_) {
+            return true;
+        }
+        if (slew_hold_.active(clock_.now())) {
+            return true;
+        }
+        const MountStatus status = status_of_locked(frame);
+        // Decision 0022: a status sampled inside a hold never ends it. The mount, not the window, says when the slew
+        // ended, so Slewing stays true until a frame sampled after the hold closed is published (at most one poll).
+        if (slew_hold_.active(frame.status_sampled_at)) {
+            return true;
+        }
+        // Issue #2420: a zero sensor search moves until a fresh status past its hold reads 7 (the poll ends it then) or
+        // its bound stops it with a stored error, whatever status it reports meanwhile.
+        if (driver_motion_ == DriverMotion::HomeSearch) {
+            return true;
+        }
+        if (status.is_slewing) {
+            // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
+            // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
+            // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
+            // dispatching and no Park/FindHome still moving (driver_motion_).
+            return !(pulse_window_open() && (!slew_in_progress_ || goto_seen_stopped_) &&
+                     driver_motion_ == DriverMotion::None);
+        }
+        // Issue #2063: the client's pulse takes over from the trim of a GOTO the mount already finished.
+        if (pulse_window_open() && goto_seen_stopped_) {
+            return false;
+        }
+        // The poll's advance_motion_locked() trims and lands the GOTO and clears this flag; the getter only reads it.
+        return slew_in_progress_;
     }
 
-    // Issue #2396 (AB-7): the async GOTO landing gate, run by the Slewing read once the status reads stopped. The
+    // What the poll decides once the status reads stopped and no early return applies: the GOTO's settle trim, the
+    // async landing gate and, when neither is pending, the end of the slew. True while the slew goes on. `frame` is the
+    // tick's own sample, `sampled_at` the task-clock time its status exchange began.
+    bool advance_motion_locked(const PolledFrame& frame, std::chrono::steady_clock::time_point sampled_at) const {
+        // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
+        // compensating sidereal motion during its final ~1 s approach, so
+        // slews settle a consistent ~11-16 arcsec east of the RA target
+        // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
+        // the firmware deadbands slews shorter than ~15". Instead, close the
+        // residual with a duration-computed pulse-guide trim (guide rate is
+        // known, so err/rate gives the exact pulse length), re-measuring and
+        // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
+        // on this firmware and Dec pulse polarity flips with pier side.
+        // Slewing stays true while a trim pulse runs.
+        if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
+            ++slew_refine_count_;
+            try {
+                const Wire protocol = wire();
+                // The tick's own position sample; a tick that has none (the seed's read failed) trims nothing.
+                double ra_err_hours = frame.ra_hours - slew_target_ra_hours_;
+                if (ra_err_hours > 12.0) {
+                    ra_err_hours -= 24.0;
+                } else if (ra_err_hours < -12.0) {
+                    ra_err_hours += 24.0;
+                }
+                const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
+                constexpr double kTrimMinArcsec = 5.0;    // below this: on target
+                constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
+                if (frame.position_known && std::fabs(ra_err_arcsec) > kTrimMinArcsec &&
+                    std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
+                    double guide_fraction = kDefaultGuideRateFraction;
+                    try {
+                        guide_fraction = protocol.get_guide_rates().first;
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the default is kept
+                        // Unreadable guide rate — fall back to the default fraction.
+                    }
+                    if (guide_fraction < 0.1 || guide_fraction > 1.0) {
+                        guide_fraction = kDefaultGuideRateFraction;
+                    }
+                    const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
+                    int duration_ms = static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
+                    duration_ms = std::clamp(duration_ms, 100, 8000);
+                    // Reported RA too large -> mount is east of target -> pulse
+                    // west (RA-, direction 3); too small -> east (RA+, 2).
+                    const int direction = ra_err_arcsec > 0 ? 3 : 2;
+                    ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
+                                                   " arcsec from RA target; pulse-guide trim " +
+                                                   std::to_string(slew_refine_count_) + "/" +
+                                                   std::to_string(kMaxSlewRefines) + " (" +
+                                                   std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
+                    // The wire call, not pulse_guide(): the #2504 refusal must not block the GOTO's own trim.
+                    send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
+                                               [&] { protocol.pulse_guide(direction, duration_ms); });
+                    goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
+                    return true;
+                }
+            } catch (const std::exception&) {
+                // Best-effort trim; fall through and report slew complete, unless the link was lost: then
+                // NotConnected, never a "not slewing" from a mount that is gone.
+                throw_if_link_lost();
+            }
+        }
+        // Issue #2396 (AB-7): an async GOTO ends only on a confirmed landing, never on the status alone.
+        if (slew_in_progress_ && equatorial_slew_ && landing_gate_claim_.has_value() &&
+            owns_locked(*landing_gate_claim_)) {
+            if (!async_goto_landed_locked(frame, sampled_at)) {
+                return true;
+            }
+        }
+        slew_in_progress_ = false;
+        return false;
+    }
+
+    // Issue #2396 (AB-7): the async GOTO landing gate, run by the poll once the status reads stopped. The
     // HAE29C status can read stopped while the mount still moves (over Wi-Fi by tens of degrees, and over USB 1 to 2 s
-    // early, #2396 RC51 trace), so Slewing stays true until two position reads at least kLandingSampleGap apart agree
-    // within kLandingStableArcsec, unless a read finds it within kLandingOnTargetArcsec of the target, which lands it
-    // at once (a GOTO that arrived reads as before). A failed read is no sample: Slewing stays true, and three in a row
-    // latch the fault.
+    // early, #2396 RC51 trace), so Slewing stays true until two position samples at least kLandingSampleGap apart agree
+    // within kLandingStableArcsec, unless a sample finds it within kLandingOnTargetArcsec of the target, which lands it
+    // at once (a GOTO that arrived reads as before). A tick with no position sample is no sample: Slewing stays true.
     // A mount that came to rest more than kSlewFarMissArcsec from the target did not land: the failure is stored and
     // raised (the mount is at rest, so no stop is sent). The gate keeps one sample and its time and never sleeps.
-    bool async_goto_landed_locked(std::chrono::steady_clock::time_point now) const {
-        try {
-            refresh_position_cache_locked(true);
-        } catch (const std::exception&) {
-            throw_if_link_lost();
+    bool async_goto_landed_locked(const PolledFrame& frame, std::chrono::steady_clock::time_point now) const {
+        if (!frame.position_known) {
             landing_prev_valid_ = false;
             return false;
         }
-        const double ra = cached_ra_hours_;
-        const double dec = cached_dec_degrees_;
+        const double ra = frame.ra_hours;
+        const double dec = frame.dec_degrees;
         const auto target_miss_arcsec = [&](double ra_hours, double dec_degrees) {
             const double ra_sky = std::abs(util::shortest_ra_delta_hours(ra_hours, slew_target_ra_hours_)) * 15.0 *
                                   3600.0 * std::cos(slew_target_dec_degrees_ * std::numbers::pi / 180.0);
@@ -1618,12 +1663,12 @@ public:
         // reads stopped away from its target).
         if (const auto [ra_miss, dec_miss] = target_miss_arcsec(ra, dec);
             ra_miss <= kLandingOnTargetArcsec && dec_miss <= kLandingOnTargetArcsec) {
-            landing_gate_generation_ = 0;
+            landing_gate_claim_.reset();
             return true;
         }
         // The gate is bounded too: a mount still not settled at the GOTO's kSlewTimeout bound is stopped.
         if (now >= slew_bound_deadline_) {
-            landing_gate_generation_ = 0;
+            landing_gate_claim_.reset();
             if (!stop_bounded_motion_locked("The slew did not settle within " + std::to_string(kSlewTimeout.count()) +
                                             " s")) {
                 throw_if_link_lost();  // NotConnected; the relink stop is recorded from the flags kept
@@ -1649,7 +1694,7 @@ public:
         if (ra_delta >= kLandingStableArcsec || dec_delta >= kLandingStableArcsec) {
             return false;
         }
-        landing_gate_generation_ = 0;
+        landing_gate_claim_.reset();
         const auto [ra_sky_arcsec, dec_arcsec] = target_miss_arcsec(ra, dec);
         if (ra_sky_arcsec > kSlewFarMissArcsec || dec_arcsec > kSlewFarMissArcsec) {
             slew_in_progress_ = false;
@@ -1673,9 +1718,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
-        util::validate_dec(dec, "TargetDeclination");
+        util::check_target_declination_arguments(dec);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetDeclination"});
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1693,9 +1738,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
-        util::validate_ra(ra, "TargetRightAscension");
+        util::check_target_right_ascension_arguments(ra);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_target_state(kCommandLimits, GateChecks{*this, "TargetRightAscension"});
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1704,28 +1749,15 @@ public:
     }
     
     int get_tracking_rate() const override {
-        return serve_cached_or_refill(
-            [&] {
-                return (tracking_rate_override_until_ > clock_.now() && status_cache_valid_) ||
-                       status_cache_fresh_locked();
-            },
-            [&] {
-                auto now = clock_.now();
-                if (tracking_rate_override_until_ > now && status_cache_valid_) {
-                    return static_cast<int>(cached_status_.tracking_rate);
-                }
-                refresh_status_cache_locked();
-                // Alpaca TrackingRate uses DriveRates enum values (0-4).
-                return static_cast<int>(cached_status_.tracking_rate);
-            });
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        // Alpaca TrackingRate uses DriveRates enum values (0-4).
+        return static_cast<int>(status_of_locked(served_frame_locked()).tracking_rate);
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate < 0 || rate > 4) {
-            throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
-        }
+        util::check_tracking_rate_arguments(kCommandLimits, rate);
         StateLock lock(lock_gate_);
-        check_connected();
+        util::check_tracking_rate_state(kCommandLimits, GateChecks{*this, "TrackingRate"});
 
         const Wire protocol = wire();
 
@@ -1733,10 +1765,10 @@ public:
         if (rate == 4) {
             protocol.set_custom_tracking_rate(custom_tracking_rate_);
         }
-        cached_status_.tracking_rate = rate;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
-        tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
+        // The mount's read-back lags the write: the written rate holds for 2 s over any status a poll samples.
+        tracking_rate_written_ = rate;
+        tracking_rate_override_until_ = clock_.now() + std::chrono::seconds(2);
+        polled_.write([rate](PolledFrame& frame) { frame.status.tracking_rate = rate; });
     }
 
     std::vector<int> get_tracking_rates() const override {
@@ -1788,18 +1820,18 @@ public:
             // A new FindHome starts over; a zero search's own status 2 would clear the flag anyway, and a :MH# model
             // returns below at a status 7 it can trust.
             home_search_unconfirmed_ = false;
-            // Force-refresh: a stale cached is_at_home (e.g. set before a park/
-            // unpark cycle, which never touches it) short-circuits the whole home
-            // operation and the client then sees AtHome == false. A zero search ignores is_at_home, so it reads the
-            // status only to end a search still running (the overdue stop): right after ConformU's AbortSlew and
-            // Tracking writes the HAE29C took 0.8 s (USB) and 1.36 s (Wi-Fi) to answer :GLS#, which put FindHome
-            // past its 1 s initiator target.
+            // A direct read: a stale at-home flag (e.g. one set before a park/unpark cycle) short-circuits the whole
+            // home operation and the client then sees AtHome == false, so the frame is not trusted here. A zero search
+            // ignores is_at_home, so it reads the status only to end a search still running (the overdue stop): right
+            // after ConformU's AbortSlew and Tracking writes the HAE29C took 0.8 s (USB) and 1.36 s (Wi-Fi) to answer
+            // :GLS#, which put FindHome past its 1 s initiator target.
+            std::optional<MountStatus> status;
             if (!zero_search || driver_motion_ == DriverMotion::HomeSearch) {
-                refresh_status_cache_locked(true);
+                status = read_status_direct_locked();
             }
             // Issue #2420: a mount with a zero sensor search wakes from a power loss at status 7 wherever it points,
             // so status 7 proves nothing there and the search always runs (about 20 s from a true zero too).
-            if (!zero_search && cached_status_.is_at_home) {
+            if (!zero_search && status && status->is_at_home) {
                 return;
             }
 
@@ -1813,17 +1845,14 @@ public:
                     protocol.go_to_home();
                 }
             });
-            supersede_slew_dispatch_locked();
+            claim_slew_locked();
             driver_motion_ = zero_search ? DriverMotion::HomeSearch : DriverMotion::Home;
             if (zero_search) {
                 home_search_deadline_ = clock_.now() + kZeroSearchTimeout;  // only a search has a bound (#2432)
                 home_search_seen_moving_ = false;
                 home_search_resent_ = false;
                 home_search_start_until_ = clock_.now() + kZeroSearchStartGrace;
-                home_search_next_poll_ = clock_.now() + kZeroSearchPollInterval;
             }
-            status_cache_valid_ = false;
-            position_cache_valid_ = false;
         }
         // Issue #2432: the bound runs on its own slot, so the :Q# goes out at kZeroSearchTimeout whether or not a
         // client reads the status. Started with no driver lock held (decision 0006 rule 4).
@@ -1835,9 +1864,9 @@ public:
     void park() override {
         StateLock lock(lock_gate_);
         check_connected();
-        
-        refresh_status_cache_locked();
-        if (cached_status_.is_parked) {
+
+        // A direct read: the already-parked check must not take a frame the last poll sampled before the mount parked.
+        if (read_status_direct_locked().is_parked) {
             return;
         }
 
@@ -1848,27 +1877,20 @@ public:
                     throw AlpacaException("Failed to park mount");
                 }
             });
-            clear_device_fault_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
-            record_device_fault_locked("Park", e.what());
             throw AlpacaException(std::string("Failed to park mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
-        supersede_slew_dispatch_locked();
+        claim_slew_locked();
         driver_motion_ = DriverMotion::Park;
         park_override_until_ = std::chrono::steady_clock::time_point{};
-        cached_status_.is_parked = false;
-        cached_status_.is_slewing = true;
-        cached_status_.is_at_home = false;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
-        position_cache_valid_ = false;
+        write_motion_started_locked();
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
         // slews complete physically but the mount keeps reporting
         // system-status 2 ("slewing") forever instead of 6 ("parked");
         // tracking-off (:ST0#) finalizes the transition. Arm the finalizer —
-        // refresh_status_cache_locked() fires it once the mount is observed
+        // the poll fires it once the mount is observed
         // stationary at the park target while still claiming to slew.
         park_finalize_pending_ = hae29c_quirks_active();
         park_target_valid_ = false;
@@ -1893,30 +1915,29 @@ public:
         reap_slew_dispatch();
         StateLock lock(lock_gate_);
         // open-astro#728: a latched fault must not stop a client stopping the
-        // mount. Skip the latch check and the cached slewing flag, neither of
-        // which can be trusted on a faulted link, and send the stop; a sent stop
-        // clears the latch. InvalidWhileParked is not raised while latched.
+        // mount. The fault refusal is skipped, never NotConnected, and the stop goes out with no status read in
+        // front of it. The stop is not a poll, so it does not clear the latch: the next good poll does (decision 0009
+        // rule 1). InvalidWhileParked is not raised while latched.
         // Issue #2395 (AB-3): the stop goes out before the parked check, which
         // may read the status; InvalidWhileParked comes only from a read that
         // succeeded, so a failed read never keeps the stop off the wire.
-        const bool faulted = connected_ && device_faulted_;
-        if (!faulted) {
-            check_connected();
-        }
+        const bool faulted = connected_ && !polled_.fault().empty();
+        check_connected(/*allow_fault=*/true);
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again. Clear unconditionally (a
         // soft-failed goto never set is_slewing).
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);
+        cancel_move_axis_caps_locked();
         invalidate_slew_error_locked();
-        // open-astro#768: the stop is sent even when the cached status says the
-        // mount is not slewing; that cache can lag a GOTO the mount accepted.
+        end_fast_cache_grace_locked();
+        // open-astro#768: the stop is sent even when the frame says the
+        // mount is not slewing; that frame can lag a GOTO the mount accepted.
         const Wire protocol = wire();
         try {
             protocol.stop_slewing();
-            clear_device_fault_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
-            record_device_fault_locked("AbortSlew", e.what());
             throw AlpacaException(std::string("AbortSlew failed: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -1939,8 +1960,9 @@ public:
         axis_move_active_primary_ = false;
         axis_move_active_secondary_ = false;
         tracking_state_before_move_.reset();
-        status_cache_valid_ = false;
         clear_slew_hold_locked();
+        // The stop took: a frame sampled before it must not keep saying slewing (a read right after sends nothing).
+        polled_.write([](PolledFrame& frame) { frame.status.is_slewing = false; });
         if (parked) {
             throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
         }
@@ -1953,46 +1975,53 @@ public:
                 }
             } catch (const std::exception& e) {
                 throw_if_link_lost();
-                record_device_fault_locked("AbortSlew", e.what());
                 throw AlpacaException(
                     std::string("AbortSlew stopped the mount but could not restore Tracking: ") + e.what(),
                     AlpacaError::DriverException);
             }
-            // The mount is stopped: the cache that serves the read-back window must not keep the GOTO's status.
-            cached_status_.is_tracking = *restore_tracking;
-            cached_status_.is_slewing = false;
-            cached_status_.system_status = *restore_tracking ? 1 : 0;
-            status_cache_valid_ = true;
-            last_status_update_ = clock_.now();
-            tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
+            // The mount is stopped: the frame that serves the read-back window must not keep the GOTO's status.
+            write_tracking_locked(*restore_tracking);
+            polled_.write(
+                [restore = *restore_tracking](PolledFrame& frame) { frame.status.system_status = restore ? 1 : 0; });
         }
     }
     
     void pulse_guide(int direction, int duration) override {
         // Argument validation precedes the connection and park checks (ASCOM).
-        // 99999 ms is the protocol's 5-digit duration field.
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("PulseGuide direction must be 0-3", AlpacaError::InvalidValue);
-        }
-        if (duration < 0 || duration > 99999) {
-            throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
-        }
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_fast_locked("PulseGuide");
-        // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
-        // status is still the GOTO's: the pulse itself makes the firmware report slewing.
-        if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
-            refresh_status_cache_locked(/*force=*/true);
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide", /*fast_parked=*/true});
+        // Issue #2063: a GOTO nobody polled is still flagged here, and so is a Park or FindHome (#2504). Ask the
+        // mount before the pulse starts, while its status is still the motion's: the pulse itself makes the
+        // firmware report slewing.
+        const auto own_motion_running = [&] {
+            return (slew_in_progress_ && !goto_seen_stopped_) || driver_motion_ != DriverMotion::None;
+        };
+        if (own_motion_running() && !slew_hold_.active(clock_.now())) {
+            read_status_direct_locked();
+            ensure_not_parked_fast_locked("PulseGuide");  // a Park that landed unpolled: the gate read the old frame
+        }
+        // Issue #2504: a pulse would change the GOTO, Park or FindHome the driver started.
+        if (own_motion_running()) {
+            throw AlpacaException("PulseGuide is not allowed while a slew, park or home is running",
+                                  AlpacaError::InvalidOperation);
+        }
+        const bool is_dec = (direction == 0 || direction == 1);
+        const bool is_ra = (direction == 2 || direction == 3);
+        // Issue #2503: the pulse and a jog on its axis would drive one motor at once. The jog keeps running, and a
+        // pulse on the other axis is still accepted.
+        if (is_dec ? axis_move_active_secondary_ : axis_move_active_primary_) {
+            throw AlpacaException("PulseGuide is not allowed on an axis MoveAxis is moving",
+                                  AlpacaError::InvalidOperation);
         }
 
         const Wire protocol = wire();
+        // The pulse's baselines come from the frame the poll holds (0 when it holds no position yet).
+        const PolledFrame held_frame = held_frame_locked();
         int calibrated_direction = direction;
-        const bool is_dec = (direction == 0 || direction == 1);
-        const bool is_ra = (direction == 2 || direction == 3);
         if (is_dec) {
             bool invert_dec = dec_guide_inverted_;
-            if (should_flip_dec_for_pier_locked()) {
+            if (should_flip_dec_for_pier(held_frame.position_known ? held_frame.side_of_pier : -1)) {
                 invert_dec = !invert_dec;
             }
             if (invert_dec) {
@@ -2006,7 +2035,7 @@ public:
             if (last_ra_read_valid_) {
                 pulse_guiding_hold_ra_hours_ = last_ra_read_hours_;
             } else {
-                pulse_guiding_hold_ra_hours_ = cached_ra_hours_;
+                pulse_guiding_hold_ra_hours_ = held_frame.position_known ? held_frame.ra_hours : 0.0;
             }
             pulse_position_hold_[kRaAxis].arm(now, pulse + kPulseGuideCompletionDelay + kPulseGuideHoldGrace);
             pulse_position_hold_[kDecAxis].clear();
@@ -2025,7 +2054,7 @@ public:
             if (last_dec_read_valid_) {
                 pulse_guiding_dec_baseline_degrees_ = last_dec_read_degrees_;
             } else {
-                pulse_guiding_dec_baseline_degrees_ = cached_dec_degrees_;
+                pulse_guiding_dec_baseline_degrees_ = held_frame.position_known ? held_frame.dec_degrees : 0.0;
             }
             pulse_position_correction_[kDecAxis].arm(now,
                                                      pulse + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace);
@@ -2033,7 +2062,7 @@ public:
             if (last_dec_read_valid_) {
                 pulse_guiding_hold_dec_degrees_ = last_dec_read_degrees_;
             } else {
-                pulse_guiding_hold_dec_degrees_ = cached_dec_degrees_;
+                pulse_guiding_hold_dec_degrees_ = held_frame.position_known ? held_frame.dec_degrees : 0.0;
             }
             pulse_position_hold_[kDecAxis].arm(now, pulse + kPulseGuideCompletionDelay + kPulseGuideHoldGrace);
             pulse_position_hold_[kRaAxis].clear();
@@ -2052,7 +2081,7 @@ public:
             if (last_ra_read_valid_) {
                 pulse_guiding_ra_baseline_hours_ = last_ra_read_hours_;
             } else {
-                pulse_guiding_ra_baseline_hours_ = cached_ra_hours_;
+                pulse_guiding_ra_baseline_hours_ = held_frame.position_known ? held_frame.ra_hours : 0.0;
             }
             pulse_position_correction_[kRaAxis].arm(now,
                                                     pulse + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace);
@@ -2084,48 +2113,46 @@ public:
         const Wire protocol = wire();
         AltAz altaz = protocol.get_alt_az();
         protocol.set_park_position(altaz.altitude_degrees, altaz.azimuth_degrees);
-        status_cache_valid_ = false;
-        position_cache_valid_ = false;
     }
     
     void slew_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
-        std::uint64_t generation = 0;
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinates");
+        util::MotionClaim claim;
         {
             StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinates");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinates"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
-            generation = slew_operation_generation_;
+            claim = slew_claim_;
         }
-        wait_for_slew_completion("SlewToCoordinates", generation);
+        wait_for_slew_completion("SlewToCoordinates", claim);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
         double phys_dec = 0.0;
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         std::string previous_slew_error;
         {
             StateLock lock(lock_gate_);
             phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
-            check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
+            util::check_equatorial_slew_state(kCommandLimits, GateChecks{*this, "SlewToCoordinatesAsync"});
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             equatorial_slew_ = true;
-            generation = slew_operation_generation_;
-            arm_slew_bound_locked(generation);
+            claim = slew_claim_;
+            arm_slew_bound_locked(claim);
         }
-        start_slew_body(generation, previous_slew_error, "Failed to start async slew",
-                        [this, phys_ra, phys_dec, generation](util::OperationContext& ctx) {
-                            run_slew_body(ctx, generation, "SlewToCoordinatesAsync", [&] {
+        start_slew_body(claim, previous_slew_error, "Failed to start async slew",
+                        [this, phys_ra, phys_dec, claim](util::OperationContext& ctx) {
+                            run_slew_body(ctx, claim, "SlewToCoordinatesAsync", [&] {
                                 dispatch_slew_command_locked(phys_ra, phys_dec, &ctx, "SlewToCoordinatesAsync");
                             });
                         });
@@ -2163,19 +2190,18 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::check_sync_arguments(ra, dec, "SyncToCoordinates");
         StateLock lock(lock_gate_);
-        check_connected();
-        ensure_not_parked_locked("SyncToCoordinates");
+        util::check_sync_state(kCommandLimits, GateChecks{*this, "SyncToCoordinates"});
 
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
 
-        refresh_position_cache_locked(true);
-        sync_offset_ra_hours_ = ra - cached_ra_hours_;
-        sync_offset_dec_degrees_ = dec - cached_dec_degrees_;
+        const Position position = read_position_direct_locked();
+        sync_offset_ra_hours_ = ra - position.ra_hours;
+        sync_offset_dec_degrees_ = dec - position.dec_degrees;
         if (sync_offset_ra_hours_ > 12.0) sync_offset_ra_hours_ -= 24.0;
         if (sync_offset_ra_hours_ < -12.0) sync_offset_ra_hours_ += 24.0;
     }
@@ -2188,54 +2214,43 @@ public:
         }
         ensure_not_parked_locked("SyncToTarget");
 
-        refresh_position_cache_locked(true);
-        sync_offset_ra_hours_ = target_ra_hours_ - cached_ra_hours_;
-        sync_offset_dec_degrees_ = target_dec_degrees_ - cached_dec_degrees_;
+        const Position position = read_position_direct_locked();
+        sync_offset_ra_hours_ = target_ra_hours_ - position.ra_hours;
+        sync_offset_dec_degrees_ = target_dec_degrees_ - position.dec_degrees;
         if (sync_offset_ra_hours_ > 12.0) sync_offset_ra_hours_ -= 24.0;
         if (sync_offset_ra_hours_ < -12.0) sync_offset_ra_hours_ += 24.0;
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
-        validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
+        util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAzAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
-        std::uint64_t generation = 0;
+        util::MotionClaim claim;
         std::string previous_slew_error;
         {
             StateLock lock(lock_gate_);
-            check_connected();
-            if (!site_info_valid_) {
-                ensure_site_info_cached_locked();
-                // ensure_site_info_cached_locked() sets site_info_valid_ on success;
-                // this re-check detects a failed cache populate, not a dead condition.
-                // cppcheck-suppress identicalInnerCondition
-                if (!site_info_valid_) {
-                    throw AlpacaException("Site information unavailable for Alt/Az slew",
-                                          AlpacaError::ValueNotSet);
-                }
-            }
-            ensure_not_parked_locked("SlewToAltAzAsync");
-            refuse_alt_az_slew_while_tracking_locked("SlewToAltAzAsync");
+            util::check_alt_az_slew_state(
+                kCommandLimits, GateChecks{*this, "SlewToAltAzAsync", /*fast_parked=*/false, /*refresh_site=*/false});
             previous_slew_error = last_slew_error_;
-            supersede_slew_dispatch_locked();
-            generation = slew_operation_generation_;
+            claim_slew_locked();
+            claim = slew_claim_;
             slew_in_progress_ = true;
             goto_seen_stopped_ = false;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
-            arm_slew_bound_locked(generation);
+            arm_slew_bound_locked(claim);
         }
 
-        start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
-                        [this, altitude, azimuth, generation](util::OperationContext& ctx) {
-                            run_slew_body(ctx, generation, "SlewToAltAzAsync", [&] {
+        start_slew_body(claim, previous_slew_error, "Failed to start async Alt/Az slew",
+                        [this, altitude, azimuth, claim](util::OperationContext& ctx) {
+                            run_slew_body(ctx, claim, "SlewToAltAzAsync", [&] {
                                 auto converted = alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_,
                                                                   site_longitude_cached_, current_utc_time_locked());
                                 double ra_hours = converted.first;
                                 double dec_degrees = converted.second;
-                                // The initiator already claimed and published this generation.
+                                // The initiator already claimed both axes and published the state.
                                 prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees,
                                                           "SlewToAltAzAsync", false);
                                 dispatch_slew_command_locked(ra_hours, dec_degrees, &ctx, "SlewToAltAzAsync");
@@ -2247,26 +2262,19 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
-        std::uint64_t generation = 0;
-        validate_alt_az(altitude, azimuth, "SlewToAltAz");
+        util::MotionClaim claim;
+        util::check_alt_az_arguments(kCommandLimits, altitude, azimuth, "SlewToAltAz");
         {
             StateLock lock(lock_gate_);
-            check_connected();
-            ensure_site_info_cached_locked();
-            if (!site_info_valid_) {
-                throw AlpacaException("Site information unavailable for Alt/Az slew",
-                                      AlpacaError::ValueNotSet);
-            }
-            ensure_not_parked_locked("SlewToAltAz");
-            refuse_alt_az_slew_while_tracking_locked("SlewToAltAz");
+            util::check_alt_az_slew_state(kCommandLimits, GateChecks{*this, "SlewToAltAz"});
             auto converted = alt_az_to_ra_dec(
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
             dec_degrees = converted.second;
             start_slew_to_coordinates_locked(ra_hours, dec_degrees);
-            generation = slew_operation_generation_;
+            claim = slew_claim_;
         }
-        wait_for_slew_completion("SlewToAltAz", generation);
+        wait_for_slew_completion("SlewToAltAz", claim);
     }
     
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -2287,28 +2295,20 @@ public:
         const Wire protocol = wire();
         try {
             send_with_slew_hold_locked(std::chrono::seconds(2), [&] { protocol.unpark(); });
-            clear_device_fault_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
-            record_device_fault_locked("Unpark", e.what());
             throw AlpacaException(std::string("Failed to unpark mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        motion_owner_.cancel(util::MotionOwner::kBothAxes);  // ends a Park's claim, as a stop
         supersede_slew_dispatch_locked();
-        cached_status_.is_parked = false;
-        cached_status_.is_slewing = true;
-        cached_status_.is_at_home = false;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
-        park_override_until_ = last_status_update_ + kUnparkGrace;
+        write_motion_started_locked();
+        park_override_until_ = clock_.now() + kUnparkGrace;
         park_finalize_pending_ = false;
     }
 
 private:
     static constexpr std::chrono::seconds kSiteInfoCacheTtl{60};
-    static constexpr std::chrono::milliseconds kStatusCacheTtl{1000};
-    static constexpr std::chrono::milliseconds kPositionCacheTtl{1000};
-    static constexpr std::chrono::seconds kSideOfPierPositionTtl{5};
     static constexpr std::chrono::milliseconds kSlewPollInterval{250};
     static constexpr std::chrono::seconds kSlewTimeout{300};
     static constexpr std::chrono::seconds kFastCacheGrace{30};
@@ -2343,40 +2343,21 @@ private:
     // 11-16 arcsec east RA settle, Dec within 0.2 arcsec, park clean).
     bool goto_refine_active() const { return mount_info_.model_code == "0036" || mount_info_.model_code == "0012"; }
 
-    // Whether a call may try the mount again while a fault is latched (decision 0009 rule 1). Read: the getters that
-    // already read position, Alt/Az or status from the mount. Every other call, writes included, only refuses.
-    enum class LatchProbe : std::uint8_t { Refuse, Read };
-
-    // At most one probe per this interval while latched, on the task clock: a probe that times out holds io_mutex_
-    // (Wire drops mutex_ for the read) for the read timeout (5 s by default), so a client polling at 1 Hz is not
-    // blocked on every call behind the operation lock, and a mount that
-    // answers again is found within 5 s of polling, five probes before util::kLinkStalenessBound loses the link.
-    static constexpr std::chrono::seconds kFaultProbeInterval{5};
-
-    // NotConnected while disconnected and once the link is lost (decision 0009 rule 3), checked before any cache;
-    // DriverException while a fault is latched (rule 1), which past util::kLinkStalenessBound loses the link (rule 2).
-    // While latched, a LatchProbe::Read call once per kFaultProbeInterval sends one :GLS# status read instead of
-    // refusing: a good reply clears the latch (note_device_read_ok_locked()) and the call goes on; a failed one keeps
-    // it and throws DriverException; a hangup over serial is a lost link (NotConnected). Between probes it refuses
-    // with nothing sent. The probe and the staleness loss are exchanges (the loss takes the wrapper's exchange
-    // mutex), so only a caller that holds the operation lock runs them; a Mode::State member refuses with the
-    // latched text and leaves the loss to the next Mode::Io call, as IsPulseGuiding does (decision 0016).
-    void check_connected(LatchProbe probe = LatchProbe::Refuse) const {
+    // NotConnected while disconnected and once the link is lost (decision 0009 rule 3), checked before any frame;
+    // DriverException while the poll's fault is latched (rule 1), which past util::kLinkStalenessBound loses the link
+    // (rule 2b, the poll's). No command or getter probes a latched fault: the poll does, every tick, and its next good
+    // frame clears it. AbortSlew alone passes `allow_fault`: a latched fault must not stop a client stopping the
+    // mount (#728), and it is never excused from NotConnected.
+    void check_connected(bool allow_fault = false) const {
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
         throw_if_link_lost();
-        if (device_faulted_) {
-            if (lock_gate_.holds_io()) {
-                lose_link_if_fault_stale();
-                if (probe == LatchProbe::Read && clock_.now() >= next_fault_probe_) {
-                    next_fault_probe_ = clock_.now() + kFaultProbeInterval;
-                    refresh_status_cache_locked(true);
-                    return;
-                }
+        if (!allow_fault) {
+            if (const std::string fault = polled_.fault(); !fault.empty()) {
+                throw AlpacaException("iOptron mount communications compromised: " + fault,
+                                      AlpacaError::DriverException);
             }
-            throw AlpacaException("Mount communications compromised: " + last_device_error_,
-                                  AlpacaError::DriverException);
         }
     }
 
@@ -2389,23 +2370,30 @@ private:
         }
     }
 
+    // NotConnected while disconnected or connecting and once the link is lost (decision 0009 rule 3), with no lock
+    // and no fault refusal: for the members that serve the client's own values (the optics, SlewSettleTime).
+    void check_connected_lock_free() const {
+        check_connected_before_lock();
+        throw_if_link_lost();
+    }
+
     // Signalled by a refill helper that, under the state lock alone, finds the cache it would serve was never
     // primed or was invalidated: serve_cached_or_refill() runs the body again under the operation lock. Not an
     // std::exception on purpose, so no catch on the way back mistakes it for a failed exchange.
     struct RefillNeedsOperationLock {};
 
-    // Decision 0016 rule 1 (#1829): a getter served from a cache takes the state lock alone and answers when its
-    // cache is fresh (the common case: every cache is primed at connect and refilled on a TTL), so it never waits
-    // behind a command, the clock-sync body or another getter's refill on the wire. Only when the cache has
-    // lapsed, or a fault is latched (the probe is an exchange), does it take the operation lock and run `body`
-    // under both locks, where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true
-    // must mean `body` reaches no wire: the refill helpers return early on the same predicates. The check and
-    // the refill read the clock separately, so a TTL, hold window or override can lapse between the two (a 1 Hz
-    // poller lands on the TTL edge). A refill reached that way serves a primed cache as it stands, and when the
-    // cache it would serve was never primed or was invalidated it signals RefillNeedsOperationLock instead of
-    // reaching the wire: the body is then run again under both locks (serve_as_is_locked()). A body signals
-    // before it writes any state, because the second run repeats everything before the signal: Declination and
-    // RightAscension write their last_*_read_ after the refill, Slewing counts a refine after its signal.
+    // Decision 0016 rule 1 (#1829), for the site members (SiderealTime, SiteLatitude, SiteLongitude and
+    // DestinationSideOfPier, #2491 rule 9: the site is not part of the polled frame): a getter served from the site
+    // cache takes the state lock alone and answers when its cache is fresh (primed at connect, 30 s grace, then its 60
+    // s TTL), so it never waits behind a command, the clock-sync body or another getter's refill on the wire. Only when
+    // the cache has lapsed does it take the operation lock and run `body` under both locks,
+    // where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true must mean `body` reaches no
+    // wire: the refill helpers return early on the same predicates. A latched fault is refused under the state lock,
+    // before any wait on the operation lock (#2677). The check and the refill read the clock
+    // separately, so the TTL can lapse between the two. A refill reached that way serves a primed cache as it stands,
+    // and when the cache it would serve was never primed or was invalidated it signals RefillNeedsOperationLock instead
+    // of reaching the wire: the body is then run again under both locks (serve_as_is_locked()). A body signals before
+    // it writes any state, because the second run repeats everything before the signal.
     template <typename Fresh, typename Body>
     std::invoke_result_t<Body&> serve_cached_or_refill(Fresh&& fresh, Body&& body) const {
         check_connected_before_lock();
@@ -2415,17 +2403,23 @@ private:
                 throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
             }
             throw_if_link_lost();
-            if (!device_faulted_ && fresh()) {
+            // A latched fault is refused here, under the state lock: under the operation lock it would wait for
+            // the poll's probe, one reply timeout, only to refuse the same way (#2677).
+            if (const std::string fault = polled_.fault(); !fault.empty()) {
+                throw AlpacaException("iOptron mount communications compromised: " + fault,
+                                      AlpacaError::DriverException);
+            }
+            if (fresh()) {
                 try {
                     return body();
-                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch): the body reruns below
                     // Lapsed between `fresh` and the body's own check, on a read that needs the exchange: the
                     // body runs again below, under the operation lock.
                 }
             }
         }
         StateLock lock(lock_gate_);
-        check_connected(LatchProbe::Read);
+        check_connected();
         return body();
     }
 
@@ -2447,81 +2441,210 @@ private:
         }
         throw RefillNeedsOperationLock{};
     }
-    bool position_cache_fresh_locked() const {
-        const auto now = clock_.now();
-        return position_cache_valid_ && (now < fast_cache_until_ || (now - last_position_update_) < kPositionCacheTtl);
-    }
-    bool altaz_cache_fresh_locked() const {
-        const auto now = clock_.now();
-        return altaz_cache_valid_ && (now < fast_cache_until_ || (now - last_altaz_update_) < kPositionCacheTtl);
-    }
-    bool status_cache_fresh_locked() const {
-        const auto now = clock_.now();
-        return status_cache_valid_ && (now < fast_cache_until_ || (now - last_status_update_) < kStatusCacheTtl);
-    }
     bool site_info_fresh_locked() const {
         const auto now = clock_.now();
         return site_info_valid_ && (now < fast_cache_until_ || (now - last_site_info_fetch_) < kSiteInfoCacheTtl);
     }
 
-    // Decision 0009 rule 2a: the wrapper saw the serial port gone (or lose_link() ran) and released it. Lock-free.
-    static bool link_lost() { return !iOptronProtocolWrapper::instance().link_alive(); }
+    // Decision 0009 rule 2a: the wrapper saw the serial port gone (or lose_link() ran) and released it; or rule 2b: the
+    // poll's fault stood for util::kLinkStalenessBound, or no frame was published for it (the module's loss latch, set
+    // before on_state_poll_lost() releases the port). Lock-free.
+    bool link_lost() const { return polled_.link_lost() || !iOptronProtocolWrapper::instance().link_alive(); }
 
-    // A lost link is NotConnected with the loss reason: never a DriverException that counts toward the fault latch,
-    // and never a value read before the loss. Called first in every catch that turns a failed exchange into a
-    // DriverException or into a value or "slew done" served instead (the wedged-park finalizer included, whose
-    // caller serves the status it just read). The catches that only skip optional work (the GOTO trim's guide-rate
-    // fallback, the calibrations, the clock-sync retries, the connect's reads, which the connect follows with its own
+    // A lost link is NotConnected with the loss reason: never a DriverException, and never a value read before the
+    // loss. Called first in every catch that turns a failed exchange into a DriverException or into a value or "slew
+    // done" served instead (the wedged-park finalizer included). The catches that only skip optional work (the GOTO
+    // trim's guide-rate fallback, the clock-sync retries, the connect's reads, which the connect follows with its own
     // loss check) and the slew body, which records its failed dispatch, leave a loss to the next call through
     // check_connected(); Connected reads false at once either way.
-    static void throw_if_link_lost() {
+    void throw_if_link_lost() const {
         const auto& link = iOptronProtocolWrapper::instance();  // link_alive() and link_fault() do no I/O
-        if (link.link_alive()) {
+        if (!polled_.link_lost() && link.link_alive()) {
             return;
         }
-        const std::string reason = link.link_fault();
+        std::string reason = link.link_fault();
+        if (reason.empty()) {
+            reason = polled_.fault();
+        }
         throw AlpacaException(
             reason.empty() ? std::string("Mount link lost; Connect again once the mount is back") : reason,
             AlpacaError::NotConnected);
     }
 
-    // Decision 0009 rule 2b: a latched fault that has stood past util::kLinkStalenessBound on the task clock is a lost
-    // link, found by the next call through check_connected() (no poll). The wrapper releases the port and keeps the
-    // reason (rules 3 and 5), then this throws NotConnected. The wrapper call is an exchange for the gate (it
-    // takes the wrapper's exchange mutex), so it runs under io_mutex_ with mutex_ released; link_fault_mutex_ is
-    // a leaf released before it.
-    void lose_link_if_fault_stale() const {
-        const auto since = std::chrono::steady_clock::time_point(
-            std::chrono::steady_clock::duration(device_fault_since_ticks_.load()));
-        if (!device_faulted_ || clock_.now() - since < util::kLinkStalenessBound) {
-            return;
+    // Decision 0009 rule 2b, the poll's loss callback: the fault stood for util::kLinkStalenessBound, or no frame was
+    // published for it. Runs once per loss on the poll thread with no driver lock held, then the poll ends (no
+    // autonomous reconnect). The wrapper releases the port and keeps the reason (rules 3 and 5); the call is an
+    // exchange for the gate (it takes the wrapper's exchange mutex), so it runs under io_mutex_ with mutex_ released.
+    void on_state_poll_lost() {
+        const std::string fault = polled_.fault();
+        const std::string bound = std::to_string(util::kLinkStalenessBound.count()) + " s";
+        const std::string reason = fault.empty() ? "No mount state frame for " + bound
+                                                 : "Mount fault stood for " + bound + " with no good reply: " + fault;
+        try {
+            StateLock lock(lock_gate_);
+            wire().lose_link(reason);
+        } catch (const std::exception&) {
+            ALPACA_LOG_WARN("iOptron", "The mount link could not be released after the loss");
         }
-        wire().lose_link("Mount fault stood for " + std::to_string(util::kLinkStalenessBound.count()) +
-                         " s with no good reply: " + published_fault_text());
-        throw_if_link_lost();
     }
 
-    std::string published_fault_text() const {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        return link_fault_text_;
+    // Ends the state poll, with no driver lock held (it takes both for its reads, so a join under either would
+    // deadlock). The stop flag first: a probe mid-exchange finishes that exchange and sends nothing after it (the
+    // wrapper has no interrupt, so a Disconnect waits for one reply at most), see Wire::call.
+    void stop_state_poll() {
+        poll_stop_ = true;
+        polled_.stop_and_join();
     }
 
-    // Issue #2395 (AB-3): true only when a status that was read says parked (the cache, or a fresh read). A failed
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return polled_.age(); }
+
+    // The frame a getter serves, under mutex_: NotConnected while disconnected or once the link is lost,
+    // DriverException with the poll's fault text while one is latched, else the held frame, stale or not (decision 0010
+    // point 6).
+    PolledFrame served_frame_locked() const {
+        check_connected();
+        return polled_.served().value;
+    }
+
+    // The held frame whatever its age or the fault, or an empty one: for a command that wants a number if there is one.
+    PolledFrame held_frame_locked() const {
+        const auto held = polled_.read();
+        return held ? held->value : PolledFrame{};
+    }
+
+    // A value the frame does not hold (yet) is DriverException, never InvalidOperation (decision 0010 rule 8).
+    static const PolledFrame& require_position(const PolledFrame& frame) {
+        if (!frame.position_known) {
+            throw AlpacaException("The mount position is not available yet", AlpacaError::DriverException);
+        }
+        return frame;
+    }
+    static const PolledFrame& require_altaz(const PolledFrame& frame) {
+        if (!frame.altaz_known) {
+            throw AlpacaException("Alt/Az is not available: the last read failed", AlpacaError::DriverException);
+        }
+        return frame;
+    }
+
+    // The status as the getters and the guards read it: the frame's, with the read-back windows of a client's write
+    // over it (decision 0010 rule 14). The mount's read-back lags a Tracking or TrackingRate write, so inside its 2 s
+    // window the written value is served whatever a poll sampled.
+    MountStatus overlay_status_locked(MountStatus status) const {
+        const auto now = clock_.now();
+        if (tracking_override_until_ > now) {
+            status.is_tracking = tracking_written_;
+        }
+        if (tracking_rate_override_until_ > now) {
+            status.tracking_rate = tracking_rate_written_;
+        }
+        return status;
+    }
+
+    MountStatus status_of_locked(const PolledFrame& frame) const {
+        if (!frame.status_known) {
+            throw AlpacaException("The mount status is not available yet", AlpacaError::DriverException);
+        }
+        return overlay_status_locked(frame.status);
+    }
+
+    std::optional<MountStatus> known_status_locked() const {
+        const PolledFrame frame = held_frame_locked();
+        if (!frame.status_known) {
+            return std::nullopt;
+        }
+        return overlay_status_locked(frame.status);
+    }
+
+    // Write-through of the frame (decision 0010 rule 4): a client write changes what a getter reports at once, in the
+    // same mutex_ hold that changed the driver state. A poll never overlaps a command (it takes the I/O lock), so
+    // none can overwrite a write, and the windows below cover the firmware's read-back lag.
+    void write_tracking_locked(bool tracking) const {
+        tracking_written_ = tracking;
+        tracking_override_until_ = clock_.now() + std::chrono::seconds(2);
+        polled_.write([tracking](PolledFrame& frame) { frame.status.is_tracking = tracking; });
+    }
+
+    // Park and Unpark: the mount is on its way, not parked and not at home, whatever the poll sampled before.
+    void write_motion_started_locked() const {
+        polled_.write([](PolledFrame& frame) {
+            frame.status.is_parked = false;
+            frame.status.is_slewing = true;
+            frame.status.is_at_home = false;
+        });
+    }
+
+    // A status read for the control path (a command, a watchdog's bound): the exchange under the operation lock, the
+    // effects a fresh status settles, then the frame's write-through. The poll never reads on a command's behalf, and
+    // a failed read counts for nothing: only the poll feeds the fault latch.
+    MountStatus read_status_direct_locked() const {
+        const auto sampled_at = clock_.now();
+        MountStatus status;
+        try {
+            status = wire().get_status();
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
+                                  AlpacaError::DriverException);
+        }
+        ingest_status_locked(status, sampled_at);
+        polled_.write([&status, sampled_at](PolledFrame& frame) {
+            frame.status_known = true;
+            frame.status = status;
+            frame.status_sampled_at = sampled_at;
+        });
+        return overlay_status_locked(status);
+    }
+
+    // The same for the position (Sync, MoveAxis's Dec polarity, the synchronous slew's landing). The Sync offsets are
+    // driver state applied when a getter serves the frame, so the frame holds the mount's own position.
+    Position read_position_direct_locked() const {
+        Position position;
+        try {
+            position = wire().get_position();
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            throw AlpacaException(std::string("Failed to refresh mount position: ") + e.what(),
+                                  AlpacaError::DriverException);
+        }
+        polled_.write([&position](PolledFrame& frame) {
+            frame.position_known = true;
+            frame.ra_hours = position.ra_hours;
+            frame.dec_degrees = position.dec_degrees;
+            frame.side_of_pier = position.side_of_pier;
+        });
+        return position;
+    }
+
+    // The status a command decides on: the held frame's while it is fresh (younger than kSnapshotMaxAge), else a read
+    // under the operation lock, as the TTL the cache had.
+    MountStatus status_for_command_locked() const {
+        const auto held = polled_.read();
+        if (held && held->value.status_known && !held->stale) {
+            return overlay_status_locked(held->value.status);
+        }
+        return read_status_direct_locked();
+    }
+
+    int held_side_of_pier_locked() const {
+        const PolledFrame frame = held_frame_locked();
+        return frame.position_known ? frame.side_of_pier : -1;
+    }
+
+    // Issue #2395 (AB-3): true only when a status that was read says parked (the frame, or a fresh read). A failed
     // read is not "parked": AbortSlew, which runs this after its stop, then returns normally. A lost link throws.
     bool parked_per_successful_read_locked() const {
         if (park_override_until_ > clock_.now()) {
             return false;
         }
-        if (status_cache_valid_ && !cached_status_.is_parked) {
+        if (const auto held = known_status_locked(); held && !held->is_parked) {
             return false;
         }
         try {
-            refresh_status_cache_locked();
+            return status_for_command_locked().is_parked;
         } catch (const std::exception&) {
             throw_if_link_lost();
             return false;
         }
-        return cached_status_.is_parked;
     }
 
     void ensure_not_parked_locked(const char* action) const {
@@ -2530,11 +2653,7 @@ private:
             park_override_until_ = now + kUnparkGrace;
             return;
         }
-        if (status_cache_valid_ && !cached_status_.is_parked) {
-            return;
-        }
-        refresh_status_cache_locked();
-        if (cached_status_.is_parked) {
+        if (status_for_command_locked().is_parked) {
             throw AlpacaException(std::string(action) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
         }
@@ -2546,105 +2665,19 @@ private:
             park_override_until_ = now + kUnparkGrace;
             return;
         }
-        if (status_cache_valid_) {
-            if (cached_status_.is_parked) {
-                throw AlpacaException(std::string(action) + " is not allowed while parked",
-                                      AlpacaError::InvalidWhileParked);
-            }
-            return;
-        }
-        if (cached_status_.is_parked) {
+        if (const auto held = known_status_locked(); held && held->is_parked) {
             throw AlpacaException(std::string(action) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
         }
     }
 
-    // A single transient timeout must not brick the whole session: only latch
-    // device_faulted_ (which makes every call through check_connected() throw)
-    // after several CONSECUTIVE failures. A successful read resets the count
-    // via note_device_read_ok_locked().
-    static constexpr int kDeviceFaultThreshold = 3;
-
-    void record_device_fault_locked(const char* context, const std::string& detail) const {
-        ++device_fault_count_;
-        last_device_error_ = std::string(context) + ": " + detail;
-        if (device_fault_count_ >= kDeviceFaultThreshold) {
-            if (!device_faulted_) {
-                // The staleness bound runs from the latch (decision 0009 rule 2b), on the task clock; the first
-                // probe one interval after it, since the read that latched has just failed.
-                device_fault_since_ticks_.store(clock_.now().time_since_epoch().count());
-                next_fault_probe_ = clock_.now() + kFaultProbeInterval;
-            }
-            device_faulted_ = true;
-            ALPACA_LOG_ERROR("iOptron", "Device fault (latched after " + std::to_string(device_fault_count_) +
-                                            " consecutive failures) - " + last_device_error_);
-        } else {
-            ALPACA_LOG_WARN("iOptron", "Device fault (transient, " + std::to_string(device_fault_count_) + "/" +
-                                           std::to_string(kDeviceFaultThreshold) + ") - " + last_device_error_);
-        }
-        publish_link_fault_locked();
-    }
-
-    void clear_device_fault_locked() const {
-        device_fault_count_ = 0;
-        device_faulted_ = false;
-        last_device_error_.clear();
-        publish_link_fault_locked();
-    }
-
-    // Copies the latched fault text to the narrow-mutex copy get_link_fault() reads.
-    // Call under mutex_ after every change to device_faulted_ or last_device_error_.
-    void publish_link_fault_locked() const {
-        std::lock_guard<std::mutex> lock(link_fault_mutex_);
-        link_fault_text_ = device_faulted_ ? last_device_error_ : std::string{};
-    }
-
-    // open-astro#728: a successful read ends the run of failures, so only
-    // consecutive failures reach the threshold. A good reply also clears a
-    // latch that has tripped (decision 0009 rule 1): while latched it comes
-    // from a check_connected() probe. AbortSlew's sent stop and a reconnect
-    // clear it too (Park and Unpark also clear it on success, but
-    // check_connected() refuses them while it is set).
-    void note_device_read_ok_locked() const {
-        if (device_faulted_) {
-            ALPACA_LOG_INFO("iOptron", "Device fault cleared: the mount answered again");
-            clear_device_fault_locked();
-            return;
-        }
-        device_fault_count_ = 0;
-    }
-
-    void prefetch_mount_state_locked() {
+    // `gut_reply`: the connect's :GUT# reply, for the site's timezone and DST; null when that read failed, and
+    // the site read then sends its own :GUT# as before (#1784). Position, Alt/Az and status are the poll's seed.
+    void prefetch_site_locked(const std::string* gut_reply) {
         const Wire protocol = wire();
         auto now = clock_.now();
         try {
-            Position pos = protocol.get_position();
-            cached_dec_degrees_ = pos.dec_degrees;
-            cached_ra_hours_ = pos.ra_hours;
-            cached_side_of_pier_ = pos.side_of_pier;
-            position_cache_valid_ = true;
-            last_position_update_ = now;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "Failed to prefetch position cache: " + std::string(e.what()));
-        }
-        try {
-            AltAz altaz = protocol.get_alt_az();
-            cached_alt_degrees_ = altaz.altitude_degrees;
-            cached_az_degrees_ = altaz.azimuth_degrees;
-            altaz_cache_valid_ = true;
-            last_altaz_update_ = now;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "Failed to prefetch Alt/Az cache: " + std::string(e.what()));
-        }
-        try {
-            cached_status_ = protocol.get_status();
-            status_cache_valid_ = true;
-            last_status_update_ = now;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "Failed to prefetch status cache: " + std::string(e.what()));
-        }
-        try {
-            SiteInfo site = protocol.get_site_info();
+            SiteInfo site = gut_reply ? protocol.get_site_info(*gut_reply) : protocol.get_site_info();
             site_longitude_cached_ = site.longitude_degrees;
             site_latitude_cached_ = site.latitude_degrees;
             hemisphere_north_ = site.is_northern_hemisphere;
@@ -2658,21 +2691,129 @@ private:
         }
     }
 
-    bool get_tracking_locked() const {
-        auto now = clock_.now();
-        if (tracking_override_until_ > now && status_cache_valid_) {
-            return cached_status_.is_tracking;
+    bool get_tracking_locked() const { return status_for_command_locked().is_tracking; }
+
+    // The poll's probe (decision 0010, #2491), on the poll thread, or on the connect thread for the seed, with no
+    // driver lock held. It takes the operation lock for the whole tick (a command waits for at most one probe, and
+    // nothing interleaves between its reads and its effects), reads :GLS#, :GEP# and :GAC# through Wire (which drops
+    // mutex_ for each exchange), runs the effects a fresh status settles, and publishes the frame itself, under mutex_
+    // in the same hold as the effects' last state change. It returns nullopt: the module publishes nothing and counts
+    // the tick good. A mandatory read (status, position) that fails ends the probe with a throw, which counts toward
+    // the fault latch; the probe throws only fixed text and never logs a mount reply (CWE-117, AlpacaCore has no
+    // escaper).
+    std::optional<PolledFrame> probe() {
+        struct PollThread {
+            explicit PollThread(const iOptronTelescopeDriver* self) { tl_state_poll_driver = self; }
+            ~PollThread() { tl_state_poll_driver = nullptr; }
+            PollThread(const PollThread&) = delete;
+            PollThread& operator=(const PollThread&) = delete;
+        } poll_thread{this};
+        const bool seed = seeding_.exchange(false);
+        try {
+            StateLock lock(lock_gate_);
+            if (poll_stop_.load()) {
+                throw AlpacaException("iOptron state poll stopped", AlpacaError::DriverException);
+            }
+            const auto token = polled_.begin_poll();
+            const Wire protocol = wire();
+            PolledFrame frame;
+            frame.status_sampled_at = clock_.now();
+            // The seed (the first probe of a connection) publishes what the mount answers, even nothing: a connect does
+            // not fail because status or position is missing, and the getters say so until a poll answers. Every later
+            // probe throws and feeds the fault latch.
+            const auto mandatory = [&](auto&& read) {
+                try {
+                    read();
+                } catch (const std::exception&) {
+                    if (!seed || poll_stop_.load() || !iOptronProtocolWrapper::instance().link_alive()) throw;
+                }
+            };
+            mandatory([&] {
+                frame.status = protocol.get_status();
+                frame.status_known = true;
+            });
+            mandatory([&] {
+                const Position position = protocol.get_position();
+                frame.ra_hours = position.ra_hours;
+                frame.dec_degrees = position.dec_degrees;
+                frame.side_of_pier = position.side_of_pier;
+                frame.position_known = true;
+            });
+            read_altaz_optional_locked(protocol, frame);
+            if (poll_stop_.load()) {
+                throw AlpacaException("iOptron state poll stopped", AlpacaError::DriverException);
+            }
+            // Nothing the effects throw ends the probe (decision 0010 rule 7): a failed operation keeps its error in
+            // last_slew_error_ for Slewing to raise and is not a failed poll, so the tick's frame is published whatever
+            // an effect did. A stopped probe publishes nothing, and a lost link ends the poll after this tick.
+            try {
+                run_poll_effects_locked(frame, frame.status_sampled_at);
+            } catch (const std::exception&) {
+                if (poll_stop_.load()) throw;
+                if (!iOptronProtocolWrapper::instance().link_alive()) polled_.lose_link();
+                ALPACA_LOG_DEBUG("iOptron", "A state poll effect did not complete; the tick's frame is published");
+            }
+            if (poll_stop_.load()) {
+                throw AlpacaException("iOptron state poll stopped", AlpacaError::DriverException);
+            }
+            polled_.publish(token, frame);
+            return std::nullopt;
+        } catch (...) {
+            // Positive evidence (decision 0009 rule 2a): the wrapper saw the serial port gone, in this probe or in an
+            // earlier exchange. The loss latch is set at once, so the poll ends after this tick.
+            if (!iOptronProtocolWrapper::instance().link_alive()) polled_.lose_link();
+            throw;
         }
-        refresh_status_cache_locked();
-        return cached_status_.is_tracking;
+    }
+
+    // :GAC# is optional (a mount that answers the status and the position is alive), so its failure leaves the frame
+    // with no Alt/Az and is not a failed poll. A reply that never came backs the read off to every
+    // kAltAzBackoffTicks-th tick until it answers, so a mount that times out on it adds one reply timeout per four
+    // probes. The probe never reads the message text: a failed :GAC# that took longer than a poll period on the real
+    // clock (the wrapper's reply timeout is real, decision 0005) counts as a timeout; a parse failure or `0#` answers
+    // at once and stays optional on every tick. A lost link is not a :GAC# failure and ends the probe.
+    void read_altaz_optional_locked(const Wire& protocol, PolledFrame& frame) {
+        if (altaz_skip_ticks_ > 0) {
+            --altaz_skip_ticks_;
+            return;
+        }
+        const auto began = std::chrono::steady_clock::now();
+        try {
+            const AltAz altaz = protocol.get_alt_az();
+            frame.alt_degrees = altaz.altitude_degrees;
+            frame.az_degrees = altaz.azimuth_degrees;
+            frame.altaz_known = true;
+        } catch (const std::exception&) {
+            if (poll_stop_.load() || !iOptronProtocolWrapper::instance().link_alive()) throw;
+            if (std::chrono::steady_clock::now() - began > kStatePollPeriod) {
+                altaz_skip_ticks_ = kAltAzBackoffTicks - 1;
+            }
+        }
+    }
+
+    // What a tick's status settles, in the order the Slewing getter ran it before the poll (decision 0010 rule 7):
+    // the status effects, the zero search's start check, the early returns of the old getter (a stored failure, a jog,
+    // an open hold window or a motion that is still under way leave slew_in_progress_ as it is), then the trim, the
+    // landing gate and the clear. `frame` is the tick's own sample, not yet published.
+    void run_poll_effects_locked(PolledFrame& frame, std::chrono::steady_clock::time_point sampled_at) const {
+        if (!frame.status_known) {
+            return;  // the seed's status read failed: nothing to settle
+        }
+        ingest_status_locked(frame.status, sampled_at);
+        check_zero_search_started_locked(frame.status, sampled_at);
+        if (!last_slew_error_.empty() || axis_move_active_primary_ || axis_move_active_secondary_ ||
+            slew_hold_.active(sampled_at) || driver_motion_ == DriverMotion::HomeSearch || frame.status.is_slewing ||
+            (pulse_window_open() && goto_seen_stopped_)) {
+            return;
+        }
+        advance_motion_locked(frame, sampled_at);
     }
 
     // ITelescopeV4: SlewToAltAz and SlewToAltAzAsync throw InvalidOperation while Tracking is true (#1377), since a
-    // tracking mount drifts off the requested Alt/Az. Reads the same value as get_tracking(), from the status cache
-    // under mutex_: the same TTL-gated status read the equatorial slews' guard makes (it may send one `:GLS#`
-    // when the cache has expired; the parked check does not refresh a valid, unparked cache), or the tracking
-    // write's read-back window. Runs after the argument, connected and parked checks and before anything is sent or
-    // superseded.
+    // tracking mount drifts off the requested Alt/Az. Reads the same value as get_tracking(), from the frame under
+    // mutex_: the same guard read the equatorial slews make (it sends one `:GLS#` when the frame is stale), or the
+    // tracking write's read-back window. Runs after the argument, connected and parked checks and before anything is
+    // sent or superseded.
     void refuse_alt_az_slew_while_tracking_locked(const char* label) const {
         if (get_tracking_locked()) {
             throw AlpacaException(std::string(label) + " is not allowed while Tracking is true",
@@ -2680,17 +2821,39 @@ private:
         }
     }
 
-    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Runs after the parked check and before the new slew
-    // supersedes a dispatch in flight, so a refusal leaves that motion alone.
-    // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
-    void check_equatorial_slew_allowed_locked(const char* label) const {
-        check_connected();
-        ensure_not_parked_locked(label);
-        if (tracking_off_for_slew_locked()) {
-            throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+    // The command gate's state checks in iOptron's words (#2258): util/telescope_command_gate.h decides the order,
+    // these answer each step with the driver's own texts and reads. check_connected() also refuses a latched fault,
+    // so the gate's fault step has nothing left to check. PulseGuide reads the parked flag from the cache
+    // (`fast_parked`); the other families may refresh it from the mount. SlewToAltAzAsync reads the site only while
+    // none is cached (`refresh_site` false); SlewToAltAz also refreshes a cached site past its TTL.
+    struct GateChecks {
+        const iOptronTelescopeDriver& driver;
+        const char* who = nullptr;
+        bool fast_parked = false;
+        bool refresh_site = true;
+        void check_connected() const { driver.check_connected(); }
+        void check_not_parked(bool /*stop*/) const {
+            fast_parked ? driver.ensure_not_parked_fast_locked(who) : driver.ensure_not_parked_locked(who);
         }
-    }
+        void check_no_fault() const {}
+        // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+        // (open-astro#1274). Runs after the parked check and before the new slew
+        // supersedes a dispatch in flight, so a refusal leaves that motion alone.
+        // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
+        void check_tracking() const {
+            if (driver.tracking_off_for_slew_locked()) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+        void check_site() const {
+            if (refresh_site || !driver.site_info_valid_) driver.ensure_site_info_cached_locked();
+            if (!driver.site_info_valid_) {
+                throw AlpacaException("Site information unavailable for Alt/Az slew", AlpacaError::ValueNotSet);
+            }
+        }
+        void check_not_tracking() const { driver.refuse_alt_az_slew_while_tracking_locked(who); }
+    };
 
     // Not get_tracking_locked(): :GLS reports slewing (2) instead of tracking,
     // so the getter reads a GOTO as off, and refusing there would refuse a
@@ -2699,18 +2862,18 @@ private:
     // read-back window, or a stopped mount (0, or 7 at home); parked (6) is
     // refused before this runs.
     bool tracking_off_for_slew_locked() const {
-        if (tracking_override_until_ > clock_.now() && status_cache_valid_) {
-            return !cached_status_.is_tracking;
+        const MountStatus status = status_for_command_locked();
+        if (tracking_override_until_ > clock_.now()) {
+            return !status.is_tracking;
         }
-        refresh_status_cache_locked();
-        return cached_status_.system_status == 0 || cached_status_.system_status == 7;
+        return status.system_status == 0 || status.system_status == 7;
     }
 
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec, double phys_ra, double phys_dec,
                                    const char* label, bool supersede = true) {
         check_connected();
         ensure_not_parked_locked(label);
-        if (supersede) supersede_slew_dispatch_locked();
+        if (supersede) claim_slew_locked();
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
@@ -2731,30 +2894,48 @@ private:
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
     }
 
-    // Issue #2396 (AB-8): an async GOTO of @p generation that still moves kSlewTimeout after its start is stopped by
+    // Issue #2396 (AB-8): an async GOTO of @p claim that still moves kSlewTimeout after its start is stopped by
     // the motion bound watchdog (the synchronous waiter has its own bound).
-    void arm_slew_bound_locked(std::uint64_t generation) {
+    void arm_slew_bound_locked(const util::MotionClaim& claim) {
         slew_bound_deadline_ = clock_.now() + kSlewTimeout;
-        slew_bound_generation_ = generation;
-        landing_gate_generation_ = generation;  // AB-7: the Slewing read waits for a confirmed landing
+        slew_bound_claim_ = claim;
+        landing_gate_claim_ = claim;  // AB-7: the Slewing read waits for a confirmed landing
         landing_prev_valid_ = false;
     }
 
-    void invalidate_slew_error_locked() {
-        ++slew_operation_generation_;
-        last_slew_error_.clear();
+    // Issue #2522: true while @p claim still owns its axes: no newer claim and no stop (MoveAxis, AbortSlew, Unpark,
+    // a connect or a disconnect) reached them.
+    bool owns_locked(const util::MotionClaim& claim) const {
+        return motion_owner_.stop_reason(claim) == util::StopReason::None;
     }
 
+    // A slew, Park or FindHome (#2263, #2522): claims both axes before the command sets its flags (decision 0006
+    // rule 3), so every older slew body and waiter stands down, and clears the GOTO state it supersedes. The MoveAxis
+    // caps stay: a slew leaves the jog flags set, and the cap's :qR#/:qD# stops arrow motion only, so a jog under a
+    // GOTO still ends at its 60 s.
+    void claim_slew_locked() {
+        slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
+        supersede_slew_dispatch_locked();
+    }
+
+    void invalidate_slew_error_locked() { last_slew_error_.clear(); }
+
     void supersede_slew_dispatch_locked() {
-        // Clear an unsent GOTO's state before a stale worker observes its
-        // generation mismatch, preventing a ghost slew/trim after newer motion.
+        // Clear an unsent GOTO's state before a stale worker finds its claim lost (the caller claimed or cancelled
+        // first), preventing a ghost slew/trim after newer motion.
         // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
+        end_fast_cache_grace_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
         driver_motion_ = DriverMotion::None;
     }
+
+    // Issue #2562: the post-connect grace serves the connect's reads to the getter burst after Connect. A motion the
+    // driver starts (every initiator supersedes, and AbortSlew) ends it: the site caches then follow the mount on their
+    // TTLs. (The frame has no grace: the poll keeps it at most one tick old.)
+    void end_fast_cache_grace_locked() const { fast_cache_until_ = std::chrono::steady_clock::time_point{}; }
 
     void clear_slew_hold_locked() const { slew_hold_.clear(); }
 
@@ -2855,8 +3036,6 @@ private:
             }
             throw AlpacaException(failure);
         }
-        status_cache_valid_ = false;
-        position_cache_valid_ = false;
     }
 
     // Issue #2396: the status read before the :MS1#. Motion already running that reads 2 (a GOTO, a Park, or a pulse
@@ -2906,7 +3085,6 @@ private:
             throw_if_link_lost();
             ALPACA_LOG_WARN("iOptron", std::string("Stop after an unanswered :MS1# failed: ") + e.what());
         }
-        status_cache_valid_ = false;
         return false;
     }
 
@@ -2917,13 +3095,12 @@ private:
 
     // Issue #2396: a synchronous GOTO that fails after its dispatch (the 300 s bound, a far miss, failed position
     // reads) ends the slew state, hold included, and sends :Q# (best effort), as an unconfirmed GOTO does, so a
-    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p generation is
-    // slew_operation_generation_ after this GOTO's dispatch: when a newer motion (another client's GOTO, a MoveAxis,
-    // Park, AbortSlew or a reconnect) has bumped it, the mount is that motion's, and neither the stop nor the state
-    // clear runs.
-    [[noreturn]] void fail_synchronous_slew(std::string failure, std::uint64_t generation) {
+    // mount still moving is stopped. A stop that cannot be sent is logged and named in the error. @p claim is this
+    // GOTO's both-axes claim: when a newer motion (another client's GOTO, a MoveAxis, Park, AbortSlew or a reconnect)
+    // has taken or stopped an axis, the mount is that motion's, and neither the stop nor the state clear runs.
+    [[noreturn]] void fail_synchronous_slew(std::string failure, const util::MotionClaim& claim) {
         StateLock lock(lock_gate_);
-        if (generation != slew_operation_generation_) {
+        if (!owns_locked(claim)) {
             throw AlpacaException(failure + "; a newer motion owns the mount, so no stop was sent");
         }
         slew_in_progress_ = false;
@@ -2931,20 +3108,20 @@ private:
         try {
             wire().stop_slewing();
             failure += "; the mount was sent a stop";
+            // The stop took: the frame sampled before it must not keep saying slewing (as after AbortSlew).
+            polled_.write([](PolledFrame& frame) { frame.status.is_slewing = false; });
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", "Stop after a failed synchronous slew failed: " + std::string(e.what()));
             failure += "; the stop could not be sent, so the mount may still be moving";
         }
-        status_cache_valid_ = false;
-        position_cache_valid_ = false;
         throw AlpacaException(failure);
     }
 
-    void wait_for_slew_completion(const char* label, std::uint64_t generation) {
+    void wait_for_slew_completion(const char* label, const util::MotionClaim& claim) {
         const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
             if (clock_.now() > deadline) {
-                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", generation);
+                fail_synchronous_slew(std::string(label) + " timed out waiting for slew to complete", claim);
             }
             clock_.sleep_for(kSlewPollInterval);
         }
@@ -2962,6 +3139,7 @@ private:
         if (has_target) {
             static constexpr double kStableThresholdArcsec = 30.0;
             static constexpr int kRequiredStableReads = 3;
+            static constexpr int kSlewLandingFailedReads = 3;  // failed landing reads that fail the slew
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
             double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
             int stable_count = 0;
@@ -2974,9 +3152,7 @@ private:
                 double target_ra = 0, target_dec = 0;
                 {
                     StateLock lock(lock_gate_);
-                    target_reached = slew_target_reached_locked();
-                    cur_ra = cached_ra_hours_;
-                    cur_dec = cached_dec_degrees_;
+                    target_reached = slew_target_reached_locked(cur_ra, cur_dec);
                     target_ra = slew_target_ra_hours_;
                     target_dec = slew_target_dec_degrees_;
                 }
@@ -2989,10 +3165,10 @@ private:
                 // Issue #2396: a failed position read is no sample, so it can neither count as stable nor land the
                 // slew on the position from before it.
                 if (!target_reached.has_value()) {
-                    if (++failed_reads >= kDeviceFaultThreshold) {
+                    if (++failed_reads >= kSlewLandingFailedReads) {
                         fail_synchronous_slew(
                             std::string(label) + " failed: the mount position could not be read to confirm the landing",
-                            generation);
+                            claim);
                     }
                     prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
                     stable_count = 0;
@@ -3026,7 +3202,7 @@ private:
                                                   " arcsec (RA) and " +
                                                   std::to_string(static_cast<long>(std::lround(dec_arcsec))) +
                                                   " arcsec (Dec) from the target",
-                                              generation);
+                                              claim);
                     }
                     ALPACA_LOG_INFO("iOptron", std::string(label) +
                                     ": position stabilized but target not reached");
@@ -3038,7 +3214,7 @@ private:
             }
             if (!landed) {
                 fail_synchronous_slew(std::string(label) + " timed out waiting for the mount to land on the target",
-                                      generation);
+                                      claim);
             }
         }
 
@@ -3046,96 +3222,41 @@ private:
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         StateLock lock(lock_gate_, StateLock::Mode::State);
-        if (generation == slew_operation_generation_) {
+        if (owns_locked(claim)) {
             slew_in_progress_ = false;  // a newer motion owns slew_in_progress_ otherwise
         }
     }
 
-    void refresh_position_cache_locked(bool force = false) const {
-        auto now = clock_.now();
-        if (!force && (position_cache_fresh_locked() || serve_as_is_locked(position_cache_valid_))) {
-            return;
-        }
-        const Wire protocol = wire();
-        try {
-            Position pos = protocol.get_position();
-            cached_dec_degrees_ = pos.dec_degrees;
-            cached_ra_hours_ = pos.ra_hours;
-            cached_side_of_pier_ = pos.side_of_pier;
-            position_cache_valid_ = true;
-            last_position_update_ = now;
-            note_device_read_ok_locked();
-        } catch (const std::exception& e) {
-            throw_if_link_lost();
-            record_device_fault_locked("Position", e.what());
-            throw AlpacaException(std::string("Failed to refresh mount position: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
-    }
-
-    void refresh_altaz_cache_locked(bool force = false) const {
-        auto now = clock_.now();
-        if (!force && (altaz_cache_fresh_locked() || serve_as_is_locked(altaz_cache_valid_))) {
-            return;
-        }
-        const Wire protocol = wire();
-        try {
-            AltAz altaz = protocol.get_alt_az();
-            cached_alt_degrees_ = altaz.altitude_degrees;
-            cached_az_degrees_ = altaz.azimuth_degrees;
-            altaz_cache_valid_ = true;
-            last_altaz_update_ = now;
-            note_device_read_ok_locked();
-        } catch (const std::exception& e) {
-            throw_if_link_lost();
-            record_device_fault_locked("AltAz", e.what());
-            throw AlpacaException(std::string("Failed to refresh mount Alt/Az: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
-    }
-    
-    void refresh_status_cache_locked(bool force = false) const {
-        auto now = clock_.now();
-        if (!force && (status_cache_fresh_locked() || serve_as_is_locked(status_cache_valid_))) {
-            return;
-        }
-        const Wire protocol = wire();
-        try {
-            cached_status_ = protocol.get_status();
-            status_cache_valid_ = true;
-            last_status_update_ = now;
-            note_device_read_ok_locked();
-        } catch (const std::exception& e) {
-            throw_if_link_lost();
-            record_device_fault_locked("Status", e.what());
-            throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
-        finalize_wedged_park_locked();
-        stop_overdue_zero_search_locked(now);
-        note_zero_search_motion_locked();
-        if (!cached_status_.is_at_home) {
+    // Takes a status the mount reported at `sampled_at` and runs what a fresh status settles: the wedged-park
+    // finalizer (which may replace `status` by a re-read), the zero search's stop and motion note, and the end of a
+    // driver-started Park or FindHome. Run by the poll on its tick's own sample and by a control-path read
+    // (read_status_direct_locked()); the caller puts `status` in the frame.
+    void ingest_status_locked(MountStatus& status, std::chrono::steady_clock::time_point sampled_at) const {
+        const auto now = sampled_at;
+        finalize_wedged_park_locked(status);
+        stop_overdue_zero_search_locked(status, now);
+        note_zero_search_motion_locked(status);
+        if (!status.is_at_home) {
             home_search_unconfirmed_ = false;  // the mount left the 7 a failed search stopped at
         }
-        // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
-        // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
-        // initiator's override (the firmware can still report its old status just after the command). A Park
-        // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
+        // A fresh status ends a driver-started Park or FindHome: at home after a FindHome at once, any other no-motion
+        // status only past the initiator's override (the firmware can still report its old status just after the
+        // command). A Park needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
         // Runs after the finalizer, which may have re-read the status.
         // A zero search (issue #2420) ends only on status 7 past its hold, and only once a status 2 showed it
         // moving: the false zero it starts from reads 7 too, so a 7 the mount never left is not a landing (a
         // :MSH# ignored at a false zero would otherwise read as home). A running search reads 2 until it lands, so
         // another no-motion status does not end it either.
-        const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
+        const bool reached_home = driver_motion_ == DriverMotion::Home && status.is_at_home;
         const bool search_running = driver_motion_ == DriverMotion::HomeSearch &&
-                                    (!cached_status_.is_at_home || slew_hold_.active(now) || !home_search_seen_moving_);
-        if (!search_running && (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now)))) {
+                                    (!status.is_at_home || slew_hold_.active(now) || !home_search_seen_moving_);
+        if (!search_running && (reached_home || (!status.is_slewing && !slew_hold_.active(now)))) {
             driver_motion_ = DriverMotion::None;
         }
         // Issue #2063: a status that shows the mount stopped past the dispatch window ends the GOTO for the
-        // PulseGuide mask and MoveAxis even if no client reads Slewing. slew_in_progress_ stays for get_slewing(),
-        // which still runs the settle trim and clears it.
-        if (!cached_status_.is_slewing && !slew_hold_.active(now)) {
+        // PulseGuide mask and MoveAxis even if no client reads Slewing. slew_in_progress_ stays for the poll's
+        // advance_motion_locked(), which still runs the settle trim and clears it.
+        if (!status.is_slewing && !slew_hold_.active(now)) {
             goto_seen_stopped_ = true;
         }
     }
@@ -3144,9 +3265,10 @@ private:
     // best-effort like the park finalizer) and the failure is kept for Slewing until AbortSlew or a new initiator
     // (the failed-async-body rule). Runs before the landing clause, so a search that lands this read is not stopped.
     // Issue #2432: the watchdog slot (run_zero_search_watchdog()) reads the status at the bound, so this runs then
-    // whether or not a client polls; a client's read past the bound that gets here first stops it the same way.
-    void stop_overdue_zero_search_locked(std::chrono::steady_clock::time_point now) const {
-        if (driver_motion_ != DriverMotion::HomeSearch || (cached_status_.is_at_home && home_search_seen_moving_) ||
+    // whether or not the poll is running; the poll's own tick past the bound that gets here first stops it the same
+    // way.
+    void stop_overdue_zero_search_locked(const MountStatus& status, std::chrono::steady_clock::time_point now) const {
+        if (driver_motion_ != DriverMotion::HomeSearch || (status.is_at_home && home_search_seen_moving_) ||
             now < home_search_deadline_) {
             return;
         }
@@ -3155,18 +3277,10 @@ private:
     }
 
     // Every fresh status during a zero search: a status 2 means the search started (it reads 2 until it lands on 7).
-    void note_zero_search_motion_locked() const {
-        if (driver_motion_ == DriverMotion::HomeSearch && cached_status_.is_slewing) {
+    void note_zero_search_motion_locked(const MountStatus& status) const {
+        if (driver_motion_ == DriverMotion::HomeSearch && status.is_slewing) {
             home_search_seen_moving_ = true;
         }
-    }
-
-    // Whether check_zero_search_started_locked() would act on the cached status now. The watching getters (Slewing,
-    // AtHome) treat their cache as stale while it is true, so they reach the check under the operation lock even when
-    // another getter (Tracking, AtPark, TrackingRate) or an initiator refreshed the shared status just before.
-    bool zero_search_start_check_due_locked(std::chrono::steady_clock::time_point now) const {
-        return driver_motion_ == DriverMotion::HomeSearch && !home_search_seen_moving_ && status_cache_valid_ &&
-               !cached_status_.is_slewing && now >= home_search_start_until_;
     }
 
     // A zero search the mount never started. A running search reads status 2 until it lands on 7 (HAE29C traces over
@@ -3176,27 +3290,26 @@ private:
     // not start either, stop the search with a stored error instead of waiting out the bound. A status 7 with no
     // motion seen counts the same: the HAE29C wakes from a power loss at a false zero that reads 7, and a :MSH# it
     // ignores there must not read as home. Every search traced, from the true zero too, read 2 for at least a
-    // second, and the watchdog reads the status every kZeroSearchPollInterval until it sees one, so a short search
-    // is not missed for want of a client poll. Called by the getters that watch the search (Slewing, AtHome) and
-    // by the watchdog, under the operation lock: an initiator's own status read must not put a :MSH# on the wire
-    // just before its command supersedes the search. The grace is its own deadline, not the slew hold, which
-    // MoveAxis clears while the search keeps running.
-    void check_zero_search_started_locked(std::chrono::steady_clock::time_point now) const {
+    // second, and the poll reads the status every tick, so a short search is not missed for want of a client poll.
+    // Called by the poll on each tick's status, under the operation lock: an initiator's own status read must not put a
+    // :MSH# on the wire just before its command supersedes the search. The grace is its own deadline, not the slew
+    // hold, which MoveAxis clears while the search keeps running.
+    void check_zero_search_started_locked(const MountStatus& status, std::chrono::steady_clock::time_point now) const {
         if (driver_motion_ != DriverMotion::HomeSearch) {
             return;
         }
-        note_zero_search_motion_locked();
-        if (home_search_seen_moving_ || cached_status_.is_slewing || now < home_search_start_until_) {
+        note_zero_search_motion_locked(status);
+        if (home_search_seen_moving_ || status.is_slewing || now < home_search_start_until_) {
             return;
         }
         if (home_search_resent_) {
             stop_zero_search_locked("FindHome: the zero sensor search did not start (the mount stayed at status " +
-                                    std::to_string(cached_status_.system_status) + " after :MSH# was sent twice)");
+                                    std::to_string(status.system_status) + " after :MSH# was sent twice)");
             return;
         }
         home_search_resent_ = true;
         ALPACA_LOG_WARN("iOptron", "FindHome: the zero sensor search did not start (status " +
-                                       std::to_string(cached_status_.system_status) + "); sending :MSH# again");
+                                       std::to_string(status.system_status) + "); sending :MSH# again");
         try {
             send_with_slew_hold_locked(std::chrono::seconds(5), [&] { wire().find_home(); });
         } catch (const std::exception& e) {
@@ -3207,7 +3320,6 @@ private:
             return;
         }
         home_search_start_until_ = clock_.now() + kZeroSearchStartGrace;  // from the send, as find_home()
-        status_cache_valid_ = false;  // the status just read is from before the second :MSH#
     }
 
     // A zero search that ends before it showed motion (AbortSlew, a superseding command, a connect or disconnect):
@@ -3234,7 +3346,6 @@ private:
             last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
         }
         ALPACA_LOG_WARN("iOptron", last_slew_error_);
-        status_cache_valid_ = false;  // the status just read is from before the stop
     }
 
     // Issue #2432: the zero search's bound on its own slot. Call with no driver lock held (decision 0006 rule 4). The
@@ -3262,12 +3373,11 @@ private:
         }
     }
 
-    // Until the search shows a status 2, reads the status every kZeroSearchPollInterval and runs the start check
-    // (check_zero_search_started_locked(): one more :MSH#, then a stop). After that it waits on the task clock for
-    // the current search's bound, then reads the status under the operation lock: a status 7 after motion lands the
-    // search there (refresh_status_cache_locked()), anything else stops it with the stored failure. A status read that
-    // fails at the bound stops it too (fail closed); a lost link ends the body, since the loss already ends the
-    // session. Ends at once when no search runs, the driver is disconnected or the slot stops it.
+    // Waits on the task clock for the current search's bound, then reads the status under the operation lock: a status
+    // 7 after motion lands the search there (read_status_direct_locked()), anything else stops it with the stored
+    // failure. A status read that fails at the bound stops it too (fail closed); a lost link ends the body, since the
+    // loss already ends the session. The poll reads the status every tick and runs the start check, so this slot only
+    // bounds the search. Ends at once when no search runs, the driver is disconnected or the slot stops it.
     void run_zero_search_watchdog(util::OperationContext& ctx) {
         while (true) {
             std::chrono::steady_clock::duration remaining{};
@@ -3278,28 +3388,9 @@ private:
                     return;
                 }
                 const auto now = clock_.now();
-                // Until the search shows motion, read its status every kZeroSearchPollInterval and run the start
-                // check, so a short search is seen and an ignored :MSH# is caught with no client polling. A failed
-                // read here is left to the next poll or the bound; a lost link ends the body.
-                const bool polling = zero_search_poll_enabled_.load() && !home_search_seen_moving_;
-                if (now < home_search_deadline_ && polling && now >= home_search_next_poll_) {
-                    home_search_next_poll_ = now + kZeroSearchPollInterval;
-                    try {
-                        refresh_status_cache_locked(true);
-                        // Judged at the time the read started: the status is from then, not from after the
-                        // exchange (which gives up mutex_), so a slow reply cannot push it past a grace it read in.
-                        check_zero_search_started_locked(now);
-                    } catch (const std::exception& e) {
-                        if (link_lost()) return;
-                        ALPACA_LOG_DEBUG("iOptron", std::string("Zero search poll read failed (the next poll or the "
-                                                                "bound retries): ") +
-                                                        e.what());
-                    }
-                    if (driver_motion_ != DriverMotion::HomeSearch) return;
-                }
                 if (now >= home_search_deadline_) {
                     try {
-                        refresh_status_cache_locked(true);
+                        read_status_direct_locked();
                     } catch (const std::exception& e) {
                         if (link_lost()) return;
                         if (driver_motion_ == DriverMotion::HomeSearch) {
@@ -3312,9 +3403,6 @@ private:
                     return;
                 }
                 remaining = home_search_deadline_ - now;
-                if (zero_search_poll_enabled_.load() && !home_search_seen_moving_) {
-                    remaining = std::min(remaining, home_search_next_poll_ - now);
-                }
             }
             if (!ctx.wait_for(remaining)) return;
         }
@@ -3324,10 +3412,11 @@ private:
     // the destructor, which serializes its reapers. The body never takes transition_mutex_.
     void stop_zero_search_watchdog() { zero_search_watchdog_.cancel_all_and_join(); }
 
-    // Issue #2396 (AB-8, AB-9): (re)starts the motion bound watchdog. Call with no driver lock held (decision 0006
-    // rule 4), after the MoveAxis or async GOTO published its deadline. The start supersedes a body already waiting,
-    // so a body that saw no motion and is on its way out can never leave the new motion unbounded. A start the slot
-    // refuses is logged and leaves the router's client-silence watchdog as the bound.
+    // Issue #2396 (AB-8): (re)starts the motion bound watchdog. Call with no driver lock held (decision 0006
+    // rule 4), after the async GOTO published its deadline. The start supersedes a body already waiting, so a body
+    // that saw no motion and is on its way out can never leave the new motion unbounded. A start the slot refuses is
+    // logged and leaves the router's client-silence watchdog as the bound. The MoveAxis cap is not here: each axis
+    // has its own slot (move_axis_cap_).
     void start_motion_bound_watchdog() {
         try {
             motion_bound_watchdog_.start([this](util::OperationContext& ctx) { run_motion_bound_watchdog(ctx); });
@@ -3336,11 +3425,10 @@ private:
         }
     }
 
-    // Waits on the task clock for the nearer of the two deadlines. A MoveAxis still running at its deadline is
-    // stopped with :Q# and a stored error that Slewing raises. An async GOTO of the bounded generation is checked at
-    // its deadline: a status that still reads slewing, or one that cannot be read, stops it the same way; a mount that
-    // reads stopped is left for the Slewing read to land. Ends when no bounded motion runs, on a disconnect or when the
-    // slot stops it.
+    // Waits on the task clock for the async GOTO's deadline. A GOTO of the bounded claim is checked at its deadline: a
+    // status that still reads slewing, or one that cannot be read, stops it with :Q# and a stored error that Slewing
+    // raises; a mount that reads stopped is left for the Slewing read to land. Ends when no bounded GOTO runs, on a
+    // disconnect or when the slot stops it.
     void run_motion_bound_watchdog(util::OperationContext& ctx) {
         while (true) {
             std::chrono::steady_clock::duration remaining{};
@@ -3349,19 +3437,13 @@ private:
                 // A lost link is the relink stop's (relink_stop_pending_, taken from the motion flags by the next
                 // Connect or Disconnect): send nothing and leave the flags for it.
                 if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None) return;
-                const bool axis_moving = axis_move_active_primary_ || axis_move_active_secondary_;
-                const bool slew_bounded = slew_in_progress_ && slew_bound_generation_ == slew_operation_generation_;
-                if (!axis_moving && !slew_bounded) return;
+                const bool slew_bounded =
+                    slew_in_progress_ && slew_bound_claim_.has_value() && owns_locked(*slew_bound_claim_);
+                if (!slew_bounded) return;
                 const auto now = clock_.now();
-                if (axis_moving && now >= move_axis_deadline_) {
-                    stop_bounded_motion_locked("MoveAxis ran for " + std::to_string(kMaxMoveAxisDuration.count()) +
-                                               " s with no new MoveAxis");
-                    return;
-                }
-                if (slew_bounded && now >= slew_bound_deadline_) {
+                if (now >= slew_bound_deadline_) {
                     try {
-                        refresh_status_cache_locked(true);
-                        if (cached_status_.is_slewing) {
+                        if (read_status_direct_locked().is_slewing) {
                             stop_bounded_motion_locked("The slew did not end within " +
                                                        std::to_string(kSlewTimeout.count()) + " s");
                             return;
@@ -3373,14 +3455,10 @@ private:
                                                    ")");
                         return;
                     }
-                    slew_bound_generation_ = 0;  // checked once: the Slewing read lands it
-                    if (!axis_moving) return;
+                    slew_bound_claim_.reset();  // checked once: the Slewing read lands it
+                    return;
                 }
-                remaining = std::chrono::steady_clock::duration::max();
-                if (axis_moving) remaining = move_axis_deadline_ - now;
-                if (slew_bounded && slew_bound_generation_ != 0) {
-                    remaining = std::min(remaining, slew_bound_deadline_ - now);
-                }
+                remaining = slew_bound_deadline_ - now;
             }
             if (!ctx.wait_for(remaining)) return;
         }
@@ -3410,37 +3488,161 @@ private:
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
         axis_move_active_secondary_ = false;
+        cancel_move_axis_caps_locked();
         tracking_state_before_move_.reset();
         driver_motion_ = DriverMotion::None;
-        slew_bound_generation_ = 0;
+        slew_bound_claim_.reset();
         clear_slew_hold_locked();
         if (stop_failed) {
             ALPACA_LOG_WARN("iOptron", last_slew_error_);
         } else {
             ALPACA_LOG_INFO("iOptron", last_slew_error_);
         }
-        status_cache_valid_ = false;
-        position_cache_valid_ = false;
         return true;
     }
 
     // Cancel and join the motion bound watchdog. Without mutex_ held; under transition_mutex_ or in the destructor.
     void stop_motion_bound_watchdog() { motion_bound_watchdog_.cancel_all_and_join(); }
 
+    // ── The MoveAxis cap (#2651) ─────────────────────────────────────────────────────────────────────────────────
+    // A non-zero MoveAxis starts a body in its own axis's slot (move_axis_cap_[axis]); it waits through its context
+    // until the 60 s window the move armed has passed, then runs util::run_motion_deadline()'s verified stop of that
+    // axis (:qR# or :qD#) and keeps the outcome for Slewing. A renewal supersedes the body, MoveAxis(axis, 0) and
+    // AbortSlew cancel it, and a disconnect joins it. The other axis's move does not renew it.
+
+    // Starts the cap body of `axis`. Call with no driver lock held (decision 0006 rule 4): a body still waiting for the
+    // operation lock in its stop would otherwise be waited for under it. A start the slot refuses leaves the move with
+    // no cap, so the move is stopped and the call fails (fail closed).
+    void start_move_axis_cap(int axis, util::HoldWindow window) {
+        try {
+            move_axis_cap_[axis].start(
+                [this, axis, window](util::OperationContext& ctx) { run_move_axis_cap(axis, window, ctx); });
+            return;
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", "MoveAxis cap could not start: " + std::string(e.what()));
+            try {
+                static_cast<void>(move_axis_under_lock(axis, 0.0));
+            } catch (const std::exception& stop_error) {
+                ALPACA_LOG_WARN("iOptron",
+                                "MoveAxis stop after the refused cap failed: " + std::string(stop_error.what()));
+            }
+            throw AlpacaException(
+                std::string("MoveAxis: the cap on the move could not start, so the axis was stopped: ") + e.what(),
+                AlpacaError::DriverException);
+        }
+    }
+
+    static std::string move_axis_cap_prefix() {
+        return "MoveAxis ran for " + std::to_string(util::kMaxMoveAxisDuration.count()) + " s with no new MoveAxis";
+    }
+
+    void run_move_axis_cap(int axis, util::HoldWindow window, util::OperationContext& ctx) {
+        const std::string expired = move_axis_cap_prefix() + "; the mount was stopped";
+        try {
+            util::run_motion_deadline(ctx, clock_, window, move_axis_cap_hooks(axis, ctx), expired);
+        } catch (const AlpacaException& ex) {
+            keep_move_axis_cap_outcome(axis, ctx, expired, ex);
+        }
+    }
+
+    bool axis_move_active_locked(int axis) const {
+        return axis == 0 ? axis_move_active_primary_ : axis_move_active_secondary_;
+    }
+
+    // The hooks of one axis's verified stop. Each takes the operation lock for its own exchange and holds none between
+    // them (decision 0016). :qR# and :qD# stop that axis's arrow motion only, so the stop is per axis, and the
+    // verification reads that axis alone: the status is the whole mount's and so is read as stopped while the other
+    // axis jogs, and the position is the axis's own coordinate (the mount is a German equatorial: RA is axis 0, Dec
+    // axis 1) with the other field pinned.
+    util::StopVerifyHooks move_axis_cap_hooks(int axis, util::OperationContext& ctx) {
+        util::StopVerifyHooks hooks;
+        hooks.send_stop = [this, axis, &ctx] {
+            StateLock lock(lock_gate_);
+            // A stop that a newer command or a disconnect cancelled sends nothing: the initiator cancels the slot while
+            // it holds this lock (decision 0006 rule 6), so the check inside the lock is the order on the wire.
+            if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None ||
+                !axis_move_active_locked(axis)) {
+                return;
+            }
+            wire().send_command_blind(axis == 0 ? ":qR#" : ":qD#");
+        };
+        hooks.read_status = [this, axis]() -> std::optional<util::MotionStatusReading> {
+            StateLock lock(lock_gate_);
+            if (!connected_ || link_lost()) return std::nullopt;
+            if (axis_move_active_locked(1 - axis)) {
+                // The other axis's jog is not this axis's motion.
+                return util::MotionStatusReading{false, clock_.now()};
+            }
+            const bool moving = read_status_direct_locked().is_slewing;
+            return util::MotionStatusReading{moving, clock_.now()};
+        };
+        hooks.read_position = [this, axis]() -> std::optional<util::PositionReading> {
+            StateLock lock(lock_gate_);
+            if (!connected_ || link_lost()) return std::nullopt;
+            const Position position = read_position_direct_locked();
+            const util::MountPosition axis_position{axis == 0 ? position.ra_hours : 0.0,
+                                                    axis == 0 ? 0.0 : position.dec_degrees};
+            return util::PositionReading{axis_position, clock_.now()};
+        };
+        return hooks;
+    }
+
+    // What the cap kept: the stop verified, so the axis stands still and Slewing raises the text once (until the next
+    // command); or the stop did not verify, so the flag stays and Slewing raises it while the axis may still move.
+    // Only while the body is current and its axis still jogs: a stop, a renewal or a disconnect owns the axis
+    // meanwhile. A lost link leaves the flags for the relink stop.
+    void keep_move_axis_cap_outcome(int axis, util::OperationContext& ctx, const std::string& expired,
+                                    const AlpacaException& ex) {
+        StateLock lock(lock_gate_);
+        if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None ||
+            !axis_move_active_locked(axis)) {
+            return;
+        }
+        if (ex.what() != expired) {
+            last_slew_error_ = move_axis_cap_prefix() + "; the mount did not stop: " + ex.what();
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            return;
+        }
+        last_slew_error_ = expired;
+        (axis == 0 ? axis_move_active_primary_ : axis_move_active_secondary_) = false;
+        try {
+            restore_tracking_when_axes_idle_locked();
+        } catch (const std::exception& e) {
+            throw_if_link_lost();
+            tracking_state_before_move_.reset();
+            last_slew_error_ += ", and Tracking could not be restored: " + std::string(e.what());
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            return;
+        }
+        ALPACA_LOG_INFO("iOptron", last_slew_error_);  // a client can cause it: decision 0007 rule 9
+    }
+
+    // Under mutex_: AbortSlew, a connect and a disconnect end both caps. Never joins (decision 0006 rule 3).
+    void cancel_move_axis_caps_locked() const {
+        move_axis_cap_[0].cancel();
+        move_axis_cap_[1].cancel();
+    }
+
+    // Cancel and join both cap bodies. Without mutex_ held; under transition_mutex_ or in the destructor.
+    void stop_move_axis_caps() {
+        move_axis_cap_[0].cancel_all_and_join();
+        move_axis_cap_[1].cancel_all_and_join();
+    }
+
     // See park(): once an :MP1# park has physically arrived, some firmware
     // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
     // off. Runs after every fresh status fetch; best-effort — a failure here
     // just retries on the next refresh. Known limit: while the finalizer keeps failing the mount stays
     // "slewing", so driver_motion_ stays Park until Unpark or AbortSlew (conservative: Slewing stays true).
-    void finalize_wedged_park_locked() const {
+    void finalize_wedged_park_locked(MountStatus& status) const {
         if (!park_finalize_pending_) {
             return;
         }
-        if (cached_status_.is_parked) {
+        if (status.is_parked) {
             park_finalize_pending_ = false;
             return;
         }
-        if (!cached_status_.is_slewing || !park_target_valid_) {
+        if (!status.is_slewing || !park_target_valid_) {
             return;
         }
         const Wire protocol = wire();
@@ -3457,15 +3659,14 @@ private:
                             "Park slew arrived but mount still reports slewing; sending tracking-off "
                             "to finalize (HAE firmware quirk)");
             protocol.stop_tracking();
-            cached_status_ = protocol.get_status();
-            last_status_update_ = clock_.now();
-            if (cached_status_.is_parked) {
+            status = protocol.get_status();
+            if (status.is_parked) {
                 park_finalize_pending_ = false;
             }
         } catch (const std::exception&) {
             // A pulled cable is NotConnected, never the status read just before it served as AtPark or Slewing.
             throw_if_link_lost();
-            // Otherwise best-effort: leave the flag armed and retry on the next refresh.
+            // Otherwise best-effort: leave the flag armed and retry on the next tick.
         }
     }
 
@@ -3495,7 +3696,6 @@ private:
             dst_observed_ = site.dst_observed;
             site_info_valid_ = true;
             last_site_info_fetch_ = now;
-            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
             if (site_info_valid_) {
@@ -3503,7 +3703,6 @@ private:
                 last_site_info_fetch_ = now;
                 return;
             }
-            record_device_fault_locked("SiteInfo", e.what());
             throw AlpacaException(std::string("Failed to read site info: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -3541,48 +3740,6 @@ private:
         return false;
     }
 
-    void calibrate_dec_guide_locked(int duration_ms) {
-        refresh_status_cache_locked(true);
-        if (cached_status_.is_slewing || cached_status_.is_parked) {
-            ALPACA_LOG_WARN("iOptron", "Skipping Dec guide calibration while slewing or parked");
-            return;
-        }
-
-        const Wire protocol = wire();
-        try {
-            const auto start = protocol.get_position();
-            dec_guide_calibration_side_ = start.side_of_pier;
-            if (std::abs(start.dec_degrees) > 85.0) {
-                ALPACA_LOG_WARN("iOptron", "Skipping Dec guide calibration near the pole (Dec=" +
-                                              std::to_string(start.dec_degrees) + ")");
-                return;
-            }
-            const int sample_duration = std::clamp(duration_ms, 500, 2000);
-            protocol.pulse_guide(0, sample_duration);
-            clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
-            Position end = protocol.get_position();
-            for (int i = 0; i < 2; ++i) {
-                clock_.sleep_for(std::chrono::milliseconds(200));
-                end = protocol.get_position();
-            }
-
-            const double delta = end.dec_degrees - start.dec_degrees;
-            const double min_delta = 0.0005;  // ~1.8 arcsec
-            if (std::abs(delta) < min_delta) {
-                ALPACA_LOG_WARN("iOptron", "Dec guide calibration inconclusive; using default mapping (delta=" +
-                                              std::to_string(delta) + " deg)");
-                return;
-            }
-
-            dec_guide_inverted_ = (delta < 0.0);
-            dec_guide_calibrated_ = true;
-            ALPACA_LOG_INFO("iOptron", std::string("Dec guide calibration: ") +
-                                           (dec_guide_inverted_ ? "inverted" : "normal"));
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Dec guide calibration failed: ") + e.what());
-        }
-    }
-
     // Issue #2434: one :AG# read on the connect path, and again from a per-axis setter while the rate is unknown. A
     // failed read leaves the rate unknown (GuideRate raises) and does not fail the connect; a hangup over serial
     // loses the link, which the connect's link check reports.
@@ -3599,31 +3756,23 @@ private:
         }
     }
 
-    // Empty when the position read failed.
-    std::optional<bool> slew_target_reached_locked() const {
+    // Empty when the position read failed. `cur_ra` and `cur_dec` are the position it read (a direct read: the
+    // synchronous slew's landing is a command's, not the poll's).
+    std::optional<bool> slew_target_reached_locked(double& cur_ra, double& cur_dec) const {
         try {
-            refresh_position_cache_locked(true);
+            const Position position = read_position_direct_locked();
+            cur_ra = position.ra_hours;
+            cur_dec = position.dec_degrees;
         } catch (const std::exception&) {
             throw_if_link_lost();  // a synchronous slew ends with NotConnected, not "position stabilized"
             return std::nullopt;
         }
-        const double ra_delta_hours = std::abs(util::shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
-        const double dec_delta_degrees = std::abs(slew_target_dec_degrees_ - cached_dec_degrees_);
+        const double ra_delta_hours = std::abs(util::shortest_ra_delta_hours(slew_target_ra_hours_, cur_ra));
+        const double dec_delta_degrees = std::abs(slew_target_dec_degrees_ - cur_dec);
         const double ra_arcsec = ra_delta_hours * 15.0 * 3600.0;
         const double dec_arcsec = dec_delta_degrees * 3600.0;
         return ra_arcsec <= kSlewCompletionToleranceArcsec &&
                dec_arcsec <= kSlewCompletionToleranceArcsec;
-    }
-
-    static void validate_alt_az(double altitude_degrees, double azimuth_degrees, const char* label) {
-        if (!std::isfinite(altitude_degrees) || altitude_degrees < -90.0 || altitude_degrees > 90.0) {
-            throw AlpacaException(std::string(label) + " altitude must be in [-90, 90] degrees",
-                                  AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(azimuth_degrees) || azimuth_degrees < 0.0 || azimuth_degrees >= 360.0) {
-            throw AlpacaException(std::string(label) + " azimuth must be in [0, 360) degrees",
-                                  AlpacaError::InvalidValue);
-        }
     }
 
     void sync_site_settings_with_mount_locked() {
@@ -3712,10 +3861,8 @@ private:
         // sync_time_on_connect_ is fixed at construction; published_connected_ is lock-free.
         if (!sync_time_on_connect_ || !published_connected_.load()) return;
         try {
-            resync_pending_.store(true);
-            drain_pending_resync(event.kind == util::HostClockEvent::Kind::Stepped
-                                     ? "Host clock stepped by " + std::to_string(event.step.count()) + " ms"
-                                     : std::string("Host clock became trusted"));
+            host_clock_gate_.owe(event);
+            drain_pending_resync(util::HostClockWriteGate::describe(event));
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw (the string building)
         }
     }
@@ -3725,13 +3872,13 @@ private:
     // A change seen while disconnected is dropped. Call with no driver lock held.
     void drain_pending_resync(const std::string& why) noexcept {
         try {
-            while (resync_pending_.load()) {
+            while (host_clock_gate_.owed()) {
                 std::unique_lock<std::mutex> transition(transition_mutex_, std::try_to_lock);
                 if (!transition.owns_lock()) {
                     if (host_clock_busy_hook_) host_clock_busy_hook_();  // test seam: no driver lock held
                     return;                                              // its holder drains as it lets go
                 }
-                if (!resync_pending_.exchange(false)) return;
+                if (!host_clock_gate_.take_owed()) return;
                 start_resync_transition_locked(why);
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch): a timer-thread hook must not throw
@@ -3848,14 +3995,12 @@ private:
         // Issue #2419: the host clock goes into the mount only once it is trusted (NTP-synchronised, or set or
         // confirmed by a client, or a step seen since start). A Pi with no RTC boots on the time of its last
         // shutdown; :SUT from it put RC51's mount 6 h 48 min out. The site commands below do not depend on it.
-        if (do_clock_sync && !util::HostClockTrust::trusted()) {
+        // A re-sync stops silently; the connect's pass asks the gate, which warns (#2480).
+        if (do_clock_sync &&
+            !(resync ? util::HostClockTrust::trusted()
+                     : host_clock_gate_.may_write(mount_utc ? format_utc(*mount_utc) : std::string("unknown")))) {
             do_clock_sync = false;
             if (resync) return;
-            ALPACA_LOG_WARN("iOptron",
-                            "Host clock is not trusted (not NTP-synchronised, not set or confirmed by a client); "
-                            "leaving the mount clock (" +
-                                (mount_utc ? format_utc(*mount_utc) : std::string("unknown")) +
-                                ") alone until the host clock is set or a client writes UTCDate");
         }
         if (resync && !do_clock_sync) return;
 
@@ -4042,26 +4187,26 @@ private:
     // Must be called WITHOUT mutex_ held -- the body takes mutex_, so joining
     // under the lock would deadlock -- and every caller holds
     // slew_handoff_mutex_ (or is the destructor), because the slot requires
-    // its reapers to be serialized across the whole join. The body sends one
-    // command (no long waits), so the join is quick.
-    // open-astro#768: abort and disconnect fence the dispatch through this.
+    // its reapers to be serialized across the whole join.
+    // open-astro#768: only the stop paths (abort, disconnect, the destructor) fence the dispatch through this; a
+    // motion command supersedes it (rule 3).
     void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
 
     // Starts `body` on the slew slot after the initiator published its state
-    // and bumped slew_operation_generation_. Call without mutex_ held, under
-    // slew_handoff_mutex_. A refused start (no thread) undoes the published
+    // and claimed both axes (`claim`). Call without mutex_ held, under
+    // slew_handoff_mutex_, which keeps the starts in claim order. A refused start (no thread) undoes the published
     // state and restores the error the initiator cleared.
-    void start_slew_body(std::uint64_t generation, std::string& previous_slew_error, const char* failure_prefix,
+    // The older body is superseded, never joined (decision 0006 rule 3): the claim already took its axes, and it
+    // checks that claim under the operation lock before it sends anything, so its GOTO either went out before this
+    // claim or never goes out (open-astro#768).
+    void start_slew_body(const util::MotionClaim& claim, std::string& previous_slew_error, const char* failure_prefix,
                          std::function<void(util::OperationContext&)> body) {
         try {
             if (before_slew_reap_) before_slew_reap_();
-            // The previous dispatch is cancelled and joined first, so a newer
-            // initiator never leaves an older body running (open-astro#768).
-            reap_slew_dispatch();
             slew_.start(std::move(body));
         } catch (const std::exception& e) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
-            if (generation == slew_operation_generation_) {
+            if (owns_locked(claim)) {
                 slew_in_progress_ = false;
                 clear_slew_hold_locked();
                 last_slew_error_ = std::move(previous_slew_error);
@@ -4075,13 +4220,13 @@ private:
     // records a real failure in last_slew_error_ (never one caused by its own
     // cancellation). `dispatch` runs under mutex_.
     template <typename Dispatch>
-    void run_slew_body(util::OperationContext& ctx, std::uint64_t generation, const char* label, Dispatch&& dispatch) {
+    void run_slew_body(util::OperationContext& ctx, const util::MotionClaim& claim, const char* label,
+                       Dispatch&& dispatch) {
         if (before_slew_worker_lock_) before_slew_worker_lock_();
         StateLock lock(lock_gate_);
-        // A superseding initiator already cleared/replaced the GOTO state
-        // before bumping this generation; never publish or clear state owned
-        // by that newer operation.
-        if (generation != slew_operation_generation_) return;
+        // A newer motion command claimed or a stop cancelled one of this GOTO's axes, and already cleared or replaced
+        // the GOTO state; never publish or clear state owned by that newer operation.
+        if (!owns_locked(claim)) return;
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             slew_in_progress_ = false;
             clear_slew_hold_locked();
@@ -4117,7 +4262,16 @@ public:
         motion_bound_watchdog_.set_spawn_for_testing(std::move(spawn));
     }
     bool motion_bound_watchdog_running_for_testing() const { return motion_bound_watchdog_.running(); }
-    void set_zero_search_poll_for_testing(bool enabled) { zero_search_poll_enabled_.store(enabled); }
+    void set_move_axis_cap_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        move_axis_cap_[0].set_spawn_for_testing(spawn);
+        move_axis_cap_[1].set_spawn_for_testing(std::move(spawn));
+    }
+    // Forward the module's seams (util::PolledState::pause_for_testing / poll_now_for_testing). A paused poll waits its
+    // ticks on the task clock and probes nothing: a case that scripts the mount's replies or advances the clock while
+    // it counts them pauses it so the poll does not consume them. poll_state_now_for_testing() is one full tick on the
+    // calling thread, paused or not.
+    void set_state_poll_paused_for_testing(bool paused) { polled_.pause_for_testing(paused); }
+    void poll_state_now_for_testing() { polled_.poll_now_for_testing(); }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
     void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
@@ -4230,12 +4384,8 @@ private:
         return std::clamp(best_index + 1, 1, 9);
     }
 
-    bool should_flip_dec_for_pier_locked() const {
-        if (cached_side_of_pier_ == 0 || cached_side_of_pier_ == 1) {
-            return (cached_side_of_pier_ == 1);
-        }
-        return false;
-    }
+    // The :GEP# pier digit: side 1 flips the Dec pulse polarity; any other value (-1 unknown, 0, 2) does not.
+    static bool should_flip_dec_for_pier(int side_of_pier) { return side_of_pier == 1; }
 
     // Task waits, settle/poll sleeps and deadlines run on this clock (open-astro#1223,
     // decision 0005). Real by default; UTC pointing time stays on system_clock
@@ -4317,15 +4467,6 @@ private:
     mutable double sync_offset_ra_hours_ = 0.0;
     mutable double sync_offset_dec_degrees_ = 0.0;
 
-    mutable double cached_ra_hours_ = 0.0;
-    mutable double cached_dec_degrees_ = 0.0;
-    mutable int cached_side_of_pier_ = -1;
-    mutable bool position_cache_valid_;
-    mutable std::chrono::steady_clock::time_point last_position_update_;
-    mutable double cached_alt_degrees_ = 0.0;
-    mutable double cached_az_degrees_ = 0.0;
-    mutable bool altaz_cache_valid_;
-    mutable std::chrono::steady_clock::time_point last_altaz_update_;
     mutable GuideRate cached_guide_rate_{};
     mutable bool guide_rate_valid_;
 
@@ -4334,10 +4475,7 @@ private:
     mutable bool dec_guide_inverted_ = true;
     mutable int dec_guide_calibration_side_ = -1;
     std::atomic<bool> dec_guide_calibration_in_progress_{false};
-    
-    mutable MountStatus cached_status_{};
-    mutable bool status_cache_valid_;
-    mutable std::chrono::steady_clock::time_point last_status_update_;
+
     mutable bool axis_move_active_primary_ = false;
     mutable bool axis_move_active_secondary_ = false;
     mutable std::optional<bool> tracking_state_before_move_{};
@@ -4358,7 +4496,7 @@ private:
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
     // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by
-    // refresh_status_cache_locked() once a fresh status reports at home after a FindHome, or no motion
+    // ingest_status_locked() once a fresh status reports at home after a FindHome, or no motion
     // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     // HomeSearch (issue #2420) is a FindHome running the :MSH# zero sensor search: MoveAxis keeps it like the others,
@@ -4374,15 +4512,14 @@ private:
     // zero search only (#2432) and read only while driver_motion_ is HomeSearch (the status refresh and the zero
     // search watchdog), so the sites that end the motion need not reset it.
     std::chrono::steady_clock::time_point home_search_deadline_{};
-    // Issue #2396 (AB-8, AB-9): the motion bound watchdog's deadlines, task clock, under mutex_. A MoveAxis that runs
-    // past move_axis_deadline_ (refreshed by every MoveAxis with a non-zero rate) is stopped; an async GOTO of
-    // generation slew_bound_generation_ that still moves at slew_bound_deadline_ is stopped.
-    std::chrono::steady_clock::time_point move_axis_deadline_{};
+    // Issue #2396 (AB-8): the motion bound watchdog's deadline, task clock, under mutex_. An async GOTO whose claim
+    // slew_bound_claim_ still owns its axes and still moves at slew_bound_deadline_ is stopped. (The MoveAxis cap's
+    // window is the body's own: move_axis_cap_.)
     std::chrono::steady_clock::time_point slew_bound_deadline_{};
-    mutable std::uint64_t slew_bound_generation_ = 0;
+    mutable std::optional<util::MotionClaim> slew_bound_claim_;
     // Issue #2396 (AB-7): the async landing gate (async_goto_landed_locked()), under mutex_. The gate runs for the
-    // GOTO of landing_gate_generation_ (0: none) and keeps its last position sample.
-    mutable std::uint64_t landing_gate_generation_ = 0;
+    // GOTO of landing_gate_claim_ (empty: none) while that claim owns its axes, and keeps its last position sample.
+    mutable std::optional<util::MotionClaim> landing_gate_claim_;
     mutable bool landing_prev_valid_ = false;
     mutable double landing_prev_ra_hours_ = 0.0;
     mutable double landing_prev_dec_degrees_ = 0.0;
@@ -4399,18 +4536,8 @@ private:
     // Until this task-clock instant a zero search with no status 2 yet is still starting: set with each :MSH#.
     mutable std::chrono::steady_clock::time_point home_search_start_until_{};
     static constexpr std::chrono::seconds kZeroSearchStartGrace{5};
-    // The watchdog's status reads until a search shows motion (status 2); the shortest traced search read 2 for
-    // about a second before its 7. Read and written only under the operation lock (the watchdog body, find_home()).
-    mutable std::chrono::steady_clock::time_point home_search_next_poll_{};
-    static constexpr std::chrono::milliseconds kZeroSearchPollInterval{1000};
-    // Test seam (set_zero_search_poll_for_testing): off, the watchdog waits only for the bound, as before the polling,
-    // so a case about client reads is not raced by the watchdog's reads. On in production.
-    std::atomic<bool> zero_search_poll_enabled_{true};
     // About 20 s from Orion on RC51 (HAE29C, 2026-11-19); the bound covers a worst-case start with margin.
     static constexpr std::chrono::seconds kZeroSearchTimeout{120};
-    // Issue #2396 (AB-9): a MoveAxis left running this long with no new MoveAxis is stopped (a dead-man for a client
-    // that went away while another client kept the router's client-silence watchdog quiet).
-    static constexpr std::chrono::seconds kMaxMoveAxisDuration{60};
     // Issue #2396 (AB-7): the async landing gate's two samples are at least this far apart and agree within this.
     static constexpr std::chrono::milliseconds kLandingSampleGap{500};
     static constexpr double kLandingStableArcsec = 30.0;
@@ -4424,25 +4551,33 @@ private:
     // cancellation), cleared by the next slew initiator and by AbortSlew.
     // Consulted by get_slewing() before the cached status.
     mutable std::string last_slew_error_;
-    std::uint64_t slew_operation_generation_ = 0;
+    // The per-axis motion owner (#2263, #2522), under mutex_. A slew, Park or FindHome claims both axes
+    // (claim_slew_locked(), kept in slew_claim_), a moving MoveAxis its own axis; MoveAxis(axis, 0) cancels its axis,
+    // and AbortSlew, Unpark, a connect and a disconnect cancel both. The mount runs every motion itself, so no body
+    // calls finished() and a PulseGuide claims nothing (the "Motion claims" bullet in ioptron.instructions.md).
+    util::MotionOwner motion_owner_;
+    util::MotionClaim slew_claim_;
     static constexpr int kMaxSlewRefines = 3;
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
-    // Written under mutex_; atomic so the lock-free IsPulseGuiding can refuse on a fault (decision 0009 rule 1).
-    mutable std::atomic<bool> device_faulted_{false};
-    // When the latch tripped, in task-clock ticks (decision 0009 rule 2b); read only while device_faulted_ is set.
-    mutable std::atomic<std::chrono::steady_clock::rep> device_fault_since_ticks_{0};
-    // The earliest task-clock time check_connected() may probe a latched fault; under mutex_.
-    mutable std::chrono::steady_clock::time_point next_fault_probe_{};
-    mutable int device_fault_count_ = 0;
-    mutable std::string last_device_error_;
-    mutable std::mutex link_fault_mutex_;
-    mutable std::string link_fault_text_;
     mutable bool utc_query_supported_;
+    // The site cache's post-connect grace (decision 0016; #2562): the site members serve the connect's read for 30 s.
     mutable std::chrono::steady_clock::time_point fast_cache_until_{};
+    // The read-back windows of a client's write (decision 0010 rule 14): the mount's status lags a Tracking or
+    // TrackingRate write, so for 2 s the written value is served over whatever a poll sampled. Under mutex_.
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};
+    mutable bool tracking_written_ = false;
     mutable std::chrono::steady_clock::time_point tracking_rate_override_until_{};
+    mutable int tracking_rate_written_ = 0;
+    // The state poll (decision 0010): set before polled_.stop_and_join() on a disconnect, a connect over a lost link
+    // and in the destructor, cleared by the connect's reset; the probe sends nothing once it is set (Wire::call). The
+    // first probe of a connection is the seed (probe()). Both atomic: the probe reads them on the poll thread, and the
+    // seed flag is set by the connect thread with no driver lock held.
+    std::atomic<bool> poll_stop_{false};
+    std::atomic<bool> seeding_{false};
+    // Ticks of :GAC# still to skip after one timed out (read_altaz_optional_locked()); under mutex_.
+    int altaz_skip_ticks_ = 0;
     // Decision 0022: Slewing reads true while it is active, from a GOTO, Park, FindHome, Unpark or GOTO trim
     // dispatch for that initiator's hold. Under mutex_.
     mutable util::HoldWindow slew_hold_;
@@ -4465,9 +4600,9 @@ private:
     // Test seam (issue #2419): runs before each attempt of the clock sync's UTC write, before its exchange, with no
     // driver lock held.
     std::function<void()> clock_sync_before_utc_exchange_hook_;
-    // Issue #2419: a host clock change not acted on yet: stored before on_host_clock_changed() tries
-    // transition_mutex_, drained by whoever holds that lock as it lets go.
-    std::atomic<bool> resync_pending_{false};
+    // Issue #2419: a host clock change not acted on yet (owed): stored before on_host_clock_changed() tries
+    // transition_mutex_, drained by whoever holds that lock as it lets go. Also the connect's untrusted warning.
+    util::HostClockWriteGate host_clock_gate_{"iOptron"};
     // Issue #2419, under mutex_: a clock-sync body of this session ran to its end (cleared by connect). Until then a
     // re-sync that superseded the connect's pass runs that pass in its place.
     bool clock_sync_connect_pass_done_ = false;
@@ -4489,8 +4624,17 @@ private:
     std::mutex slew_handoff_mutex_;
     // The async slew dispatch (decision 0006), declared last so the slot is destroyed, and its body
     // joined, before any member the body touches. Private generation: only start() bumps it, while the
-    // driver's own slew_operation_generation_ stays the supersede guard (MoveAxis, Park and FindHome bump
-    // it without the handoff lock).
+    // motion owner's claims stay the supersede guard (MoveAxis, Park and FindHome claim without the handoff lock).
+    // The state poll (decision 0010, #2491): every member its probe touches is declared above, and the slots below,
+    // whose bodies call polled_.write() and link_lost(), are destroyed before it. The destructor stops it with the
+    // other bodies.
+    util::OperationGeneration poll_generation_;
+    mutable util::PolledState<PolledFrame> polled_{
+        clock_,
+        poll_generation_,
+        {kStatePollPeriod, kStatePollFaultThreshold, kSnapshotMaxAge, "iOptron mount"},
+        [this] { return probe(); },
+        [this] { on_state_poll_lost(); }};
     util::OperationGeneration slew_slot_generation_;
     util::AsyncOperation slew_{"iOptron slew", slew_slot_generation_, clock_};
     // The connect-time clock-sync body (decision 0006); its own generation, so a slew start never
@@ -4502,11 +4646,17 @@ private:
     util::OperationGeneration zero_search_watchdog_generation_;
     util::AsyncOperation zero_search_watchdog_{"iOptron zero search watchdog", zero_search_watchdog_generation_,
                                                clock_};
-    // Issue #2396 (AB-8, AB-9): the bound on a MoveAxis and an async GOTO (run_motion_bound_watchdog()); its own
-    // generation. Declared after everything the body touches.
+    // Issue #2396 (AB-8): the bound on an async GOTO (run_motion_bound_watchdog()); its own generation. Declared after
+    // everything the body touches.
     util::OperationGeneration motion_bound_watchdog_generation_;
     util::AsyncOperation motion_bound_watchdog_{"iOptron motion bound watchdog", motion_bound_watchdog_generation_,
                                                 clock_};
+    // Issue #2651: the 60 s MoveAxis cap of each axis (run_move_axis_cap()); a generation of its own per axis, so a
+    // renewal on one axis never supersedes the other's body. Declared after everything the bodies touch.
+    std::array<util::OperationGeneration, 2> move_axis_cap_generation_;
+    mutable std::array<util::AsyncOperation, 2> move_axis_cap_{
+        {{"iOptron MoveAxis cap 0", move_axis_cap_generation_[0], clock_},
+         {"iOptron MoveAxis cap 1", move_axis_cap_generation_[1], clock_}}};
 };
 
 // Factory function implementation
@@ -4692,6 +4842,13 @@ void set_motion_bound_watchdog_spawn_for_testing(TelescopeDriver& driver,
     }
 }
 
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_move_axis_cap_spawn_for_testing(std::move(spawn));
+    }
+}
+
 bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         return ioptron->motion_bound_watchdog_running_for_testing();
@@ -4699,9 +4856,15 @@ bool motion_bound_watchdog_running_for_testing(TelescopeDriver& driver) {
     return false;
 }
 
-void set_zero_search_poll_for_testing(TelescopeDriver& driver, bool enabled) {
+void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
-        ioptron->set_zero_search_poll_for_testing(enabled);
+        ioptron->set_state_poll_paused_for_testing(paused);
+    }
+}
+
+void poll_state_now_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->poll_state_now_for_testing();
     }
 }
 

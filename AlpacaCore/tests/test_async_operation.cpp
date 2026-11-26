@@ -38,6 +38,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -468,9 +469,15 @@ TEST_CASE("AsyncOperation - a refused thread is an AlpacaException and changes n
     const auto generation_before = h.generation.current();
     const auto failure_before = h.op->last_failure();
 
-    h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread {
-        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-    });
+    // An allocation failure on the start path is refused the same way (#2084).
+    SECTION("EAGAIN") {
+        h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    }
+    SECTION("bad_alloc") {
+        h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
+    }
     int code = 0;
     std::string message;
     try {
@@ -589,6 +596,28 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
+}
+
+// #2586: live() is running() minus a body told to stop. A cancelled or
+// superseded body still winding down is running() but not live(), so a driver
+// can tell a live operation from one that only has to return.
+TEST_CASE("AsyncOperation - live() is false for a stopped body that has not returned yet",
+          "[util][async_operation][unit]") {
+    Harness h;
+    auto p = probe();
+    auto g = h.gate();
+    CHECK_FALSE(h.op->live());
+    REQUIRE(h.start_within(gated_body(p, g)));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    CHECK(h.op->live());
+
+    SECTION("cancelled") { h.op->cancel(); }
+    SECTION("superseded by the shared generation") { h.generation.bump(); }
+    CHECK(h.op->running());
+    CHECK_FALSE(h.op->live());
+    g->open();
+    REQUIRE(eventually([&] { return !h.op->running(); }));
+    CHECK_FALSE(h.op->live());
 }
 
 // Case 6: a throw never reaches std::terminate; the current body's is kept

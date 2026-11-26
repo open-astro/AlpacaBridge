@@ -76,8 +76,8 @@ jobs:
         # workflow reports a newer release; keep the step name.
         run: |
           set -euo pipefail
-          ver=2.7.0
-          sha256=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+          ver=2.7.1
+          sha256=983d22fbad9724514e3fcc6acc83b5fa64c5ffa6b0d9f510028f22c1b223ff81
           curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${ver}/osv-scanner_linux_arm64" \
             -o /tmp/osv-scanner
           echo "${sha256}  /tmp/osv-scanner" | sha256sum --check --strict -
@@ -122,7 +122,7 @@ jobs:
             | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload to code scanning
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
         with:
           sarif_file: osv.sarif
           category: osv-scanner-nightly-deb

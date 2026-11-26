@@ -71,6 +71,11 @@ struct IefwPortInfo {
  */
 std::vector<IefwPortInfo> enumerate_iefw_ports();
 
+/// The USB descriptor tokens of a iEFW filter wheel adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& iefw_usb_tokens();
+
 /**
  * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
  *        serial-port probe claim (waits out another scan's probe of the same
@@ -110,7 +115,7 @@ public:
 
     /**
      * @brief False once an exchange has seen the port gone (a hangup, or
-     * EIO/ENXIO/ENODEV on a write) or the driver called lose_link(); the port
+     * EIO/ENXIO/ENODEV/EBADF on a write) or the driver called lose_link(); the port
      * is then already released (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
      */
     bool link_alive() const noexcept;

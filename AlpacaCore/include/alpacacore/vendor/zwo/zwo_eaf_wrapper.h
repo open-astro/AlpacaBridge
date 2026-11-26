@@ -37,6 +37,7 @@ public:
     int get_position(int focuser_id) override;
     void move(int focuser_id, int position) override;
     void stop(int focuser_id) override;
+    void reset_position(int focuser_id, int position) override;
 
     int get_max_step(int focuser_id) override;
     void set_max_step(int focuser_id, int max_step) override;
@@ -45,6 +46,7 @@ public:
     double get_temperature(int focuser_id) override;
     std::string get_serial_number(int focuser_id) override;
     std::string get_firmware_version(int focuser_id) override;
+    std::string get_type(int focuser_id) override;
     std::string get_sdk_version() override;
 
 private:

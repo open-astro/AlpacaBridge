@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **ConformU fake CI: the ConformU tarball is cached and its download retried** (CI): every ConformU row downloaded the pinned release asset from GitHub, and a 504 failed the row before any test ran (two runs on 2026-11-27, one of them on #2729). The rows now restore it from an Actions cache keyed on its sha256; a miss downloads it with `curl --retry 5 --retry-all-errors`, and the checksum is checked either way.

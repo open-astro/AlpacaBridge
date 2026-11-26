@@ -70,13 +70,15 @@ NormalizeResult normalize_skywatcher(const DeviceConfig& in, Source source) {
         result.config.set(kSkyWatcherConnectionType.key, type);
     }
 
-    const char* endpoint_missing = nullptr;
+    std::string endpoint_missing;
     if (type == "serial" && in.get(kSkyWatcherPortPath).empty()) {
         endpoint_missing = "Serial port path is required";
     } else if (type == "network" && in.get(kSkyWatcherHost).empty()) {
         endpoint_missing = "Host IP address is required";
+    } else if (type == "network") {
+        endpoint_missing = network_port_fault(kSkyWatcherUdpPort.key, result.config.get(kSkyWatcherUdpPort));
     }
-    if (endpoint_missing) {
+    if (!endpoint_missing.empty()) {
         if (from_api) {
             result.rejection = endpoint_missing;
             return result;

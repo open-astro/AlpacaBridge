@@ -113,7 +113,7 @@ void set_log_max_total_bytes(std::uintmax_t bytes);
 // before today, unless two logged days are further apart than the retention
 // (a clock jump, or a rig left off that long): then the days logged since the
 // gap count as if they had followed the last day logged before it, so the
-// earlier files stay until that many days of newer logs exist (#2292); then
+// earlier files stay until that many days of newer logs exist (#2292). Then
 // delete the oldest files until the directory fits the total size cap
 // (set_log_max_total_bytes). Safe to call repeatedly; each step is a no-op
 // when its limit is disabled. Returns the number of files removed by both.

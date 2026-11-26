@@ -14,6 +14,8 @@
 // destructor cancel and join it, and a body that throws is kept by the slot until the next start.
 // open-astro#2419: the body writes the mount clock only from a trusted host clock, and a host clock step or a
 // trust edge after the connect re-syncs it on the same slot.
+// The state poll (#2491) waits its ticks on the same task clock, so every case pauses it (a paused poll parks and skips
+// its cycles) and waits for two waiters: the poll and the body.
 
 #ifndef _WIN32
 
@@ -145,6 +147,12 @@ const auto kRealHost = std::chrono::system_clock::time_point(std::chrono::second
 const auto kMountPowerUp = std::chrono::system_clock::time_point(std::chrono::seconds(1483272042));
 constexpr std::chrono::milliseconds kRc51Step{24507000};
 
+// A thread for each MoveAxis cap slot that never runs the cap body: the move keeps its axis flag, and no cap waiter
+// joins the task clock.
+void idle_move_axis_cap(alpacacore::TelescopeDriver& driver) {
+    ioptron::set_move_axis_cap_spawn_for_testing(driver, [](std::function<void()>) { return std::thread([] {}); });
+}
+
 // A mount connected on an untrusted host clock: the connect's body has sent its site commands and no clock command.
 // The host UTC seam reads `host`; the clock-sync UTC hook counts the body's finished passes in `passes`.
 struct UntrustedConnect {
@@ -160,13 +168,15 @@ struct UntrustedConnect {
         mount.set_utc_reply(gut_reply_for(kMountPowerUp));
         driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                              std::nullopt, true, clock);
+        ioptron::set_state_poll_paused_for_testing(
+            *driver, true);  // the case is about the clock sync: the poll only waits its ticks
         ioptron::set_host_utc_source_for_testing(
             *driver, [this] { return std::chrono::system_clock::time_point(std::chrono::seconds(host_s.load())); });
         ioptron::set_clock_sync_utc_hook_for_testing(*driver, [this](bool after_send) {
             if (after_send) ++passes;
         });
         driver->set_connected(true);
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(eventually([&] { return passes.load() == 1; }));
         refuse_motion_bound_watchdog();
@@ -174,18 +184,21 @@ struct UntrustedConnect {
     void set_host(std::chrono::system_clock::time_point utc) {
         host_s.store(std::chrono::duration_cast<std::chrono::seconds>(utc.time_since_epoch()).count());
     }
-    // The motion bound watchdog (#2396 AB-8, AB-9: the MoveAxis dead-man and the async GOTO bound) waits on the same
-    // task clock, so wait_for_waiters(1) would count it in place of the re-sync body. connect() refuses that slot for
-    // every rig case (a refused start is logged and leaves the router's client-silence watchdog as the bound).
+    // The motion bound watchdog (#2396 AB-8: the async GOTO bound) and a MoveAxis cap (#2651) wait on the same task
+    // clock, so wait_for_waiters(2), the state poll and the re-sync body, would count them in place of the re-sync
+    // body. connect() refuses the watchdog slot for every rig case (a refused start is logged and leaves the router's
+    // client-silence watchdog as the bound) and gives the cap slots a thread that never runs the body (a refused cap
+    // start fails the MoveAxis), so a MoveAxis case holds its motion past the 60 s cap.
     void refuse_motion_bound_watchdog() {
         ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
             throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
         });
+        idle_move_axis_cap(*driver);
     }
     // Sends the event and lets the re-sync body past its start delay.
     void host_clock_changed(alpacacore::util::HostClockEvent event) {
         driver->on_host_clock_changed(event);
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
     }
 };
@@ -202,11 +215,13 @@ TEST_CASE("iOptron Telescope Driver - a clock-sync body that throws is kept unti
     REQUIRE(mount.ok());
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     CHECK_FALSE(ioptron::clock_sync_failure_for_testing(*driver).has_value());
 
     ioptron::set_clock_sync_hook_for_testing(*driver, [] { throw std::runtime_error("clock sync boom"); });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
 
     // The body runs on its own thread: wait for the slot to keep the throw.
@@ -234,10 +249,12 @@ TEST_CASE("iOptron Telescope Driver - a disconnect joins a clock-sync body that 
     REQUIRE(mount.ok());
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     Gate gate;
     ioptron::set_clock_sync_hook_for_testing(*driver, [&gate] { gate.block(); });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(gate.wait_entered());
 
@@ -263,8 +280,10 @@ TEST_CASE("iOptron Telescope Driver - a disconnect during a clock-sync command s
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     // The first site command is in flight (reply held) when the disconnect lands.
     mount.hold_next_reply(std::chrono::milliseconds(800));
     clock.advance(std::chrono::milliseconds(250));
@@ -280,10 +299,12 @@ TEST_CASE("iOptron Telescope Driver - the destructor joins a clock-sync body tha
     REQUIRE(mount.ok());
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     Gate gate;
     ioptron::set_clock_sync_hook_for_testing(*driver, [&gate] { gate.block(); });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(gate.wait_entered());
 
@@ -304,11 +325,13 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     // The first body blocks in the hook, before it sends any command; once released the hook returns at once.
     Gate gate;
     ioptron::set_clock_sync_hook_for_testing(*driver, [&gate] { gate.block(); });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(gate.wait_entered());
 
@@ -327,7 +350,7 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
 
     // Released, the first body sees it was superseded and sends nothing; the second runs its commands.
     gate.release();
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
@@ -347,8 +370,10 @@ TEST_CASE("iOptron Telescope Driver - a superseded clock-sync body sends no furt
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     // The first body's first site command is in flight (reply held) when the second start lands. The driver
     // reads for 200 ms only, so the body gives up on that command and meets its stop between commands.
     mount.hold_next_reply(std::chrono::milliseconds(1500));
@@ -356,7 +381,7 @@ TEST_CASE("iOptron Telescope Driver - a superseded clock-sync body sends no furt
     REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
     ioptron::start_clock_sync_for_testing(*driver);
 
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
@@ -376,6 +401,8 @@ TEST_CASE("iOptron Telescope Driver - a client UTCDate write after the clock syn
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     // The client's write lands after the body's :SUT and before the body publishes its state.
     const auto client_utc = std::chrono::system_clock::time_point(std::chrono::seconds(1900000000));
     auto* raw = driver.get();
@@ -383,7 +410,7 @@ TEST_CASE("iOptron Telescope Driver - a client UTCDate write after the clock syn
         if (after_send) raw->set_utc_date(client_utc);
     });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     // The body's publication also caches the site latitude; it is the signal that the body has published.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -406,6 +433,8 @@ TEST_CASE("iOptron Telescope Driver - client site writes after the clock sync's 
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297, 10.0,
                                                               true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     // The client's writes land after the body's :SLA/:SLO and before the body publishes its state.
     auto* raw = driver.get();
     ioptron::set_clock_sync_utc_hook_for_testing(*driver, [raw](bool after_send) {
@@ -415,7 +444,7 @@ TEST_CASE("iOptron Telescope Driver - client site writes after the clock sync's 
         raw->set_site_elevation(42.0);
     });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     // The body's publication replaces the fake mount's year-2000 UTC with host time: the signal it has published.
     const auto published = [&] {
@@ -442,6 +471,8 @@ TEST_CASE("iOptron Telescope Driver - a :SUT retry sends the host time of that a
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     // Attempt 1 fails before the send. Attempt 2 waits until the host clock has moved on by 2 ms, then notes it.
     std::atomic<int> attempts{0};
     std::atomic<long long> floor_ms{0};
@@ -457,11 +488,11 @@ TEST_CASE("iOptron Telescope Driver - a :SUT retry sends the host time of that a
                            .count());
     });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     const auto first = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (attempts.load() < 1 && std::chrono::steady_clock::now() < first) std::this_thread::yield();
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the retry wait
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the retry wait
     clock.advance(std::chrono::milliseconds(750));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
@@ -559,9 +590,6 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     UntrustedConnect rig;
     rig.connect();
     const auto sla = rig.mount.count(":SLA");
-    // Counted from the connect: on 6.0 a connect reads :GUT# for the UTC sample and again for the site (main's
-    // #1784 reads it once), so the case checks what the re-sync adds.
-    const auto gut = rig.mount.count(":GUT");
 
     // A client's UTCDate already set the mount (the router's own step): 1.5 s apart is inside the 2 s threshold.
     rig.mount.set_utc_reply(gut_reply_for(kStaleHost + std::chrono::milliseconds(1500)));
@@ -569,7 +597,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains("already agrees, no re-sync"); }));
     rig.driver->set_connected(false);
-    CHECK(rig.mount.count(":GUT") == gut + 1);  // the re-sync's check
+    CHECK(rig.mount.count(":GUT") == 2);  // the connect's sample and the re-sync's check
     CHECK(rig.mount.count(":SLA") == sla);
     CHECK(rig.mount.count(":SUT") == 0);
 }
@@ -586,13 +614,15 @@ TEST_CASE("iOptron Telescope Driver - a re-sync that supersedes the connect's pa
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     ioptron::set_host_utc_source_for_testing(*driver, [] { return kRealHost; });
     std::atomic<int> passes{0};
     ioptron::set_clock_sync_utc_hook_for_testing(*driver, [&](bool after_send) {
         if (after_send) ++passes;
     });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect's body, parked in its delay
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the connect's body, parked in its delay
     driver->on_host_clock_changed(kStepped);
     REQUIRE(clock.drain_until([&] { return passes.load() == 1 || log.contains("already agrees"); },
                               std::chrono::milliseconds(250), std::chrono::seconds(10)));
@@ -617,10 +647,10 @@ TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis 
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
     // Parked in its 1 s wait: nothing went to the mount clock while the axis moved.
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     CHECK(rig.mount.count(":SUT") == 0);
     rig.clock.advance(std::chrono::seconds(1));  // still moving: it waits again
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     CHECK(rig.mount.count(":SUT") == 0);
 
     rig.driver->move_axis(0, 0.0);
@@ -656,7 +686,7 @@ TEST_CASE("iOptron Telescope Driver - a MoveAxis that starts after the re-sync's
     CHECK(rig.mount.count(":SLA") == sla);
 
     // The axis stops: the re-sync goes on and writes the clock.
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     rig.driver->move_axis(0, 0.0);
     rig.clock.advance(std::chrono::seconds(1));
     REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
@@ -681,12 +711,12 @@ TEST_CASE("iOptron Telescope Driver - a host clock change during a held set_conn
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.driver->on_host_clock_changed(kStepped);  // returns at once: transition_mutex_ is held
-    CHECK_FALSE(rig.clock.wait_for_waiters(1, std::chrono::milliseconds(300)));  // nothing started yet
+    CHECK_FALSE(rig.clock.wait_for_waiters(2, std::chrono::milliseconds(300)));  // nothing started yet
     CHECK(rig.mount.count(":SUT") == 0);
 
     held.release();
     client.join();
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::milliseconds(250));
     REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
     CHECK(log.contains("Host clock changed during a connect or disconnect; mount UTC 2017-01-01T12:00:42Z -> "));
@@ -726,7 +756,7 @@ TEST_CASE("iOptron host clock re-sync - a change whose lock try fails as set_con
     REQUIRE(busy_seen.load());
     REQUIRE(client_returned.load());
 
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
     rig.clock.advance(std::chrono::milliseconds(250));
     REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
@@ -758,7 +788,7 @@ TEST_CASE("iOptron host clock re-sync - a change stored just before set_connecte
     REQUIRE(delivered.load());
     ioptron::set_connected_exit_hook_for_testing(*rig.driver, {});
 
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
     rig.clock.advance(std::chrono::milliseconds(250));
     REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
@@ -782,7 +812,7 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // parked in its 1 s motion wait
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // parked in its 1 s motion wait
 
     // An hour from the host clock, so the re-sync's agree check cannot be what keeps it.
     const auto client_utc = kRealHost + std::chrono::hours(1);
@@ -827,7 +857,7 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return goto_started.load(); }));
     REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the UTC write, parked in its 1 s motion wait
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the UTC write, parked in its 1 s motion wait
     CHECK(rig.mount.count(":SLA") == sla + 1);                        // the site went out before the GOTO
     CHECK(rig.mount.count(":SUT") == 0);
 
@@ -865,11 +895,11 @@ TEST_CASE("iOptron host clock re-sync - a MoveAxis held past the motion bound en
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     // One poll short of the bound: it still waits.
     rig.clock.advance(alpacacore::util::kHostClockResyncMotionBound - alpacacore::util::kHostClockResyncMotionPoll);
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     CHECK_FALSE(log.contains("gives up"));
 
     // At the bound: it gives up and the body ends.
@@ -900,6 +930,8 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     ioptron::set_host_utc_source_for_testing(*driver, [] { return kRealHost; });
     std::atomic<int> passes{0};
     ioptron::set_clock_sync_utc_hook_for_testing(*driver, [&](bool after_send) {
@@ -910,19 +942,17 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
         if (!failed_once.exchange(true)) throw std::runtime_error("connect pass refused");
     });
     driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(eventually([&] { return ioptron::clock_sync_failure_for_testing(*driver).has_value(); }));
     CHECK(mount.count(":SLA") == 0);
     CHECK(mount.count(":SUT") == 0);
 
-    // The MoveAxis dead-man (#2396 AB-9) would stop the axis long before the 15 min motion bound; refused here.
-    ioptron::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
-        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-    });
+    // The MoveAxis cap (#2396 AB-9, #2651) would stop the axis long before the 15 min motion bound; it never runs here.
+    idle_move_axis_cap(*driver);
     driver->move_axis(0, driver->get_axis_rate_range(0).first);
     driver->on_host_clock_changed(kStepped);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
     REQUIRE(eventually([&] { return log.contains("waits for the motion to end") || passes.load() == 1; }));
     // Neither the site nor the clock went out while the axis moved.
@@ -932,7 +962,7 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
 
     // The axis stops: the re-sync, parked in its 1 s wait, does the connect's work, the site included, and writes
     // the clock.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     driver->move_axis(0, 0.0);
     clock.advance(std::chrono::seconds(1));
     REQUIRE(eventually([&] { return passes.load() == 1; }));
@@ -951,8 +981,10 @@ TEST_CASE("iOptron Telescope Driver - a host clock change starts nothing while d
         alpacacore::test::FakeTaskClock clock;
         auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                                   std::nullopt, true, clock);
+        ioptron::set_state_poll_paused_for_testing(
+            *driver, true);  // the case is about the clock sync: the poll only waits its ticks
         driver->on_host_clock_changed(kStepped);
-        CHECK_FALSE(clock.wait_for_waiters(1, std::chrono::milliseconds(300)));
+        CHECK_FALSE(clock.wait_for_waiters(2, std::chrono::milliseconds(300)));
         CHECK(mount.commands().empty());
     }
     {
@@ -962,20 +994,21 @@ TEST_CASE("iOptron Telescope Driver - a host clock change starts nothing while d
         alpacacore::test::FakeTaskClock clock;
         auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
                                                                   std::nullopt, false, clock);
+        ioptron::set_state_poll_paused_for_testing(
+            *driver, true);  // the case is about the clock sync: the poll only waits its ticks
         std::atomic<int> passes{0};
         ioptron::set_clock_sync_utc_hook_for_testing(*driver, [&](bool after_send) {
             if (after_send) ++passes;
         });
         driver->set_connected(true);
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
         REQUIRE(eventually([&] { return passes.load() == 1; }));
-        const auto gut = mount.count(":GUT");  // the connect's reads (two on 6.0, one on main after #1784)
         driver->on_host_clock_changed(kStepped);
         driver->on_host_clock_changed(kBecameTrusted);
-        CHECK_FALSE(clock.wait_for_waiters(1, std::chrono::milliseconds(300)));
+        CHECK_FALSE(clock.wait_for_waiters(2, std::chrono::milliseconds(300)));
         driver->set_connected(false);
-        CHECK(mount.count(":GUT") == gut);  // no re-sync read
+        CHECK(mount.count(":GUT") == 1);
         CHECK(mount.count(":SUT") == 0);
     }
 }
@@ -988,9 +1021,11 @@ TEST_CASE("iOptron Telescope Driver - a host clock change racing a disconnect le
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
                                                               std::nullopt, true, clock);
+    ioptron::set_state_poll_paused_for_testing(
+        *driver, true);  // the case is about the clock sync: the poll only waits its ticks
     for (int round = 0; round < 20; ++round) {
         driver->set_connected(true);
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the connect's body, parked in its delay
+        REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the connect's body, parked in its delay
         std::atomic<bool> stop{false};
         // The timer thread, hammering the hook while the disconnect runs: every start it makes either lands before
         // the disconnect's join (and is joined) or sees the mount disconnected (and starts nothing).
@@ -1000,7 +1035,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change racing a disconnect le
         driver->set_connected(false);
         stop = true;
         timer.join();
-        CHECK_FALSE(clock.wait_for_waiters(1, std::chrono::milliseconds(50)));
+        CHECK_FALSE(clock.wait_for_waiters(2, std::chrono::milliseconds(50)));
     }
     CHECK(mount.count(":SUT") == 0);
 }

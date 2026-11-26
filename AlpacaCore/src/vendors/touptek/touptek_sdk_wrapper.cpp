@@ -40,6 +40,8 @@ struct ToupcamApi {
 #undef TOUPCAM_CONSTANT
 };
 
+static_assert(TOUPCAM_EVENT_IMAGE == kToupEventImage);
+
 }  // namespace
 
 ToupTekSDK& ToupTekSDKWrapper::instance() {

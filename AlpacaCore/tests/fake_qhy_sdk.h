@@ -66,23 +66,17 @@ namespace alpacacore::test {
  *
  * TWO RULES THIS FAKE MUST KEEP (they are not stylistic):
  *
- * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature,
- *    cooler-off and telemetry workers join with a bounded timeout and DETACH
- *    on expiry (telemetry since issue #323, so the rule is load-bearing for
- *    it too), and its pulse-guide worker is detached by design. A fake that blocks turns
- *    those into detached threads still calling into it after the test body
- *    has moved on — i.e. a use-after-free of the fake itself. The ONE
+ * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure body (its
+ *    util::CaptureSession) and its slot bodies (temperature, telemetry,
+ *    cooler-off, pulse guide) are joined with no time bound (issue #1736), so a
+ *    blocking fake hangs the driver's disconnect or teardown. The ONE
  *    sanctioned exception is `before_call`, null in every ordinary test: a
  *    case that sets it to block a named method owns the consequences and
  *    must release the block before its driver is destroyed (the three #339
  *    cases). LockedQHYSDK::slowest_call_ms() is the mechanical check that no
  *    method has quietly gained a block; the forward sweep asserts it.
- * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
- *    detachable workers, which reach the SDK through a captured QHYSDK*
- *    rather than through the driver's `sdk_` member. (Exposure and polling workers
- *    still capture `this` too and can touch it after the SDK call returns, so
- *    they are not safe to outlive the driver either -- the capture narrows
- *    that window, it does not remove it.) Declare the fake before the driver
+ * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT: the driver and every
+ *    body it joins reach the SDK through its `sdk_` reference. Declare the fake before the driver
  *    (locals destroy in reverse order); never stash a driver beyond the
  *    fake's scope. QHYSeamFixture (locked_qhy_sdk.h, #338) owns fake,
  *    decorator and driver in that order so a case cannot get this wrong.
@@ -121,10 +115,13 @@ namespace alpacacore::test {
  *   here, while the same change on hardware would flip has_cooler. Set the
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
- * - get_single_frame() sizes its fake copy from bits_, even when frame_bpp
- *   overrides the returned metadata. This is safe for malformed-format tests
- *   because the driver rejects the metadata before consuming the frame; don't
- *   use that override to model a valid frame with different byte packing.
+ * - get_single_frame() sizes its fake copy from the bpp and channels it
+ *   returns (frame_bpp/frame_channels overrides included), still clamped to
+ *   the last get_mem_length(); a valid 3-channel 8-bit frame therefore also
+ *   needs mem_length_override set to width * height * 3.
+ * - exposure_remaining defaults to 0 (the exposure is over), so a case that
+ *   does not set it gets the frame call straight after the arm, where a real
+ *   camera reports the remaining time during the exposure (#2721).
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
@@ -226,6 +223,7 @@ public:
     std::deque<int> cfw_position_script;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
+    uint32_t exposure_remaining = 0;  // get_exposure_remaining's return; 100 or less: the exposure is over (#2721)
     // When set, get_single_frame throws this NotConnected text instead of returning, as the real wrapper does for a
     // handle closed under the call (#2292).
     std::optional<std::string> frame_throw;
@@ -397,14 +395,13 @@ public:
             // at this call, only "the open failed".
             throw AlpacaException("fake: unknown QHY camera id '" + camera_id + "'", AlpacaError::DriverException);
         }
-        // open-astro#324: model QHYSDKWrapper::open_camera()'s zombie-worker
-        // refusal (qhy_sdk_wrapper.cpp, the PR #201 finding). A previous
-        // exposure worker that timed out its join and was DETACHED can still
-        // be blocked inside GetQHYCCDSingleFrame on the old handle after
-        // close_camera() erased the entry; opening a second handle to the same
-        // physical device then is undefined territory for the vendor SDK, and
-        // is reachable from either the camera driver or the paired CFW driver
-        // reconnecting.
+        // open-astro#324: model QHYSDKWrapper::open_camera()'s refusal while a
+        // registered exposure flag is still true (qhy_sdk_wrapper.cpp, the PR
+        // #201 finding): opening a second handle to a physical device with an
+        // exposure call still in flight on the old one is undefined territory
+        // for the vendor SDK, from either the camera driver or the paired CFW
+        // driver reconnecting. Since #1736 the camera driver joins its exposure
+        // body before it closes, so only a misbehaving caller reaches it.
         //
         // exposure_workers_ was written and never read, so the fake could not
         // fail a reconnect storm here -- and a reconnect storm is the single
@@ -593,14 +590,20 @@ public:
         return read_directly;
     }
 
+    uint32_t get_exposure_remaining(const std::string& camera_id) override {
+        hit("get_exposure_remaining");
+        require_open(camera_id);
+        return exposure_remaining;
+    }
+
     bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
                           uint32_t& bpp, uint32_t& channels) override {
         hit("get_single_frame");
         require_open(camera_id);
         if (frame_throw) throw AlpacaException(*frame_throw, AlpacaError::NotConnected);
         // Returns IMMEDIATELY — see rule 1 in the class comment. The real call
-        // blocks for the whole exposure; a fake that did would strand the
-        // driver's detachable exposure worker.
+        // blocks for the whole exposure; a fake that did would hang the driver's
+        // join of its exposure body.
         width = roi_.width;
         height = roi_.height;
         bpp = bits_;
@@ -610,7 +613,7 @@ public:
         if (frame_bpp) bpp = *frame_bpp;
         if (frame_channels) channels = *frame_channels;
         if (frame_ok && buffer != nullptr) {
-            const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
+            const uint32_t bytes_per_px = ((bpp > 8) ? 2U : 1U) * channels;
             const uint32_t current = width * height * bytes_per_px;
             // open-astro#328: the real GetQHYCCDSingleFrame has no length
             // parameter either -- the vendor SDK trusts the caller to have

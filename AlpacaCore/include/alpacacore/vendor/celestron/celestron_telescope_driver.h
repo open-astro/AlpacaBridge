@@ -55,15 +55,26 @@ void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thr
 
 /// Test seams for the status poll (decision 0010). `driver` must come from the factories above; anything else is
 /// ignored (poll_status_now_for_testing returns false).
-/// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs.
+/// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs. Returns once no body tick is in
+/// flight, and a body tick that was already past the module's pause check measures nothing.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// One poll tick on the calling thread (a full frame). False when the connection is gone or lost.
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs at the start of a poll tick, before its pause check and its first exchange, without any driver lock held; null
+/// clears it.
+void set_status_poll_before_tick_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs once a poll tick has planned its sample (whether it reads Slewing), before its site read and sample exchanges,
+/// without any driver lock held; null clears it.
+void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs after a slewing read (the slew-complete wait, the park poll), before its result is applied, without any
 /// driver lock held; null clears it.
 void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs in a PulseGuide's chunk chain after the wait for the previous chunk and before the chunk takes mutex_ and the
+/// send gate, on the chain's thread with no driver lock held; a newer command that lands here must stop the chunk.
+/// Null clears it.
+void set_pulse_chunk_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs when the poll or the slew-complete wait has found a failure, before its stops are sent, without any driver
 /// lock held; null clears it.
 void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
@@ -83,7 +94,7 @@ void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// as the body returns, whatever it did. Around it: ClientWriting and ClientWritten just before and after a client
 /// UTCDate write's exchange (under transition_mutex_ and the initiator lock; ClientWriting also before a client
 /// SiteLatitude or SiteLongitude write), ExitChecked at each pass of set_connected()'s exit with
-/// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its state is published (under
+/// the re-sync gate held, PulseSent once a PulseGuide's first write is out and before its send gate closes (under
 /// the initiator lock only), Gated as set_connected() takes the re-sync gate (with it and transition_mutex_ held),
 /// HookBusy when on_host_clock_changed() found the gate held (on the timer thread, no driver lock held).
 enum class ClockResyncStep : std::uint8_t {

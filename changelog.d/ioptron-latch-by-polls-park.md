@@ -1,0 +1,2 @@
+### Fixed (tests)
+- **iOptron latched-fault cases wait for the poll to park before they step the clock** (issue #2491): `latch_by_polls()` stepped three poll periods right after the connect. When the clock-sync body parked before the state poll, the first step was lost to the poll, only two reads failed and the fault did not latch (merge-queue CI, "iOptron Link - a latched fault refuses reads and writes with Connected true"). The helper now waits for both tasks to park, as #2670 did for the other iOptron cases.

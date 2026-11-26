@@ -10,25 +10,47 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/logging.h>
-#include <alpacacore/util/power_port_state_store.h>
+#include <alpacacore/util/power_port_switch_driver.h>
+#include <alpacacore/util/soft_pwm_ports.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
-#include <alpacacore/version.h>
 
-#include <atomic>
-#include <cmath>
-#include <mutex>
+#include <cstddef>
 #include <string>
-#include <thread>
-#include <vector>
+#include <utility>
+
+#include "pwm_gpio_misc_backend.h"
 
 namespace alpacacore::vendor::zwo {
 
 namespace {
 
 constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
+
+util::PowerPortProfile asiair_plus_profile(const AsiairPlusSwitchConfig& config) {
+    util::PowerPortProfile profile;
+    profile.name = "ZWO ASIAIR Plus Switch";
+    profile.description = "ZWO ASIAIR Plus (RK3568) 12V power switch (" + config.device_path + ")";
+    profile.driver_info = "AlpacaCore ZWO ASIAIR Plus Switch";
+    profile.unique_id_prefix = "ZWO_ASIAIR_PLUS_RK3568_";
+    profile.log_category = kLogCategory;
+    profile.not_connected_message = "ASIAIR Plus switch not connected";
+    // Logged only when close() throws. The engine's close() logs a failed settle instead of throwing, so only an
+    // unexpected exception (a failed thread join or allocation) reaches it.
+    profile.destruction_warning = "Error during ASIAIR Plus switch destruction: ";
+    profile.power_on_state = config.power_on_state;
+    for (std::size_t i = 0; i < config.ports.size(); ++i) {
+        const auto& p = config.ports[i];
+        util::PowerPortProfilePort port;
+        port.name = p.name;
+        port.description =
+            "ASIAIR Plus DC port " + std::to_string(i + 1) + " (" + util::power_port_mode_text(p.pwm_enabled) + ")";
+        port.range_error = "Switch value out of range";
+        port.pwm_enabled = p.pwm_enabled;
+        profile.ports.push_back(std::move(port));
+    }
+    return profile;
+}
 
 } // namespace
 
@@ -80,305 +102,27 @@ AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     return cfg;
 }
 
-class ZWOAsiairPlusSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
-public:
-    // Issue #358: hand the connect-failure reason to the router.
-    ALPACA_EXPOSE_CONNECT_ERROR()
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config) {
+    return create_zwo_asiair_plus_switch(device_number, config, kSysfsDevChar);
+}
 
-    ZWOAsiairPlusSwitchDriver(int device_number, AsiairPlusSwitchConfig config)
-        : AsyncConnectable(kLogCategory),
-          device_number_(device_number),
-          config_(std::move(config)),
-          wrapper_(config_.device_path, config_.ports, config_.pwm_frequency_hz) {
-        switch_names_.reserve(config_.ports.size());
-        for (const auto& p : config_.ports) {
-            switch_names_.emplace_back(p.name);
-        }
+std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number, const AsiairPlusSwitchConfig& config,
+                                                            const std::string& sysfs_dev_char_root) {
+    if (config.ports.size() > 4) {
+        throw AlpacaException("ASIAIR Plus exposes 4 DC ports; configuration lists more", AlpacaError::InvalidValue);
     }
-
-    ~ZWOAsiairPlusSwitchDriver() override {
-        // Blocks new connection tasks, then joins the in-flight one — MUST be
-        // first, before members the task touches are destroyed (base contract).
-        shutdown_connection();
-        try {
-            wrapper_.close();
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIAIR Plus switch destruction: ") + e.what());
-        }
+    auto profile = asiair_plus_profile(config);
+    util::PortsConfig ports;
+    ports.device_path = config.device_path;
+    ports.pwm_frequency_hz = config.pwm_frequency_hz;
+    ports.model_name = "ASIAIR Plus";
+    ports.log_category = kLogCategory;
+    // Ports 1..4 are lines 0..3: the backend maps them onto the kernel indices 4..7.
+    for (std::size_t i = 0; i < config.ports.size(); ++i) {
+        ports.ports.push_back({config.ports[i].name, static_cast<unsigned int>(i), true, config.ports[i].pwm_enabled});
     }
-
-    int get_device_number() const override { return device_number_; }
-
-    std::string get_name() const override { return "ZWO ASIAIR Plus Switch (RK3568)"; }
-
-    DeviceType get_device_type() const override { return DeviceType::Switch; }
-
-    std::string fallback_unique_id() const override {
-        return "ZWO_ASIAIR_PLUS_RK3568_" + std::to_string(device_number_);
-    }
-
-    std::string get_description() const override {
-        return "ZWO ASIAIR Plus (RK3568) 12V power switch (" + config_.device_path + ")";
-    }
-
-    std::string get_driver_info() const override {
-        return "AlpacaCore ZWO ASIAIR Plus Switch";
-    }
-
-    std::string get_driver_version() const override { return alpacacore::kVersion; }
-
-    int get_interface_version() const override { return 3; }
-
-    // Lock-free (issue #382): an atomic, so this never waits behind a connect
-    // or disconnect and never nests a lock with AsyncConnectable's
-    // pending_mutex_. Not the wrapper's is_open(): the fd may be held since
-    // the server start without a client connected (decision 0021).
-    bool get_connected() const override { return connected_.load(std::memory_order_acquire); }
-
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
-
-    void set_connected(bool connected) override {
-        // Serialize whole transitions against each other (issue #528): the
-        // base's record/consume gates only see an ASYNC connect. With a sync
-        // connect in flight on thread A, a sync disconnect on thread B saw
-        // "not connected" twice (nothing in flight, idempotent) and returned
-        // as a no-op while A went on to store true -- the client was told
-        // the disconnect succeeded and the device ended up Connected. Held
-        // only for set_connected() against set_connected(); getters stay free.
-        std::lock_guard<std::mutex> transition(transition_mutex_);
-        // Base gates BEFORE the idempotency check: a sync disconnect during an
-        // in-flight connect looks idempotent (both sides see disconnected) and
-        // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(get_connected())) {
-            return;
-        }
-        if (connected && consume_pending_disconnect(get_connected())) {
-            return;
-        }
-        if (connected) {
-            if (get_connected()) {
-                return;
-            }
-            // An fd held since the server start (decision 0021) is taken over as it is.
-            if (!wrapper_.is_open()) {
-                wrapper_.open();
-            }
-            connected_.store(true, std::memory_order_release);
-        } else {
-            // A Disconnect with no client connected keeps lines held since the
-            // server start: releasing them would drop a PWM duty to full on.
-            if (!get_connected()) {
-                return;
-            }
-            connected_.store(false, std::memory_order_release);
-            if (wrapper_.is_open()) {
-                wrapper_.close();
-            }
-        }
-    }
-
-    void apply_power_on_state(bool new_boot) override {
-        std::lock_guard<std::mutex> transition(transition_mutex_);
-        if (config_.power_on_state == util::PowerOnState::Leave || get_connected()) {
-            return;
-        }
-        std::vector<util::PowerOnPort> ports;
-        ports.reserve(config_.ports.size());
-        for (const auto& p : config_.ports) {
-            ports.push_back({true, p.pwm_enabled});
-        }
-        const auto plan = util::plan_power_on(config_.power_on_state, new_boot, ports,
-                                              util::PowerPortStateStore::load(get_unique_id()));
-        try {
-            for (std::size_t i = 0; i < plan.size(); ++i) {
-                if (!plan[i]) {
-                    continue;
-                }
-                // Keep the fd open after the start: a PWM duty is a userspace
-                // worker, and the first Connect takes it over.
-                if (!wrapper_.is_open()) {
-                    wrapper_.open();
-                }
-                wrapper_.set_value(i, *plan[i]);
-                save_port_state(static_cast<int>(i), *plan[i]);
-                ALPACA_LOG_INFO(kLogCategory,
-                                config_.ports[i].name + " set to " + std::to_string(*plan[i]) + " at server start");
-            }
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory, std::string("Could not apply the power-on state: ") + e.what());
-        }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override { return false; }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("CommandBlind not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("CommandBool not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
-    }
-
-    int get_max_switch() const override {
-        return static_cast<int>(config_.ports.size());
-    }
-
-    bool get_can_write(int id) const override {
-        validate_id(id);
-        return true;
-    }
-
-    bool get_can_async(int id) const override {
-        validate_id(id);
-        return false;
-    }
-
-    bool get_switch(int id) const override {
-        validate_id(id);
-        ensure_connected();
-        const double v = wrapper_.get_value(static_cast<std::size_t>(id));
-        return v > get_min_switch_value_unchecked(id);
-    }
-
-    void set_switch(int id, bool state) override {
-        validate_id(id);
-        ensure_connected();
-        const double v = state ? get_max_switch_value_unchecked(id)
-                               : get_min_switch_value_unchecked(id);
-        set_switch_value(id, v);
-    }
-
-    void set_async(int id, bool /*state*/) override {
-        validate_id(id);
-        ensure_connected();
-        throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
-    }
-
-    double get_switch_value(int id) const override {
-        validate_id(id);
-        ensure_connected();
-        return static_cast<double>(wrapper_.get_value(static_cast<std::size_t>(id)));
-    }
-
-    void set_switch_value(int id, double value) override {
-        validate_id(id);
-        ensure_connected();
-        // std::lround on NaN/Inf is undefined behaviour; reject non-finite
-        // values from the HTTP API as InvalidValue first.
-        if (!std::isfinite(value)) {
-            throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
-        }
-        const double min_v = get_min_switch_value_unchecked(id);
-        const double max_v = get_max_switch_value_unchecked(id);
-        const long rounded = std::lround(value);
-        if (rounded < static_cast<long>(min_v) || rounded > static_cast<long>(max_v)) {
-            throw AlpacaException("Switch value out of range", AlpacaError::InvalidValue);
-        }
-        wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
-        save_port_state(id, static_cast<int>(rounded));
-    }
-
-    void set_async_value(int id, double /*value*/) override {
-        validate_id(id);
-        ensure_connected();
-        throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
-    }
-
-    bool get_state_change_complete(int id) const override {
-        validate_id(id);
-        ensure_connected();
-        return true;
-    }
-
-    std::string get_switch_name(int id) const override {
-        validate_id(id);
-        std::lock_guard<std::mutex> lock(name_mutex_);
-        return switch_names_[static_cast<std::size_t>(id)];
-    }
-
-    void set_switch_name(int id, const std::string& name) override {
-        validate_id(id);
-        std::lock_guard<std::mutex> lock(name_mutex_);
-        switch_names_[static_cast<std::size_t>(id)] = name;
-    }
-
-    std::string get_switch_description(int id) const override {
-        validate_id(id);
-        const auto& p = config_.ports[static_cast<std::size_t>(id)];
-        const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
-        return "ASIAIR Plus DC port " + std::to_string(id + 1) + " (" + mode + ")";
-    }
-
-    double get_min_switch_value(int id) const override {
-        validate_id(id);
-        return get_min_switch_value_unchecked(id);
-    }
-
-    double get_max_switch_value(int id) const override {
-        validate_id(id);
-        return get_max_switch_value_unchecked(id);
-    }
-
-    double get_switch_step(int id) const override {
-        validate_id(id);
-        return 1.0;
-    }
-
-private:
-    // Remembers what a client set, for a start that restores it (decision 0021).
-    // A failed save is logged by the store; the port was still set.
-    void save_port_state(int id, int value) {
-        util::PowerPortStateStore::save(get_unique_id(), id, value * 100.0 / get_max_switch_value_unchecked(id));
-    }
-
-    void ensure_connected() const {
-        if (!get_connected()) {
-            throw AlpacaException("ASIAIR Plus switch not connected", AlpacaError::NotConnected);
-        }
-    }
-
-    void validate_id(int id) const {
-        if (id < 0 || id >= static_cast<int>(config_.ports.size())) {
-            throw AlpacaException("Switch ID out of range", AlpacaError::InvalidValue);
-        }
-    }
-
-    double get_min_switch_value_unchecked(int) const { return 0.0; }
-
-    double get_max_switch_value_unchecked(int id) const {
-        return config_.ports[static_cast<std::size_t>(id)].pwm_enabled ? 100.0 : 1.0;
-    }
-
-    const int device_number_;
-    const AsiairPlusSwitchConfig config_;
-    AsiairPlusProtocolWrapper wrapper_;
-
-    mutable std::mutex name_mutex_;
-    // Guards set_connected() against a concurrent set_connected() only (#528),
-    // and against apply_power_on_state().
-    std::mutex transition_mutex_;
-    std::atomic<bool> connected_{false};
-    std::vector<std::string> switch_names_;
-};
-
-std::unique_ptr<SwitchDriver> create_zwo_asiair_plus_switch(int device_number,
-                                                            AsiairPlusSwitchConfig config) {
-    return std::make_unique<ZWOAsiairPlusSwitchDriver>(device_number, std::move(config));
+    return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<PwmGpioMiscBackend>>>(
+        device_number, std::move(profile), std::move(ports), sysfs_dev_char_root);
 }
 
 } // namespace alpacacore::vendor::zwo

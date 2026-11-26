@@ -21,9 +21,9 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 
 ## Rules
 
-1. A getter that needs no device access takes no lock that is held across a device transaction, and the driver `mutex_` is not held across an SDK call, serial exchange, connect handshake or move; a camera's short `with_camera`/`with_handle` SDK call is bounded by Rule 4. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (trace getter locks and every device exchange in the converted class).
-2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (leaf), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and a helper mutex nests under `mutex_` only as a leaf that takes no other lock and does no I/O or joins (the driver lifecycle instructions list the shared leaves and each vendor file its own). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (inspect nested acquisitions and confirm each leaf's call graph contains no other locks, I/O or joins).
-3. `Connected` is lock-free, and identity and limits are published at the end of connect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (Connected reads an atomic without waiting; getters use connect-published metadata).
+1. A getter that needs no device access takes no lock that is held across a device transaction, and the driver `mutex_` is not held across an SDK call, serial exchange, connect handshake or move; a camera's short `with_camera`/`with_handle` SDK call is bounded by Rule 4. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`. Checked by: review (trace getter locks and every device exchange in the converted class).
+2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (the leaf of the driver's own locks), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and a helper mutex nests under `mutex_` only as a leaf that takes no other lock and does no I/O or joins (the driver lifecycle instructions list the shared leaves and each vendor file its own). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (inspect nested acquisitions and confirm each leaf's call graph contains no other locks, I/O or joins).
+3. `Connected` is lock-free, and identity and limits are published at the end of connect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h`. Checked by: review (Connected reads an atomic without waiting; getters use connect-published metadata).
 4. A camera driver's `with_camera` and `with_handle` hold `mutex_` across short SDK calls, never across an image wait, an exposure or the connect handshake, and a camera moves its operational calls to the order of Rule 2 only with a measured getter stall. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: review (an image wait, exposure or connect under `mutex_`; an operational lock-order conversion that cites no measured stall).
 5. `AGENTS.md` and the driver lifecycle instructions state this rule and link this record. Scope: `AGENTS.md`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review (both instruction owners retain the lock-order rule and a link to this record).
 6. In a converted driver, state read before a wire call that releases `mutex_` is re-read or re-validated after it, and a per-thread lock tracker that cannot record a lock throws `DriverException` before it takes any lock (item 8). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review (a value read before a wire call and used after it with no re-read or counter check; a lock-table-full path that takes `mutex_` or only logs).
@@ -39,12 +39,12 @@ Symbol: `transition_mutex_`
 | --- | --- | --- | --- | --- | --- |
 | Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | adopted |  |  |
 | Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted |  | served from `PolledState` |
-| Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | partial | #1838 | rule 6: slew gate re-locks after a live `is_tracking()` without re-checking park |
+| Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1838 | rule 6: both slew forms re-check the link and park after the live `is_tracking()` read (#1883) |
 | Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1759 |  |
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
-| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | partial | #1840 | rule 3: MaxStep is a live `:08#` read |
+| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1840 | served from `PolledState`; MaxStep read once at connect; `TempComp` stays a live read under the wrapper lock, which Rule 1 allows because it needs device access |
 | Gemini PDH switch |  | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted |  |  |
 | gphoto camera |  | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | adopted |  |  |
 | iOptron filter wheel |  | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted |  |  |
@@ -52,9 +52,12 @@ Symbol: `transition_mutex_`
 | iOptron iFR focuser |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_focuser_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iFR rotator |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iGuider camera |  | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted |  |  |
-| iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted |  |  |
-| iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1829 | `util::LockGate` drops `mutex_` per exchange; a getter whose TTL cache lapsed takes the I/O lock for that read |
+| iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
+| iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1829, #2491 | `util::LockGate` drops `mutex_` per exchange; the position, Alt/Az, status and Slewing getters serve the polled frame and send nothing (#2491, [decision 0010](0010-snapshot-served-state.md)); the TTL clause stays for the four site getters (SiderealTime, SiteLatitude, SiteLongitude, DestinationSideOfPier): one whose cache lapsed takes the I/O lock for that read |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
+| OnStep focuser |  | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders `Move`, `Halt` and the `TempComp` write |
+| OnStep rotator |  | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders the moves, `Halt` and `Sync` |
+| OnStep switch |  | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | served from `PolledState`; the I/O lock is the shared link's (its sequence lock, then its wire lock), and `io_mutex_` orders the writes |
 | Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted |  |  |
 | Player One filter wheel |  | `AlpacaCore/src/vendors/playerone/playerone_filterwheel_driver.cpp` | adopted |  |  |
 | Player One thermal switch |  | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted |  |  |
@@ -68,22 +71,22 @@ Symbol: `transition_mutex_`
 | ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |
 | ToupTek focuser |  | `AlpacaCore/src/vendors/touptek/touptek_focuser_driver.cpp` | adopted |  |  |
-| ToupTek switch |  | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp` | adopted |  |  |
+| ToupTek switch |  | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
 | ToupTek thermal switch |  | `AlpacaCore/src/vendors/touptek/touptek_thermal_switch_driver.cpp` | adopted |  |  |
 | WandererAstro box switch |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_box_switch_driver.cpp` | adopted |  |  |
 | WandererAstro cover |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp` | adopted |  | writes with no reply wait under `state_mutex_` (Alternatives rejected) |
 | WandererAstro filter wheel |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp` | adopted |  | writes with no reply wait under `state_mutex_` (Alternatives rejected) |
 | WandererAstro rotator |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_driver.cpp` | adopted |  |  |
 | WeeWX observing conditions |  | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted |  |  |
-| ZWO ASIAIR Plus switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted |  |  |
-| ZWO ASIAIR switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted |  |  |
+| ZWO ASIAIR Plus switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
+| ZWO ASIAIR switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
 | ZWO camera |  | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted |  |  |
 | ZWO filter wheel |  | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted |  |  |
 | ZWO focuser |  | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted |  |  |
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
 | ZWO switch |  | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted |  |  |
-| ZWO telescope | `set_connected_mutex_` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  | transition lock named `set_connected_mutex_` |
-| remotealpaca (proxied devices) |  | — | planned | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
+| ZWO telescope |  | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  |  |
+| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp` | adopted | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
 
 ## Alternatives rejected
 
@@ -96,7 +99,7 @@ Symbol: `transition_mutex_`
 
 - Reviewers check each driver PR against the Rules above. A driver that still holds `mutex_` across device I/O is a defect with its own issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (the cameras #1841 to #1845, and others; the iOptron telescope converted in #1829).
+- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (none is left: the cameras converted in #1841 to #1845, the iOptron telescope in #1829 and the Bisque telescope in #1883).
 
 ## How to reverse
 

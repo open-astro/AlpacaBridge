@@ -47,11 +47,16 @@ namespace alpacacore::util {
  *   lock held: `probe()` does the device I/O and returns the frame (it throws
  *   when the exchange failed), and the module publishes it. A write() that
  *   landed since the probe began drops the frame; the next poll publishes.
+ * - A probe that must publish under its own driver lock (it applies a result in the
+ *   same hold as the frame) takes begin_poll() itself, publishes with publish() and
+ *   returns std::nullopt: the device answered, the module publishes nothing. That
+ *   counts as a good probe for the fault latch; the frame's age is then the only loss
+ *   evidence, so a probe that never publishes ages the last frame to loss.
  * - `fault_threshold` failed probes in a row latch a fault. A latched fault
  *   refuses the cache (served() throws DriverException) but the probe keeps
  *   running; the next good probe clears it.
- * - A fault that has stood for util::kLinkStalenessBound, or a frame older
- *   than it, sets the loss latch once and calls `on_lost()` on the poll thread
+ * - A fault that has stood for `loss_bound` (util::kLinkStalenessBound by
+ *   default), or a frame older than it, sets the loss latch once and calls `on_lost()` on the poll thread
  *   with no driver lock held, then the poll ends (no autonomous reconnect,
  *   decision 0009). reset() clears the latch for the next connect.
  * - lose_link(), from the probe on positive evidence that the transport is
@@ -70,20 +75,26 @@ template <typename Frame>
 class PolledState {
 public:
     using Reading = typename StateSnapshot<Frame>::Reading;
+    using Token = typename StateSnapshot<Frame>::Token;
 
     struct Config {
         std::chrono::nanoseconds period{std::chrono::milliseconds(250)};
         int fault_threshold = 3;
-        /// Freshness bound; must undercut util::kLinkStalenessBound.
+        /// Freshness bound; must undercut `loss_bound`.
         std::chrono::nanoseconds max_age{std::chrono::milliseconds(500)};
         /// Component name on every log line and in the thrown messages.
         std::string log_tag;
+        /// How long a fault may stand, or a frame go unrefreshed, before the link is lost (decision 0009
+        /// point 2(b)): a driver may set a longer bound, with its reason in its code. Last, so the adopters'
+        /// positional initializers keep the default.
+        std::chrono::nanoseconds loss_bound{kLinkStalenessBound};
     };
 
-    /// `probe` runs the device exchange and returns the frame, or throws.
+    /// `probe` runs the device exchange and returns the frame, or throws; nullopt means it answered and
+    /// published through publish() itself, or had nothing to publish (a probe returning Frame converts).
     /// `on_lost` releases the transport; it runs once per loss.
-    PolledState(TaskClock& clock, OperationGeneration& generation, Config config, std::function<Frame()> probe,
-                std::function<void()> on_lost)
+    PolledState(TaskClock& clock, OperationGeneration& generation, Config config,
+                std::function<std::optional<Frame>()> probe, std::function<void()> on_lost)
         : clock_(clock),
           config_(std::move(config)),
           probe_(std::move(probe)),
@@ -91,9 +102,8 @@ public:
           snapshot_(clock, config_.max_age),
           slot_(config_.log_tag + " state poll", generation, clock) {
         // Not a static_assert: the bound is a Config value, not a template argument.
-        if (config_.max_age >= kLinkStalenessBound) {
-            throw AlpacaException("PolledState max_age must undercut util::kLinkStalenessBound",
-                                  AlpacaError::InvalidOperation);
+        if (config_.max_age >= config_.loss_bound) {
+            throw AlpacaException("PolledState max_age must undercut its loss_bound", AlpacaError::InvalidOperation);
         }
     }
 
@@ -141,6 +151,14 @@ public:
         snapshot_.write(std::forward<Apply>(apply));
     }
 
+    /// For a probe that publishes itself (StateSnapshot::begin_poll): take it under the driver lock that
+    /// decides what the probe samples, before the exchange.
+    Token begin_poll() const { return snapshot_.begin_poll(); }
+
+    /// StateSnapshot::publish: false (frame dropped) when a write() or reset() landed since `token`. Call it
+    /// under the driver lock that applies the probe's other results, so they take effect with the frame.
+    bool publish(Token token, Frame frame) { return snapshot_.publish(token, std::move(frame)); }
+
     /// The frame for a getter. Throws NotConnected when the link is lost (or no
     /// frame is held) and DriverException with the fault text while a fault is
     /// latched; otherwise the reading, stale or not.
@@ -148,7 +166,7 @@ public:
         throw_if_lost();
         const auto epoch = current_epoch();
         const auto reading = snapshot_.read();
-        if (reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound) {
+        if (reading.has_value() && clock_.now() - reading->measured_at >= config_.loss_bound) {
             latch_lost(epoch);
             throw_if_lost();
         }
@@ -179,7 +197,7 @@ public:
     bool link_lost() const { return lost_.load(); }
 
     /// Positive evidence that the transport is gone (decision 0009 rule 2a): sets the loss latch now, without
-    /// waiting out util::kLinkStalenessBound. Called from the probe, so it belongs to the connection that
+    /// waiting out the loss bound. Called from the probe, so it belongs to the connection that
     /// reset() last opened; the poll ends after the current cycle and calls `on_lost()` once.
     void lose_link() { (void)latch_lost(current_epoch()); }
 
@@ -197,6 +215,12 @@ public:
         slot_.set_spawn_for_testing(std::move(spawn));
     }
     void pause_for_testing(bool paused) { paused_.store(paused); }
+
+    /// Test seam: starts the poll slot again, with none of the inline probes start() runs, after a stop_and_join()
+    /// that left the poll thread off the task clock.
+    void restart_poll_for_testing() {
+        slot_.start([this](OperationContext& ctx) { run(ctx); });
+    }
 
     /// Test seam: one poll cycle on the calling thread, `on_lost()` included.
     void poll_now_for_testing() { cycle(); }
@@ -225,6 +249,7 @@ private:
     // can carry the device's reply; AlpacaCore has no log escaper (CWE-117), so
     // the lines state the fact only.
     void poll_once() {
+        const auto epoch = current_epoch();
         const auto token = snapshot_.begin_poll();
         std::optional<Frame> frame;
         try {
@@ -239,7 +264,16 @@ private:
                 ALPACA_LOG_INFO(config_.log_tag, "Communications restored");
             }
         }
-        snapshot_.publish(token, std::move(*frame));
+        if (frame.has_value()) {
+            snapshot_.publish(token, std::move(*frame));
+            return;
+        }
+        // The probe published for itself, or had nothing to: a frame no publish refreshed still ages to loss.
+        const auto reading = snapshot_.read();
+        if (reading.has_value() && clock_.now() - reading->measured_at >= config_.loss_bound && latch_lost(epoch)) {
+            ALPACA_LOG_ERROR(config_.log_tag, "Link lost: no state frame published for " + loss_bound_text() +
+                                                  "; set Connected false then true to reconnect");
+        }
     }
 
     void note_failure() {
@@ -252,19 +286,20 @@ private:
             } else {
                 ALPACA_LOG_DEBUG(config_.log_tag, "State poll failed; the frame keeps its age");
             }
-            lost = health_.fault_stale(clock_.now());
+            lost = health_.fault_stale(clock_.now(), config_.loss_bound);
         }
         if (!lost) {
             const auto reading = snapshot_.read();
-            lost = reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound;
+            lost = reading.has_value() && clock_.now() - reading->measured_at >= config_.loss_bound;
         }
         if (lost && latch_lost(epoch)) {
-            ALPACA_LOG_ERROR(
-                config_.log_tag,
-                "Link lost: no answer to the state poll for " +
-                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(kLinkStalenessBound).count()) +
-                    " s; set Connected false then true to reconnect");
+            ALPACA_LOG_ERROR(config_.log_tag, "Link lost: no answer to the state poll for " + loss_bound_text() +
+                                                  "; set Connected false then true to reconnect");
         }
+    }
+
+    std::string loss_bound_text() const {
+        return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config_.loss_bound).count()) + " s";
     }
 
     // One poll and, once per loss, the transport release. True when lost.
@@ -301,7 +336,7 @@ private:
 
     TaskClock& clock_;
     Config config_;
-    std::function<Frame()> probe_;
+    std::function<std::optional<Frame>()> probe_;
     std::function<void()> on_lost_;
     StateSnapshot<Frame> snapshot_;
     // Narrow: held for a counter or a string, never across an exchange.

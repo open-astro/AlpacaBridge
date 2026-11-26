@@ -762,9 +762,12 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     REQUIRE(clock.wait_for_woken_settled(std::chrono::milliseconds(2000)));
 
     mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor
+    const int starts = mount.start_count(2);
     driver->move_axis(1, -kMaxMoveAxisRate);
     sw::set_status_poll_paused_for_testing(*driver, false);
-    REQUIRE(follow_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(2000)));
+    // The ":J" the fake counted, not a sampled axis_running(): the guard can start and stop the axis between two
+    // samples on a loaded host (issue #2628).
+    REQUIRE(follow_until(clock, [&] { return mount.start_count(2) > starts; }, std::chrono::milliseconds(2000)));
     CHECK(pump_until(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(6)));
     CHECK(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(6)));
     driver->set_connected(false);
@@ -1315,7 +1318,7 @@ TEST_CASE("SkyWatcher limits - Tracking on during a duty worker join still start
     a_thread = std::thread([&] {
         try {
             driver->set_declination_rate(0.12);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): only the join order is tested
         }
         a_done = true;
     });

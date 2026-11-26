@@ -57,10 +57,11 @@ them behind a green check. Keying on device type as well catches those.
 
 Known gap: the pair is the finest key the gate has, so a registered driver
 masks every other driver of the same vendor and type. The two ZWO ASIAIR
-switch drivers (`zwo_asiair_switch_driver.cpp`, `zwo_asiair_plus_switch_driver.cpp`,
-libgpiod, no fake seam) have no [stress] case and are hidden behind the ZWO
-dew-heater switch registration; they are covered by code review only.
-Same shape for (gemini, covercalibrator): only Flat Panel Pro
+switch drivers were hidden that way behind the ZWO dew-heater switch until
+#1862 gave them their own storms (test_zwo_asiair_concurrency_stress.cpp,
+over the libgpiod and ioctl stubs); deleting those storms would still pass
+the gate, because the dew-heater storm keeps the pair registered.
+For (gemini, covercalibrator): only Flat Panel Pro
 (GeminiFlatPanelV2Driver, gemini_flatpanel_driver.cpp) is stormed, but that
 also marks the Cover Lite class (GeminiFlatPanelDriver, same file, its own
 set_connected/calibrator implementation, no task threads) and the Rev2
@@ -311,8 +312,9 @@ ALLOWLIST = set()
 
 
 # Vendor *_driver.cpp files that define no driver class of their own: each is
-# a factory that builds another vendor's driver class under its own identity,
-# so it has no get_device_type() override for find_drivers() to read. Each
+# a factory that builds another vendor's driver class, or a shared driver
+# template, under its own identity, so it has no get_device_type() override
+# for find_drivers() to read. Each
 # entry states the device type the factory builds and why; the pair still
 # needs its own [stress] registration through that factory. An entry whose
 # file is gone, or now has an override of its own, is a failure below.
@@ -321,6 +323,23 @@ DELEGATING_FACTORIES = {
         "camera",
         "create_altair_camera() builds the ToupTek camera driver class "
         "(touptek_camera_driver.cpp) over the Altair SDK with Altair identity strings"),
+    # The GPIO power-port switches share util::PowerPortSwitchDriver (#2264).
+    "AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp": (
+        "switch",
+        "create_ioptron_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the iMate PowerBox wrapper"),
+    "AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp": (
+        "switch",
+        "create_touptek_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the StellaVita power box"),
+    "AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp": (
+        "switch",
+        "create_zwo_asiair_plus_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over util::SoftPwmPorts and the ASIAIR Plus RK3568 backend"),
+    "AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp": (
+        "switch",
+        "create_zwo_asiair_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over util::SoftPwmPorts and util::GpiodLineBackend"),
 }
 
 
@@ -802,20 +821,21 @@ def find_ungated_registration_files():
                                                registrations)
 
 
-def missing_message(vendor, dtype, paths):
+def missing_message(vendor, dtype, paths, script_path=__file__):
     """The rule-1 finding for an uncovered (vendor, device type) pair.
 
     A function rather than an inline format so the self-test can pin its
     wording: the message must point at /driver-build Step 7b and must never
     offer ALLOWLIST as an alternative (that list is empty: every driver that
-    predated the gate is now registered).
+    predated the gate is now registered). The script is named repo-relative, so
+    a checkout path never lands in the message (#1755).
     """
     return (
         "MISSING: %s/%s has no [stress] TEST_CASE: %s. Register it in "
         "AlpacaCore/tests/test_%s_concurrency_stress.cpp (/driver-build Step 7b: build "
         "the seam, then the registration). ALLOWLIST in %s is empty (every pair is "
         "registered) and must not grow."
-        % (vendor, dtype, ", ".join(paths), vendor, __file__)
+        % (vendor, dtype, ", ".join(paths), vendor, "scripts/" + os.path.basename(script_path))
     )
 
 
@@ -930,6 +950,12 @@ def self_test():
     check("MISSING message never offers ALLOWLIST as an alternative",
           missing.index("Register it in") < missing.index("ALLOWLIST")
           and "add" not in after.lower().replace("predate", ""))
+    # A checkout path containing "add" (/home/u/1add73d25a67/...) must not trip
+    # the check above: the message names the script repo-relative (#1755).
+    in_add_dir = missing_message("fakevendor", "camera", ["x_driver.cpp"],
+                                 script_path="/home/u/1add73d25a67/scripts/check_stress_registration.py")
+    check("MISSING message names the script repo-relative, whatever the checkout path",
+          "add" not in in_add_dir.split("ALLOWLIST", 1)[1].lower().replace("predate", ""))
 
     # A DeviceType:: mention earlier in the file (a comment, here) must not
     # be picked up ahead of the actual override.

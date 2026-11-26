@@ -16,6 +16,9 @@ concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Nothing by default: the job grants what it needs (#1755).
+permissions: {}
+
 jobs:
   # The job id is the check-run name the skills bind verdicts to
   # (`.name == "review"` in /pr-checker and /submit-pr); do not add a `name:`.
@@ -115,49 +118,58 @@ jobs:
             sleep 30
           done
 
-      # Claude Code CLI, cached so a review does not depend on claude.ai/install.sh
+      # Claude Code CLI, cached so a review does not depend on the download host
       # answering (it returned 429 on some runs). These four steps run before the
       # checkout below, so no PR-head code exists on the runner yet and nothing
       # from a PR can write into the cached files before the save. Under
       # pull_request_target the cache is scoped to the default branch. Keep
-      # the version in the key, the install and the check equal to the action's pinned
+      # the version in the key, the download and the check equal to the action's pinned
       # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA below
-      # is bumped. The version check is the only integrity check.
+      # is bumped. The binary is downloaded directly, not through install.sh,
+      # and checked against a sha256 pinned here (issue #2632): take the new value
+      # from the release's manifest.json (`platforms.linux-x64.checksum`) and
+      # change the version, the sha256 and the cache key together. The check
+      # runs on a cache hit too.
       - name: Restore the Claude Code CLI cache
         id: claude_cli_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: |
-            ~/.local/share/claude
-            ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          path: ~/.local/bin/claude
+          key: claude-code-cli-2.1.325-0dc4f4a9-${{ runner.os }}-${{ runner.arch }}
 
-      - name: Install the Claude Code CLI on a cache miss
+      - name: Download the Claude Code CLI on a cache miss
         if: steps.claude_cli_cache.outputs.cache-hit != 'true'
         run: |
-          # Without pipefail a failed curl (429) leaves bash reading an empty
-          # script, which exits 0, and the pipeline would pass.
-          set -o pipefail
+          # ubuntu-latest is x64; the pinned sha256 below is the linux-x64 binary's.
+          url="https://downloads.claude.ai/claude-code-releases/2.1.325/linux-x64/claude"
+          mkdir -p "${HOME}/.local/bin"
           # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
           for wait in 15 30 60 120 stop; do
-            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
+            if curl -fsSL "${url}" -o "${HOME}/.local/bin/claude"; then
               exit 0
             fi
             if [ "${wait}" = stop ]; then
-              echo "::error::The Claude Code CLI install failed after 5 attempts."
+              echo "::error::The Claude Code CLI download failed after 5 attempts."
               exit 1
             fi
-            echo "Install failed; retrying in ${wait} s."
+            echo "Download failed; retrying in ${wait} s."
             sleep "${wait}"
           done
 
-      - name: Check the Claude Code CLI version
+      - name: Check the Claude Code CLI sha256 and version
+        env:
+          CLAUDE_CLI_SHA256: 0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf
         run: |
+          if ! echo "${CLAUDE_CLI_SHA256}  ${HOME}/.local/bin/claude" | sha256sum -c --quiet; then
+            echo "::error::The Claude Code CLI binary does not match the pinned sha256."
+            exit 1
+          fi
+          chmod +x "${HOME}/.local/bin/claude"
           reported="$("${HOME}/.local/bin/claude" --version)" || reported="(claude did not run)"
           case "${reported}" in
-            2.1.302\ *|2.1.302) echo "Claude Code CLI ${reported}" ;;
+            2.1.325\ *|2.1.325) echo "Claude Code CLI ${reported}" ;;
             *)
-              echo "::error::Expected Claude Code CLI 2.1.302, got: ${reported}"
+              echo "::error::Expected Claude Code CLI 2.1.325, got: ${reported}"
               exit 1
               ;;
           esac
@@ -166,10 +178,8 @@ jobs:
         if: steps.claude_cli_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: |
-            ~/.local/share/claude
-            ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          path: ~/.local/bin/claude
+          key: claude-code-cli-2.1.325-0dc4f4a9-${{ runner.os }}-${{ runner.arch }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -177,7 +187,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           # Fork code is read, never built or executed, in this job; the
           # safe-to-review label is the maintainer accepting that read.
-          allow-unsafe-pr-checkout: true
+          allow-unsafe-pr-checkout: true  # zizmor: ignore[unsafe-checkout] -- label-gated read, never built or run; see above
           fetch-depth: 1
           persist-credentials: false
 
@@ -282,7 +292,7 @@ jobs:
             echo "ADR_SCOPE_EOF"
           } >> "${GITHUB_OUTPUT}"
 
-      - uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d  # v1
+      - uses: anthropics/claude-code-action@acfe7992852970efb4fee683d63d628e3e52df67  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is
@@ -411,8 +421,12 @@ jobs:
             with the Write tool (writes outside the workspace are denied, so
             not /tmp). Do not post it yourself; a workflow step posts the file.
             If the file is missing, the run fails.
+          # Explicit mode keeps --allowedTools a strict list. The action skips its
+          # auto-mode default today (allowed_non_write_users and
+          # path_to_claude_code_executable are set), but this does not rely on that.
           claude_args: |
             --model opus
+            --permission-mode default
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(python3 -I ${{ runner.temp }}/adr-tools/scripts/check_adr_scope.py --checklist:*)"
 
       # Every in-scope rule needs a checklist line before anything posts. The

@@ -121,6 +121,24 @@ TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][teles
     require_alpaca_error([&]() { driver->set_target_declination(45.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+TEST_CASE("SynScan Telescope Driver - slew and sync arguments are checked before the connection",
+          "[synscan][telescope][unit]") {
+    // AGENTS.md: InvalidValue precedes the connection check (open-astro#2084).
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    require_alpaca_error([&]() { driver->slew_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(25.0, 10.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 91.0); }, alpacacore::AlpacaError::InvalidValue);
+    // A valid pair still reports the connection.
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 10.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("SynScan Telescope Driver - Axis Rate Ranges", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
@@ -155,7 +173,7 @@ TEST_CASE("SynScan Telescope Driver - Device metadata", "[synscan][telescope][un
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         3, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
 
-    CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // fallback before a model id is read
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");  // fallback before a model id is read
     CHECK(driver->get_description() == "Sky-Watcher SynScan V3/V4 Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore SynScan Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
@@ -174,24 +192,36 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     REQUIRE_FALSE(driver->get_connected());
 
     // Position queries require connection
-    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 
     // Tracking requires connection
-    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Slew and park require connection (or target not set, both throw AlpacaException)
-    CHECK_THROWS_AS(driver->slew_to_target_async(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    // Slew and park require connection; the connection check precedes the unset target (#2075)
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
+
+    // Unsupported members report the connection first, then their NotImplemented answer once connected (#1919)
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking_rate(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
 
     // Action and command methods
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32  // needs the fake mount server
@@ -285,17 +315,15 @@ TEST_CASE("SynScan Telescope Driver - Telescope Properties", "[synscan][telescop
 
     CHECK(driver->get_interface_version() >= 3);
 
-    auto eq = driver->get_equatorial_system();
-    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
-           eq == alpacacore::EquatorialSystem::J2000 ||
-           eq == alpacacore::EquatorialSystem::Other));
+    // Pinned, not an OR of every value (#1858): the driver reports J2000 coordinates.
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::J2000);
 
     require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
 
-    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&] { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][unit]") {
@@ -339,6 +367,24 @@ TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnecte
     // Valid arguments still reach the connection check.
     require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #2258: the command gate checks the PulseGuide direction before the duration, so a call with both wrong names the
+// direction (before the gate, SynScan named the duration). The code is InvalidValue either way.
+TEST_CASE("SynScan Telescope Driver - a PulseGuide with a bad direction and a negative duration names the direction",
+          "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    try {
+        driver->pulse_guide(5, -1);
+        FAIL("a bad direction and a negative duration must be refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+        CHECK(std::string(e.what()) == "Invalid PulseGuide direction");
+    }
 }
 
 // open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
@@ -940,10 +986,12 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
     }
 
     // Falsified by: synscan_telescope_driver.cpp run_pulse_stop_body cancel branch, drop the manual_axis_slewing_
-    // write: the replacement is then refused with the link error instead of InvalidOperation.
-    SECTION("a replacement pulse is refused while the axis may still be moving") {
+    // write: the next pulse is then refused with the link error instead of InvalidOperation. A replacement pulse
+    // supersedes instead of cancelling (#2263), so the cancel comes from AbortSlew, whose own stops fail too.
+    SECTION("after the cancel a pulse is refused while the axis may still be moving") {
+        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
         try {
-            driver->pulse_guide(2, 300);  // cancels and joins the first pulse; its stop fails
+            driver->pulse_guide(2, 300);
             FAIL("PulseGuide started although the cancelled pulse's stop failed");
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
@@ -1015,14 +1063,14 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
         // AbortSlew verifies its stop on the task clock (#2412).
-        CHECK_THROWS_AS(alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); }),
-                        alpacacore::AlpacaException);
+        require_alpaca_error([&] { alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); }); },
+                             alpacacore::AlpacaError::DriverException);
     }
     SECTION("MoveAxis stop") {
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     }
     SECTION("PulseGuide end") {
         driver->pulse_guide(2, 300);  // East, RA
@@ -1176,18 +1224,53 @@ TEST_CASE("SynScan Telescope Driver spec audit - DestinationSideOfPier rejects o
                          alpacacore::AlpacaError::InvalidValue);
 }
 
-TEST_CASE("SynScan Telescope Driver spec audit - DoesRefraction is not implemented",
+#ifndef _WIN32  // needs the fake mount server
+TEST_CASE("SynScan Telescope Driver - connected unsupported members keep their NotImplemented answers",
           "[synscan][telescope][unit][spec-audit]") {
-    alpacacore::vendor::synscan::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
-    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    auto driver = make_connected_driver(server);
+    REQUIRE(driver->get_connected());
+
+    // The connection check comes first (#1919); once connected each absent capability keeps its ITelescopeV4 answer.
+    // The driver applies no refraction correction, so DoesRefraction raises on read and on write.
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_tracking_rate(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    driver->set_connected(false);
 }
+
+// Issue #1867: the driver applies no rate offset, so a connected DeclinationRate and RightAscensionRate read 0.0
+// (their setters are PropertyNotImplemented, above), and Tracking is settable.
+TEST_CASE("SynScan Telescope Driver - connected rate getters read zero and CanSetTracking is true",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    auto driver = make_connected_driver(server);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_can_set_tracking());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+
+    driver->set_connected(false);
+    // Disconnected, both getters check the connection.
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+}
+#endif
 
 TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
           "[synscan][telescope][unit][spec-audit]") {

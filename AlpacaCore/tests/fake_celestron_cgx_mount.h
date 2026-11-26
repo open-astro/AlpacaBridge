@@ -26,12 +26,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -47,16 +49,40 @@ namespace alpacacore::test {
 // explicit completion; guide expiry still uses real time unless held by a test.
 // Guide pulses do not advance encoders; the polarity case applies an explicit
 // signed encoder step to check the hardware-verified direction convention.
-// Stop-completion delay, label-readback transients and post-rate-off encoder drift are scripted fault hooks,
-// not a simulation of the controller's deceleration or settling dynamics.
+// Stop-completion delay, post-stop motion behind a done status, label-readback transients and post-rate-off encoder
+// drift are scripted fault hooks, not a simulation of the controller's deceleration or settling dynamics.
 // Per-read RA drift is a legacy Sync fault hook, not the elapsed-time model.
+// A GOTO minimum duration (set_goto_min_duration()) holds SLEW_DONE busy at the target, a stand-in for the
+// controller's deceleration and settle; a tracking rate (set_tracking_counts_per_second()) moves a tracking axis at a
+// fixed rate in the 0x06/0x07 direction, whatever rate the command asked for. A GOTO ends tracking on its axis: whether
+// the controller does so is not established (an assumption of the fake). Wire latency is the case's own hook
+// (set_before_request()); the fake answers at once.
+// A GOTO seam (set_goto_seam(), #2640) is the controller's direction model: a GOTO on that axis moves linearly and
+// never crosses the seam label, so a target past it is reached the long way round. Dec starts with the seam the rig
+// established at label 0xC00000 (2026-11-24: every Dec GOTO whose shorter way crossed it went the long way, in both
+// directions and from two physical angles; GOTOs either side of it took the shorter way). Whether RA has a seam is
+// not established, so RA starts without one; without a seam a GOTO takes the shorter way around the 24-bit circle.
 // A crawling home search never reports done and does not move the encoder; it is not the controller's fallback path.
+// A scripted home search (script_home_search()) drives fixed legs at constant rates and ends exactly at the physical
+// home, or drives its last leg forever (a switch never found); it has no acceleration, no limit sensor and no hard
+// stop, so a runaway turns the axis without bound until a stop. The leg shapes come from the #2213 rig capture and
+// the Oct-28 incident (docs/failures/0016-cgx-home-travel.md), not from the controller's search algorithm.
+// An inert home start (set_inert_home_starts()) is ACKed, ends any search the axis was running where it is and starts
+// none, so MC_LEVEL_DONE reads done at once with the axis off its home (#2640): MC_LEVEL_DONE reads done whenever no
+// search runs (home_done=1 on a stopped axis, docs/failures/0014-cgx-stop-completion.md). Why the rig's homes after
+// an interrupted home route answered done in 2-3 s is not established; this is the shape the driver must not trust.
+// An auto-completed home reads searching on its first MC_LEVEL_DONE read and done after it (a real search reads
+// searching from its start for seconds); it is at the physical home from the start. set_auto_home_searching_reads()
+// widens that to more reads, for a case whose callers race one start (#2661): a superseded home body's supervision
+// read can come between a new start and that start's own check and take its one searching read.
 // Hardware qualification must replace assumptions before they become claims.
 
 /// Small stateful AUX endpoint for direct-USB protocol tests.
 class FakeCelestronCgxMount {
 public:
-    FakeCelestronCgxMount() : pty_("FakeCelestronCgxMount"), worker_([this] { run(); }) {}
+    FakeCelestronCgxMount() : pty_("FakeCelestronCgxMount"), worker_([this] { run(); }) {
+        set_goto_seam(0x11, 0xC00000U);
+    }
     ~FakeCelestronCgxMount() { stop_worker(); }
 
     FakeCelestronCgxMount(const FakeCelestronCgxMount&) = delete;
@@ -66,6 +92,8 @@ public:
     std::string slave_path() const { return pty_.slave_path(); }
     void corrupt_next_reply_checksum() { corrupt_next_checksum_.store(true); }
     void set_auto_complete_motions(bool enabled) { auto_complete_motions_.store(enabled); }
+    // An auto-completed home answers searching to this many MC_LEVEL_DONE reads (default 1), then done.
+    void set_auto_home_searching_reads(int reads) { auto_home_searching_reads_.store(reads); }
     void set_hold_guide_until_completed(bool hold) { hold_guide_until_completed_.store(hold); }
     void set_muted(bool muted) { muted_.store(muted); }
     void set_echo_requests(bool enabled) { echo_requests_.store(enabled); }
@@ -87,6 +115,12 @@ public:
     }
     void set_cgx_switches_present(bool present) { cgx_switches_present_.store(present); }
     void set_stop_completion_reads(int reads) { stop_completion_reads_.store(reads); }
+    // After each zero-rate stop of `axis`, its status reads done at once, yet each of its next `reads` position reads
+    // moves it `counts_per_read` further (#2411): a status that reports the stop before the axis is still.
+    void set_post_stop_motion_reads(std::uint8_t axis, int reads, std::int32_t counts_per_read) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        post_stop_motion_[axis_index(axis)] = {reads, counts_per_read};
+    }
     void set_ra_stop_drift_reads(int reads) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         ra_stop_drift_reads_ = reads;
@@ -106,6 +140,56 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         axes_[axis_index(axis)].velocity_counts_per_second = counts_per_second;
     }
+    // A tracking axis moves at this rate in advance_motion() (0: at the axis velocity, the older shape).
+    void set_tracking_counts_per_second(std::uint8_t axis, std::uint32_t counts_per_second) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].tracking_counts_per_second = counts_per_second;
+    }
+    // GOTOs on `axis` move linearly and never cross `seam` (an encoder label); nullopt gives the shorter way.
+    void set_goto_seam(std::uint8_t axis, std::optional<std::uint32_t> seam) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].goto_seam = seam;
+    }
+    // Each GOTO (0x02, 0x17) reads busy for at least this much advance_motion() time, at its target once there.
+    void set_goto_min_duration(std::chrono::milliseconds duration) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        goto_min_duration_ms_ = static_cast<std::uint64_t>(duration.count());
+    }
+    // Called on the fake's thread for each request to a motor before it is executed, with no fake lock held: a case
+    // advances its clocks there to model the round trip. Clear it (nullptr) before what it captures dies: the clear
+    // waits for a call in progress.
+    void set_before_request(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(before_request_mutex_);
+        before_request_ = std::move(hook);
+    }
+    // One leg of a scripted home search at `counts_per_second`: `counts` encoder counts in `direction` (+1 or -1),
+    // `counts` 0 driving forever; or, with `direction` 0, the shorter way to the physical home, where it ends.
+    struct HomeLeg {
+        int direction = 1;
+        std::uint32_t counts_per_second = 0;
+        std::uint32_t counts = 0;
+    };
+    // The next MC_LEVEL_START on `axis` runs these legs (one call per search, in order), reading searching until the
+    // last leg ends; a finite last leg ends at the physical home, done. A stop ends the search where it is.
+    void script_home_search(std::uint8_t axis, std::vector<HomeLeg> legs) {
+        if (legs.empty()) throw std::invalid_argument("CGX fake home search needs a leg");
+        for (const HomeLeg& leg : legs) {
+            if (leg.direction < -1 || leg.direction > 1 || leg.counts_per_second == 0)
+                throw std::invalid_argument("CGX fake home leg needs a direction of -1, 0 or 1 and a rate");
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].scripted_home_searches.emplace_back(legs.begin(), legs.end());
+    }
+    // The next `starts` MC_LEVEL_START on `axis` are inert: ACKed, they end a running search where it is, start none
+    // and move nothing, so MC_LEVEL_DONE reads done at once.
+    void set_inert_home_starts(std::uint8_t axis, int starts) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].inert_home_starts = starts;
+    }
+    void set_physical_position(std::uint8_t axis, std::uint32_t position) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        axes_[axis_index(axis)].physical_position = position & 0x00ffffffU;
+    }
     void advance_motion(std::chrono::milliseconds elapsed) {
         if (elapsed < std::chrono::milliseconds::zero()) {
             throw std::invalid_argument("CGX fake motion cannot advance by a negative duration");
@@ -120,17 +204,24 @@ public:
             }
         }
         for (AxisState& axis : axes_) {
-            if (axis.homing || !(axis.slewing || axis.tracking || axis.manual_motion)) continue;
-            const std::uint64_t numerator =
-                static_cast<std::uint64_t>(axis.velocity_counts_per_second) * milliseconds + axis.motion_remainder;
+            if (axis.homing) {
+                advance_home_search(axis, milliseconds);
+                continue;
+            }
+            if (!(axis.slewing || axis.tracking || axis.manual_motion)) continue;
+            const std::uint32_t rate = axis.tracking && axis.tracking_counts_per_second != 0
+                                           ? axis.tracking_counts_per_second
+                                           : axis.velocity_counts_per_second;
+            const std::uint64_t numerator = static_cast<std::uint64_t>(rate) * milliseconds + axis.motion_remainder;
             const std::uint64_t budget = numerator / 1000;
             axis.motion_remainder = numerator % 1000;
             if (axis.slewing) {
-                const std::int32_t delta = signed_delta(axis.target, encoder_position(axis));
+                axis.goto_busy_ms_left -= std::min(axis.goto_busy_ms_left, milliseconds);
+                const std::int32_t delta = goto_delta(axis);
                 const std::uint64_t distance = static_cast<std::uint64_t>(std::abs(delta));
                 if (distance <= budget) {
                     axis.physical_position = (axis.physical_position + delta) & 0x00ffffffU;
-                    axis.slewing = false;
+                    axis.slewing = axis.goto_busy_ms_left > 0;
                     axis.motion_remainder = 0;
                 } else if (budget != 0) {
                     const auto step = static_cast<std::int32_t>(budget);
@@ -156,11 +247,20 @@ public:
         reply_faults_.push_back({axis, command, true, std::move(payload)});
     }
 
+    // Raw bytes the mount puts on the wire unasked (stale bus traffic, a torn frame). Call it only while the link is
+    // idle: it is not ordered with the worker's replies.
+    void write_unsolicited(const std::vector<std::uint8_t>& bytes) {
+        static_cast<void>(
+            pty_write_bounded(pty_.master_fd(), reinterpret_cast<const char*>(bytes.data()), bytes.size(), stop_));
+    }
+
     void sever_link() {
         stop_worker();
         pty_.sever();
     }
 
+    // A label set here keeps the Dec GOTO seam at 0xC00000 (set_goto_seam()): a GOTO from it across that label goes
+    // the long way round.
     void set_encoder_position(std::uint8_t axis, std::uint32_t position) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         AxisState& state = axes_[axis_index(axis)];
@@ -249,6 +349,9 @@ private:
         std::uint32_t encoder_offset = 0;
         std::uint32_t target = 0;
         std::uint32_t velocity_counts_per_second = 100000;
+        std::uint32_t tracking_counts_per_second = 0;
+        std::uint64_t goto_busy_ms_left = 0;
+        std::optional<std::uint32_t> goto_seam;
         std::uint64_t motion_remainder = 0;
         int motion_direction = 1;
         bool slewing = false;
@@ -259,12 +362,53 @@ private:
         int stop_reads_remaining = 0;
         int post_stop_drift_remaining = 0;
         int crawling_home_searches = 0;
+        int inert_home_starts = 0;
+        int home_searching_reads = 0;  // an auto-completed home's MC_LEVEL_DONE reads that still answer searching
+        std::deque<std::deque<HomeLeg>> scripted_home_searches;
+        std::deque<HomeLeg> home_legs;  // the running scripted search
         std::vector<int> stops_before_home_starts;
+        int post_stop_motion_remaining = 0;
+        std::int32_t post_stop_motion_step = 0;
         std::deque<std::int32_t> label_read_offsets;
         std::chrono::steady_clock::time_point guide_deadline{};
         std::uint8_t autoguide_rate = 128;
         std::array<int, 256> command_counts{};
     };
+
+    // Drives a scripted search's legs for `milliseconds`; a search without a script does not move.
+    static void advance_home_search(AxisState& axis, std::uint64_t milliseconds) {
+        while (!axis.home_legs.empty()) {
+            HomeLeg& leg = axis.home_legs.front();
+            if (leg.direction == 0) {  // toward home: the direction and distance are fixed when the leg begins
+                const std::int32_t to_home = signed_delta(0, axis.physical_position);
+                leg.direction = to_home < 0 ? -1 : 1;
+                leg.counts = static_cast<std::uint32_t>(std::abs(to_home));
+                if (leg.counts == 0) {
+                    end_home_leg(axis);
+                    continue;
+                }
+            }
+            const std::uint64_t reach = leg.counts_per_second * milliseconds / 1000;
+            const bool leg_ends = leg.counts != 0 && reach >= leg.counts;
+            const std::uint64_t moved = leg_ends ? leg.counts : reach;
+            axis.physical_position = static_cast<std::uint32_t>(
+                (static_cast<std::int64_t>(axis.physical_position) + leg.direction * static_cast<std::int64_t>(moved)) &
+                0x00ffffff);
+            if (!leg_ends) {
+                if (leg.counts != 0) leg.counts -= static_cast<std::uint32_t>(moved);
+                return;
+            }
+            milliseconds -= moved * 1000 / leg.counts_per_second;
+            end_home_leg(axis);
+        }
+    }
+    static void end_home_leg(AxisState& axis) {
+        axis.home_legs.pop_front();
+        if (!axis.home_legs.empty()) return;
+        axis.physical_position = 0;  // the switch: the physical home
+        axis.homing = false;
+        axis.slewing = false;
+    }
 
     struct ReplyFault {
         std::uint8_t axis;
@@ -301,6 +445,15 @@ private:
         const std::uint32_t wrapped = (target - current) & 0x00ffffffU;
         return wrapped >= 0x00800000U ? static_cast<std::int32_t>(wrapped) - 0x01000000
                                       : static_cast<std::int32_t>(wrapped);
+    }
+
+    // The counts a GOTO still has to move: the shorter way, or with a seam the way that does not cross it.
+    static std::int32_t goto_delta(const AxisState& axis) {
+        if (!axis.goto_seam) return signed_delta(axis.target, encoder_position(axis));
+        const auto from_seam = [&](std::uint32_t label) {
+            return static_cast<std::int32_t>((label - *axis.goto_seam) & 0x00ffffffU);
+        };
+        return from_seam(axis.target) - from_seam(encoder_position(axis));
     }
 
     static std::vector<std::uint8_t> encode_u24(std::uint32_t value) {
@@ -379,6 +532,11 @@ private:
                                                     echo.size(), stop_));
             }
             send_unrelated_noise(request);
+            if (request.destination == 0x10 || request.destination == 0x11) {
+                std::lock_guard<std::mutex> lock(
+                    before_request_mutex_);  // held across the call: see set_before_request
+                if (before_request_) before_request_();
+            }
             const std::optional<AuxFrame> response = respond_to(request);
             if (!response) {
                 continue;
@@ -467,6 +625,11 @@ private:
                     axis.physical_position = (axis.physical_position + 4) & 0x00ffffffU;
                     --axis.post_stop_drift_remaining;
                 }
+                if (axis.post_stop_motion_remaining > 0) {
+                    axis.physical_position = static_cast<std::uint32_t>(
+                        (static_cast<std::int64_t>(axis.physical_position) + axis.post_stop_motion_step) & 0x00ffffff);
+                    --axis.post_stop_motion_remaining;
+                }
                 if (request.destination == 0x10 && axis.tracking) {
                     axis.physical_position =
                         (axis.physical_position + ra_tracking_drift_per_read_.load()) & 0x00ffffffU;
@@ -489,15 +652,17 @@ private:
                 if (request.payload.size() != 3) return std::nullopt;
                 axis.target = decode_u24(request.payload);
                 axis.slewing = !auto_complete_motions_.load();
+                axis.goto_busy_ms_left = goto_min_duration_ms_;
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
-                axis.motion_direction = signed_delta(axis.target, encoder_position(axis)) < 0 ? -1 : 1;
+                axis.motion_direction = goto_delta(axis) < 0 ? -1 : 1;
                 if (!axis.slewing) {
-                    axis.physical_position =
-                        (axis.physical_position + signed_delta(axis.target, encoder_position(axis))) & 0x00ffffffU;
+                    axis.physical_position = (axis.physical_position + goto_delta(axis)) & 0x00ffffffU;
                 }
                 axis.homing = false;
+                axis.home_legs.clear();
+                axis.home_searching_reads = 0;
                 break;
             case 0x13:
                 if (axis.stop_reads_remaining > 0) {
@@ -510,33 +675,61 @@ private:
             case 0x0b: {
                 axis.post_stop_drift_remaining = 0;
                 axis.stops_before_home_starts.push_back(axis.command_counts[0x24]);
-                const bool crawl = axis.crawling_home_searches > 0;
+                axis.home_legs.clear();
+                axis.home_searching_reads = 0;
+                if (axis.inert_home_starts > 0) {
+                    --axis.inert_home_starts;
+                    axis.homing = false;
+                    axis.slewing = false;
+                    axis.manual_motion = false;
+                    axis.tracking = false;
+                    axis.motion_remainder = 0;
+                    break;
+                }
+                if (!axis.scripted_home_searches.empty()) {
+                    axis.home_legs = std::move(axis.scripted_home_searches.front());
+                    axis.scripted_home_searches.pop_front();
+                }
+                const bool crawl = axis.crawling_home_searches > 0 && axis.home_legs.empty();
                 if (crawl) --axis.crawling_home_searches;
-                axis.homing = crawl || !auto_complete_motions_.load();
+                axis.homing = crawl || !axis.home_legs.empty() || !auto_complete_motions_.load();
                 axis.slewing = axis.homing;
                 axis.manual_motion = false;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
-                if (!axis.homing) axis.physical_position = 0;
+                if (!axis.homing) {
+                    axis.physical_position = 0;
+                    axis.home_searching_reads = auto_home_searching_reads_.load();
+                }
                 break;
             }
             case 0x12:
+                if (!axis.homing && axis.home_searching_reads > 0) {
+                    --axis.home_searching_reads;
+                    payload = {0x00};
+                    break;
+                }
                 payload = {static_cast<std::uint8_t>(axis.homing ? 0x00 : 0xff)};
                 break;
             case 0x24:
             case 0x25:
                 if (request.payload.size() != 1) return std::nullopt;
+                axis.home_searching_reads = 0;
                 axis.tracking = false;
                 axis.motion_remainder = 0;
                 if (request.payload[0] == 0) {
                     axis.stop_reads_remaining = stop_completion_reads_.load();
+                    std::tie(axis.post_stop_motion_remaining, axis.post_stop_motion_step) =
+                        post_stop_motion_[axis_index(request.destination)];
                     axis.slewing = false;
                     axis.homing = false;
+                    axis.home_legs.clear();
                     axis.manual_motion = false;
                 } else {
                     axis.manual_motion = true;
                     axis.slewing = false;
                     axis.homing = false;
+                    axis.home_legs.clear();
                     axis.motion_direction = request.command == 0x25 ? -1 : 1;
                 }
                 break;
@@ -589,6 +782,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> corrupt_next_checksum_{false};
     std::atomic<bool> auto_complete_motions_{false};
+    std::atomic<int> auto_home_searching_reads_{1};
     std::atomic<bool> hold_guide_until_completed_{false};
     std::atomic<bool> muted_{false};
     std::atomic<bool> echo_requests_{false};
@@ -604,6 +798,10 @@ private:
     std::optional<std::pair<std::uint8_t, std::uint8_t>> fragment_filter_;
     std::array<AxisState, 2> axes_{};
     int ra_stop_drift_reads_ = 0;
+    std::uint64_t goto_min_duration_ms_ = 0;
+    std::mutex before_request_mutex_;  // not state_mutex_: the hook takes it (advance_motion)
+    std::function<void()> before_request_;
+    std::array<std::pair<int, std::int32_t>, 2> post_stop_motion_{};
     std::array<std::vector<std::int32_t>, 2> label_read_offsets_;
     std::array<std::vector<std::uint8_t>, 2> motor_versions_{{{7, 18}, {7, 18}}};
     std::array<std::vector<std::uint8_t>, 2> motor_models_{{{0x17, 0x88}, {0x17, 0x88}}};

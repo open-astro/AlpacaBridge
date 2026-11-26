@@ -5,7 +5,7 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 ## Quick Start
 
 1. **Download the vendor SDK** from the vendor's official website
-2. **Read the SDK root** that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on. Nothing searches for the SDK: the path is literal and its shape differs per vendor. Most vendors keep the extracted folder as a level of its own (`external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64_26.07.28/`, `external/ToupTek/toupcamsdk.20260519/`, `external/Altair/altaircamsdk.20260531/`, `external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/`); SVBONY does not: `SVB_SDK_ROOT` is `external/SVBONY/` itself, and CMake looks for `external/SVBONY/include/SVBCameraSDK.h` and `external/SVBONY/lib/`, one level below that root
+2. **Read the SDK root** that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on. Nothing searches for the SDK: the path is literal and its shape differs per vendor. Most vendors keep the extracted folder as a level of its own (`external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64/`, `external/ToupTek/toupcamsdk/`, `external/Altair/altaircamsdk/`, `external/PlayerOne/PlayerOne_Camera_SDK_Linux/`); SVBONY does not: `SVB_SDK_ROOT` is `external/SVBONY/` itself, and CMake looks for `external/SVBONY/include/SVBCameraSDK.h` and `external/SVBONY/lib/`, one level below that root
 3. **Extract the SDK archive** so that its contents land at exactly that root
    - Two-level vendors: place the vendor-named folder under `external/<Vendor>/`
    - SVBONY: place the archive's `include/`, `lib/` and the rest directly in `external/SVBONY/`, with no extra folder level
@@ -49,6 +49,12 @@ This keeps the repository clean while allowing important documentation to be ver
 The ZWO SDK is vendored as a minimal subset in `external/ZWO/ASI_Camera_SDK/`, so
 no manual download is required for standard builds. If you need to update the
 SDK version, replace only the allowlisted files and keep the set minimal.
+
+Every vendored binary has its sha256 in [`SHA256SUMS`](SHA256SUMS), and CI fails
+when a file and its line differ (issue #2633). After an SDK bump, check the new
+files against the vendor's download, then run
+`python3 scripts/check_vendor_binaries.py --write` and commit `SHA256SUMS` with
+the new files.
 
 ZWO CAA and EAF SDK subsets are vendored in `external/ZWO/CAA/` and `external/ZWO/EAF/`
 for the rotator and focuser drivers.

@@ -188,22 +188,12 @@ TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", 
 
 #include "fake_serial_streamer.h"
 #include "fake_task_clock.h"
+#include "wandererastro_streamer_helpers.h"
 
 namespace {
 
-// Moves the fake clock by @p d, then waits (bounded, real time) for the
-// reader thread's next pass: its silence check is the one clock read a muted
-// or severed link makes per pass, taken under the lock the driver's getters
-// also take, so a getter called after this returns sees that pass's verdict.
-bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
-    clock.advance(d);
-    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
-}
-
-// set_muted() can land just after the streamer committed one more frame to the
-// pty; give the reader time to take it at the current virtual time before the
-// clock moves, or it would restart the silence window.
-void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+using alpacacore::test::wanderer::advance_one_pass;
+using alpacacore::test::wanderer::drain_after_mute;
 
 template <typename Pred>
 bool wait_until_sfw(Pred pred, std::chrono::milliseconds limit) {
@@ -241,18 +231,22 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
             return true;
         }
     };
-    drain_after_mute();
+    REQUIRE(drain_after_mute(wheel, clock));
     // The 10 s limit is inclusive: exactly 10 s of silence still serves the cache.
     REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
     CHECK(driver->get_position() == 2);
     // One millisecond more latches the fault.
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    const auto sent_before = wheel.commands().size();
     CHECK(position_throws());
     CHECK(driver->get_connected());
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(wheel.received("6"));  // no move went on the wire while faulted
+    // No move went on the wire while faulted: a move to Alpaca 5 is wire slot 6, sent as 2000 + slot.
+    REQUIRE(wheel.wait_for_quiet(std::chrono::seconds(5)));  // the streamer has read whatever was written
+    CHECK_FALSE(wheel.received("2006"));
+    CHECK(wheel.commands().size() == sent_before);
     // Names and offsets are driver-side and keep answering.
     CHECK(driver->get_names().size() == 8);
 
@@ -331,7 +325,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - Disconnect returns after the port 
     // A silent link under a blocking-read retune: a VTIME-paced reader would
     // park in read() and never see its stop flag.
     wheel.set_muted(true);
-    drain_after_mute();
+    REQUIRE(wheel.wait_for_quiet(std::chrono::seconds(5)));
     alpacacore::test::wanderer::retune_to_blocking_read(wheel.keepalive_fd());
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
@@ -353,7 +347,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - Link fault restores retuned line s
     // Bytes keep arriving but no frame parses (the wrong baud's garbage), so no
     // read ever times out and tty_read()'s own restore never runs.
     wheel.set_frame("ZZZZZZ\r");
-    drain_after_mute();
+    REQUIRE(alpacacore::test::wanderer::wait_for_frames(wheel, 1));
     alpacacore::test::wanderer::set_line_speed(wheel.keepalive_fd(), B9600);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     REQUIRE(alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == B9600);
@@ -376,4 +370,273 @@ TEST_CASE("WandererAstro Filter Wheel - another SFW version connects under a gen
     CHECK(driver->get_connected());
     CHECK(driver->get_name() == "WandererAstro Filter Wheel");
     driver->set_connected(false);
+}
+
+// ---------------------------------------------------------------------------
+// Decision 0009 (issue #1988): a hangup is a lost link at once, a silence fault
+// standing for util::kLinkStalenessBound is one too, the loss reason is the one
+// fault text until the next Connect or Disconnect, and only the client relinks.
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/link_health.h>
+
+namespace {
+
+// kSfwFrame at slot 5, so a reconnect shows which wheel answered.
+const char* const kReplugSfwFrame = "WSFW368A20260124A5ABCDEFGHIA0A0A0A0A0A0A0A0A1A\n";
+
+// Position and moves answer NotConnected over a lost link, before the fault
+// check or the cache; names and offsets are driver-side and keep answering,
+// and DeviceState is the empty list.
+void require_wheel_lost(alpacacore::FilterWheelDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    require_alpaca_error([&]() { (void)driver.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.set_position(5); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver.get_names().size() == 8);
+    CHECK(driver.get_focus_offsets().size() == 8);
+    CHECK(driver.get_device_state().empty());
+}
+
+}  // namespace
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp reader_loop
+// treating a hangup errno as a plain read error for the silence latch (no end_link_from_reader call).
+TEST_CASE("WandererAstro FilterWheel Driver - a cable pulled with the stream running loses the link at once (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the hangup can end the link
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 2);
+    const std::string port = wheel.slave_path();  // emptied by the cut
+
+    wheel.sever_link();
+    // Real time: the reader meets the hangup on its next read.
+    CHECK(wait_until_sfw([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_wheel_lost(*driver);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    CHECK_FALSE(driver->get_device_firmware().has_value());  // the cached firmware date went with the link
+    CHECK(wait_until_sfw([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                         std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp get_connected returning
+// connected_.load() alone.
+TEST_CASE("WandererAstro FilterWheel Driver - a command on a pulled cable fails NotConnected (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    wheel.sever_link();
+    // The write meets the dead port, or the reader already has: either way
+    // the move is NotConnected, never DriverException.
+    require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp
+// check_link_silence never asking link_.fault_stale(now), so the fault stands with Connected true.
+TEST_CASE("WandererAstro FilterWheel Driver - a silence fault standing 30 s loses the link (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = wheel.slave_path();
+
+    wheel.set_muted(true);
+    REQUIRE(drain_after_mute(wheel, clock));
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(10001)));
+    // Faulted, not lost: Connected stays true and Position refuses with DriverException.
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(advance_one_pass(clock, alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1)));
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(alpacacore::util::is_serial_port_in_use(port));
+
+    // The fault has now stood for the bound: the link is lost.
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    CHECK(wait_until_sfw([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_wheel_lost(*driver);
+    CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);
+    CHECK(wait_until_sfw([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                         std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp disconnect not
+// clearing loss_reason_, so the reason outlives the Disconnect.
+TEST_CASE("WandererAstro FilterWheel Driver - the loss reason stays until the next Disconnect or Connect (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugSfwFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(wheel);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_link_fault().empty());
+
+    wheel.sever_link();
+    REQUIRE(wait_until_sfw([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    const std::string reason = driver->get_link_fault();
+    CHECK(reason.find("Serial link lost") != std::string::npos);
+    clock.advance(std::chrono::minutes(5));  // nothing ages the kept reason away
+    CHECK(driver->get_link_fault() == reason);
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp set_connected keeping the
+// idempotency check `connected == connected_.load()`, so a Connect over a lost link returns as already connected.
+TEST_CASE("WandererAstro FilterWheel Driver - a Connect over a lost link reopens without a Disconnect (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugSfwFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(wheel);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 2);
+
+    wheel.sever_link();
+    REQUIRE(wait_until_sfw([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+
+    // No Disconnect: a Connect while the raw flag is still set must not be taken as already connected.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_position() == 4);  // the replugged wheel's slot 5, not the old cache
+    CHECK(driver->get_link_fault().empty());
+    // The Connect homed the replugged wheel, as every Connect does.
+    REQUIRE(replugged.wait_for_quiet(std::chrono::seconds(5)));
+    CHECK(replugged.received("1500002"));
+
+    // A Disconnect over a lost link completes and clears the reason.
+    const std::string replugged_port = replugged.slave_path();
+    replugged.sever_link();
+    REQUIRE(wait_until_sfw([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(replugged_port));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp connect's wait
+// loop not checking hung_up(), so it waits out serial_timeout_s.
+TEST_CASE("WandererAstro FilterWheel Driver - Connect fails at once when the port hangs up mid-wait (#1988)",
+          "[wandererastro][filterwheel][unit][fake][link-lost]") {
+    // No frame for 60 s; the master closes 300 ms in. The connect waits up to
+    // serial_timeout_s (5 s), so a connect that returns well before it saw the hangup.
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300), std::chrono::seconds(60));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200);
+    std::thread severer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the cut lands mid-wait
+        wheel.sever_link();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    severer.join();
+    CHECK(elapsed < std::chrono::milliseconds(2500));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a connect that never completed is not a lost session
+}
+
+namespace {
+// Real time: what the case waits for is the reader thread meeting the dead fd.
+template <typename Pred>
+bool wait_for_2262(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return pred();
+}
+}  // namespace
+
+// Issue #2262: EBADF on the device's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": its reader counted the read as a silent one and
+// Connected kept reading true until the silence fault, then the staleness bound, caught up.
+TEST_CASE("WandererAstro FilterWheel Driver - EBADF on the device's fd loses the link at once",
+          "[wandererastro][filterwheel][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the EBADF can end the link
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    const std::string port = wheel.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port, 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));  // the reader's read and a command's write both meet EBADF
+
+    CHECK(wait_for_2262([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK(
+        wait_for_2262([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}
+
+// FakeSerialStreamer SFW wheel mode: the opt-in sfw_travel argument applies a move command after the travel time.
+// The SFW ConformU factory uses the same travel (conformu_filterwheel_factories.h).
+constexpr auto kSfwTravel = std::chrono::milliseconds(600);
+
+TEST_CASE("FakeSerialStreamer - SFW mode moves the wheel after the travel time",
+          "[wandererastro][filterwheel][unit][fake]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(20), std::chrono::milliseconds(0),
+                                               kSfwTravel);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_position() == 2);
+
+    driver->set_position(5);  // wire slot 6
+    CHECK(wait_until_sfw([&] { return wheel.received("2006"); }, std::chrono::milliseconds(5000)));
+    CHECK(driver->get_position() == -1);  // still travelling: the frame has not changed yet
+    CHECK(wait_until_sfw([&] { return driver->get_position() == 5; }, std::chrono::milliseconds(5000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+TEST_CASE("FakeSerialStreamer - the fixed frame ignores a move command by default",
+          "[wandererastro][filterwheel][unit][fake]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(20));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->set_position(5);
+    REQUIRE(wait_until_sfw([&] { return wheel.received("2006"); }, std::chrono::milliseconds(5000)));
+    // Three travel times of streamed frames: if the move mode were on by default, at the factory's travel, the wheel
+    // would have landed by now.
+    std::this_thread::sleep_for(3 * kSfwTravel);
+    CHECK(driver->get_position() == -1);  // the target is never reached: the stream still says slot 3
+    CHECK_NOTHROW(driver->set_connected(false));
 }

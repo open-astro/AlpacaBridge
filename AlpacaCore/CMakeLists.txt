@@ -29,6 +29,7 @@ option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 option(ALPACACORE_ENABLE_SKYWATCHER "Enable SkyWatcher motor controller vendor support" OFF)
 option(ALPACACORE_ENABLE_ONSTEP "Enable OnStep vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
+option(ALPACACORE_ENABLE_REMOTEALPACA "Enable the remotealpaca upstream Alpaca client (decision 0023)" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini vendor support (focuser, flat panel)" OFF)
 option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
@@ -58,6 +59,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_SKYWATCHER ON)
     set(ALPACACORE_ENABLE_ONSTEP ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
+    set(ALPACACORE_ENABLE_REMOTEALPACA ON)
     set(ALPACACORE_ENABLE_GEMINI ON)
     set(ALPACACORE_ENABLE_SVBONY ON)
     set(ALPACACORE_ENABLE_CELESTRON ON)
@@ -81,7 +83,6 @@ set(ALPACACORE_CORE_SOURCES
     src/core/alpaca_defs.cpp
     src/core/device_capabilities.cpp
     src/core/util/logging.cpp
-    src/core/util/threading.cpp
     src/core/util/error_handling.cpp
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
@@ -89,12 +90,14 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/atomic_file.cpp
     src/core/util/flat_number_file.cpp
     src/core/util/power_port_state_store.cpp
+    src/core/util/soft_pwm_ports.cpp
     src/core/util/rotator_sync_offset_store.cpp
     src/core/util/unique_id.cpp
     src/core/util/lock_gate.cpp
     src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
+    src/catalog/attached_devices.cpp
 )
 
 # Management sources
@@ -116,6 +119,16 @@ target_include_directories(alpacacore PUBLIC
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 
+# The libcurl implementation of util::HttpClient, the one outbound HTTP seam a
+# vendor uses (decision 0023, issue #1753). Its own library so alpacacore keeps
+# no curl dependency: only a vendor that speaks HTTP (WeeWX) links it. Built
+# whenever libcurl is found; a vendor that needs it requires it.
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    add_library(alpacacore_http_client STATIC src/core/util/http_client.cpp)
+    target_link_libraries(alpacacore_http_client PUBLIC alpacacore PRIVATE CURL::libcurl)
+endif()
+
 # Built-in descriptor composition (open-astro#710): which vendor descriptors this
 # build registers. Kept out of alpacacore so the core links no vendor library and
 # the dependency runs one way: alpacacore <- alpacacore_<vendor> <- alpacacore_builtins.
@@ -128,6 +141,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/astroasis/astroasis_schema.cpp
     src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
+    src/vendors/remotealpaca/remotealpaca_schema.cpp
     src/vendors/svbony/svbony_schema.cpp
     src/vendors/gphoto/gphoto_schema.cpp
     src/vendors/playerone/playerone_schema.cpp
@@ -216,6 +230,16 @@ if(ALPACACORE_ENABLE_WEEWX)
         # WeeWX factory registration behind this macro. Without it the
         # registration compiles empty even though alpacacore_weewx links fine.
         target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WEEWX)
+    endif()
+endif()
+
+# The remotealpaca proxied devices over the upstream Alpaca client (issue #1753).
+if(ALPACACORE_ENABLE_REMOTEALPACA)
+    add_subdirectory(src/vendors/remotealpaca)
+    if(TARGET alpacacore_remotealpaca)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_remotealpaca)
+        # register_builtin_factories() guards its remotealpaca factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_REMOTEALPACA)
     endif()
 endif()
 
@@ -362,6 +386,15 @@ install(TARGETS alpacacore_builtins
     RUNTIME DESTINATION bin
 )
 
+if(TARGET alpacacore_http_client)
+    install(TARGETS alpacacore_http_client
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
 # Install vendor libraries if they exist
 if(ALPACACORE_ENABLE_ZWO AND TARGET alpacacore_zwo)
     install(TARGETS alpacacore_zwo
@@ -419,6 +452,15 @@ endif()
 
 if(ALPACACORE_ENABLE_WEEWX AND TARGET alpacacore_weewx)
     install(TARGETS alpacacore_weewx
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_REMOTEALPACA AND TARGET alpacacore_remotealpaca)
+    install(TARGETS alpacacore_remotealpaca
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

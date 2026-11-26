@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -55,24 +56,35 @@ struct Rig {
     OperationGeneration generation;
     std::atomic<bool> fail{false};
     std::atomic<int> next{1};
+    // The probe answered and returned nothing for the module to publish; `self_publish` runs first, if set
+    // (the probe taking the token and publishing the frame itself).
+    std::atomic<bool> silent{false};
+    std::function<void()> self_publish;
     std::atomic<int> probes{0};
     std::atomic<int> lost_calls{0};
     std::atomic<std::thread::id> lost_thread{};
     std::function<void()> during;
     std::unique_ptr<PolledState<Frame>> state;
 
-    explicit Rig(int threshold = 3, std::chrono::nanoseconds max_age = 2 * kPeriod) {
+    // With no `loss_bound` the Config keeps its default.
+    explicit Rig(int threshold = 3, std::chrono::nanoseconds max_age = 2 * kPeriod,
+                 std::optional<std::chrono::nanoseconds> loss_bound = std::nullopt) {
         PolledState<Frame>::Config config;
         config.period = kPeriod;
         config.fault_threshold = threshold;
         config.max_age = max_age;
+        if (loss_bound) config.loss_bound = *loss_bound;
         config.log_tag = "Test";
         state = std::make_unique<PolledState<Frame>>(
             clock, generation, config,
-            [this] {
+            [this]() -> std::optional<Frame> {
                 ++probes;
                 if (during) during();
                 if (fail.load()) throw std::runtime_error("no reply");
+                if (silent.load()) {
+                    if (self_publish) self_publish();
+                    return std::nullopt;
+                }
                 return Frame{next.load()};
             },
             [this] {
@@ -362,6 +374,64 @@ TEST_CASE("PolledState - max_age must undercut the link staleness bound", "[poll
     CHECK_THROWS_AS(PolledState<Frame>(clock, generation, config, [] { return Frame{}; }, [] {}), AlpacaException);
 }
 
+// Falsified by: polled_state.h:poll_once() compare the frame's age with kLinkStalenessBound, not config_.loss_bound.
+TEST_CASE("PolledState - a longer loss_bound admits a longer max_age and moves the loss to it",
+          "[polled_state][unit]") {
+    SECTION("a 60 s max_age under a 90 s bound constructs; max_age at the bound is refused") {
+        CHECK_NOTHROW(Rig(3, 60s, 90s));
+        CHECK_THROWS_AS(Rig(3, 90s, 90s), AlpacaException);
+    }
+    SECTION("a frame 40 s old is stale but not lost; past 90 s it is lost") {
+        Rig rig(3, 20s, 90s);  // stale past 20 s, lost at 90 s
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.silent = true;  // answers every probe, publishes nothing: the frame ages
+
+        rig.clock.advance(40s);
+        const auto reading = rig.state->served();
+        CHECK(reading.stale);
+        CHECK(reading.value.value == 1);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+
+        rig.clock.advance(50s - 1ms);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+        rig.clock.advance(1ms);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        CHECK(rig.lost_calls.load() == 1);
+        rig.state->stop_and_join();
+    }
+    SECTION("a fault latched with the frame is lost at 90 s, not at 30 s") {
+        Rig rig(3, 60s, 90s);
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.fail = true;
+        for (int i = 0; i < 3; ++i) rig.state->poll_now_for_testing();
+        REQUIRE_FALSE(rig.state->fault().empty());
+
+        rig.clock.advance(40s);
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+        rig.clock.advance(50s);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        CHECK(rig.lost_calls.load() == 1);
+        rig.state->stop_and_join();
+    }
+    SECTION("the default bound still loses the frame at util::kLinkStalenessBound") {
+        Rig rig(1000);
+        REQUIRE(rig.state->start());
+        rig.state->pause_for_testing(true);
+        rig.silent = true;
+        rig.clock.advance(alpacacore::util::kLinkStalenessBound);
+        rig.state->poll_now_for_testing();
+        CHECK(rig.state->link_lost());
+        rig.state->stop_and_join();
+    }
+}
+
 namespace {
 
 // Delegates to the fake; `on_now` runs once inside now(), which orders an interleaving
@@ -481,4 +551,63 @@ TEST_CASE("PolledState - lose_link sets lost at once and the poll ends and calls
     rig.state->stop_and_join();
     rig.state->reset();
     CHECK_FALSE(rig.state->link_lost());
+}
+
+// Falsified by: polled_state.h:poll_once() skip the health_.on_reply() call when the probe returns nullopt.
+TEST_CASE("PolledState - a self-publishing probe that returns nullopt clears a latched fault", "[polled_state][unit]") {
+    Rig rig;
+    REQUIRE(rig.state->start());
+    rig.state->pause_for_testing(true);
+    rig.fail = true;
+    for (int i = 0; i < 3; ++i) rig.state->poll_now_for_testing();
+    REQUIRE_FALSE(rig.state->fault().empty());
+
+    rig.fail = false;
+    rig.silent = true;
+    rig.self_publish = [&rig] {
+        const auto token = rig.state->begin_poll();
+        CHECK(rig.state->publish(token, Frame{9}));
+    };
+    rig.state->poll_now_for_testing();
+    CHECK(rig.state->fault().empty());
+    CHECK_FALSE(rig.state->link_lost());
+    CHECK(rig.state->served().value.value == 9);  // the probe's own frame, not one the module published
+    rig.state->stop_and_join();
+}
+
+// Falsified by: polled_state.h:publish() return true without comparing the token (the write-epoch guard).
+TEST_CASE("PolledState - publish after a write since begin_poll returns false and drops the frame",
+          "[polled_state][unit]") {
+    Rig rig;
+    REQUIRE(rig.state->start());
+    rig.state->stop_and_join();
+
+    const auto stale = rig.state->begin_poll();
+    rig.state->write([](Frame& f) { f.value = 99; });
+    CHECK_FALSE(rig.state->publish(stale, Frame{5}));
+    CHECK(rig.state->served().value.value == 99);
+
+    const auto fresh = rig.state->begin_poll();
+    CHECK(rig.state->publish(fresh, Frame{6}));
+    CHECK(rig.state->served().value.value == 6);
+}
+
+// Falsified by: polled_state.h:poll_once() skip the frame-age loss check after a probe that returned nullopt.
+TEST_CASE("PolledState - a nullopt probe with no publish ages the last frame to loss", "[polled_state][unit]") {
+    Rig rig(1000);
+    REQUIRE(rig.state->start());
+    rig.state->pause_for_testing(true);
+    rig.silent = true;  // answers every probe, publishes nothing
+
+    rig.clock.advance(alpacacore::util::kLinkStalenessBound - 1ms);
+    rig.state->poll_now_for_testing();
+    CHECK_FALSE(rig.state->link_lost());
+    CHECK(rig.lost_calls.load() == 0);
+
+    rig.clock.advance(1ms);
+    rig.state->poll_now_for_testing();
+    CHECK(rig.state->link_lost());
+    CHECK(rig.state->fault().empty());  // a good probe latched no fault: the frame's age is the verdict
+    CHECK(rig.lost_calls.load() == 1);
+    rig.state->stop_and_join();
 }

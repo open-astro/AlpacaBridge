@@ -82,6 +82,8 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
+using alpacacore::test::advance_polling;
+using alpacacore::test::age_past_connect_grace;
 using alpacacore::test::require_alpaca_error;
 
 class WorkerGate {
@@ -203,7 +205,7 @@ bool advance_until_not_slewing(alpacacore::TelescopeDriver& driver, alpacacore::
     const auto deadline = clock.now() + std::chrono::seconds(20);
     while (read_slewing(driver) != SlewingRead::False) {
         if (clock.now() >= deadline) return false;
-        clock.advance(std::chrono::milliseconds(100));
+        advance_polling(clock, std::chrono::milliseconds(100));
     }
     return true;
 }
@@ -265,6 +267,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
         0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, 45.0, -122.0, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -275,7 +278,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
 
     mount.set_reject_goto(false);
     mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
-    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+    age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
     gate.arm();
     REQUIRE_NOTHROW(driver->slew_to_alt_az_async(30.0, 90.0));
     const bool worker_paused = gate.wait_until_entered();
@@ -321,6 +324,104 @@ TEST_CASE("iOptron async - a stale worker cannot publish over a newer accepted s
     CHECK(mount.count(":MS1#") == 1);
     REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
+}
+
+// Decision 0006 rule 3: a newer SlewToCoordinatesAsync supersedes the body in flight and returns without joining it.
+// The older body is held before it takes the operation lock; once released it sends nothing (its claim is lost), so
+// the newer GOTO is the only and last :MS1# (open-astro#768).
+// Falsified by: ioptron_telescope_driver.cpp start_slew_body() calling reap_slew_dispatch() before slew_.start().
+TEST_CASE("iOptron async - a newer slew supersedes the body in flight without joining it",
+          "[ioptron][telescope][async][slewfailure]") {
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    WorkerGate gate;
+    gate.arm();
+    std::atomic<int> bodies_returned{0};  // before the driver, whose slot joins the threads that set it
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {}, clock);
+    alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, [&](std::function<void()> run) {
+        return std::thread([run = std::move(run), &bodies_returned] {
+            run();
+            bodies_returned.fetch_add(1);
+        });
+    });
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    const bool worker_paused = gate.wait_until_entered();
+    if (!worker_paused) gate.release();
+    REQUIRE(worker_paused);
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool newer_returned = false;
+    std::exception_ptr newer_error;
+    std::thread newer([&] {
+        try {
+            driver->slew_to_coordinates_async(6.5, 25.0);
+        } catch (...) {
+            newer_error = std::current_exception();
+        }
+        std::lock_guard<std::mutex> lock(done_mutex);
+        newer_returned = true;
+        done_cv.notify_all();
+    });
+    bool returned_while_held = false;
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        returned_while_held = done_cv.wait_for(lock, std::chrono::seconds(3), [&] { return newer_returned; });
+    }
+    gate.release();
+    newer.join();
+    CHECK(returned_while_held);
+    if (newer_error) std::rethrow_exception(newer_error);
+
+    REQUIRE(wait_until([&] { return bodies_returned.load() == 2; }, 5000));
+    // The superseded body wrote nothing: no stored failure, the newer target stands.
+    CHECK(read_slewing(*driver) != SlewingRead::Threw);
+    CHECK(driver->get_target_right_ascension() == 6.5);
+    driver->set_connected(false);
+    const auto log = mount.commands();
+    CHECK(mount.count(":MS1#") == 1);
+    std::string last_target;
+    for (const auto& cmd : log) {
+        if (cmd.rfind(":SRA", 0) == 0) last_target = cmd;
+        if (cmd == ":MS1#") break;
+    }
+    CHECK(last_target == ":SRA035100000#");  // 6.5 h in 0.01 arcsec: the newer target
+}
+
+// open-astro#768 with the older body inside its :MS1# exchange: the newer initiator claims only under the operation
+// lock that body holds, so the older GOTO lands first and the newer target is the one the last :MS1# carries.
+// Falsified by: ioptron_telescope_driver.cpp run_slew_body() taking the motion claim check out from under the
+// operation lock, or dispatch_slew_command_locked() releasing the operation lock between :SRA and :MS1#.
+TEST_CASE("iOptron async - a superseded GOTO already on the wire lands before the newer one",
+          "[ioptron][telescope][async][slewfailure]") {
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    mount.set_command_reply_delay(":MS1#", std::chrono::milliseconds(300));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));  // the older body is in its exchange
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.5, 25.0));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
+    mount.set_command_reply_delay(":MS1#", std::chrono::milliseconds(0));
+    driver->set_connected(false);
+
+    const auto log = mount.commands();
+    std::vector<std::string> goto_targets;  // the :SRA each :MS1# carried, in wire order
+    std::string last_target;
+    for (const auto& cmd : log) {
+        if (cmd.rfind(":SRA", 0) == 0) last_target = cmd;
+        if (cmd == ":MS1#") goto_targets.push_back(last_target);
+    }
+    REQUIRE(goto_targets.size() == 2);
+    CHECK(goto_targets[0] == ":SRA029700000#");  // 5.5 h
+    CHECK(goto_targets[1] == ":SRA035100000#");  // 6.5 h
 }
 
 TEST_CASE("iOptron - rejected synchronous GOTO clears the prior async failure",
@@ -369,6 +470,49 @@ TEST_CASE("iOptron - MoveAxis clears a superseded dispatch before its stale work
     driver->set_connected(false);  // joins the stale dispatch before checking the wire
     CHECK(mount.count(":MS1#") == 0);
     CHECK(mount.count(":Z") == 0);  // a ghost GOTO must not trigger the HAE16 RA trim
+}
+
+// Issue #2522 (the #2263 policy): an async GOTO claims both axes, so a MoveAxis on either axis, a jog or a stop, ends
+// a dispatch body that has not sent its :MS1# yet. The case waits for the body to return on its own before it stops
+// the jog or disconnects, so neither of those is what ends it.
+// Falsified by: ioptron_telescope_driver.cpp move_axis_under_lock() claiming nothing for a non-zero rate (the jog
+// legs fail), or cancelling nothing for a zero rate (the stop legs fail).
+TEST_CASE("iOptron motion owner - a MoveAxis on either axis supersedes an async GOTO not yet dispatched (#2522)",
+          "[ioptron][telescope][async][motion-owner]") {
+    for (const int axis : {0, 1}) {
+        for (const bool jog : {false, true}) {
+            CAPTURE(axis, jog);
+            alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+            REQUIRE(mount.ok());
+            WorkerGate gate;
+            gate.arm();
+            std::atomic<bool> body_returned{false};  // before the driver, whose slot joins the thread that sets it
+            alpacacore::test::FakeTaskClock clock;
+            auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
+                0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {},
+                clock);
+            alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, [&](std::function<void()> run) {
+                return std::thread([run = std::move(run), &body_returned] {
+                    run();
+                    body_returned.store(true);
+                });
+            });
+            REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+            REQUIRE_NOTHROW(driver->slew_to_coordinates_async(0.001, 0.0));
+            const bool worker_paused = gate.wait_until_entered();
+            if (!worker_paused) gate.release();
+            REQUIRE(worker_paused);
+
+            REQUIRE_NOTHROW(driver->move_axis(axis, jog ? driver->get_axis_rate_range(axis).first : 0.0));
+            gate.release();
+            REQUIRE(wait_until([&] { return body_returned.load(); }, 5000));
+            CHECK(mount.count(":MS1#") == 0);
+            CHECK(mount.count(":Z") == 0);  // no ghost GOTO, so no HAE16 RA trim either
+            if (jog) driver->move_axis(axis, 0.0);
+            driver->set_connected(false);
+        }
+    }
 }
 
 TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handoff",
@@ -448,7 +592,7 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_normal_goto(true);  // :MS2# would be accepted: a re-aim shows (#2395)
-    CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, 20.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->slew_to_coordinates(5.5, 20.0); }, alpacacore::AlpacaError::DriverException);
     const int goto_attempts = mount.count(":MS1#");
     CHECK(goto_attempts == 1);  // no retry after a limit rewrite
 
@@ -468,8 +612,11 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
 namespace {
 
 // Runs `call` on another thread and steps the fake clock until it returns, so a synchronous slew (which waits on the
-// task clock) ends instead of hanging. Returns what it threw, or null.
-std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& call) {
+// task clock) ends instead of hanging. Each step lets the poll finish its tick, and `on_step` (if any) sees the virtual
+// time stepped so far. Returns what it threw, or null.
+std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& call,
+                                      const std::function<void(std::chrono::nanoseconds)>& on_step = {}) {
+    const auto began = clock.now();
     auto done = std::async(std::launch::async, [&]() -> std::exception_ptr {
         try {
             call();
@@ -479,7 +626,8 @@ std::exception_ptr run_stepping_clock(alpacacore::test::FakeTaskClock& clock, co
         return nullptr;
     });
     for (int i = 0; i < 2000 && done.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready; ++i) {
-        clock.advance(std::chrono::milliseconds(500));
+        advance_polling(clock, std::chrono::milliseconds(500));
+        if (on_step) on_step(clock.now() - began);
     }
     return done.get();
 }
@@ -579,9 +727,10 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         if (initiator.alt_az) {
             mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
-            clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+            age_past_connect_grace(clock);            // past the connect fast-cache grace and the status TTL
         }
 
         IoptronLogCapture logs;
@@ -662,6 +811,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
     alpacacore::test::FakeTaskClock clock;
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    wait_for_ioptron_connect_parked(clock);
     mount.set_goto_reply("", /*moves=*/true);
     const int stops_before = mount.count(":Q#");
     const int status_reads = mount.count(":GLS#");
@@ -669,7 +819,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // One :GLS# before the :MS1# (was the mount already moving?) and one after it (is it moving now?).
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1 && mount.count(":GLS#") > status_reads + 1; }, 10000));
-    clock.advance(std::chrono::seconds(6));  // past the dispatch window: the mount's status decides
+    advance_polling(clock, std::chrono::seconds(6));  // past the dispatch window: the mount's status decides
     CHECK(read_slewing(*driver) == SlewingRead::True);
     CHECK(mount.count(":Q#") == stops_before);
     driver->abort_slew();
@@ -689,6 +839,7 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
         alpacacore::test::FakeTaskClock clock;
         auto driver = safety_driver(mount, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        wait_for_ioptron_connect_parked(clock);
         mount.set_system_status(2);  // earlier motion still running
         mount.set_goto_reply("", /*moves=*/false);
         const int stops_before = mount.count(":Q#");
@@ -707,7 +858,7 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
             mount.set_system_status(1);  // the old motion ends
             REQUIRE(wait_until(
                 [&] {
-                    clock.advance(std::chrono::milliseconds(100));
+                    advance_polling(clock, std::chrono::milliseconds(100));
                     return read_slewing(*driver, &message) == SlewingRead::Threw;
                 },
                 10000));
@@ -827,10 +978,23 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO whose landing position canno
     alpacacore::test::FakeTaskClock clock;
     auto driver = safety_driver(mount, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    mount.fail_position_reads_after_goto(3);
     const int stops_before = mount.count(":Q#");
 
-    const std::exception_ptr error = run_stepping_clock(clock, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    // The poll reads the position too, and three failed polls would latch a fault that Slewing reports before the wait
+    // reaches its landing reads. So the poll is paused and ticked by hand: once the 5 s hold is over, one tick samples
+    // the stopped mount (Slewing ends), and only then do the position reads start to fail, for the wait's own three
+    // direct reads alone.
+    alpacacore::vendor::ioptron::set_state_poll_paused_for_testing(*driver, true);
+    bool armed = false;
+    const std::exception_ptr error = run_stepping_clock(
+        clock, [&] { driver->slew_to_coordinates(5.5, 20.0); },
+        [&](std::chrono::nanoseconds stepped) {
+            if (!armed && stepped >= std::chrono::seconds(6)) {
+                armed = true;
+                alpacacore::vendor::ioptron::poll_state_now_for_testing(*driver);
+                mount.fail_next_position_reads(3);
+            }
+        });
     int code = 0;
     const std::string message = message_of(error, &code);
     CHECK(code == alpacacore::AlpacaError::DriverException);

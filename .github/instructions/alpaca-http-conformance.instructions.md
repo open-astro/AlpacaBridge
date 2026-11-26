@@ -21,6 +21,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     A value that parses but is out of range for the device (the driver's or the router's range check) is answered the same way: HTTP 200 with `InvalidValue` (0x401). A parameter that is missing, or whose value does not parse as the required type, is not: see `400` below.
   - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. Also 400: a required parameter that is missing, or a value that cannot be parsed as the required type (`Position=abc`, `TempComp=maybe`, a JSON field of the wrong type, a non-whole or out-of-`int` integer); the Device API 400 text says "insufficient information" and Alpaca API Reference s2.5 sends it before the driver. The parse helpers (`parse_int_value`, `parse_bool_value`, `parse_double_value`, `json_int_value`, behind `DeviceCall::get_*`/`find_*` in `device_call.cpp`) throw `RequestNotInterpretable`, which `DeviceCall::run` turns into 400, never reaching the driver. Every Device API 400 body is `text/plain` with a short message, no JSON envelope (built by `DeviceCall::run` for a dispatcher arm and by `set_bad_request_text` for the routing-level 400s); the 400s of the AlpacaBridge-only management requests (`description` write, `configuredevice`, `update/channel`) keep the JSON envelope ([ADR 0007](../../docs/decisions/0007-lan-surface-threat-model.md)). Decided 2026-10-21 on issue #1476; `test_routing.cpp` and `test_route_table.cpp` pin both. A genuinely unroutable URL (no device/management match) stays 404.
     `DeviceCall::run` (`AlpacaHTTP/src/http/device_call.cpp`) is the one place that decides 400 text versus an Alpaca error for a device call: a `RequestNotInterpretable` becomes the 400, an `AlpacaException` the mapped error number with a `200`, and any other `std::exception` `DriverError` (0x500) with its `what()`. A dispatcher arm reads scalar parameters through `DeviceCall::get_*`/`find_*` and answers through `ok()`/`ok_void()`; the arms that take a structured or raw field (action, command*, filter wheel names/focusoffsets, ObservingConditions) read it through `DeviceCall::json_field`/`form_field`. No arm parses the body with `parse_json`, catches these exceptions or copies the transaction ids itself.
+    `ManagementCall` (`AlpacaHTTP/src/http/management_call.h`, issue #2486) is the same for a management handler: it reads `ClientTransactionID` from the query (a non-zero JSON body ID replaces it once the handler reads the body through `json_body()`), finds a body field by its accepted spellings (`json_field`), and builds the envelope (`ok()`, `error()`, `failure()` for a caught exception). The log endpoints use it; a management handler moved onto it parses no `ClientTransactionID` itself.
   - `403` — a `Host` header that is not allowed, only when `http.host_check_enabled` is true (off by default; issue #392, checked in `Router::route()` before static files and routing: IP literals, `localhost`, this machine's hostname, `*.local`/`*.home.arpa`/`*.internal` and `http.allowed_hosts`; a missing `Host` passes), or a cross-origin state-changing request. Both carry the Alpaca envelope with `InvalidValue` and echo `ClientTransactionID`; a test that sends another `Host` gets the 403 only with the check enabled (`Router::set_host_check_enabled(true)`).
   - `500` — unexpected internal error only.
 - **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
@@ -103,7 +104,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   worth a structural fix here: closing it means every driver exposing one
   atomic "get state" call instead of two, a bigger change than this PR's
   scope. Left as a known risk rather than solved.
-- **`Connected` is per-client, refcounted in the router — never wire an
+- **`Connected` is per-client, refcounted by the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
   guider on the same mount), so the router keeps a per-device registry of
@@ -112,8 +113,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `getpeername`, so ClientID-less clients on different hosts get distinct
   anonymous slots; the length prefix keeps a client-supplied ClientID from
   forging a collision with another (address, ClientID) pair, and an empty
-  address degrades to ClientID-only) via `Router::register_client_connection` and
-  friends: first client in powers the upstream link, `PUT connected=false`
+  address degrades to ClientID-only; `ClientConnectionLedger::client_key`) in
+  `ClientConnectionLedger` (`src/http/client_connection_ledger.h`, issue #2521,
+  tested alone in `test_client_connection_ledger.cpp`): first client in powers the upstream link, `PUT connected=false`
   (and Platform 7 `disconnect`) only tears it down when the LAST registered
   client leaves, and `GET connected` answers the *caller's* registration
   AND-ed with device state (ClientID-less requests read raw device state on
@@ -125,14 +127,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   device connected; device removal clears the registry entry (the map is
   keyed by driver pointer — a later driver at a recycled address must not
   inherit registrations). A per-device connection-op mutex
-  (`device_connection_op_mutex`) serializes the whole decision + driver call
+  (`ClientConnectionLedger::op_mutex`) serializes the whole decision + driver call
   so a client connecting during another client's last-out teardown can't
   register against a link about to drop; it is held across the blocking
   connect/disconnect waits (same-device ops queue) while the registry mutex
-  itself still never spans driver calls — and `clear_client_connections`
+  itself still never spans driver calls — and `ClientConnectionLedger::clear`
   must never erase the op-mutex entry (it runs under the op mutex; erasing
   would let a concurrent op mint a fresh mutex and bypass serialization) —
-  op-mutex entries are reaped only by `purge_device_connection_state`,
+  op-mutex entries are reaped only by `ClientConnectionLedger::purge`,
   called in `handle_remove_device` AFTER the op lock is released and the
   device is out of the DeviceRegistry (issue #162); `device_is_current`
   guards every map insertion so a straggler request that fetched the device
@@ -141,6 +143,20 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   back an ephemeral mutex). If you add any new
   endpoint that connects or disconnects a device, route the decision
   through this registry and take the op mutex.
+  The same registry feeds the web UI's activity dot (issue #1764):
+  `configureddevices` reports per device `ActiveClients` (registrations
+  refreshed inside the 10 minute window) and `LastClientRequestAgeMs` (age
+  of the newest, absent when none) from `ClientConnectionLedger::activity`, which reads
+  the map only and never calls the driver. A device request carrying
+  `X-AlpacaBridge-Client: web-ui` (the web UI's own, `WEB_UI_CLIENT_HEADER` in
+  `web/format.js`) skips the per-request refresh in `handle_device`; a
+  `Connected` GET or PUT still registers or refreshes as before, and the web
+  UI sends neither (its only device request is the Celestron calibration
+  action). The header is the web UI's alone: an Alpaca client that copies it
+  stops refreshing its own registration, which then expires after 10 minutes.
+  The registry clock is
+  injectable (the ledger takes it at construction; a router test passes it as
+  `Router`'s third constructor argument); the 10 minute window is unchanged.
 - **Connections are persistent (HTTP keep-alive) — never emit
   `Connection: close` on a normal response** (2026-09-07). `Response::to_string()`
   defaulted to `Connection: close`, and `Server::handle_connection` served one
@@ -283,10 +299,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   padding, not a request). This also settles the per-request timeout
   question that two review rounds on #233 got wrong in different ways: a
   worker only ever reads a connection whose request has already begun
-  arriving, so every recv runs under the plain 30 s `kSocketTimeoutSeconds`
+  arriving, so every body recv runs under the plain 30 s `kSocketTimeoutSeconds`
   bound set at accept time and there is no idle timeout to restore. Tests:
   the slow-body and pre-carried-headers cases in `test_server_socket.cpp`
   (16 s gap inside request 2's body, in its own write and pre-carried).
+  **The header phase has its own deadline** (issue #1694): the request line
+  and headers of every request, keep-alive ones included, must arrive within
+  `kHeaderDeadlineSeconds` (10 s) of the worker starting to read them; each
+  header recv waits (`poll()`) only for the time left, and expiry is a 408 and
+  a close. Without it a peer trickling one header byte at a time reset the
+  30 s recv bound with every byte and held the worker about 150 s, and the
+  per-address cap is no defence (its default equals the pool size). Test: the
+  header-deadline case in `test_server_socket.cpp`, shortened through
+  `Server::set_header_deadline_for_test()`.
 - **Persistence is opt-in: a connection may only stay open for an exchange we
   framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
   latent framing gap into a stream desync, because leftover or mis-framed

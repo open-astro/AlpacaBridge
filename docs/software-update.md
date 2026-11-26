@@ -143,6 +143,9 @@ The state-changing endpoints (`check`, `install`, `channel`) carry the cross-ori
 [wifi-api.md](wifi-api.md): a browser request whose `Origin` does not match
 `Host` gets HTTP 403 with `ErrorMessage` "Cross-origin software update requests
 are not allowed". `GET status` is exempt, like every other GET.
+A verb a known sub-path does not take (a `GET` on `check`, a `POST` on `status`) is answered HTTP 405 with
+`Allow` and `ErrorNumber` 1036 (`InvalidOperation`), after the guard; an unknown sub-path is HTTP 200 with
+`ErrorNumber` 1025 and "Unknown update endpoint or method: <sub>".
 
 - `GET /management/v1/update/status` returns the last check result and the
   installer state without any network fetch (it reads the unit's state over
@@ -227,7 +230,8 @@ answers 0x400 "Software update not configured".
 the arm64 Trixie `main` index at apt.openastro.net, which means "follow the
 update channel": leave the key out (it is a commented example in the shipped
 file) unless you mirror the repository. Any other non-empty value is an
-override that pins the check and disables the channel selector. Only the check
+override that pins the check and disables the channel selector. The URL must be
+`https://`: the fetch refuses a plain `http://` mirror ("Unsupported protocol"). Only the check
 uses it; the install always goes through the host's own apt sources. An empty
 value disables the check. Credentials do not belong in this URL: any client on
 the LAN can read the status, and although the server removes a

@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/nexstar_frame.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
@@ -37,7 +38,6 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -167,8 +167,7 @@ std::string probe_synscan_port(const std::string& port_path) {
 bool raw_port_looks_like_synscan_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, synscan_usb_tokens());
 }
 
 // Issue #1202: whether the scan may probe @p resolved. A port another
@@ -305,81 +304,9 @@ int parse_hex_pair(std::string_view value, std::size_t offset) {
     return result;
 }
 
-int parse_mode_byte(const std::string& response) {
-    if (response.empty()) {
-        return 0;
-    }
-    unsigned char ch = static_cast<unsigned char>(response[0]);
-    if (ch >= static_cast<unsigned char>('0') && ch <= static_cast<unsigned char>('9')) {
-        return static_cast<int>(ch - static_cast<unsigned char>('0'));
-    }
-    return static_cast<int>(ch);
-}
-
-std::string build_hex(uint32_t value, std::size_t width) {
-    std::ostringstream oss;
-    oss << std::uppercase << std::setw(static_cast<int>(width)) << std::setfill('0') << std::hex << value;
-    return oss.str();
-}
-
-std::string trailing_hex(const std::string& value) {
-    std::size_t end = value.size();
-    while (end > 0 && !std::isxdigit(static_cast<unsigned char>(value[end - 1]))) {
-        --end;
-    }
-    std::size_t start = end;
-    while (start > 0 && std::isxdigit(static_cast<unsigned char>(value[start - 1]))) {
-        --start;
-    }
-    return value.substr(start, end - start);
-}
-
-std::string leading_hex(const std::string& value) {
-    std::size_t start = 0;
-    while (start < value.size() && !std::isxdigit(static_cast<unsigned char>(value[start]))) {
-        ++start;
-    }
-    std::size_t end = start;
-    while (end < value.size() && std::isxdigit(static_cast<unsigned char>(value[end]))) {
-        ++end;
-    }
-    return value.substr(start, end - start);
-}
-
-std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std::string& response,
-                                                                       bool precise) {
-    const std::size_t expected_digits = precise ? 6 : 4;
-    auto comma = response.find(',');
-    if (comma == std::string::npos) {
-        return std::nullopt;
-    }
-
-    std::string left = trailing_hex(response.substr(0, comma));
-    std::string right = leading_hex(response.substr(comma + 1));
-    if (left.size() < expected_digits || right.size() < expected_digits) {
-        return std::nullopt;
-    }
-
-    // A precise field is eight digits, the position in the upper six and two
-    // ignored ones (issue #785): keep the field's last eight, then their first six.
-    const std::size_t field_digits = precise ? 8 : 4;
-    if (left.size() > field_digits) {
-        left = left.substr(left.size() - field_digits);
-    }
-    left.resize(expected_digits);
-    right.resize(expected_digits);
-
-    uint32_t first_raw = 0;
-    uint32_t second_raw = 0;
-    std::istringstream first_iss(left);
-    std::istringstream second_iss(right);
-    first_iss >> std::hex >> first_raw;
-    second_iss >> std::hex >> second_raw;
-    if (first_iss.fail() || second_iss.fail()) {
-        return std::nullopt;
-    }
-    return std::make_pair(first_raw, second_raw);
-}
+using util::build_hex;
+using util::parse_axis_pair_response;
+using util::parse_mode_byte;
 
 } // namespace
 
@@ -419,6 +346,7 @@ public:
         connection_info_ = info;
         last_connect_error_.clear();
         link_lost_.store(false);
+        interrupt_.store(false);
         set_fault("");
 
         bool success = false;
@@ -464,6 +392,8 @@ public:
     }
 
     bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    void set_interrupt(bool interrupt) noexcept { interrupt_.store(interrupt); }
 
     std::string link_fault() const {
         std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -848,33 +778,8 @@ public:
     }
 
     void set_location(const LocationInfo& info) {
-        double lat = info.latitude_degrees;
-        double lon = info.longitude_degrees;
-
-        int lat_sign = lat < 0.0 ? 1 : 0;
-        int lon_sign = lon < 0.0 ? 1 : 0;
-        lat = std::abs(lat);
-        lon = std::abs(lon);
-
-        int lat_deg = static_cast<int>(lat);
-        int lat_min = static_cast<int>((lat - lat_deg) * 60.0);
-        int lat_sec = static_cast<int>((lat - lat_deg - lat_min / 60.0) * 3600.0);
-        int lon_deg = static_cast<int>(lon);
-        int lon_min = static_cast<int>((lon - lon_deg) * 60.0);
-        int lon_sec = static_cast<int>((lon - lon_deg - lon_min / 60.0) * 3600.0);
-
-        std::string cmd;
-        cmd.reserve(1 + 8);
-        cmd.push_back('W');
-        cmd.push_back(static_cast<char>(lat_deg));
-        cmd.push_back(static_cast<char>(lat_min));
-        cmd.push_back(static_cast<char>(lat_sec));
-        cmd.push_back(static_cast<char>(lat_sign));
-        cmd.push_back(static_cast<char>(lon_deg));
-        cmd.push_back(static_cast<char>(lon_min));
-        cmd.push_back(static_cast<char>(lon_sec));
-        cmd.push_back(static_cast<char>(lon_sign));
-        (void)send_command(cmd, true, 0);
+        // NexStar "W" (uppercase) sets the location: util::location_command() (nexstar_frame.h).
+        (void)send_command(util::location_command(info.latitude_degrees, info.longitude_degrees), true, 0);
     }
 
     TimeInfo get_time() {
@@ -1151,7 +1056,7 @@ private:
         }
         return true;
 #else
-        return util::tty_write_all(serial_fd_, data);
+        return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
 #endif
     }
 
@@ -1185,7 +1090,7 @@ private:
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(serial_fd_, spec, deadline);
+            return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
 #else
@@ -1205,11 +1110,11 @@ private:
         throw AlpacaException(reason);
     }
 
-    // A failed write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the serial port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout. Serial only: a TCP
+    // A failed write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the util::SerialLink
+    // verdict, #2262) is the serial port gone: the link is lost at once. A write timeout is not. Serial only: a TCP
     // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
-        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
+        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
             fail_link_locked("SynScan serial link lost (write): " + util::errno_string(err));
         }
     }
@@ -1225,6 +1130,12 @@ private:
         link_lost_.store(true);
         disconnect_locked();
         throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
+    // A read that set_interrupt(true) ended (#2070): the disconnect that raised it owns the link, so this is not a
+    // fault and not a loss. NotConnected, the code of an exchange on a closing link; no fault text, no latch.
+    [[noreturn]] static void throw_interrupted() {
+        throw AlpacaException("SynScan exchange interrupted: the link is closing", AlpacaError::NotConnected);
     }
 
     void set_fault(const std::string& text) {
@@ -1251,6 +1162,7 @@ private:
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         util::ReadSpec spec;
         spec.max_len = kMaxReplyLen;
+        spec.cancel = &interrupt_;  // a disconnect ends the read at once (#2070)
         // When binary_bytes > 0, read exactly that many raw bytes first
         // (no CR/LF filtering, no '#' detection) then drain the '#' terminator.
         // This prevents binary values like 0x23 ('#') or 0x0A/0x0D from being
@@ -1265,6 +1177,7 @@ private:
             spec.late_byte_grace = read_slice();
             const auto r = read_reply(spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+            if (r.outcome == util::ReadOutcome::Cancelled) throw_interrupted();
             if (r.outcome != util::ReadOutcome::Length) {
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
@@ -1290,6 +1203,8 @@ private:
                 throw_link_lost(r.err);
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("SynScan response too long");
+            case util::ReadOutcome::Cancelled:
+                throw_interrupted();
             case util::ReadOutcome::Timeout:
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
@@ -1305,6 +1220,7 @@ private:
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
         spec.skip.clear();
+        spec.cancel = &interrupt_;  // a cancelled drain leaves the payload valid, like a missing '#'
         const auto r = read_reply(spec, deadline);
         if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
     }
@@ -1329,6 +1245,9 @@ private:
     mutable std::mutex mutex_;
     bool connected_;
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect()
+    // set_interrupt(): read without mutex_ by every reply read (ReadSpec::cancel), so a disconnect ends one in flight
+    // without waiting for the lock that read holds (#2070). Cleared by set_interrupt(false) and the next connect().
+    std::atomic<bool> interrupt_{false};
     // The loss reason for the driver's get_link_fault() (decision 0009 rule 5), cleared by the next connect(). Its own
     // leaf mutex, never held across an exchange, so a getter never waits on the wire.
     mutable std::mutex fault_mutex_;
@@ -1362,6 +1281,8 @@ bool SynScanProtocolWrapper::connect(const ConnectionInfo& info) {
 void SynScanProtocolWrapper::disconnect() {
     pimpl_->disconnect();
 }
+
+void SynScanProtocolWrapper::set_interrupt(bool interrupt) noexcept { pimpl_->set_interrupt(interrupt); }
 
 bool SynScanProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
@@ -1465,6 +1386,12 @@ TimeInfo SynScanProtocolWrapper::get_time() {
 
 void SynScanProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+const std::vector<std::string>& synscan_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",      "FTDI",
+                                                 "CP210",    "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::synscan

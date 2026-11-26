@@ -21,6 +21,7 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -81,6 +82,32 @@ TEST_CASE("Altair Camera Driver - Defaults", "[altair][camera][unit]") {
     CHECK(driver->get_has_shutter() == false);
 }
 
+TEST_CASE(
+    "Altair Camera Driver - The default FakeToupTekSDK camera takes every bin and refuses a TEC set point out of range",
+    "[altair][camera][unit]") {
+    // Falsified by: default_camera() listing bins 1, 2 and 4 under MaxBin 4 (bin 3 refused), or the fake TEC storing
+    // any set point (-273.25 C and 100 C accepted where the SDK answers E_INVALIDARG): the Altair row shares both.
+    FakeToupTekSDK fake;
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("altair-0", "Altair One"));
+    auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    REQUIRE(driver->get_max_bin_x() == 4);
+    for (int bin = 1; bin <= driver->get_max_bin_x(); ++bin) {
+        INFO("bin " << bin);
+        driver->set_bin_x(bin);
+        CHECK(driver->get_bin_x() == bin);
+    }
+    for (const double setpoint : {-273.25, 100.0}) {
+        INFO("set point " << setpoint);
+        require_alpaca_error([&] { driver->set_set_ccd_temperature(setpoint); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_set_ccd_temperature(-10.0);
+    CHECK(driver->get_set_ccd_temperature() == Catch::Approx(-10.0));
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("Altair Camera Driver - Device metadata", "[altair][camera][unit]") {
     FakeToupTekSDK fake;
     auto driver = alpacacore::vendor::altair::create_altair_camera(3, 1, fake);
@@ -122,6 +149,36 @@ TEST_CASE("Altair Camera Driver - Connected identity comes from the Altair SDK",
     CHECK(fake.ref_count("altair-178m-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+}
+
+// Issue #1997: Altair rides the ToupTek driver, so the web UI rows come from the same connect-time cache. Falsified
+// by: touptek_camera_driver.cpp get_device_sdk_version() reading sdk_.get_sdk_version() on every call.
+TEST_CASE("Altair Camera Driver - firmware and SDK version come from the Altair SDK at connect",
+          "[altair][camera][unit][firmware]") {
+    auto fake = make_fake_with_178m();
+    fake.sdk_version = "60.31589.20260531";
+    fake.firmware_version = "3.2.1.20140922";
+    fake.hw_version = "3.12";
+    fake.fpga_version = "1.13";
+    fake.production_date = "20150327";
+    auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
+    const int sdk_reads = fake.call_count("get_sdk_version");
+
+    CHECK(driver->get_device_firmware() == std::nullopt);
+    CHECK(driver->get_device_sdk_version() == std::optional<std::string>("60.31589.20260531"));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int firmware_reads = fake.call_count("get_firmware_version");
+    CHECK(driver->get_device_firmware() ==
+          std::optional<std::string>("3.2.1.20140922 (hardware 3.12, FPGA 1.13, production date 2015-03-27)"));
+    CHECK(driver->get_device_sdk_version() == std::optional<std::string>("60.31589.20260531"));
+    CHECK(driver->get_driver_info() == "AlpacaCore Altair Camera Driver");
+    // The getters made no SDK call: the version was read once, at construction, the firmware once, at connect.
+    CHECK(fake.call_count("get_firmware_version") == firmware_reads);
+    CHECK(fake.call_count("get_sdk_version") == sdk_reads);
+
+    driver->set_connected(false);
+    CHECK(driver->get_device_firmware() == std::nullopt);
 }
 
 TEST_CASE("Altair Camera Driver - Not connected throws", "[altair][camera][unit]") {

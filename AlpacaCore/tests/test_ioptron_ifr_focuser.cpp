@@ -276,6 +276,31 @@ TEST_CASE("iOptron iFR - a pulled cable loses the link for both devices", "[iopt
     CHECK(focuser->get_link_fault().empty());
 }
 
+// Issue #2262: EBADF on the unit's own fd is a lost link for both devices, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 the session's classifier listed EIO, ENXIO and ENODEV only: the write
+// failed with DriverException "iFR write failed" and both devices kept reading Connected over a dead fd.
+TEST_CASE("iOptron iFR - EBADF on a command write loses the link for both devices",
+          "[ioptron][ifr][focuser][link-lost][issue2262]") {
+    FakeIoptronIfr fake;
+    FakeTaskClock clock;
+    auto focuser = ifr::create_ifr_focuser(0, fake.slave_path(), "ifr3", clock);
+    auto rotator = ifr::create_ifr_rotator(0, fake.slave_path(), "ifr3", clock);
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    focuser->set_connected(true);
+    rotator->set_connected(true);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);  // one session, one fd
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { focuser->move(2000); }, AlpacaError::NotConnected);
+    CHECK_FALSE(focuser->get_connected());
+    CHECK_FALSE(rotator->get_connected());
+    CHECK(focuser->get_link_fault() == "iFR serial link lost (errno 9)");
+    CHECK(rotator->get_link_fault() == focuser->get_link_fault());
+    focuser->set_connected(false);
+    CHECK(focuser->get_link_fault().empty());  // decision 0009 rule 5
+}
+
 TEST_CASE("iOptron iFR - a unit that stops answering faults, then loses the link for both devices",
           "[ioptron][ifr][focuser][link-lost]") {
     FakeIoptronIfr fake;

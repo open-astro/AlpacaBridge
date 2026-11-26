@@ -1498,6 +1498,39 @@ TEST_CASE("SynScan GOTO landing - a GOTO that misses by 49 arcmin twice fails th
     driver->set_connected(false);
 }
 
+// Decision 0022 rule 2 (#1836): the landing re-GOTO of a SlewToCoordinates arms the kRefineStartForce window before it
+// is sent; a send that throws clears it, so Slewing reads false as soon as the call has failed. The first GOTO lands
+// 49' off and the handset never answers the repeat, so its send times out. The status poll is paused and run_virtual
+// waits for both the poll's own wait and the caller's (min_waiters 2), so no virtual time passes during that timeout.
+TEST_CASE("SynScan hold window - a landing re-GOTO whose send fails leaves Slewing false",
+          "[synscan][telescope][goto-landing][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->ra_offset_script[0].store(kFarMissCounts);
+    st->ra_scripted.store(true);
+    std::atomic<int> repeats_refused{0};
+    alpacacore::test::FakeMountServer server(
+        [&repeats_refused, st, inner = responder(st)](const std::string& chunk) -> std::string {
+            if (!chunk.empty() && chunk[0] == 'r' && st->goto_count.load() >= 1) {
+                repeats_refused.fetch_add(1);
+                return "";  // no reply: the repeat's send times out
+            }
+            return inner(chunk);
+        });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 300);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    REQUIRE_THROWS(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }, 2));
+    REQUIRE(st->goto_count.load() == 1);
+    REQUIRE(repeats_refused.load() == 1);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan GOTO landing - an async GOTO ending 49 arcmin off is repeated while Slewing stays true (#1105)",
           "[synscan][telescope][goto-landing]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1872,7 +1905,7 @@ TEST_CASE("SynScan GOTO landing - a superseded synchronous landing move leaves t
     std::thread slew([&] {
         try {
             driver->slew_to_coordinates(kTargetRa, kTargetDec);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): superseded by the abort
             // superseded by the abort
         }
         slew_done.store(true);

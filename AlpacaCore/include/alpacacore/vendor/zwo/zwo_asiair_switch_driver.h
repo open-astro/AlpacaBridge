@@ -14,7 +14,6 @@
 
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 
 #include <cstdint>
 #include <memory>
@@ -22,6 +21,12 @@
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
+
+struct AsiairPortConfig {
+    std::string name;
+    std::uint32_t gpio_line;
+    bool pwm_enabled;
+};
 
 struct AsiairSwitchConfig {
     std::string gpio_chip_path = "/dev/gpiochip0";
@@ -33,6 +38,9 @@ struct AsiairSwitchConfig {
     // driver, so the only difference clients see is this label. Defaults to the
     // Pro layout; the router overrides it for the CM4 Plus.
     std::string model_name = "ASIAIR Pro";
+    // The board revision when one model ships on two ("Pi CM4" for the CM4 Plus), named in the Description only:
+    // the Name is brand + model (decision 0024).
+    std::string board;
     // What the ports do when the server starts (decision 0021): `powerOnState`.
     util::PowerOnState power_on_state = util::PowerOnState::Leave;
 };
@@ -42,6 +50,6 @@ struct AsiairSwitchConfig {
 // PWM frequency 1000 Hz.
 AsiairSwitchConfig default_asiair_pro_config();
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, AsiairSwitchConfig config);
+std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, const AsiairSwitchConfig& config);
 
 } // namespace alpacacore::vendor::zwo

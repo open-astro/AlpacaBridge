@@ -58,9 +58,12 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
-/// The same for the MoveAxis bound's slot (#2412).
-void set_motion_bound_spawn_for_testing(TelescopeDriver& driver,
-                                        std::function<std::thread(std::function<void()>)> spawn);
+/// Test seam (#2467): runs on the PulseGuide caller's thread after the pulse's wire turn is released and before its
+/// stop timer starts, with no driver lock held. Call only while no PulseGuide is in flight.
+void set_pulse_start_hook_for_testing(TelescopeDriver& driver, std::function<void(int axis)> hook);
+/// The same for the MoveAxis cap slots (#2412, #2651), one per axis: both get the factory.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test seams of the status poll (decision 0010): the poll's own module seams (util::PolledState). Pausing makes the
 /// poll wait its ticks on the task clock and probe nothing; poll_status_now runs one full tick (alt/az, pier side and
@@ -75,6 +78,14 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 /// held, so a case that holds the wire in one exchange can tell a second sender is queued behind it. An empty
 /// function removes it.
 void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` when a Disconnect or the destructor has decided whether to raise the wrapper interrupt, with no driver
+/// lock held, so a case can hold the teardown there and check whose exchanges it cuts (#2070). An empty function
+/// removes it.
+void set_closing_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the slew slot's thread as each slew or Park body returns, before the slot counts it as returned,
+/// with no driver lock held, so a case can act while a cancelled body is still winding down (#2586). An empty
+/// function removes it.
+void set_slew_body_exit_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seams of the host clock re-sync (open-astro#2419): `hook` runs as each re-sync body ends, with no driver lock
 /// held, and is told whether the body wrote the mount clock; an empty function removes it.

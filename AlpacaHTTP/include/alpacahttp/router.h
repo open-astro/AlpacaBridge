@@ -14,6 +14,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/catalog/attached_devices.h>
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/device_registry.h>
@@ -43,7 +44,9 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -58,13 +61,25 @@
 namespace alpacahttp {
 
 class DeviceCall;  // src/http/device_call.h: one Device API call, built per request
+class PersistedConfigStore;  // src/http/persisted_config_store.h: config/registered_devices.json
+class ClientConnectionLedger;  // src/http/client_connection_ledger.h: per-client Connected bookkeeping
+class Router;
+struct ManagementRoute;
+
+// open-astro#2648: one known sub-path of a sub-routed management row (wifi/{sub}, update/{sub}) and the verbs it
+// accepts. `sub` is the tail; a tail written "prefix/{arg}" is every tail that starts "prefix/".
+struct ManagementSubRoute {
+    const char* sub;
+    unsigned verbs;
+};
 
 struct RouteMatch {
     std::string device_type;
     std::uint32_t device_number = 0;
+    // A device method, or the tail of a management path (logfiles/<name>, wifi/<sub>, update/<sub>).
     std::string method_name;
-    bool is_management = false;
-    std::string management_endpoint;
+    // open-astro#2485: the management route table row the path matched, null for a device path.
+    const ManagementRoute* management = nullptr;
     // #574: set when the path's device-number digits don't fit in a valid
     // uint32_t range (either overflowed to a wrapped value, or the digit
     // string itself overflowed even a 64-bit parse). device_type and
@@ -74,10 +89,54 @@ struct RouteMatch {
     bool device_number_invalid = false;
 };
 
+// open-astro#2485: one row of the management route table (Router::management_routes()). parse_route() matches
+// the path against it and handle_management() applies, in order: the origin guard when it runs before the verb
+// check, the verb check, the guard when it runs after it, then the handler.
+struct ManagementRoute {
+    static constexpr unsigned kVerbGet = 1U << 0;
+    static constexpr unsigned kVerbPost = 1U << 1;
+    static constexpr unsigned kVerbPut = 1U << 2;
+    static constexpr unsigned kVerbDelete = 1U << 3;
+    static constexpr unsigned kVerbOther = 1U << 4;  // a verb Request::parse_method does not know
+
+    // reject_cross_origin_request() (decision 0007). It passes every GET.
+    enum class Guard : std::uint8_t {
+        None,
+        BeforeVerbCheck,  // every request but a GET, a wrong verb included
+        AfterVerbCheck,   // an accepted verb only: the logfiles collection, where a wrong verb is answered 405
+    };
+    // The answer to a verb the route does not accept (decision 0007 rule 13).
+    enum class WrongVerb : std::uint8_t {
+        AlpacaText,        // an Alpaca-defined path: 400 with a text/plain message (#1508)
+        MethodNotAllowed,  // an AlpacaBridge-only path: 405, Allow and InvalidOperation (#2484)
+    };
+    using Handler = Response (*)(Router&, const Request&, const RouteMatch&, std::uint32_t server_tx_id);
+    // Matches a path with a tail and stores the tail; null for an exact path.
+    using TailMatcher = bool (*)(const std::string& path, std::string& tail);
+
+    const char* path;   // "/management/v1/<name>", or "/api"; a tail is written {name}
+    const char* alias;  // the unversioned spelling
+    TailMatcher tail;
+    unsigned verbs;
+    Guard guard;
+    const char* guard_what;  // names the route in the 403 message
+    WrongVerb wrong_verb;
+    const char* wrong_verb_message;
+    // open-astro#674: synctime echoes a ClientTransactionID sent only in the JSON body on every reply.
+    bool body_transaction_id;
+    Handler handler;
+    // open-astro#2648: a sub-routed row lists its known sub-paths. Their verbs replace `verbs` in the verb check
+    // and the Allow header; a tail not listed reaches the handler, which answers the unknown path.
+    std::span<const ManagementSubRoute> subs = {};
+};
+
 class Router {
 public:
     Router();
     ~Router();
+
+    // open-astro#2485: the management route table; public so test_route_table can walk it.
+    static const std::vector<ManagementRoute>& management_routes();
 
     // open-astro#664: a hook that adds descriptors to the catalog before
     // load_persisted_devices() runs, so a ConfigSource::Persisted device can
@@ -86,11 +145,27 @@ public:
     // built-in registration functions don't provide, use it.
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
     explicit Router(const CatalogExtension& extend_catalog);
+    // As above, knowing the HTTP port the server listens on before the saved
+    // devices load, so a proxied device configured on this server is refused
+    // there too (decision 0023 rule 4). The Server passes its configured port.
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port);
+    // As above, with the clock that stamps and ages the per-client Connected
+    // registrations (issue #1764; steady_clock::now() when empty). Only tests
+    // pass one; the clock must outlive the Router.
+    using ClientClock = std::function<std::chrono::steady_clock::time_point()>;
+    Router(const CatalogExtension& extend_catalog, std::uint16_t listen_port, ClientClock client_clock);
 
     // The catalog register_device_from_config() and sanitize_device_config()
     // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
     // directly via alpacahttp::test_catalog helpers.
     alpacacore::catalog::DeviceCatalog& catalog() { return catalog_; }
+
+    // Where GET /management/v1/attacheddevices reads serial ports (#2312): the
+    // real /dev and /sys unless a test points it at a fake tree. Set before
+    // the router serves requests; it is not locked.
+    void set_attached_device_roots(alpacacore::catalog::AttachedDeviceRoots roots) {
+        attached_device_roots_ = std::move(roots);
+    }
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
@@ -103,14 +178,12 @@ public:
     bool sync_system_clock_from_clients() const { return host_clock_.enabled(); }
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
-    // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
-    // read), so the #289 wiring -- the UTCDate PUT stepping
-    // the clock before the driver sees the value, and the connect-time
-    // warning -- can be driven in a test without touching the real system
-    // clock. NOT the synctime endpoint: handle_sync_time() calls
-    // clock_settime() directly and only its mark_stepped()/mark_step_failed()
-    // bookkeeping goes through this object, so a test must never POST it an
-    // in-range epoch even with the hooks installed.
+    // four probes are fakes (adjtimex, clock_settime, the sysfs RTC read and
+    // the RTC write), so every path that sets the clock -- the UTCDate PUT
+    // (#289) and the synctime POST (#2479) -- and the connect-time warning can
+    // be driven in a test without touching the real system clock. Both
+    // paths set the clock, write the RTC and latch HostClockTrust inside
+    // HostClock, so a test asserts all three through these hooks.
     //
     // open-astro#399: this replaces only the clock's PROBES, in place. The
     // HostClock object is never destroyed, so -- unlike the version that
@@ -127,7 +200,9 @@ public:
     // Router.
     void set_host_clock_hooks(
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
-        alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
+        alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; },
+        alpacacore::util::HostClock::WriteRtcFn write_rtc =
+            [](std::string&, std::string&) { return alpacacore::util::HostClock::RtcWrite::NoDevice; });
 
     // open-astro#670: test seam for the wall clock GET /management/v1/synctime
     // reports. Production never sets it; the default is system_clock::now.
@@ -204,6 +279,13 @@ public:
     // value a PUT saved. The description reports it and the web UI edits it;
     // the responder binds the saved port only at the next restart.
     void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
+    // Decision 0023 rule 4: the HTTP port this server listens on, on every
+    // address (the listener binds the wildcard). A proxied device's factory and
+    // its Connect read it through BindContext::listen_addresses to refuse an
+    // upstream that is this server. 0 means not known yet (no check). The
+    // Server sets the port it bound, which differs from the configured one when
+    // that was 0.
+    void set_listen_port(std::uint16_t port) { listen_port_->store(port, std::memory_order_release); }
 
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
@@ -259,10 +341,13 @@ public:
 private:
     // open-astro#664: populated in the constructor, before load_persisted_devices().
     alpacacore::catalog::DeviceCatalog catalog_;
+    alpacacore::catalog::AttachedDeviceRoots attached_device_roots_;
 
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
+    // Set and copied under callback_mutex_: a setter may run while a handler reads.
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+    std::mutex callback_mutex_;
 
     // The 100 ms delayed shutdown/restart callback. A second request while one
     // is waiting out the delay is dropped; once its callback runs, a later
@@ -287,6 +372,9 @@ private:
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
     std::atomic<std::uint16_t> discovery_port_{Config::kDefaultDiscoveryPort};
+    // Shared with the listen_addresses source a proxied device keeps, so the
+    // driver never reads a destroyed Router.
+    std::shared_ptr<std::atomic<std::uint16_t>> listen_port_ = std::make_shared<std::atomic<std::uint16_t>>(0);
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.
@@ -304,6 +392,10 @@ private:
     std::atomic<bool> stopping_{false};
     std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
     std::atomic<std::chrono::milliseconds::rep> sync_slew_wait_limit_ms_{90000};
+
+    // True while a networkadapters search runs: it holds one of the shared workers for the finder's whole
+    // listen, so concurrent searches could pin the pool (decision 0007, surface 2 resource budget).
+    std::atomic<bool> network_adapter_search_{false};
 
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.
@@ -331,11 +423,20 @@ private:
     Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
-    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
+    // GET /management/v1/faileddevices (web UI extension).
     Response handle_failed_devices(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#2312: GET /management/v1/attacheddevices, every detected serial,
+    // HID and camera device with the catalog entries it could be; opens no serial port.
+    Response handle_attached_devices(const Request& request, std::uint32_t server_tx_id);
+    // GET /management/v1/networkadapters?vendor=celestron: the adapters a vendor's finder hears announce
+    // themselves on the LAN (the SkyPortal WiFi beacon), for the web form's "Find adapter" button. The finder
+    // blocks for its whole listen (5 s for the SkyPortal) on this worker, with no router lock held; one search
+    // runs at a time, and a second request meanwhile is refused at once (network_adapter_search_).
+    Response handle_network_adapters(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     // open-astro#2057: in-place telescope optics update (apertureDiameter, focalLength), no re-registration.
     Response handle_update_device(const Request& request, std::uint32_t server_tx_id);
@@ -388,10 +489,10 @@ private:
                                      std::string* warning = nullptr);
 
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
-    void add_or_replace_persisted_device(const nlohmann::json& config);
-    bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
-    // True when the file was written; false is already logged at ERROR.
-    bool save_persisted_devices() const;
+    // Loads persisted_store_ once, then registers its entries, prunes the
+    // stores keyed by uniqueId, adopts legacy state and applies power-on state.
+    // Called from the constructor only, so the list is loaded before any request
+    // routes; no handler calls it (issue #2483).
     void load_persisted_devices();
 
     nlohmann::json build_description_payload() const;
@@ -428,28 +529,6 @@ private:
     Response dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
                                            const std::string& method_name, const DeviceCall& call);
 
-    // Per-client Connected tracking (issue #160). Alpaca allows several
-    // clients to share one device (imaging app + guider on the same mount);
-    // the upstream link must only be torn down when the LAST client
-    // disconnects. Keyed by driver instance; the inner map records each
-    // ClientID's last-seen time so registrations from vanished clients can
-    // expire instead of pinning the device connected forever.
-    std::size_t register_client_connection(const void* device, const std::string& client_key);
-    std::size_t unregister_client_connection(const void* device, const std::string& client_key);
-    bool client_connection_registered(const void* device, const std::string& client_key);
-    void touch_client_connection(const void* device, const std::string& client_key);
-    void clear_client_connections(const void* device);
-    // Erase BOTH maps' entries for a removed device (issue #162). Never call
-    // while the device's op mutex is held — see clear_client_connections.
-    void purge_device_connection_state(const void* device);
-
-    // Serializes the connect/disconnect DECISION + driver call per device so
-    // a client connecting during another client's last-out teardown can't
-    // register against a link that is about to drop (review of #160). Held
-    // across the blocking connect/disconnect waits — same-device connection
-    // ops queue; everything else (other devices, GETs) is unaffected.
-    std::shared_ptr<std::mutex> device_connection_op_mutex(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
-
     void add_clock_fields(nlohmann::json& desc) const;
     void warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const;
 
@@ -469,15 +548,11 @@ private:
     // nothing would ever reap them (PR #164 review of issue #162).
     static bool device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
-    // Guards client_connections_ only; never held across driver calls.
-    mutable std::mutex client_connections_mutex_;
-    std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
-        client_connections_;
-    std::unordered_map<const void*, std::shared_ptr<std::mutex>> connection_op_mutexes_;
+    // Per-client Connected bookkeeping (issues #160, #2521); src/http/client_connection_ledger.h.
+    std::unique_ptr<ClientConnectionLedger> client_ledger_;
 
-    // Guards persisted_devices_ and persisted_devices_loaded_. Never held
-    // together with server_info_mutex_ or across driver-registry calls.
-    mutable std::mutex persisted_devices_mutex_;
+    // config/registered_devices.json (issue #2481); src/http/persisted_config_store.h.
+    std::unique_ptr<PersistedConfigStore> persisted_store_;
     // A driver can outlive this Router in the device registry, so its connect-time store goes through this.
     struct LearnedConfigSink {
         std::mutex mutex;
@@ -486,20 +561,6 @@ private:
     std::shared_ptr<LearnedConfigSink> learned_sink_ = std::make_shared<LearnedConfigSink>();
     // Merges @p learned into the stored entry @p entry names, then saves. An empty @p unique_id matches any ID.
     void store_learned_config(const nlohmann::json& entry, const nlohmann::json& learned, const std::string& unique_id);
-    // Serialises the file write in save_persisted_devices(): request workers
-    // reach it concurrently through persist_client_site() (#444), and two
-    // truncate-and-write passes interleave into invalid JSON. Lock order:
-    // this one FIRST, then persisted_devices_mutex_ inside it for the
-    // snapshot, so a save can never rename an older snapshot over a newer
-    // dump. Consequently save_persisted_devices() must never be called while
-    // persisted_devices_mutex_ is held (it would self-deadlock).
-    mutable std::mutex persisted_file_mutex_;
-    std::vector<nlohmann::json> persisted_devices_;
-    bool persisted_devices_loaded_ = false;
-    // Decision 0018: IDs a configuredevice call has chosen and not stored yet,
-    // so two concurrent calls sending one ID cannot both keep it. Guarded by
-    // persisted_devices_mutex_.
-    std::set<std::string> reserved_unique_ids_;
 
     // #1969: what the bind hook said about a device that did register (a ZWO
     // camera that learned no identity), keyed by type and number, shown as

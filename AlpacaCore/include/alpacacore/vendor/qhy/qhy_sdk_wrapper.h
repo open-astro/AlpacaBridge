@@ -137,22 +137,20 @@ namespace guide_direction {
  *   owner releases, so a camera driver and the CFW driver on the same physical
  *   device (e.g. the miniCam8M's integrated wheel) each get an independent
  *   open/close lifecycle over one shared handle.
- * - A fake MUST NOT block in any method. The camera driver's exposure,
- *   temperature and cooler-off workers join with a bounded timeout and DETACH
- *   on expiry, and its pulse-guide thread is detached by design; a blocking
- *   fake turns those into detached threads still calling into the fake after
- *   the test body has moved on.
+ * - A fake MUST NOT block in any method. The camera driver joins its exposure
+ *   body and its temperature, telemetry, cooler-off and pulse-guide bodies with
+ *   no time bound (issue #1736), so a blocking fake hangs its disconnect or
+ *   teardown.
  *
- * LIFETIME: drivers hold a plain QHYSDK& — and the detachable workers above
- * capture a QHYSDK* — so the SDK object MUST outlive every driver constructed
+ * LIFETIME: drivers hold a plain QHYSDK&, so the SDK object MUST outlive every driver constructed
  * on it. Declare the fake before the driver (locals destroy in reverse order);
  * never stash a driver beyond the fake's scope.
  */
 class QHYSDK {
 public:
     // Destructor is protected and NON-virtual (below), not public and virtual:
-    // nothing ever owns a QHYSDK*. Drivers hold a QHYSDK&, workers capture a
-    // raw QHYSDK*, and every implementation is either a function-local static
+    // nothing ever owns a QHYSDK*. Drivers hold a QHYSDK&, and every
+    // implementation is either a function-local static
     // (QHYSDKWrapper) or a stack object (FakeQHYSDK, LockedQHYSDK). A public
     // virtual destructor here would make `delete static_cast<QHYSDK*>(&...)`
     // compile against the singleton, since access for delete is checked on the
@@ -192,13 +190,13 @@ public:
     /**
      * @brief Register the exposure worker's liveness flag for a camera_id.
      *
-     * The camera driver calls this once per exposure generation (alongside
-     * its own exposure_thread_running_ assignment) so open_camera() below
-     * can refuse to open a SECOND physical handle to the same device while
-     * a detached zombie worker might still be blocked inside
-     * GetQHYCCDSingleFrame on the OLD handle -- a hazard reachable not just
-     * through the camera driver's own reconnect, but through the paired CFW
-     * driver reconnecting independently (they share one physical handle).
+     * The camera driver calls this once per exposure, with a flag that is true
+     * until its exposure body leaves the SDK, so open_camera() below can refuse
+     * to open a SECOND physical handle to the same device while an exposure
+     * call might still be in flight on the OLD handle -- through the camera
+     * driver's own reconnect or the paired CFW driver reconnecting
+     * independently (they share one physical handle). Since #1736 the camera
+     * driver joins its body before it closes, so the refusal is a backstop.
      * Stored outside the handle map so it survives that map entry being
      * erased by close_camera() -- which is exactly the moment it's needed.
      */
@@ -240,6 +238,11 @@ public:
      * @return true if SDK returned QHYCCD_READ_DIRECTLY (old cameras — read immediately)
      */
     virtual bool start_single_frame(const std::string& camera_id) = 0;
+
+    /**
+     * @brief GetQHYCCDExposureRemaining: 100 or less means the exposure is over (qhyccd.h). Does not block.
+     */
+    virtual uint32_t get_exposure_remaining(const std::string& camera_id) = 0;
 
     /**
      * @brief Blocking call that waits for a single frame and copies it into buffer.
@@ -351,6 +354,7 @@ public:
     uint32_t get_mem_length(const std::string& camera_id) override;
 
     bool start_single_frame(const std::string& camera_id) override;
+    uint32_t get_exposure_remaining(const std::string& camera_id) override;
     bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
                           uint32_t& bpp, uint32_t& channels) override;
     void cancel_exposure(const std::string& camera_id) override;

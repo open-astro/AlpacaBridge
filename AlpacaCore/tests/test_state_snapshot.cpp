@@ -15,7 +15,10 @@
 
 #include <alpacacore/util/state_snapshot.h>
 
+#include <atomic>
 #include <chrono>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_task_clock.h"
@@ -135,4 +138,45 @@ TEST_CASE("StateSnapshot - a write on an empty frame drops a poll in flight", "[
     snap.write([](Pointing& p) { p.ra = 9.0; });
     CHECK_FALSE(snap.publish(token, Pointing{1.0, 2.0}));
     CHECK_FALSE(snap.read().has_value());
+}
+
+// The header says any number of threads read and write (#2088). Tagged [stress-guard], not [stress]: this file is
+// in the unconditional TEST_SOURCES; the sanitizers-tsan job runs "[stress-guard]" under ThreadSanitizer.
+// Falsified by: state_snapshot.h read() or write() without its lock_guard (TSan race; a torn ra/dec pair).
+TEST_CASE("StateSnapshot - a publisher, a writer and readers never see a torn frame",
+          "[state_snapshot][stress-guard]") {
+    FakeTaskClock clock;
+    StateSnapshot<Pointing> snap(clock, 2s);
+    std::atomic<bool> stop{false};
+    std::atomic<long long> torn{0};
+    std::atomic<long long> reads{0};
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] {  // the poll: ra and dec always equal in a published frame
+        for (double v = 0; !stop.load(); v += 1) {
+            const auto token = snap.begin_poll();
+            (void)snap.publish(token, Pointing{v, v});
+        }
+    });
+    threads.emplace_back([&] {  // a client write-through keeps the pair equal too
+        for (double v = 0; !stop.load(); v -= 1) {
+            snap.write([v](Pointing& p) {
+                p.ra = v;
+                p.dec = v;
+            });
+        }
+    });
+    for (int i = 0; i < 3; ++i) {
+        threads.emplace_back([&] {
+            while (!stop.load()) {
+                if (const auto r = snap.read()) {
+                    if (r->value.ra != r->value.dec) ++torn;
+                    ++reads;
+                }
+            }
+        });
+    }
+    while (reads.load() < 20000) std::this_thread::yield();
+    stop = true;
+    for (auto& t : threads) t.join();
+    CHECK(torn.load() == 0);
 }

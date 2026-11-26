@@ -20,10 +20,14 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -36,6 +40,7 @@
 #include "cgx_clock_cleanup.h"
 #include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -326,14 +331,7 @@ struct HangupRig {
     // Runs `call` on another thread, pulls the cable while its first held reply is in flight, and returns the call's
     // error code (0 for none) and how long it took after the pull.
     std::pair<int, std::chrono::steady_clock::duration> pull_during(const std::function<void()>& call) {
-        auto task = std::async(std::launch::async, [&] {
-            try {
-                call();
-                return 0;
-            } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code();
-            }
-        });
+        auto task = std::async(std::launch::async, [&] { return alpacacore::test::error_code_of(call); });
         REQUIRE(mount->wait_for_reply_fragment(2s));
         const auto pulled = std::chrono::steady_clock::now();
         mount->sever_link();
@@ -385,6 +383,26 @@ TEST_CASE("Celestron CGX link loss - a cable pulled during a command loses the l
     CHECK(rig.driver->get_link_fault().empty());
     CHECK_FALSE(rig.driver->get_at_home());
     require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
+}
+
+// Issue #2262: EBADF on the AUX link's own fd is a lost link, as on every serial vendor. The wrapper keeps its own
+// poll()-bounded write loop and feeds the errno to the shared util::SerialLink verdict. Before #2262 its own list was
+// EIO/ENXIO/ENODEV: the write failed with DriverException, the port was closed and Connected kept reading true.
+TEST_CASE("Celestron CGX link loss - EBADF on a command write loses the link at once and Disconnect clears the reason",
+          "[celestron][cgx][unit][link-loss][link-lost][issue2262]") {
+    HangupRig rig;
+    const auto before = alpacacore::test::fds_open_on(rig.node);
+    rig.connect_and_home();
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(rig.node));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { rig.driver->set_tracking(true); }, AlpacaError::NotConnected);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(write: " + alpacacore::util::errno_string(EBADF) + ")") !=
+          std::string::npos);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 
 TEST_CASE("Celestron CGX link loss - a cable pulled during the state poll ends the poll in that tick",
@@ -448,6 +466,51 @@ TEST_CASE("Celestron CGX link loss - a cable pulled mid-operation loses the link
     }
     CHECK(rig.clock.waiter_count() == idle);  // the body ended on its own
     rig.check_lost();
+}
+
+// #2411 (the #2396 relink decision): a Connect after a link lost during a GoTo stops both axes before it sends any
+// motion. The CGX needs no util::RelinkMotionStop for it: the body's stop meets the lost link, fails and latches the
+// unverified motion, and the Connect stops both axes right after the identity probe. A pin: it passes on main.
+TEST_CASE("Celestron CGX link loss - a Connect after a loss during a GoTo stops both axes before any motion",
+          "[celestron][cgx][link-loss][link-lost][goto-safety]") {
+    HangupRig rig;
+    rig.connect_and_home();
+    rig.driver->set_tracking(true);
+    rig.mount->set_auto_complete_motions(false);
+    const auto idle = rig.clock.waiter_count();  // the paused poll body
+    const auto waits = rig.clock.wait_count();
+    rig.driver->slew_to_coordinates_async(std::fmod(rig.driver->get_sidereal_time() + 23.0, 24.0), 85.0);
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, 2s));  // the GoTo is out on the mount
+    rig.mount->sever_link();
+    for (int i = 0; i < 20 && rig.clock.waiter_count() > idle; ++i) {
+        rig.clock.advance(250ms);
+        REQUIRE(rig.clock.wait_for_woken_settled(2s));
+    }
+    REQUIRE_FALSE(rig.driver->get_connected());
+
+    rig.replug();
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
+    REQUIRE(rig.driver->get_connected());
+    const auto requests = rig.mount->requests();
+    const auto first_stop = [&](std::uint8_t axis) {
+        return std::find_if(requests.begin(), requests.end(), [axis](const auto& frame) {
+            return frame.destination == axis && frame.command == 0x24 && frame.payload == std::vector<std::uint8_t>{0};
+        });
+    };
+    const auto ra_stop = first_stop(0x10);
+    const auto dec_stop = first_stop(0x11);
+    REQUIRE(ra_stop != requests.end());
+    REQUIRE(dec_stop != requests.end());
+    // Nothing that moves an axis or rewrites a label goes out before both stops.
+    const auto last_stop = std::max(ra_stop, dec_stop);
+    for (auto frame = requests.begin(); frame != last_stop; ++frame) {
+        INFO("command " << static_cast<int>(frame->command) << " to " << static_cast<int>(frame->destination));
+        CHECK((frame->command == 0xfe || frame->command == 0x05 || frame->command == 0x24));
+    }
+    CHECK(rig.mount->count_command(0x10, 0x24) == 1);
+    CHECK(rig.mount->count_command(0x11, 0x24) == 1);
+    CHECK(rig.mount->axis_physical_position(0x10) == 0);
+    CHECK(rig.mount->axis_physical_position(0x11) == 0);
 }
 
 #endif  // !_WIN32

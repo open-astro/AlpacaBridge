@@ -78,7 +78,7 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };

@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -39,10 +40,13 @@ namespace alpacacore::test {
 // answering the commands the reporter's script and INDI's driver use.
 // Calibration: 0x2A 01 starts it, 0x2A 00 aborts it and, as the reporter saw
 // on hardware (issue #896), wipes the limits even when no calibration runs;
-// 0x2B answers [complete, state] (INDI's layout). KNOWN PARITY GAPS: motion and
-// calibration are explicit (complete_move(), complete_calibration()), not
-// timed; the encoder does not sweep during a calibration; replies to commands
-// the fake does not know are silent, as on the bus.
+// 0x2B answers [complete, state] (INDI's layout). A GOTO is explicit by default
+// (complete_move()); set_travel_rate() makes it travel to the target over time
+// instead, computed from steady_clock when the motor is asked (no thread), and
+// a 0x24 abort stops it where it is. KNOWN PARITY GAPS: calibration is
+// explicit (complete_calibration()), not timed; the encoder does not sweep
+// during a calibration; the travel rate is a stand-in, not a measured 94155
+// speed; replies to commands the fake does not know are silent, as on the bus.
 class FakeCelestronFocuser {
 public:
     FakeCelestronFocuser() : pty_("FakeCelestronFocuser"), worker_([this] { run(); }) {}
@@ -84,6 +88,22 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         drop_next_ = command;
         drop_times_ = times;
+    }
+
+    // Opt-in: a GOTO travels at this many encoder counts per second instead of waiting for complete_move(). 0 (the
+    // default) keeps the explicit mode.
+    // TODO: replace the stand-in rates callers pass with the measured 94155 focus-motor speed.
+    void set_travel_rate(std::uint32_t counts_per_second) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
+        travel_rate_ = counts_per_second;
+    }
+
+    // One-shot: the GOTO completes just after the next 0x01 position reply is composed, so that reply carries the
+    // position from before the arrival and every later reply (0x13 included) sees the motor stopped at the target.
+    void complete_move_after_position_reply() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_after_position_ = true;
     }
 
     // Finishes the motion a GOTO started: the encoder reaches the target.
@@ -135,10 +155,12 @@ public:
 
     std::uint32_t raw_position() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
         return raw_;
     }
     bool moving() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
         return target_.has_value();
     }
     std::optional<std::uint32_t> last_goto() const {
@@ -225,13 +247,38 @@ private:
             out.push_back(static_cast<std::uint8_t>(value >> shift));
     }
 
+    // Moves the encoder along the GOTO for the time since the last look. Caller holds mutex_.
+    void advance_locked() const {
+        const auto now = std::chrono::steady_clock::now();
+        if (target_ && travel_rate_ > 0) {
+            const double travelled =
+                std::chrono::duration<double>(now - travel_stamp_).count() * static_cast<double>(travel_rate_);
+            const double remaining = std::abs(static_cast<double>(*target_) - static_cast<double>(raw_));
+            if (travelled >= remaining) {
+                raw_ = *target_;
+                target_.reset();
+            } else {
+                const auto step = static_cast<std::uint32_t>(travelled);
+                if (step == 0) return;  // keep the stamp so a fast poll does not lose the fraction of a count
+                raw_ = *target_ > raw_ ? raw_ + step : raw_ - step;
+            }
+        }
+        travel_stamp_ = now;
+    }
+
     std::optional<std::vector<std::uint8_t>> respond(const alpacacore::vendor::celestron::AuxFrame& request) {
         std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
         requests_.push_back(request);
         std::vector<std::uint8_t> out;
         switch (request.command) {
             case 0x01:
                 put_be(out, raw_, 3);
+                if (complete_after_position_) {
+                    complete_after_position_ = false;
+                    if (target_) raw_ = *target_;
+                    target_.reset();
+                }
                 return out;
             case 0x02:
                 if (request.payload.size() != 3) return std::nullopt;
@@ -279,14 +326,17 @@ private:
     mutable std::mutex mutex_;
     std::uint32_t low_ = 1000;
     std::uint32_t high_ = 61000;
-    std::uint32_t raw_ = 30000;
-    std::optional<std::uint32_t> target_;
+    mutable std::uint32_t raw_ = 30000;
+    mutable std::optional<std::uint32_t> target_;
+    std::uint32_t travel_rate_ = 0;
+    mutable std::chrono::steady_clock::time_point travel_stamp_ = std::chrono::steady_clock::now();
     std::optional<std::uint32_t> last_goto_;
     std::optional<std::uint8_t> drop_next_;
     int drop_times_ = 0;
     bool calibrating_ = false;
     bool calibration_complete_ = false;
     bool status_idle_held_ = false;
+    bool complete_after_position_ = false;
     std::vector<std::uint8_t> version_{7, 11, 0x0b, 0xb8};
     std::vector<alpacacore::vendor::celestron::AuxFrame> requests_;
     std::mutex gate_mutex_;

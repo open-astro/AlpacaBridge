@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -61,10 +62,14 @@ struct MotionStatusReading {
 };
 
 /// The larger per-axis difference in arcsec: RA as the shortest wrapped hour difference x 15, unprojected (no
-/// cos(Dec)), and Dec (#2396 AB-7).
+/// cos(Dec)), and Dec (#2396 AB-7). +inf when a position is not finite, so a guard that compares it with `>` fails
+/// closed: std::max would keep a NaN, and `NaN > tolerance` is false (#2464).
 inline double axis_miss_arcsec(const MountPosition& a, const MountPosition& b) {
     const double ra = std::abs(shortest_ra_delta_hours(a.ra_hours, b.ra_hours)) * kPointingHoursToDegrees * 3600.0;
     const double dec = std::abs(a.dec_degrees - b.dec_degrees) * 3600.0;
+    if (!std::isfinite(ra) || !std::isfinite(dec)) {
+        return std::numeric_limits<double>::infinity();
+    }
     return std::max(ra, dec);
 }
 
@@ -188,7 +193,8 @@ inline void send_stop_logged(const StopVerifyHooks& hooks) {
 
 /**
  * Runs a verified stop inside a slot body: sends the stop, polls every kStopVerifyPollInterval through `ctx`, and
- * resends as StopVerifier asks. `clock` is the slot's own TaskClock (the one `ctx` waits on). Returns true when the
+ * resends as StopVerifier asks. `clock` must be the slot's own TaskClock, the one `ctx` waits on: the poll times come
+ * from `clock` and the waits from `ctx`, so two different clocks would desynchronise them. Returns true when the
  * stop is verified. Returns false, sending nothing more, as soon as the body is cancelled or superseded: the canceller
  * (AbortSlew, Disconnect) or the newer owner owns the mount from then on (decision 0006 rule 6). Throws
  * AlpacaException(DriverException, kStopNotVerifiedText) when the stop did not verify; the driver keeps it for Slewing.
@@ -256,7 +262,8 @@ inline std::chrono::nanoseconds validate_move_axis_time_limit(double seconds) {
 
 /**
  * One poll of a timed motion (a slew with its slew_time_budget(), a MoveAxis with its limit), from a slot body.
- * `deadline` is the body's copy, armed when the motion was sent (decision 0022). Returns true while the deadline has
+ * `deadline` is the body's copy, armed when the motion was sent (decision 0022); it must be armed: a never-armed
+ * (or cleared) window reads as already expired, so the first poll stops the mount. Returns true while the deadline has
  * not passed. Once it has, runs the verified stop and throws AlpacaException(DriverException, expired_text) for the
  * driver to keep for Slewing; a stop that does not verify throws kStopNotVerifiedText instead. Returns false when the
  * body was cancelled or superseded during the stop (run_verified_stop()).
@@ -270,6 +277,21 @@ inline bool enforce_motion_deadline(OperationContext& ctx, TaskClock& clock, Hol
         return false;
     }
     throw AlpacaException(expired_text, AlpacaError::DriverException);
+}
+
+/**
+ * The body of a timed motion's own slot (a MoveAxis cap, #2651): waits through `ctx` until `deadline` has passed, then
+ * enforce_motion_deadline(). Returns, sending nothing, when the body was cancelled or superseded first (a renewal, a
+ * stop, AbortSlew, a disconnect); throws as enforce_motion_deadline() once the deadline passed.
+ */
+inline void run_motion_deadline(OperationContext& ctx, TaskClock& clock, HoldWindow deadline,
+                                const StopVerifyHooks& hooks, const std::string& expired_text) {
+    for (auto now = clock.now(); deadline.active(now); now = clock.now()) {
+        if (!ctx.wait_for(deadline.until() - now)) {
+            return;
+        }
+    }
+    static_cast<void>(enforce_motion_deadline(ctx, clock, deadline, hooks, expired_text));
 }
 
 // ── Landing gate ─────────────────────────────────────────────────────────────────────────────────────────────────

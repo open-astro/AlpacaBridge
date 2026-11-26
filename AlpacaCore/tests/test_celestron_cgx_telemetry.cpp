@@ -140,10 +140,10 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     TelemetryRig rig;
     rig.coordinates();
     // Sync's raw-label/branch read is fresh even at a stationary home.
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     const auto lst = rig.driver->get_sidereal_time();
     const int sync_ra = rig.reads(0x10), sync_dec = rig.reads(0x11);
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     for (int wait = 1; wait <= 5; ++wait) {
         const bool waiting = rig.clock.wait_for_wait_count(wait, 2s);
         rig.clock.advance(20ms);
@@ -156,7 +156,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     // The synced labels are served before any poll.
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
     CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
-    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(87.0).margin(1e-3));
     rig.coordinates();
     rig.driver->set_tracking(true);
     rig.coordinates();
@@ -179,7 +179,7 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
 TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[celestron][cgx][telemetry]") {
     namespace cgx = alpacacore::vendor::celestron;
     TelemetryRig rig;
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const double before_ra = rig.driver->get_right_ascension();
     const double before_dec = rig.driver->get_declination();
@@ -189,9 +189,9 @@ TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[
         cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), old_dec_label, lst, cgx::CgxHemisphere::North)
             .pointing_side;
     const auto new_dec_label =
-        cgx::cgx_sky_position_to_encoders(lst, 85.0, lst, cgx::CgxHemisphere::North, side).second;
+        cgx::cgx_sky_position_to_encoders(lst, 87.0, lst, cgx::CgxHemisphere::North, side).second;
     rig.mount.set_label_read_offsets(0x11, {0, cgx::signed_cgx_encoder_delta(old_dec_label, new_dec_label)});
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     // Waits 1-3 are the settle before the writes; wait 4 is the first verify sleep, after both label writes.
     for (int wait = 1; wait <= 3; ++wait) {
         CHECK(rig.clock.wait_for_wait_count(wait, 2s));
@@ -211,16 +211,16 @@ TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[
     CHECK(during_dec == Catch::Approx(before_dec).margin(1e-6));
     // Sync publishes the verified pair.
     CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
-    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(87.0).margin(1e-3));
 }
 
 TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label writes", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const double lst = rig.driver->get_sidereal_time();
     rig.mount.set_label_read_offsets(0x11, std::vector<std::int32_t>(40, 100));  // the Dec label never reads back
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 87.0); });
     for (int wait = 1; wait <= 40 && sync.wait_for(0s) != std::future_status::ready; ++wait) {
         if (rig.clock.wait_for_wait_count(wait, 2s)) rig.clock.advance(20ms);
     }
@@ -245,7 +245,8 @@ TEST_CASE("CGX RightAscension holds between polls while tracking", "[celestron][
         rig.clock.advance(step);
         rig.utc += step;
     };
-    rig.mount.set_encoder_position(0x11, 0x810000);  // off the pole, so Altitude moves with the sky
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder +
+                                             0x10000);  // off the pole, so Altitude moves with the sky
     rig.driver->set_tracking(true);
     rig.poll_now();
     const double ra = rig.driver->get_right_ascension();
@@ -297,7 +298,7 @@ TEST_CASE("CGX the first read after a pulse guide shows where it ended", "[celes
 TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     rig.poll_now();
     const auto displaced = rig.driver->get_declination();
     CHECK(displaced < 90.0);
@@ -309,7 +310,7 @@ TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cg
     CHECK(rig.reads(0x11) == home_dec);
     // A reconnect drops the frame and takes a new one before Connected reads true.
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
-    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.mount.set_encoder_position(0x11, alpacacore::vendor::celestron::kCgxDecHomeEncoder + 0x10000);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     const int connect_ra = rig.reads(0x10), connect_dec = rig.reads(0x11);
     // The continuity check fails on the moved Dec axis, so the reference is gone with the old frame.
@@ -332,26 +333,28 @@ TEST_CASE("CGX GOTO planning reads the axes and in-flight getters serve the poll
     double target_ra = rig.driver->get_sidereal_time() - 1.0;
     if (target_ra < 0.0) target_ra += 24.0;
     rig.driver->slew_to_coordinates_async(target_ra, 85.0);
+    // The slew body reads each axis once on its first poll (the wrong-way watchdog, #2640) and then waits on the
+    // clock: count only once it waits, or that read races the count.
+    REQUIRE(rig.clock.wait_for_wait_count(1, 2s));
     const auto before = rig.driver->get_declination();
     rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 1);  // the planning read only
-    CHECK(rig.reads(0x11) == dec + 1);
+    CHECK(rig.reads(0x10) == ra + 2);  // the planning read and the watchdog's first read; the getters read nothing
+    CHECK(rig.reads(0x11) == dec + 2);
     // In flight the frame moves only with a poll.
     rig.mount.advance_motion(1s);
     CHECK(rig.driver->get_declination() == before);
     rig.poll_now();
     CHECK(rig.driver->get_declination() != before);
     // Completion samples a fresh pair; the motion waiter uses the same seam.
-    const bool waiting = rig.clock.wait_for_wait_count(1, 2s);
     rig.mount.complete_axis_slew(0x10);
     rig.mount.complete_axis_slew(0x11);
     rig.clock.advance(200ms);
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
-    CHECK(waiting);
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.reads(0x10) == ra + 3);
-    CHECK(rig.reads(0x11) == dec + 3);
+    // The planning read, the wrong-way watchdog's read on the leg's first poll (#2640), the poll and the arrival read.
+    CHECK(rig.reads(0x10) == ra + 4);
+    CHECK(rig.reads(0x11) == dec + 4);
     CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
 }
 
@@ -381,15 +384,21 @@ TEST_CASE("CGX a pending stop refuses the frame until the stop completes", "[cel
     CHECK(rig.reads(0x11) == dec);
     rig.clock.advance(20ms);
     const bool second_wait = rig.clock.wait_for_wait_count(2, 2s);
-    rig.clock.advance(20ms);
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    // The AbortSlew stop then reads the encoders until two reads 500 ms apart agree (#2411): step it to the end.
+    for (int step = 0; step < 100 && rig.driver->get_slewing(); ++step) {
+        rig.clock.advance(20ms);
+        REQUIRE(rig.clock.wait_for_woken_settled(2s));
+    }
     CHECK(first_wait);
     CHECK(second_wait);
     REQUIRE_FALSE(rig.driver->get_slewing());
+    // The getters read no axis: only the stop did.
+    const int stopped_ra = rig.reads(0x10), stopped_dec = rig.reads(0x11);
+    CHECK(stopped_ra > ra);
+    CHECK(stopped_dec > dec);
     CHECK_NOTHROW(rig.coordinates());
-    CHECK(rig.reads(0x10) == ra);
-    CHECK(rig.reads(0x11) == dec);
+    CHECK(rig.reads(0x10) == stopped_ra);
+    CHECK(rig.reads(0x11) == stopped_dec);
 }
 
 TEST_CASE("CGX a known fault refuses the frame and a recovered link still needs FindHome",

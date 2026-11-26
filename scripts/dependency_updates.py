@@ -90,8 +90,8 @@ class FetchError(Exception):
 
 
 def parse_version(v: str) -> tuple[tuple[int, ...], bool]:
-    """(numeric parts, is a pre-release) for '3.11.3', 'v1.25.2', '4.5.1-beta', '2.3'."""
-    m = re.match(r"^[vV]?(\d+(?:\.\d+)*)(.*)$", v.strip())
+    """(numeric parts, is a pre-release) for '3.11.3', 'v1.25.2', '4.5.1-beta', '2.3', PMD's 'pmd_releases/7.7.0'."""
+    m = re.match(r"^(?:pmd_releases/)?[vV]?(\d+(?:\.\d+)*)(.*)$", v.strip())
     if not m:
         raise ValueError(f"not a version: {v!r}")
     parts = tuple(int(x) for x in m.group(1).split("."))
@@ -795,6 +795,7 @@ def self_test() -> int:
     assert highest(["4.6.0-rc.1", "4.5.3"], include_pre=True) == "4.6.0-rc.1"
     # A pre-release baseline (ConformU 4.6.0-rc.1): not broken, 4.5.3 is no update, final 4.6.0 is.
     assert parse_version("4.6.0-rc.1") == ((4, 6), True)
+    assert parse_version("pmd_releases/7.7.0") == ((7, 7), False)
     assert not is_newer("4.5.3", "4.6.0-rc.1") and is_newer("4.6.0", "4.6.0-rc.1") and is_newer("4.6.1", "4.6.0-rc.1")
     assert not is_newer("4.6.0-rc.1", "4.6.0-rc.1")
 

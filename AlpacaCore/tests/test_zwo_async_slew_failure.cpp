@@ -12,7 +12,7 @@
 
 // open-astro#575, ZWO: the GOTO setup thread sends ":MS" after the initiator
 // returned; a mount that rejects it ("Mount rejected GOTO request") was logged
-// as "GOTO failed" and Slewing simply dropped to false once slew_force_until_
+// as "GOTO failed" and Slewing simply dropped to false once its force window (slew_hold_)
 // expired. The next Slewing read must return an Alpaca error instead
 // (contract reference in test_skywatcher_async_slew_failure.cpp).
 
@@ -49,6 +49,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::Latch;
 using alpacacore::test::timed;
 
 alpacacore::vendor::zwo::ConnectionInfo endpoint(int port, int response_timeout_ms) {
@@ -1130,32 +1131,6 @@ TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one e
 
 namespace {
 
-// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
-struct Latch {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool entered = false;
-    bool open = false;
-
-    void block() {
-        std::unique_lock<std::mutex> lock(mutex);
-        entered = true;
-        cv.notify_all();
-        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
-    }
-    bool wait_entered() {
-        std::unique_lock<std::mutex> lock(mutex);
-        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
-    }
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            open = true;
-        }
-        cv.notify_all();
-    }
-};
-
 std::thread refuse_thread(std::function<void()>) {
     throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
 }
@@ -1302,7 +1277,7 @@ TEST_CASE("ZWO async - Connected=false returns while a Park holds the initiator 
     auto park = std::async(std::launch::async, [&] {
         try {
             driver->park();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): the link closed under it
             // The link closed under it: NotConnected or a failed send, both fine here.
         }
     });
@@ -1356,7 +1331,7 @@ TEST_CASE("ZWO async - a SlewAsync during Unpark's fence-to-command gap is refus
 // must not start a drain over a newer one. A reset (AbortSlew) and a second PulseGuide (B, 6000 ms) land in that gap:
 // B's drain sends its first step, and A's late start would supersede it, so B's second step would never be sent.
 // Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse_start_mutex_ lock held across the drain
-// decision and pulse_slot_.start() (B's second step is lost); or reset_position_offsets(): removing its
+// decision and pulse_slot_[axis].start() (B's second step is lost); or end_pulses(): removing its
 // pulse_start_mutex_ lock (the reset returns while A is held).
 TEST_CASE("ZWO async - a stale pulse drain start never cuts a newer accepted pulse (#2096)",
           "[zwo][telescope][async][operation-slot]") {
@@ -1477,6 +1452,63 @@ TEST_CASE("ZWO async - a redundant connect before a new drain runs keeps no stal
     for (int i = 0; i < 4; ++i) rig.tick(std::chrono::milliseconds(250));  // 1 s
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(mount.count(":Mgs") == 0);  // nothing of B ran
+    driver->set_connected(false);
+}
+
+// open-astro#2072: a guide pulse step checks its stop reason under mutex_ and then sends ":Mg" with no lock held. An
+// AbortSlew, Park or FindHome that cancels the pulse in that gap must not send its own command first: the reset waits
+// for the step already past its check, so the initiator's command follows that ":Mg" and stops or supersedes it. The
+// seam holds the step between its check and its send; a command that reaches the mount within 200 ms real time
+// meanwhile overtook it (a bounded negative check, as sent_while_held above).
+// Falsified by: zwo_telescope_driver.cpp end_pulses(): removing the wait for sends_in_flight == 0,
+// so the initiator's command goes out while the counted ":Mg" is still unsent.
+TEST_CASE("ZWO async - AbortSlew, Park or FindHome during a guide pulse send waits for its :Mg (#2072)",
+          "[zwo][telescope][async][operation-slot]") {
+    const auto initiator_and_command = GENERATE(std::pair<std::string, std::string>{"AbortSlew", ":Q"},
+                                                std::pair<std::string, std::string>{"Park", ":hP"},
+                                                std::pair<std::string, std::string>{"FindHome", ":hC"});
+    const std::string& label = initiator_and_command.first;
+    const std::string& command = initiator_and_command.second;
+    CAPTURE(label);
+    Latch latch;
+    std::atomic<int> pulses_held{0};
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    // ":Q" exactly: a prefix would also count ":Qe" / ":Qw".
+    const auto sent = [&] { return label == "AbortSlew" ? count_exact(mount, ":Q") : mount.count(command); };
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == ":Mg" && pulses_held.fetch_add(1) == 0) latch.block();
+    });
+    rig.connect();
+
+    driver->pulse_guide(0, 3000);
+    REQUIRE(latch.wait_entered());
+    auto initiator = std::async(std::launch::async, [&] {
+        if (label == "AbortSlew") driver->abort_slew();
+        if (label == "Park") driver->park();
+        if (label == "FindHome") driver->find_home();
+    });
+    const bool sent_while_counted = wait_until([&] { return sent() > 0; }, 200);
+    latch.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the latch
+    const bool returned = initiator.wait_for(kInitiatorBudget) == std::future_status::ready;
+    initiator.wait();
+    REQUIRE_NOTHROW(initiator.get());
+    CHECK_FALSE(sent_while_counted);
+    CHECK(returned);
+    // The fake records a command when it reads it off the socket; wait for the released ":Mg" before reading order.
+    REQUIRE(mount.wait_for_count(":Mg", 1, std::chrono::seconds(2)));
+
+    const auto all = mount.commands();
+    const auto pulse_at =
+        std::find_if(all.begin(), all.end(), [](const std::string& c) { return c.starts_with(":Mg"); });
+    const auto command_at = std::find_if(all.begin(), all.end(), [&](const std::string& c) {
+        return label == "AbortSlew" ? c == ":Q" : c.starts_with(command);
+    });
+    REQUIRE(pulse_at != all.end());
+    REQUIRE(command_at != all.end());
+    CHECK(pulse_at < command_at);
+    CHECK(mount.count(":Mg") == 1);
     driver->set_connected(false);
 }
 
@@ -1643,7 +1675,7 @@ TEST_CASE("ZWO async - a repeated Connected=false waits for the running teardown
 // finds the slots empty. It can pass by accident and never fails by accident; under ThreadSanitizer
 // (sanitizers-tsan, [stress-guard]) it also checks the reapers.
 // Falsified by: zwo_telescope_driver.cpp abort_slew(): reaping the GOTO slot itself (goto_slot_.cancel_all_and_join()
-// after fence_goto(), a reaper outside set_connected_mutex_ that races disconnect's reap, failure 0011).
+// after fence_goto(), a reaper outside transition_mutex_ that races disconnect's reap, failure 0011).
 TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO target write",
           "[zwo][telescope][async][operation-slot][stress-guard]") {
     const bool abort_first = GENERATE(true, false);
@@ -1659,7 +1691,7 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
     const std::function<void()> abort = [&] {
         try {
             driver->abort_slew();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): NotConnected is fine
             // NotConnected once the disconnect won the race.
         }
     };
@@ -1683,9 +1715,10 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
     driver->set_connected(false);
 }
 
-// The destructor with live bodies: a GOTO held on its time write (":SMTI"), a pulse drain waiting for the same link
-// and the poll. The destructor disconnects (cancelling the held read), fences and reaps the GOTO, then reaps the
-// teardown, the pulse drain and the poll, without waiting out the link timeout. Under ThreadSanitizer ([stress-guard])
+// The destructor with live bodies: a GOTO held on its time write (":SMTI") and the poll. The destructor disconnects
+// (cancelling the held read), fences and reaps the GOTO, then reaps the teardown, the pulse drains and the poll,
+// without waiting out the link timeout. A PulseGuide meanwhile is refused at once (#2263: no pulse during a slew), and
+// never waits for the held GOTO. Under ThreadSanitizer ([stress-guard])
 // it also checks that no body outlives the members it touches.
 // #2256: the hold is on ":SMTI", not ":Sr". The GOTO body holds target_write_mutex_ from ":Sr" through ":MS", and
 // PulseGuide queues under it (open-astro#2093), so a hold on ":Sr" blocked the pulse until ":Sr", ":Sd" and ":MS" had
@@ -1693,8 +1726,9 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
 // over, and ":Sd"/":MS" reached the count only when the fake read them after release().
 // Falsified by: zwo_telescope_driver.cpp set_connected(): Connected=false without protocol_.cancel_pending_io(), so
 // the fence waits for the held ":SMTI" until the 5 s link timeout.
-TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and the poll live",
+TEST_CASE("ZWO async - the destructor reaps a held GOTO and the poll, and a PulseGuide meanwhile is refused at once",
           "[zwo][telescope][async][operation-slot][stress-guard]") {
+    alpacacore::test::HostClockTrustGuard trusted(true);  // the GOTO holds on its host time write (#2419)
     Rig rig(5000);
     auto& mount = rig.mount;
     rig.connect();
@@ -1702,9 +1736,12 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     mount.hold_reply(":SMTI");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
-    // The pulse must queue at once and leave its drain waiting for the link; a pulse that waits for the GOTO to
-    // finish runs the destructor after the GOTO is over, and the test checks nothing (#2256).
-    const auto pulse_took = timed([&] { REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 3000)); });
+    // The pulse must be refused at once; a pulse that waits for the GOTO to finish runs the destructor after the GOTO
+    // is over, and the test checks nothing (#2256).
+    const auto pulse_took = timed([&] {
+        alpacacore::test::require_alpaca_error([&] { rig.driver->pulse_guide(0, 3000); },
+                                               alpacacore::AlpacaError::InvalidOperation);
+    });
     CHECK(pulse_took < kInitiatorBudget);
     auto destroy = std::async(std::launch::async, [&] { rig.driver.reset(); });
     const bool destroyed = destroy.wait_for(std::chrono::seconds(2)) == std::future_status::ready;

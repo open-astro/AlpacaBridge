@@ -1,0 +1,7 @@
+### Fixed
+
+- **OnStep: NINA meridian flips now happen** (OnStep driver, issue #2179): with OnStepX's default preferred pier side (Best) the mount stays on its side past the meridian, up to the meridian limit, but the driver reported the pier side from the hour-angle sign, so NINA saw "already flipped", logged "No flip is required" and let the mount run into its limit. `SideOfPier` now reports the side the mount is really on (the `:GU#` pier-side letter, with the old rule only when the mount reports none), `DestinationSideOfPier` predicts the side the firmware will pick from its preferred side, meridian limits and RA-axis limits (read at connect and refreshed while connected), and `CanSetPierSide` is true on an OnStepX German mount with meridian flips on, so a client can set `SideOfPier` to flip: the driver sends OnStepX's own `:MNe#`/`:MNw#` (GOTO the current position on the other side), which changes no setting; a flip while the mount reports no side (at home) is refused. A fork or alt-az mount, OnStep 4.x, a mount with flips off, or a mount whose settings cannot be read keeps the old behaviour and `CanSetPierSide` false.
+
+### Added (tests)
+
+- **OnStep pier-side cases** (issue #2179): table-driven cases for the new `util/pointing.h` GEM pier-side model, and driver cases for `SideOfPier`, `DestinationSideOfPier`, `CanSetPierSide` and the `SideOfPier` flip against a scripted OnStepX.

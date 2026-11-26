@@ -12,11 +12,14 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -28,6 +31,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -47,6 +51,15 @@ constexpr unsigned kFourCC_BGGR = 0x52474742; // 'B','G','G','R'
 constexpr unsigned kFourCC_GRBG = 0x47425247; // 'G','R','B','G'
 constexpr unsigned kFourCC_GBRG = 0x47524247; // 'G','B','R','G'
 constexpr unsigned kFourCC_YYYY = 0x59595959; // mono
+
+// The frame-request texts (#2261) in ToupTek's words (Altair rides them).
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.duration_invalid = "Exposure duration must be non-negative";
+    texts.frame_start_off_sensor = "ROI extends beyond sensor bounds";
+    return texts;
+}();
+static_assert(util::all_texts_set(kRequestTexts), "every frame-request text is set");
 
 ToupBayerPattern four_cc_to_bayer(unsigned four_cc) {
     switch (four_cc) {
@@ -68,9 +81,54 @@ std::pair<int, int> bayer_offsets(ToupBayerPattern pattern) {
     }
 }
 
+// Toupcam_get_ProductionDate writes YYYYMMDD; shown as YYYY-MM-DD. Anything
+// else is shown as the SDK wrote it.
+std::string format_production_date(const std::string& date) {
+    if (date.size() == 8 && std::all_of(date.begin(), date.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        return date.substr(0, 4) + "-" + date.substr(4, 2) + "-" + date.substr(6, 2);
+    }
+    return date;
+}
+
+// The web UI's one Firmware string (issue #1997): the firmware version, then the
+// hardware version, FPGA version and production date in parentheses. A value
+// the model does not report (empty) is left out; empty when none is reported.
+std::string compose_firmware(const std::string& firmware, const std::string& hardware, const std::string& fpga,
+                             const std::string& production_date) {
+    std::string details;
+    const auto add = [&details](const std::string& label, const std::string& value) {
+        if (value.empty()) return;
+        if (!details.empty()) details += ", ";
+        details += label + " " + value;
+    };
+    add("hardware", hardware);
+    add("FPGA", fpga);
+    add("production date", production_date.empty() ? production_date : format_production_date(production_date));
+    if (firmware.empty()) return details;
+    if (details.empty()) return firmware;
+    return firmware + " (" + details + ")";
+}
+
+// The SDK (library) version for the web UI, read once: Toupcam_Version() is a
+// static string, so it is known before any connect. "unknown" is no version.
+std::optional<std::string> read_sdk_version(ToupTekSDK& sdk) {
+    std::string version;
+    try {
+        version = sdk.get_sdk_version();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (version.empty() || version == "unknown") {
+        return std::nullopt;
+    }
+    return util::normalize_dotted_version(version);
+}
+
 } // namespace
 
-class ToupTekCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
+// final: the destructor's #1995 test drives a StartExposure while ~ToupTekCameraDriver
+// runs, which is well defined only while this is the most-derived class.
+class ToupTekCameraDriver final : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -87,7 +145,7 @@ public:
           camera_info_(),
           camera_info_valid_(false),
           serial_number_(),
-          firmware_version_(),
+          sdk_version_(read_sdk_version(sdk)),
           connected_(false),
           bin_(1),
           start_x_(0),
@@ -106,17 +164,22 @@ public:
         shutdown_connection();
         // The SDK stop first, then the join: the body must be gone before the camera closes (decision 0020 rule 5).
         session_.set_stopping(true);  // the broken frame wait is not kept as a failure
+        std::function<void()> gap_hook;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             closing_ = true;
             stop_unclean_stream_locked();
+            gap_hook = disconnect_gap_hook_;
         }
+        if (gap_hook) gap_hook();  // test seam: the window closing_ guards
         session_.disconnect_and_join();
         stop_thermal_poller();
         pulse_slot_.cancel_all_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                ToupTekCameraDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(branding_.label, "Error during destruction: " + std::string(e.what()));
             }
@@ -128,7 +191,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_.name.empty()) {
-            return camera_info_.name;
+            return util::branded_name(branding_.label, camera_info_.name);
         }
         return branding_.label + " Camera";
     }
@@ -148,11 +211,25 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
+    // The camera's own firmware, with its hardware and FPGA versions and its
+    // production date, for the web UI only (never DriverInfo; issue #1997). Read
+    // at connect and cleared at disconnect, so it is empty (no firmware) while
+    // disconnected; served from firmware_mutex_, never the SDK.
+    std::optional<std::string> get_device_firmware() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
+    }
+
+    // The SDK (library) version, for the web UI only, read once when the driver
+    // is built, so the getter makes no SDK call (e.g. "60.31488.20260519").
+    std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
+
     bool get_connected() const override { return connected_.load(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // A disconnect during an in-flight connect is recorded BEFORE the
@@ -173,13 +250,15 @@ public:
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         if (!connected) {
             // Stop the SDK exposure, then join the body, BEFORE taking mutex_ and
-            // closing the handle: the body runs Toupcam_WaitImageV4 on a raw handle
-            // snapshot, so closing under it is a use-after-close (decision 0020 rule
-            // 5). The stop wakes that wait; a body failure it causes is dropped, not
-            // kept. disconnect_and_join() closes the session first, so a
-            // StartExposure that passed its connection check raises NotConnected and
-            // runs no body; it joins without mutex_ (the body takes mutex_).
+            // closing the handle: the body pulls its frame on a raw handle snapshot,
+            // so closing under it is a use-after-close (decision 0020 rule 5).
+            // disconnect_and_join() wakes the body's frame wait; a body failure the
+            // stop causes is dropped, not kept. closing_, set with the stop, is what refuses a StartExposure that
+            // passed its connection check before disconnect_and_join() closes the
+            // session: it raises NotConnected and runs no body. The join runs
+            // without mutex_ (the body takes mutex_).
             session_.set_stopping(true);
+            std::function<void()> gap_hook;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 closing_ = true;  // set with the stop: no StartExposure parks a body after it
@@ -187,7 +266,9 @@ public:
                     format_dirty_ = true;
                     roi_dirty_ = true;
                 }
+                gap_hook = disconnect_gap_hook_;
             }
+            if (gap_hook) gap_hook();  // test seam: the window closing_ guards
             session_.disconnect_and_join();
             // The poller takes mutex_ on every tick, so stop and join its slot
             // out here too -- before mutex_ is taken and the handle closed.
@@ -234,7 +315,7 @@ public:
             // end, so no getter sees a half-configured camera (item 3).
             ToupCameraInfo info = cameras[static_cast<std::size_t>(camera_index_)];
 
-            ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk.get_sdk_version());
+            ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk_version_.value_or("unknown"));
             ALPACA_LOG_INFO(branding_.label,
                             "Opening camera index " + std::to_string(camera_index_) + ": " + info.name);
 
@@ -271,6 +352,9 @@ public:
             // the next reconnect. Guard the whole post-open configuration in one try.
             std::string serial;
             std::string firmware;
+            std::string hardware;
+            std::string fpga;
+            std::string production_date;
             try {
                 sdk.put_trigger_mode(handle, 1);  // software trigger
 
@@ -320,6 +404,20 @@ public:
 
                 serial = sdk.get_serial_number(handle);
                 firmware = sdk.get_firmware_version(handle);
+                // Shown beside the firmware in the web UI only (issue #1997); a
+                // model that cannot answer one leaves it out, and never fails the
+                // connect over it.
+                const auto best_effort = [&](const char* what, auto read) {
+                    try {
+                        return read();
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG(branding_.label, std::string(what) + " failed: " + e.what());
+                        return std::string();
+                    }
+                };
+                hardware = best_effort("get_HwVersion", [&] { return sdk.get_hw_version(handle); });
+                fpga = best_effort("get_FpgaVersion", [&] { return sdk.get_fpga_version(handle); });
+                production_date = best_effort("get_ProductionDate", [&] { return sdk.get_production_date(handle); });
 
                 sdk.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
             } catch (const AlpacaException&) {
@@ -332,13 +430,21 @@ public:
             }
 
             {
+                // Its own independent leaf lock, taken with only transition_mutex_
+                // held and never nested under mutex_: a configureddevices poll does
+                // not wait behind mutex_ (driver lifecycle instructions).
+                // Published before Connected goes true below, so no poll sees a
+                // connected camera without its Firmware row.
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
+                firmware_ = compose_firmware(firmware, hardware, fpga, production_date);
+            }
+            {
                 // Publish under mutex_ (the short state lock) only now: identity,
                 // limits and the handle appear together.
                 std::lock_guard<std::mutex> lock(mutex_);
                 camera_info_ = std::move(info);
                 camera_info_valid_ = true;
                 serial_number_ = std::move(serial);
-                firmware_version_ = std::move(firmware);
                 handle_ = handle;
                 bin_ = 1;
                 start_x_ = 0;
@@ -375,13 +481,16 @@ public:
         // waits on readout_mutex_ (decision 0016 item 6). The exposure body is
         // already joined (disconnect_and_join() above), which also cleared the
         // image, the kept failure and LastExposure*.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
         std::unique_lock<std::mutex> state_lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         HToupcam handle = std::exchange(handle_, nullptr);
         // camera_info_ stays: no getter asks the SDK for it again, which a second
         // ToupTek device's open can hold (decision 0016 rule 1); connect overwrites it.
         serial_number_.clear();
-        firmware_version_.clear();
         reset_connection_state_locked();
         connected_.store(false);
         state_lock.unlock();
@@ -393,23 +502,6 @@ public:
             }
             sdk.close_camera(handle);
         }
-    }
-
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
-    }
-    bool can_action(std::string_view) const override { return false; }
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
 
     int get_bayer_offset_x() const override {
@@ -700,7 +792,7 @@ public:
         // reconnect that changed the bit depth between the check and the write left
         // the accepted bound stale (spurious SDK DriverException). Holding both locks
         // also makes the exposure check atomic with the write (start_exposure
-        // sets exposure_starting_ under mutex_). Lock order mutex_ ->
+        // reserves its start under mutex_). Lock order mutex_ ->
         // readout_mutex_ -> SDK, so the bound is read from handle_ directly, not via
         // offset_max_value() (which would re-take mutex_).
         std::lock_guard<std::mutex> lock(mutex_);
@@ -891,6 +983,7 @@ public:
         return static_cast<double>(t) / 10.0;
     }
     void set_set_ccd_temperature(double temperature) override {
+        util::check_ccd_setpoint(temperature);
         ensure_connected();
         int deci = static_cast<int>(std::lround(temperature * 10.0));
         auto& sdk = sdk_;
@@ -930,6 +1023,10 @@ public:
         }
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
+        }
+        if (duration > kDefaultMaxPulseGuideMs) {  // #2292
+            throw AlpacaException("Pulse guide duration must be <= " + std::to_string(kDefaultMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
         }
         ToupGuideDirection dir = ToupGuideDirection::North;
         switch (direction) {
@@ -973,9 +1070,10 @@ public:
     // All cache fields are guarded by mutex_ (callers hold it via with_handle).
 
     // During an exposure the last reading is served regardless of age: no
-    // thermal USB control transfer may be issued while Toupcam_WaitImageV4 is
-    // pending (the SDK answers E_UNEXPECTED / drops the frame, seen on the
-    // ATR585M at bin 3-4), and a 1-3 s old temperature is harmless.
+    // thermal USB control transfer may be issued while a frame is pending
+    // (measured with Toupcam_WaitImageV4 parked: the SDK answers E_UNEXPECTED /
+    // drops the frame, seen on the ATR585M at bin 3-4), and a 1-3 s old
+    // temperature is harmless.
     // Freshness is tracked PER quantity (temperature vs TEC voltage): a
     // temperature-only fallback read must not mark the TEC reading fresh, or
     // DeviceState (temperature first, then CoolerPower) right after connect
@@ -1045,9 +1143,9 @@ public:
     void start_exposure(double duration, bool light) override {
         (void)light;
 
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
-        }
+        // #2259 canonical order (util/camera_frame_request.h): a duration invalid whatever the camera is
+        // (non-finite, negative, or too large to convert to microseconds) precedes the connection check.
+        const double requested_us = util::check_exposure_duration(duration, kRequestTexts);
         ensure_connected();
 
         auto& sdk = sdk_;
@@ -1056,12 +1154,13 @@ public:
         // (see below).
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
-        const double rounded_us = std::max(std::round(duration * 1'000'000.0), static_cast<double>(range.min_us));
-        if (rounded_us > range.max_us) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
-        const unsigned exposure_us = static_cast<unsigned>(rounded_us);
+        // The range fits unsigned, so the microseconds the module returns do too.
+        const auto exposure_us = static_cast<unsigned>(util::exposure_microseconds(
+            requested_us, static_cast<long>(range.min_us), static_cast<long>(range.max_us), kRequestTexts));
 
+        // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot below, so a register or geometry
+        // write cannot slip in before session_.start() has published Exposing; a second start is refused.
+        util::CaptureReservation reservation;
         int active_bin = 0;
         int active_start_x = 0;
         int active_start_y = 0;
@@ -1091,14 +1190,10 @@ public:
             }
             // Validate before refusing or stopping anything.
             validate_exposure_roi_locked();
-            const CameraState state = session_.camera_state();
-            if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-                throw AlpacaException("An exposure is already in progress", AlpacaError::InvalidOperation);
-            }
-            // A body the watchdog failed can still be parked in Toupcam_WaitImageV4:
-            // stop the stream to wake it, so session_.start() below does not wait out
-            // the SDK timeout (decision 0020 rule 5). Before the snapshot, because the
-            // stop dirties the stream configuration.
+            reservation = session_.reserve();
+            // A body the watchdog failed can still be in an SDK call: stop its stream
+            // now (decision 0020 rule 5), before the snapshot, because the stop
+            // dirties the stream configuration.
             if (session_.busy() && stop_unclean_stream_locked()) {
                 format_dirty_ = true;
                 roi_dirty_ = true;
@@ -1171,10 +1266,10 @@ public:
             }
             // NB: at bin 1 an odd NumX/NumY (the +1 even pad), and at bin >= 2 the
             // grown span, make the SDK frame one pixel wider/taller than
-            // requested, so got_w/got_h from WaitImageV4 can exceed
+            // requested, so got_w/got_h from PullImageV4 can exceed
             // active_num_x/active_num_y — this is NOT an off-by-one. The body
             // lays the frame out at that wider stride and build_image_array reads
-            // the first active_num_x columns of each row (WaitImageV4 rejects a
+            // the first active_num_x columns of each row (the SDK rejects a
             // rowPitch shorter than the delivered row with E_INVALIDARG, measured
             // on the GPCMOS01200KPF, so the stride can never be the requested
             // width). Reported NumX/NumY stay = active_num_x/y.
@@ -1204,11 +1299,6 @@ public:
             saved_stream_clean = stream_clean_;
             stream_clean_ = false;
             generation = abort_generation_.load();
-            // Holds the settings (ensure_not_exposing) from this snapshot until
-            // session_.start() has published Exposing, so a register or geometry
-            // write cannot slip in between.
-            exposure_starting_ = true;
-            abort_pending_ = false;
         }
 
         auto body = [this, generation, exposure_us, active_bin, active_num_x, active_num_y, expected_w, expected_h,
@@ -1254,7 +1344,7 @@ public:
                 if (dirty_format) {
                     try {
                         sdk_local.stop(handle);
-                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): already stopped is harmless
                         // Stopping an already-stopped stream is harmless; ignore.
                     }
                     sdk_local.put_binning(handle, active_bin);
@@ -1290,7 +1380,6 @@ public:
                     sdk_local.trigger(handle, 1);
                 }
 
-                unsigned timeout_ms = (exposure_us / 1000) + 10000;
                 // Buffer rows are stride_px wide at the sensor's byte depth (RAW8
                 // = 1 byte/pixel, >8-bit = 16-bit little-endian; M14): the frame
                 // the SDK will deliver (expected_w, one wider than num for an odd
@@ -1306,14 +1395,18 @@ public:
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
-                // rowPitch = stride_px * bytes_per_pixel: Toupcam_WaitImageV4's
+                // Decision 0020 rule 4: the frame event (on_event_static) wakes this
+                // wait; the watchdog deadline bounds it, and an abort, a disconnect or
+                // the watchdog ends it without a pull. Then one non-blocking pull.
+                // rowPitch = stride_px * bytes_per_pixel: Toupcam_PullImageV4's
                 // nRowPitch is the destination row stride in OUR buffer and must
                 // hold a whole delivered row — a pitch shorter than the frame's
                 // row (the requested width against a one-wider frame) is
                 // E_INVALIDARG on hardware. build_image_array reads the first
                 // active_num_x columns of each stride_px-wide row.
-                bool got = sdk_local.wait_image(handle, timeout_ms, pixel_buffer.data(), active_16bit ? 16 : 8,
-                                                stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
+                const bool got = c.wait_for_signal() &&
+                                 sdk_local.pull_image(handle, pixel_buffer.data(), active_16bit ? 16 : 8,
+                                                      stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
 
                 if (!got) {
                     throw AlpacaException("The camera failed to deliver the exposure frame",
@@ -1379,31 +1472,26 @@ public:
             ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + failure_text);
             std::rethrow_exception(failure);  // kept by the session until the next StartExposure
         };
-        try {
-            session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
-        } catch (...) {
-            // Refused (NotConnected, or the previous body still finishing): no body
-            // ran, so the stream and the settings still need what they needed.
+        // No body ran when the start is refused (NotConnected, or the previous body still finishing) or when an
+        // AbortExposure or StopExposure recorded during the reservation ended it as it published (issue #1996,
+        // decision 0020 rule 9): the stream and the settings still need what they needed.
+        const auto restore_unstarted = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_pending_ = false;  // nothing started, so there is nothing to abort
             // Not on a camera a disconnect has closed or is closing: its stop already
             // ended the stream, and handle_ stays set until after disconnect_and_join().
             if (handle_ && !closing_) stream_clean_ = saved_stream_clean;
             format_dirty_ = format_dirty_ || dirty_format;
             roi_dirty_ = roi_dirty_ || dirty_roi;
+        };
+        bool aborted = false;
+        try {
+            aborted =
+                session_.start(std::move(reservation), static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
+        } catch (...) {
+            restore_unstarted();
             throw;
         }
-        bool abort_now = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_now = std::exchange(abort_pending_, false);
-        }
-        // An AbortExposure or StopExposure that arrived while this start waited in session_.start() (behind a body
-        // the watchdog left in the SDK) was recorded, not dropped (issue #1996): act on it now that Exposing is
-        // published, with the same stop-then-join (or frame discard) as a direct call.
-        if (abort_now) stop_exposure();
+        if (aborted) restore_unstarted();
     }
 
     void stop_exposure() override {
@@ -1411,28 +1499,30 @@ public:
         bool exposing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // A StartExposure is between its settings snapshot and session_.start()
+            // publishing Exposing, which can take up to the start timeout behind a
+            // body the watchdog left in the SDK. The session records the abort and
+            // applies it as that start publishes, so no body runs and the exposure
+            // never runs to the end after the client was told it was aborted
+            // (issue #1996, decision 0020 rule 9). Recorded before the state is read:
+            // a start that publishes Exposing in between makes record_abort() false,
+            // and the read below then sees that exposure and stops it. Read first, the
+            // state was Idle, the record failed and the abort was dropped.
+            if (session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             exposing = state == CameraState::Exposing || state == CameraState::Download;
             if (exposing) {
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
-                // A StartExposure is between its settings snapshot and session_.start()
-                // publishing Exposing, which can take up to the start timeout behind a
-                // body the watchdog left in the SDK. Record the abort; that start runs
-                // it once Exposing is published, so the exposure never runs to the end
-                // after the client was told it was aborted (issue #1996).
-                if (exposure_starting_) {
-                    abort_pending_ = true;
-                    return;
-                }
                 // A completed exposure: drop its frame. A kept failure stays until the
                 // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();
             }
             // A completed exposure leaves a reusable pull-mode stream: keep it. For an
-            // active, failed or timed-out exposure, stop() wakes WaitImageV4 promptly
-            // (a 10-min frame would otherwise take ~10 min to abort) and is the SDK
-            // stop before the join (decision 0020 rule 5). Held under mutex_ so a
+            // active, failed or timed-out exposure, stop() is the SDK stop before the
+            // join (decision 0020 rule 5); session_.abort() wakes the body's frame wait. Held under mutex_ so a
             // concurrent disconnect can't close the handle in the gap.
             if (stop_unclean_stream_locked()) {
                 // Stream was stopped; force the next exposure to re-init it. Mark the
@@ -1443,8 +1533,13 @@ public:
             }
         }
         if (exposing) {
-            session_.abort();  // joins the body; bounded by the stop above waking its frame wait
+            session_.abort();  // wakes the body's frame wait and joins it
         }
+    }
+
+    void set_disconnect_gap_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_gap_hook_ = std::move(hook);
     }
 
 private:
@@ -1462,7 +1557,14 @@ private:
     ToupCameraInfo camera_info_;
     bool camera_info_valid_;
     std::string serial_number_;
-    std::string firmware_version_;
+    // The web UI Firmware string (compose_firmware), published by the connect
+    // just before Connected goes true and cleared by the disconnect before the close. Its own
+    // independent leaf mutex: the connect and disconnect take it with only transition_mutex_
+    // held, never nested under mutex_, so get_device_firmware() never waits on mutex_ or the
+    // SDK (driver lifecycle instructions, decision 0016 item 4).
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;
+    const std::optional<std::string> sdk_version_;  // read at construction; fixed
 
     std::atomic<bool> connected_;
     // Bumped with every stream stop (stop_unclean_stream_locked, under mutex_). The
@@ -1499,19 +1601,17 @@ private:
     // Guarded by mutex_. True only when pull mode is running and the last
     // exposure (if any) published a frame without an abort/failure/timeout.
     // An idle camera does not imply a stopped body: a body the watchdog failed
-    // can still be parked in Toupcam_WaitImageV4 until a stop wakes it.
+    // can still be in an SDK call until it returns.
     bool stream_clean_;
-    // Guarded by mutex_. True from a StartExposure's settings snapshot until
-    // session_.start() has published Exposing (or refused).
-    bool exposure_starting_{false};
-    // Guarded by mutex_. An AbortExposure or StopExposure that arrived while exposure_starting_ was set; the start
-    // acts on it after session_.start() returns, and clears it when it starts or is refused (issue #1996).
-    bool abort_pending_{false};
     // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
     // a StartExposure in the gap before disconnect_and_join() closes the session
-    // would otherwise run a body that parks in Toupcam_WaitImageV4 and holds the
-    // join (decision 0020 rule 5).
+    // would otherwise run a body that triggers on a camera being closed (decision
+    // 0020 rule 5).
     bool closing_{false};
+    // Guarded by mutex_. Test seam (set_disconnect_gap_hook_for_testing): runs on the
+    // disconnecting thread after closing_ is set and before disconnect_and_join(),
+    // with no driver lock held; empty in production.
+    std::function<void()> disconnect_gap_hook_;
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
     static constexpr std::chrono::milliseconds kThermalPollInterval{1000};
@@ -1541,17 +1641,19 @@ private:
     std::mutex pulse_guide_lifecycle_mutex_;
 
     // Past start + duration + this, the session fails the exposure (watchdog).
-    // Toupcam_WaitImageV4's own timeout is the exposure + 10 s, inside it.
+    // The body's frame wait has no timeout of its own: this bounds it.
     static constexpr std::chrono::seconds kWatchdogMargin{15};
     // The exposure (decision 0020). Declared after every member the body touches:
     // destroyed first, so the body is joined before they die.
     util::CaptureSession session_;
 
-    static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
+    static void on_event_static(unsigned event, void* ctx) {
         // Pull-mode callbacks fire on an SDK-owned thread. Do not touch the
         // handle here — close/stop from this context deadlocks (SDK contract).
-        // Frame delivery is handled by Toupcam_WaitImageV4 in the exposure
-        // body, so this callback is intentionally a no-op.
+        // A frame wakes the exposure body, which pulls it (decision 0020 rule 4).
+        if (event == kToupEventImage) {
+            static_cast<ToupTekCameraDriver*>(ctx)->session_.signal();
+        }
     }
 
     void ensure_connected() const {
@@ -1565,7 +1667,7 @@ private:
     // means a concurrent disconnect cannot Toupcam_Close the handle mid-call — closing the
     // use-after-close window that a bare handle snapshot left open (it released
     // mutex_ before the SDK call). Use this for every fast SDK option
-    // read/write. Do NOT use it for blocking SDK calls (Toupcam_WaitImageV4) or
+    // read/write. Do NOT use it for a frame pull (Toupcam_PullImageV4) or
     // the exposure body, which must not hold mutex_ across them. Callers that also need
     // readout_mutex_ (set_gain/set_offset/get/set_readout_mode) take both locks
     // directly instead, to stay atomic against the two-step readout-mode apply.
@@ -1582,37 +1684,19 @@ private:
     }
 
     // Reject runtime sensor-register writes (readout mode / gain / offset) while
-    // a frame is integrating: the exposure body is blocked in wait_image
+    // a frame is integrating: the exposure body waits for the frame event
     // holding no lock, so a mid-exposure register write would race the live
     // integration and yield a mixed-state or stalled frame with no error.
-    // Requires mutex_ held, the lock start_exposure sets exposure_starting_ under.
-    // A cancelled or failed body can still be in the SDK, so the settings stay
-    // locked while the session is busy, except once the frame is Ready.
-    void ensure_not_exposing() const {
-        const CameraState state = session_.camera_state();
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-        // Past the state check nothing is exposing, and none can start under mutex_,
-        // so the watchdog cannot fail it between failure() and image_ready(): the
-        // image_ready() below cannot raise. A kept failure is not a ready frame.
-        if (session_.busy() && (session_.failure() || !session_.image_ready())) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Requires mutex_ held, the lock start_exposure reserves its start under (decision
+    // 0020 rule 9): the session answers for the reservation, Exposing, Download and a
+    // failed or cancelled body still returning with no frame ready.
+    void ensure_not_exposing() const { session_.ensure_settings_unlocked(); }
 
+    // The sensor is bounded by its EVEN size (Toupcam_put_Roi needs an even sensor span; see start_exposure).
     void validate_exposure_roi_locked() const {
-        const int max_w = (camera_info_.max_width & ~1) / bin_;
-        const int max_h = (camera_info_.max_height & ~1) / bin_;
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
-        }
-        if (num_x_ > max_w || num_y_ > max_h) {
-            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-        }
-        if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
-            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-        }
+        util::check_frame_on_sensor(util::CameraFrame{bin_, bin_, num_x_, num_y_, start_x_, start_y_},
+                                    (camera_info_.max_width & ~1) / bin_, (camera_info_.max_height & ~1) / bin_,
+                                    kRequestTexts);
     }
 
     // CoolerOn and CoolerPower are "not implemented" on a camera without a cooler (ICameraV4).
@@ -1709,8 +1793,8 @@ private:
         closing_ = false;
     }
 
-    // A body has not returned: it may be parked in Toupcam_WaitImageV4, where a
-    // thermal control transfer makes the SDK drop the frame.
+    // A body has not returned: a frame may be integrating, where a thermal
+    // control transfer makes the SDK drop it.
     bool exposure_body_running() const { return session_.busy(); }
 
     // Assumes mutex_ is held. Returns true when the pull-mode stream was not
@@ -1722,7 +1806,7 @@ private:
         if (handle_) {
             try {
                 sdk_.stop(handle_);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): treated as stopped
             }
         }
         return true;
@@ -1741,26 +1825,26 @@ private:
         }
     }
 
+    // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
+    // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
+        util::check_bin(bin_x, kRequestTexts);
+        util::check_bin(bin_y, kRequestTexts);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         // Check the exposure state under mutex_ (with readout_mutex_, lock order
         // mutex_ -> readout_mutex_) so it is atomic with the geometry mutation below
-        // and with start_exposure setting exposure_starting_ — a bare pre-lock check
+        // and with start_exposure reserving its start (rule 9) — a bare pre-lock check
         // is a TOCTOU (matches set_gain / set_readout_mode).
         std::lock_guard<std::mutex> rlock(readout_mutex_);
-        ensure_not_exposing();
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
-        if (std::find(camera_info_.supported_bins.begin(),
-                      camera_info_.supported_bins.end(),
-                      bin_x) == camera_info_.supported_bins.end()) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
+        util::check_bin_supported(bin_x, camera_info_.supported_bins, kRequestTexts);
+        ensure_not_exposing();
         if (bin_ == bin_x) return;
         bin_ = bin_x;
         // Bound by the EVEN sensor size, matching start_exposure's max_w/max_h
@@ -1781,14 +1865,15 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
+        if (width_opt) util::check_frame_size(*width_opt, kRequestTexts);
+        if (height_opt) util::check_frame_size(*height_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width, kRequestTexts);
+        util::check_frame_size(height, kRequestTexts);
         ensure_not_exposing();
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
@@ -1808,15 +1893,15 @@ private:
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
+        if (sx_opt) util::check_frame_start(*sx_opt, kRequestTexts);
+        if (sy_opt) util::check_frame_start(*sy_opt, kRequestTexts);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
-        if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative",
-                                  AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(sx, kRequestTexts);
+        util::check_frame_start(sy, kRequestTexts);
         ensure_not_exposing();
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;
@@ -1825,7 +1910,7 @@ private:
     }
 
     // Buffer holds stride_px-wide rows at 1 (RAW8) or 2 (16-bit, little-endian
-    // native) bytes per pixel — the same stride passed as WaitImageV4's
+    // native) bytes per pixel — the same stride passed as PullImageV4's
     // nRowPitch (M14); stride_px >= out_width, and the first out_width columns
     // of each row are the image.
     ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int stride_px, int out_width,
@@ -1861,7 +1946,7 @@ private:
         image.data.resize(output_pixels);
         for (int row = 0; row < out_height; ++row) {
             for (int col = 0; col < out_width; ++col) {
-                // Rows are laid out at stride_px (WaitImageV4's nRowPitch); a
+                // Rows are laid out at stride_px (PullImageV4's nRowPitch); a
                 // delivered width above out_width is cropped by reading only the
                 // first out_width columns, and one below it has only the last
                 // column missing, which reads its neighbour.
@@ -1897,6 +1982,12 @@ std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camer
 std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
                                                            ToupCameraBranding branding, util::TaskClock& clock) {
     return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk, std::move(branding), clock);
+}
+
+void set_disconnect_gap_hook_for_testing(CameraDriver& driver, std::function<void()> hook) {
+    if (auto* camera = dynamic_cast<ToupTekCameraDriver*>(&driver)) {
+        camera->set_disconnect_gap_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::touptek

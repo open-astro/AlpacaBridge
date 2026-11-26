@@ -36,12 +36,15 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
+using alpacacore::test::error_code_of;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
+using alpacacore::test::require_alpaca_error;
 
 namespace {
 
@@ -216,8 +219,8 @@ TEST_CASE("SkyWatcher getters - a connect on the wire holds up no getter and rea
     while (!done.load() && sampled < 20) {
         const auto start = steady_clock::now();
         CHECK_FALSE(driver->get_connected());
-        CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-        CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
         CHECK(driver->get_site_latitude() == kSiteLatitude);
         CHECK(driver->get_site_longitude() == kSiteLongitude);
         CHECK(std::chrono::duration_cast<milliseconds>(steady_clock::now() - start) < kGetterBudget);
@@ -248,20 +251,16 @@ TEST_CASE("SkyWatcher getters - a getter during a clean disconnect's close reads
     bool connected_in_close = true;
     int ra_error = 0;
     int slewing_error = 0;
-    auto error_of = [&](const std::function<void()>& read) {
-        try {
-            read();
-        } catch (const alpacacore::AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
     sw::set_disconnect_before_close_hook_for_testing(*driver, [&] {
         hook_ran = true;
         std::thread reader([&] {
-            connected_in_close = driver->get_connected();
-            ra_error = error_of([&] { (void)driver->get_right_ascension(); });
-            slewing_error = error_of([&] { (void)driver->get_slewing(); });
+            try {
+                connected_in_close = driver->get_connected();
+                ra_error = error_code_of([&] { (void)driver->get_right_ascension(); });
+                slewing_error = error_code_of([&] { (void)driver->get_slewing(); });
+            } catch (...) {  // a non-Alpaca exception must fail the case, not end the run from this thread
+                ra_error = slewing_error = -1;
+            }
         });
         reader.join();
     });
@@ -361,7 +360,7 @@ TEST_CASE("SkyWatcher getters - a reconnect does not race the rate-applied check
         });
         try {
             driver->set_right_ascension_rate(i % 2 == 0 ? 0.5 : -0.5);
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): refused mid-transition
             // A rate change refused mid-transition is not the subject here.
         }
         sw::set_rate_verify_before_start_hook_for_testing(*driver, nullptr);
@@ -404,7 +403,7 @@ TEST_CASE("SkyWatcher getters - an auto-detect scan on the connect holds up no s
     };
     for (const auto& g : state_getters) {
         const auto start = steady_clock::now();
-        CHECK_THROWS_AS(g.read(*driver), alpacacore::AlpacaException);
+        require_alpaca_error([&] { g.read(*driver); }, alpacacore::AlpacaError::NotConnected);
         const auto spent = std::chrono::duration_cast<milliseconds>(steady_clock::now() - start);
         INFO(g.name << " took " << spent.count() << " ms during the scan");
         CHECK(spent < kGetterBudget);

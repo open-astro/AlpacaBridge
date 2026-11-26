@@ -564,8 +564,9 @@ ZWOExposureStatus ZWOSDKWrapper::get_exposure_status(int camera_id) {
 }
 
 void ZWOSDKWrapper::get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) {
-    // ASIGetDataAfterExp is a blocking USB bulk download that can take seconds on large sensors, and holding the
-    // table's mutex across it would stall every other SDK call (stop_exposure, status polls, other cameras). The
+    // ASIGetDataAfterExp copies a frame the SDK already transferred (8 to 10 ms for an 18 MB frame on the rig,
+    // #2721) but takes no timeout, and holding the table's mutex across it would stall every other SDK call
+    // (stop_exposure, status polls, other cameras) for as long as it runs. The
     // table checks the link, then runs this with no lock held; a removal code retires the open at once, but the
     // close waits for this download to return (call_unserialised()), so a loss never closes the id under it.
     pimpl_->table_.call_unserialised(

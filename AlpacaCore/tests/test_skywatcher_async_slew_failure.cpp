@@ -22,18 +22,23 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <future>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 
@@ -342,6 +347,118 @@ TEST_CASE("SkyWatcher async - count-frame FindHome rejects a short landing", "[s
     driver->set_connected(false);
 }
 
+// open-astro#2552: a MoveAxis takes no slew-slot claim, so it does not supersede a FindHome body, and a rate-0
+// MoveAxis on an axis with no jog commands nothing at all. Neither may hide the body's later failure. Both used to
+// start a new failure epoch, and the body's failure path then returned before it dropped homing_: Slewing read
+// true with nothing moving, the failure was lost, and the failure stop never ran. (A Park cannot meet this: a
+// MoveAxis while parking is refused with InvalidWhileParked before it touches the epoch.)
+// Only Dec has a way to go here, and it stalls in goto mode, so the body's 180 s wait gives up with Dec still
+// running; the MoveAxis drives the idle RA axis (a jog, started and stopped) or commands nothing (the no-op).
+namespace {
+
+// The body's 180 s wait started before this budget does, so it times out inside it. Kept tight: once the body has
+// ended, each step waits out the clock rendezvous in real time, so a red run would otherwise take an hour.
+constexpr auto kPastSlewTimeout = std::chrono::milliseconds(181000);
+
+enum class MidBodyMoveAxis : std::uint8_t { NoOp, Jog };
+
+void move_axis_on_clock(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, int axis,
+                        double rate) {
+    auto call = std::async(std::launch::async, [&] { driver.move_axis(axis, rate); });
+    REQUIRE(run_clock_until(
+        clock, [&] { return call.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; },
+        std::chrono::milliseconds(10000)));
+    call.get();
+}
+
+void mid_body_move_axis(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                        FakeSkyWatcherMount& mount, MidBodyMoveAxis move) {
+    if (move == MidBodyMoveAxis::NoOp) {
+        move_axis_on_clock(clock, driver, 0, 0.0);
+        return;
+    }
+    move_axis_on_clock(clock, driver, 0, 1.0);
+    REQUIRE(mount.axis_running(1));
+    move_axis_on_clock(clock, driver, 0, 0.0);
+    REQUIRE(run_clock_until(clock, [&] { return !mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+}
+
+void check_home_failure_after_move_axis(MidBodyMoveAxis move) {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 5.0);
+    REQUIRE_NOTHROW(driver->find_home());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(10000)));
+    mount.set_axis_running(2, true, /*speed_mode=*/false);
+    mid_body_move_axis(clock, *driver, mount, move);
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);  // the body runs on
+
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        kPastSlewTimeout));
+    REQUIRE(last == SlewingRead::Threw);  // the failure is kept, not a silent false
+    CHECK(message.find("FindHome failed") != std::string::npos);
+    CHECK(message.find("Slew timed out") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(2));  // the failure stop ran
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(driver->get_at_home());
+    // The phase flag is down: once AbortSlew clears the failure, Slewing reads false.
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher async - a FindHome that fails after a rate-0 MoveAxis keeps its failure (#2552)",
+          "[skywatcher][async][homefailure]") {
+    check_home_failure_after_move_axis(MidBodyMoveAxis::NoOp);
+}
+
+TEST_CASE("SkyWatcher async - a FindHome that fails after a jog keeps its failure (#2552)",
+          "[skywatcher][async][homefailure]") {
+    check_home_failure_after_move_axis(MidBodyMoveAxis::Jog);
+}
+
+// open-astro#2552, the goto sibling: the rate-0 no-op does not supersede a goto either (it takes no claim), so a
+// goto that times out after one still stops the stalled axis and keeps its failure.
+TEST_CASE("SkyWatcher async - a goto that times out after a rate-0 MoveAxis stops and keeps its failure (#2552)",
+          "[skywatcher][async][slewfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
+    const double lst = driver->get_sidereal_time();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
+    REQUIRE(run_clock_until(clock, [&] { return mount.frames_seen('J') >= 2; }, std::chrono::milliseconds(10000)));
+    mount.set_axis_running(2, true, /*speed_mode=*/false);
+    move_axis_on_clock(clock, *driver, 1, 0.0);
+    std::string message;
+    SlewingRead last = SlewingRead::True;
+    REQUIRE(run_clock_until(
+        clock,
+        [&] {
+            last = read_slewing(*driver, &message);
+            return last != SlewingRead::True;
+        },
+        kPastSlewTimeout));
+    REQUIRE(last == SlewingRead::Threw);
+    CHECK(message.find("Slew timed out") != std::string::npos);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(mount.axis_running(1));
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
 // open-astro#2407 (#2396 AB-7): a goto whose landing stays far off after three re-gotos is a failed slew. It used
 // to break out of the refinement and report success. Every landing here stops 1 degree short in Dec and creeps in
 // far slower than the refinement looks again.
@@ -464,10 +581,16 @@ TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to t
     driver->move_axis(1, 1.0);
     REQUIRE(mount.axis_running(2));
     mount.reject_instant_stop(2, 10);  // the cap's ":L" is refused
-    // The cap is checked by the status poll, the one thread parked on the clock while the jog runs.
-    for (int i = 0; i < 62; ++i) {
-        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
+    // The status poll and the cap's body (#2651) are the two threads parked on the clock while the jog runs.
+    for (int i = 0; i < 59; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
         clock.advance(std::chrono::seconds(1));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    // The cap's body wakes at 60 s and sends its 3 stops, one 250 ms verify round each (#2651).
+    for (int i = 0; i < 24; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));  // the body's end leaves the poll alone
+        clock.advance(std::chrono::milliseconds(250));
         REQUIRE(clock.wait_for_woken_settled(kRendezvous));
     }
     std::string message;
@@ -475,6 +598,97 @@ TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to t
     CHECK(message.find("the stop failed") != std::string::npos);
     REQUIRE(mount.axis_running(2));
     reconnect_through_refused_disconnect_stop(*driver, mount);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// #2651: the cap's stop is verified. A board that acknowledges the stop and runs on is stopped 3 times, one 250 ms
+// verify round after another, then Slewing raises the kept error and the cap sends nothing more for this move.
+TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board ignores is sent 3 times and Slewing raises it",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    const auto step = [&](int count, std::chrono::milliseconds each, std::size_t waiters) {
+        for (int i = 0; i < count; ++i) {
+            REQUIRE(clock.wait_for_waiters(waiters, kRendezvous));
+            clock.advance(each);
+            REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+        }
+    };
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.ignore_instant_stops(2, 10);  // the board acknowledges every ":L" and runs on
+    const int stops_before = mount.frames_seen('L');
+    step(59, std::chrono::seconds(1), kPollerWaiter + 1);
+    step(32, std::chrono::milliseconds(250), kPollerWaiter);  // the cap at 60 s, then its three verify rounds
+    CHECK(mount.frames_seen('L') == stops_before + 3);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran for 60 s with no new MoveAxis call") != std::string::npos);
+    CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
+    step(40, std::chrono::milliseconds(250), kPollerWaiter);
+    CHECK(mount.frames_seen('L') == stops_before + 3);  // no retry from the cap
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    driver->set_connected(false);
+}
+
+// #2651: a cap the slot cannot start fails closed: the axis just started is stopped and the MoveAxis throws.
+TEST_CASE("SkyWatcher async - a MoveAxis whose cap cannot start stops the axis and throws",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    sw::set_move_axis_cap_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    try {
+        driver->move_axis(1, 1.0);
+        FAIL("Expected the MoveAxis to fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("could not start its time limit") != std::string::npos);
+    }
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// #2651 (review): two MoveAxis calls on one axis start their cap bodies after the locks are released, so the older
+// call's start can land after the newer one's. The older body owns a superseded move and sends no stop: the newer
+// jog must still be stopped at its own 60 s.
+TEST_CASE("SkyWatcher async - an older MoveAxis whose cap starts last leaves the newer jog capped",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::Latch older_held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    std::atomic<int> calls{0};
+    sw::set_move_axis_cap_before_start_hook_for_testing(*driver, [&] {
+        if (calls.fetch_add(1) == 0) older_held.block();  // only the first (older) call waits here
+    });
+    std::thread older([&] { driver->move_axis(1, 1.0); });
+    REQUIRE(older_held.wait_entered());
+    REQUIRE_NOTHROW(driver->move_axis(1, 1.0));  // the newer call starts its cap body first
+    older_held.release();
+    older.join();
+    sw::set_move_axis_cap_before_start_hook_for_testing(*driver, {});
+    REQUIRE(mount.axis_running(2));
+    const int stops_before = mount.frames_seen('L');
+    for (int i = 0; i < 59; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
+        clock.advance(std::chrono::seconds(1));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    for (int i = 0; i < 24; ++i) {  // the cap at 60 s and its verify rounds
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
+        clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
+    CHECK(mount.frames_seen('L') > stops_before);
     CHECK_FALSE(mount.axis_running(2));
     driver->set_connected(false);
 }
@@ -662,6 +876,240 @@ TEST_CASE("SkyWatcher async - a re-goto whose target is below the altitude floor
     CHECK_FALSE(mount.axis_running(1));
     CHECK_FALSE(mount.axis_running(2));
     REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
+namespace {
+
+// open-astro#2604: which Park or FindHome a case starts. The count-frame FindHome is a goto to the power-on index;
+// a board with home indexers (the Wave) runs AutoHome instead.
+enum class HomingLeg : std::uint8_t { Park, CountFrameHome, AutoHome };
+
+const char* leg_name(HomingLeg leg) {
+    switch (leg) {
+        case HomingLeg::Park:
+            return "Park";
+        case HomingLeg::CountFrameHome:
+            return "FindHome (count frame)";
+        case HomingLeg::AutoHome:
+            return "FindHome (AutoHome)";
+    }
+    return "?";
+}
+
+}  // namespace
+
+// open-astro#2604 (the #2586 decision): AbortSlew cancels a Park or FindHome body and does not join it. Once AbortSlew
+// has returned, it owns the end of that operation: Slewing reads false, SiteLongitude is accepted, and the cancelled
+// body sends nothing more to the board while it winds down. The wake seam holds the cancelled body as its sleep
+// returns, before it takes a driver lock, so the reads and the write land inside that window every run.
+TEST_CASE("SkyWatcher async - AbortSlew ends a Park or FindHome before its cancelled body winds down (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    const HomingLeg leg = GENERATE(HomingLeg::Park, HomingLeg::CountFrameHome, HomingLeg::AutoHome);
+    INFO(leg_name(leg));
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(leg == HomingLeg::CountFrameHome ? alpacacore::test::FakeMountProfile::eqm35_pro()
+                                                               : alpacacore::test::FakeMountProfile::wave_100i(),
+                              clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);                       // away from home and park, so the operation moves RA
+    sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame answers for the flags
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    if (leg == HomingLeg::Park) {
+        REQUIRE_NOTHROW(driver->park());
+    } else {
+        REQUIRE_NOTHROW(driver->find_home());
+    }
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());  // the cancelled body woke and is held before it takes a driver lock
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_NOTHROW(driver->set_site_longitude(10.0));
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(body_ended->load());  // all of the above ran while the body was still winding down
+
+    const std::size_t motion_before = mount.motion_log().size();
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.motion_log().size() == motion_before);  // the body's tail sent no stop and no motion
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
+// open-astro#2635: the goto form of the case above. AbortSlew stops both axes and ends the goto before the cancelled
+// body unwinds; the body's failure path used to send both ":L" stops again after AbortSlew had returned. The two
+// Target forms call the Coordinates ones, so the case runs SlewToCoordinatesAsync and SlewToTargetAsync.
+TEST_CASE("SkyWatcher async - a goto cancelled by AbortSlew sends no stop as its body unwinds (#2635)",
+          "[skywatcher][async][abort][goto-safety]") {
+    const bool to_target = GENERATE(false, true);
+    INFO((to_target ? "SlewToTargetAsync" : "SlewToCoordinatesAsync"));
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    sw::set_status_poll_paused_for_testing(*driver, true);  // no polled Slewing frame answers for the flags
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    const double ra = std::fmod(driver->get_sidereal_time() - 2.0 + 24.0, 24.0);
+    if (to_target) {
+        driver->set_target_right_ascension(ra);
+        driver->set_target_declination(40.0);
+        REQUIRE_NOTHROW(driver->slew_to_target_async());
+    } else {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(ra, 40.0));
+    }
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    // The goto body polls the board between sleeps: AbortSlew must find it in a sleep, so the wake seam holds it.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    const std::size_t motion_before_abort = mount.motion_log().size();
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());  // the cancelled body woke and is held before it takes a driver lock
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(body_ended->load());
+    CHECK(mount.motion_log().size() > motion_before_abort);  // AbortSlew's own stops
+
+    const std::size_t motion_before = mount.motion_log().size();
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.motion_log().size() == motion_before);  // the body's tail sent no stop and no motion
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
+// open-astro#2604: a body cancelled in its landing settle wait reads nothing more from the board. The Park lands, its
+// body reads RA's position (`:j`) and sleeps the settle interval; AbortSlew cancels it there, and the wake seam holds
+// it until the reads AbortSlew makes itself are done. Released, the body ends with no status (`:f`) or position
+// (`:j`) read.
+TEST_CASE("SkyWatcher async - a body cancelled in its landing settle wait reads nothing more (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::Latch held;  // declared first: it outlives the driver the hook below is set on
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);               // only the body reads the board
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return !mount.axis_running(1) && !mount.axis_running(2); }, std::chrono::milliseconds(60000)));
+    // The wait loop reads only `:f`; the settle wait starts with a `:j` and then sleeps.
+    const int positions_at_stop = mount.frames_seen('j');
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.frames_seen('j') > positions_at_stop; }, std::chrono::milliseconds(5000)));
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);  // still parking: the body is in the settle sleep
+    sw::set_stopped_body_wake_hook_for_testing(*driver, [&held] { held.block(); });
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(held.wait_entered());
+    const int status_reads = mount.frames_seen('f');
+    const int position_reads = mount.frames_seen('j');
+    held.release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.frames_seen('f') == status_reads);
+    CHECK(mount.frames_seen('j') == position_reads);
+    CHECK_FALSE(driver->get_at_park());
+    sw::set_stopped_body_wake_hook_for_testing(*driver, {});
+    driver->set_connected(false);
+}
+
+// open-astro#2604: AbortSlew ends a Park only after its own stops were answered. When its RA ":L" is refused,
+// AbortSlew throws and leaves the Park to its cancelled body, which still stops both axes as it winds down.
+TEST_CASE("SkyWatcher async - a Park whose AbortSlew stop failed is still stopped by its body (#2604)",
+          "[skywatcher][async][abort][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    const auto body_ended = std::make_shared<std::atomic<bool>>(false);  // the body thread never outlives it
+    sw::set_slew_spawn_for_testing(*driver, [body_ended](std::function<void()> body) {
+        return std::thread([body_ended, body = std::move(body)] {
+            body();
+            body_ended->store(true);
+        });
+    });
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    const int ra_stops = mount.stop_count(1);
+    const int dec_stops = mount.stop_count(2);
+    mount.reject_instant_stop(1, 1);  // AbortSlew's RA ":L" only
+    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!body_ended->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(body_ended->load());
+    CHECK(mount.stop_count(1) > ra_stops);   // the body's RA stop
+    CHECK(mount.stop_count(2) > dec_stops);  // and its Dec stop, which AbortSlew never reached
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+// open-astro#2604: the other side of the case above. A Park that runs, with no AbortSlew, still refuses SiteLongitude
+// (open-astro#2407: it sets the sidereal time the park slew aims by), and AbortSlew lets it through again.
+TEST_CASE("SkyWatcher async - SiteLongitude is refused while a Park runs", "[skywatcher][async][park][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 45.0);
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(10000)));
+    alpacacore::test::require_alpaca_error([&] { driver->set_site_longitude(10.0); },
+                                           alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_site_longitude() == Catch::Approx(-104.9903));
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK_NOTHROW(driver->set_site_longitude(10.0));
     driver->set_connected(false);
 }
 

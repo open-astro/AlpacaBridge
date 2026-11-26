@@ -286,14 +286,14 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a reconnect clears the Position li
     ConnectedIefw wheel;
     wheel.fake.set_wheel_slot(3);
     wheel.fake.fail_wheel_position(true);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     wheel.fake.fail_wheel_position(false);
 
     wheel.driver->set_connected(false);
     wheel.driver->set_connected(true);
     wheel.fake.fail_wheel_position(true);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     try {
         wheel.driver->get_position();
         FAIL("a failed read must throw");
@@ -428,7 +428,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leav
 }
 
 // A FocusOffsets write that lands while the connect reads the wheel's stored offsets is kept, not replaced by them.
-// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() overwriting focus_offsets_ with the stored
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() overwriting the offsets with the stored
 // offsets without re-checking under mutex_ that they are still empty (Offsets read back as zeros).
 TEST_CASE("iOptron iEFW Filter Wheel Driver - a FocusOffsets write during connect is kept",
           "[ioptron][filterwheel][unit][position-cache][timing]") {
@@ -452,6 +452,37 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a FocusOffsets write during connec
     driver->set_connected(false);
 }
 
+// Issue #2553: a move that passed the connection check, then waited for mutex_ while a Disconnect cleared the slot
+// count, threw DriverException "slot count unavailable" instead of NotConnected (seen 1 in ~300 loaded storms). A
+// FocusOffsets write of a huge list holds mutex_ while it copies the list (then it is refused: wrong length), so the
+// Disconnect queues on mutex_ first and the move second, behind the passed check; the futex wakes them in that
+// order. The sleeps only order the queue: a late one makes the move win the lock and the round pass, never fail.
+// Falsified by: ioptron_filterwheel_driver.cpp set_position() reading the slot count under mutex_ without
+// re-checking the connection there (the move throws DriverException, not NotConnected).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a move racing a Disconnect is NotConnected and not a missing slot count",
+          "[ioptron][filterwheel][unit]") {
+    ConnectedIefw wheel;
+    const std::vector<int> huge(std::size_t{16} << 20, 0);  // 64 MB: the copy holds mutex_ for tens of ms
+    for (int round = 0; round < 5; ++round) {
+        INFO("round " << round);
+        REQUIRE_NOTHROW(wheel.driver->set_connected(true));
+        auto holder = std::async(std::launch::async, [&] {
+            return alpacacore::test::worker_code_of([&] { wheel.driver->set_focus_offsets(huge); });
+        });
+        std::this_thread::sleep_for(5ms);
+        auto disconnect = std::async(std::launch::async, [&] {
+            return alpacacore::test::worker_code_of([&] { wheel.driver->set_connected(false); });
+        });
+        std::this_thread::sleep_for(5ms);
+        std::string message;
+        const int move = alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }, &message);
+        holder.get();  // InvalidValue (wrong length), or 0 if a late start let the Disconnect lock first
+        CHECK(disconnect.get() == 0);
+        INFO("move threw " << move << ": " << message);
+        CHECK((move == 0 || move == static_cast<int>(alpacacore::AlpacaError::NotConnected)));
+    }
+}
+
 // Since #1723 the unplugged :WM write also loses the link, so the read after it is refused twice over: by the
 // connection check before the cache, and by the invalidate in set_position()'s outer catch. The invalidate alone
 // now guards a write that fails with the link up (ETIMEDOUT on a stalled adapter), which the pty fake cannot produce.
@@ -465,7 +496,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a refused move invalidates the cac
     REQUIRE(wheel.driver->get_position() == 3);
 
     wheel.fake.unplug();  // the :WM write fails
-    CHECK_THROWS_AS(wheel.driver->set_position(4), alpacacore::AlpacaException);
+    require_alpaca_error([&] { wheel.driver->set_position(4); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { (void)wheel.driver->get_position(); },
                          static_cast<int>(alpacacore::AlpacaError::NotConnected));  // not the cached frame
 }
@@ -530,18 +561,6 @@ bool wait_until(Pred pred, milliseconds limit) {
     return true;
 }
 
-// The AlpacaException code fn threw, or 0. Safe on a non-test thread.
-int alpaca_code_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        return ex.error_code();
-    } catch (...) {
-        return -1;
-    }
-    return 0;
-}
-
 // The AlpacaException text fn threw, or empty.
 std::string alpaca_what_of(const std::function<void()>& fn) {
     try {
@@ -592,7 +611,7 @@ struct FaultedIefw {
         REQUIRE(driver->get_connected());
         fake.fail_wheel_position(true);
         for (int i = 0; i < 3; ++i) {
-            REQUIRE(alpaca_code_of([&] { (void)driver->get_position(); }) == kDriverException);
+            REQUIRE(alpacacore::test::error_code_of([&] { (void)driver->get_position(); }) == kDriverException);
         }
         REQUIRE(driver->get_link_fault().find("consecutive failures") != std::string::npos);
     }
@@ -631,7 +650,7 @@ TEST_CASE("iEFW Link - a cable pulled during a Position read loses the link at o
     const int polls = fake.count(":WP#");
     fake.hold_next_reply(milliseconds(300));  // the wheel sits on the :WP# reply while the cable is pulled
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(alpaca_code_of([&] { (void)driver->get_position(); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { (void)driver->get_position(); })); });
     REQUIRE(wait_until([&] { return fake.count(":WP#") == polls + 1; }, milliseconds(2000)));
     const auto pulled = std::chrono::steady_clock::now();
     fake.unplug();
@@ -669,7 +688,7 @@ TEST_CASE("iEFW Link - a cable pulled before a move's ack loses the link at once
     // The ack is optional (a silent firmware only costs the ack wait), but a hangup there is not silence.
     fake.hold_reply_to(":WM", milliseconds(300));
     std::atomic<int> code{0};
-    std::thread caller([&] { code.store(alpaca_code_of([&] { driver->set_position(3); })); });
+    std::thread caller([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_position(3); })); });
     REQUIRE(wait_until([&] { return fake.count(":WM03#") == 1; }, milliseconds(2000)));
     fake.unplug();
     caller.join();
@@ -719,7 +738,7 @@ TEST_CASE("iEFW Link - a loss after failed reads is NotConnected and later calls
 
     fake.fail_wheel_position(true);  // the cable is in, the replies do not parse: two failed reads, below the latch
     for (int i = 0; i < 2; ++i) {
-        CHECK(alpaca_code_of([&] { (void)driver->get_position(); }) ==
+        CHECK(alpacacore::test::error_code_of([&] { (void)driver->get_position(); }) ==
               static_cast<int>(alpacacore::AlpacaError::DriverException));
     }
     REQUIRE(driver->get_connected());
@@ -762,7 +781,7 @@ TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Dis
     port.replug(replugged);
     replugged.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return replugged.count(":FW1#") == 1; }, milliseconds(3000)));
     CHECK_FALSE(driver->get_connected());  // the handshake passed, the reconnect has not finished
     connecting.join();
@@ -787,7 +806,7 @@ TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Con
 
     fake.hold_next_reply(milliseconds(300));  // the first :DeviceInfo# reply is held while the cable goes
     std::atomic<int> code{0};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.connects() == 1; }, milliseconds(2000)));
     fake.unplug();
     connecting.join();  // the handshake's own retries (about 2 s), then the failure
@@ -818,7 +837,7 @@ TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails
 
     fake.hold_reply_to(":FW1#", milliseconds(300));
     std::atomic<int> code{-2};
-    std::thread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    std::thread connecting([&] { code.store(alpacacore::test::worker_code_of([&] { driver->set_connected(true); })); });
     REQUIRE(wait_until([&] { return fake.count(":FW1#") == 1; }, milliseconds(3000)));
     fake.unplug();
     connecting.join();
@@ -846,7 +865,7 @@ TEST_CASE("iEFW Link - a silent wheel with the cable in latches a fault and stay
 
     fake.fail_wheel_position(true);
     for (int i = 0; i < 2; ++i) {
-        (void)alpaca_code_of([&] { (void)driver->get_position(); });
+        (void)alpacacore::test::error_code_of([&] { (void)driver->get_position(); });
     }
     fake.fail_wheel_position(false);
     fake.set_silent(true);
@@ -909,7 +928,7 @@ TEST_CASE("iEFW Link - a move on a wheel with a latched fault is refused and a g
     const std::string fault = wheel.driver->get_link_fault();
     CHECK(alpaca_what_of([&] { wheel.driver->set_position(1); }) ==
           "iOptron iEFW communications compromised: " + fault);
-    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
     CHECK(wheel.fake.count(":WM") == 0);
     CHECK(wheel.driver->get_connected());
 
@@ -974,8 +993,8 @@ TEST_CASE("iEFW Link - a fault just under the staleness bound does not lose the 
           "[ioptron][filterwheel][unit][fake][link-lost]") {
     FaultedIefw wheel;
     wheel.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1));
-    CHECK(alpaca_code_of([&] { (void)wheel.driver->get_position(); }) == kDriverException);
-    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { (void)wheel.driver->get_position(); }) == kDriverException);
+    CHECK(alpacacore::test::error_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
     CHECK(wheel.driver->get_connected());
     CHECK(alpacacore::util::is_serial_port_in_use(wheel.pts));
     CHECK(wheel.driver->get_link_fault().find("consecutive failures") != std::string::npos);
@@ -1005,4 +1024,65 @@ TEST_CASE("iOptron iEFW - a code naming a focuser is refused (#2204)", "[ioptron
     auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+// #1991: the slot count is known from a connect until the next Disconnect; while it is unknown names and offsets
+// are taken as given and a lone token is not expanded.
+// Falsified by: ioptron_filterwheel_driver.cpp teardown_locked() without slots_.clear_slot_count() (the lone token
+// still expands to five names after the disconnect).
+TEST_CASE("iOptron iEFW - names and offsets follow the slot count only until a Disconnect (#1991)",
+          "[ioptron][filterwheel][unit]") {
+    ConnectedIefw wheel;
+    CHECK(wheel.driver->get_focus_offsets() == std::vector<int>(5, 0));
+    require_alpaca_error([&] { wheel.driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { wheel.driver->set_focus_offsets({1}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(wheel.driver->get_names().size() == 5);
+
+    wheel.driver->set_connected(false);
+    wheel.driver->set_names({"LRGBS"});
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"LRGBS"});
+    wheel.driver->set_names({"L", "R"});
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"L", "R"});
+    wheel.driver->set_focus_offsets({1});
+    CHECK(wheel.driver->get_focus_offsets() == std::vector<int>{1});
+}
+
+// #1991: offsets stored on the wheel fill FocusOffsets at connect when the config gives none.
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() without slots_.seed_offsets() (the offsets
+// read back as five zeros).
+TEST_CASE("iOptron iEFW - offsets stored on the wheel seed FocusOffsets at connect (#1991)",
+          "[ioptron][filterwheel][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    fake.set_stored_offset(0, 120);
+    fake.set_stored_offset(2, -45);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
+    driver->set_connected(true);
+    CHECK(driver->get_focus_offsets() == std::vector<int>{120, 0, -45, 0, 0});
+    driver->set_connected(false);
+}
+
+// Issue #2262: EBADF on the wheel's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the move failed with DriverException "Write failed"
+// and Connected kept reading true over a dead fd.
+TEST_CASE("iEFW Link - EBADF on a command write loses the link at once",
+          "[ioptron][filterwheel][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    ReplugPort port(fake);
+    auto driver = make_replug_wheel(port);
+    const auto before = alpacacore::test::fds_open_on(fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(fake.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver->set_position(2); }, kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "iEFW serial link lost (errno 9)");
+    CHECK(alpacacore::test::fds_open_on(fake.slave_path()) == before);  // the port was released
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
 }

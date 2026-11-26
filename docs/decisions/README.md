@@ -29,9 +29,9 @@ file under `.github/instructions/`, not a record.
 
 A glob matches repository paths (`*` stays in one directory, `**` crosses
 them) and must match at least one tracked file. `Scope: `**`` (any file) is
-allowed only in [0013](0013-designs-to-avoid.md), whose rules reject designs
-rather than govern files, and puts the rule in scope for every pull request;
-elsewhere it marks a rule that belongs there or in a topic file. "Checked by" names the test or check that fails when the rule is
+not allowed: it marks a rule that belongs in a topic file, and a record that
+rejects designs ([0013](0013-designs-to-avoid.md)) names the trees where the
+design would be built. "Checked by" names the test or check that fails when the rule is
 broken, or says `review (<what to look for>)` with the evidence a reviewer
 looks for. A bare `review` is allowed only for the rules that had it when the
 form changed; `DECISION_BARE_REVIEW_BASELINE` in the drift script counts them
@@ -130,3 +130,7 @@ referred to by its slug until it is written, and numbered then.
 - [Power port power-on state](0021-power-port-power-on-state.md)
 - [Hold window](0022-hold-window.md)
 - [Outbound clients in vendor wrappers](0023-outbound-clients-in-vendor-wrappers.md)
+- [Device names](0024-device-names.md)
+- [Daemon privilege](0025-daemon-privilege.md)
+- [Vendored SDK binaries](0026-vendored-sdk-binaries.md)
+- [GPIO soft-PWM composition](0027-gpio-soft-pwm-composition.md)

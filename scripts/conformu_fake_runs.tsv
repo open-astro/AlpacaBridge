@@ -1,0 +1,56 @@
+vendor	deviceType	fakeHeader	status	slice	reportPath	reason
+skywatcher	telescope	fake_skywatcher_mount.h	run	1	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt	-
+skywatcher	telescope	fake_skywatcher_serial_board.h	run	2	AlpacaCore/conformu/Sky-Watcher/Fake/Fake-telescope-fake_skywatcher_serial_board-Linux-arm64.txt	-
+zwo	telescope	fake_mount_server.h	pending	6	-	needs a ZWO AM simulator: the row serves FakeMountServer with a fixed reply table (:GU# "NG#", :Gps# "0#"), so the mount never moves, tracks or parks; FakeZwoMount is stateful but runs on a test FakeTaskClock and has no sky model
+zwo	camera	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-camera-fake_zwo_sdk-Linux-arm64.txt	-
+zwo	filterwheel	fake_zwo_efw_sdk.h	run	4	AlpacaCore/conformu/ZWO/Fake/Fake-filterwheel-fake_zwo_efw_sdk-Linux-arm64.txt	-
+zwo	focuser	fake_zwo_eaf_sdk.h	run	3	AlpacaCore/conformu/ZWO/Fake/Fake-focuser-fake_zwo_eaf_sdk-Linux-arm64.txt	-
+zwo	rotator	fake_zwo_caa_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-rotator-fake_zwo_caa_sdk-Linux-arm64.txt	-
+celestron	telescope	fake_mount_server.h	pending	6	-	needs a NexStar simulator: the row serves a fixed position-pair reply, and FakeCelestronHandset never moves the reported position on a GOTO, re-labels nothing on a Sync and keeps the tracking mode as a knob
+celestron	telescope	fake_celestron_cgx_mount.h	pending	6	-	needs a CGX simulator: motion completes only on a test opt-in (instant or scripted encoder steps), guide pulses do not move the encoders, and there is no sidereal drift or acceleration model
+celestron	telescope	fake_celestron_aux_tcp_adapter.h	pending	6	-	needs a CGX simulator behind the adapter: a GOTO moves linearly over a set time with no acceleration, a guide pulse moves nothing, tracking writes change nothing and there is no sidereal drift; the adapter's real loss mechanism is scripted per request
+celestron	focuser	fake_celestron_focuser.h	run	6	AlpacaCore/conformu/Celestron/Fake/Fake-focuser-fake_celestron_focuser-Linux-arm64.txt	-
+synscan	telescope	fake_mount_server.h	pending	6	-	needs a SynScan simulator: FakeSynScanHandset keeps one position pair for both frames that does not track the sky, a Sync changes nothing, and fixed-rate and Dec variable-rate moves move nothing
+onstep	telescope	fake_mount_server.h	pending	6	-	needs an OnStep simulator: the row serves FakeMountServer with an idle reply set (:GU# "nNp#"), so the mount never tracks, slews or parks
+onstep	focuser	fake_mount_server.h	run	3	AlpacaCore/conformu/OnStep/Fake/Fake-focuser-fake_mount_server-Linux-arm64.txt	-
+onstep	rotator	fake_mount_server.h	run	6	AlpacaCore/conformu/OnStep/Fake/Fake-rotator-fake_mount_server-Linux-arm64.txt	-
+onstep	switch	fake_mount_server.h	run	6	AlpacaCore/conformu/OnStep/Fake/Fake-switch-fake_mount_server-Linux-arm64.txt	-
+ioptron	telescope	fake_ioptron_mount.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-telescope-fake_ioptron_mount-Linux-arm64.txt	-
+ioptron	focuser	fake_ioptron_ieaf.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ieaf-Linux-arm64.txt	-
+ifr	focuser	fake_ioptron_ifr.h	run	3	AlpacaCore/conformu/iOptron/Fake/Fake-focuser-fake_ioptron_ifr-Linux-arm64.txt	-
+ifr	rotator	fake_ioptron_ifr.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-rotator-fake_ioptron_ifr-Linux-arm64.txt	-
+ioptron	switch	fake_ioptron_gpio.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-switch-fake_ioptron_gpio-Linux-arm64.txt	-
+iguider	camera	fake_iguider_v4l2.h	run	5	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_iguider_v4l2-Linux-arm64.txt	-
+astroasis	focuser	fake_astroasis_hid.h	run	6	AlpacaCore/conformu/Astroasis/Fake/Fake-focuser-fake_astroasis_hid-Linux-arm64.txt	-
+gemini	focuser	fake_gemini_focuser.h	pending	6	-	driver timing, not the fake: TempComp is a live wire read by design (decision 0016, Gemini focuser row) that can wait behind the 250 ms state poll, and missed ConformU's 0.1 s FAST target in 3 of 6 local runs (0.17-0.18 s); runs once TempComp is served without device I/O
+gemini	covercalibrator	fake_gemini_flatpanel.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel-Linux-arm64.txt	-
+gemini	switch	fake_gemini_pdh.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-switch-fake_gemini_pdh-Linux-arm64.txt	-
+qhy	camera	fake_qhy_sdk.h	pending	6	-	needs a guide model: FakeQHYSDK::guide() returns at once where ControlQHYCCDGuide blocks for the pulse, so IsPulseGuiding drops before the pulse duration (ConformU, all four directions)
+qhy	filterwheel	fake_qhy_cfw3.h	run	4	AlpacaCore/conformu/QHY/Fake/Fake-filterwheel-fake_qhy_cfw3-Linux-arm64.txt	-
+qhy	focuser	fake_qhy_qfocuser.h	run	3	AlpacaCore/conformu/QHY/Fake/Fake-focuser-fake_qhy_qfocuser-Linux-arm64.txt	-
+playerone	camera	fake_playerone_sdk.h	pending	6	-	needs an exposure model: FakePlayerOneSDK reports an image ready at once (ConformU: ImageReady true before the exposure time elapsed) and a pixel size of 0
+playerone	filterwheel	fake_playerone_pw_sdk.h	run	4	AlpacaCore/conformu/Player One/Fake/Fake-filterwheel-fake_playerone_pw_sdk-Linux-arm64.txt	-
+touptek	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	switch	fake_touptek_powerbox_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_powerbox_sdk-Linux-arm64.txt	-
+altair	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/Altair/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
+svbony	camera	fake_svbony_sdk.h	pending	6	-	needs an exposure and guide model: FakeSVBSDK reports an exposure done at once (ConformU: ImageReady true before the exposure time elapsed), its pulse_guide returns at once where the SDK blocks for the pulse (IsPulseGuiding drops early), and it has no temperature controls (CCDTemperature and HeatSinkTemperature fail "Failed to get control value")
+gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camera-fake_gphoto_sdk-Linux-arm64.txt	-
+wandererastro	covercalibrator	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-covercalibrator-fake_serial_streamer-Linux-arm64.txt	-
+wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
+wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
+bisque	telescope	-	no-fake	6	-	no fake exists yet
+weewx	observingconditions	-	no-fake	6	-	no fake exists yet
+remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
+zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
+zwo	switch	-asiair	no-fake	6	-	no fake exists yet
+zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet
+wandererastro	rotator	-	no-fake	6	-	no fake exists yet
+touptek	switch	-thermal	no-fake	6	-	no fake exists yet
+touptek	filterwheel	-	no-fake	6	-	no fake exists yet
+touptek	focuser	-	no-fake	6	-	no fake exists yet
+ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
+ioptron	camera	-	no-fake	6	-	no fake exists yet
+playerone	switch	-	no-fake	6	-	no fake exists yet
+qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
+gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet
+gemini	covercalibrator	-v2	no-fake	6	-	no fake exists yet

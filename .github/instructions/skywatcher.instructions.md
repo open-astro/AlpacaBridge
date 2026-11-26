@@ -139,7 +139,7 @@ datagrams before each send so replies cannot get off-by-one.
   open-astro#582) overrides the table on connect and when `:e` fails; it sets eps,
   never k, and the connect log names the source (measured table / user override /
   unmeasured default / identify failed). The web UI shows the same source in the
-  device name (`eps: measured`, `eps: override normal|reversed`,
+  device Description, never the name (decision 0024) (`eps: measured`, `eps: override normal|reversed`,
   `eps: unmeasured default`, `eps: identify failed`), kept after a disconnect like the
   model, and the Sky-Watcher form has a Dec axis sense select. Pier side is
   `k * branch > 0` -> pierEast, the same reader, since the goto picks the side from the
@@ -158,8 +158,8 @@ datagrams before each send so replies cannot get off-by-one.
   rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
   that file with a new hardware row for any change here.
 - **Motion limits (#436) are off by default and soft.** `minAltitudeDeg` and `meridianLimitMinutes` live in the catalog descriptor (`skywatcher_fields.h`); `util::MotionLimits` (`util/motion_limits.h`) is the pure decision. Only `SlewToCoordinatesAsync` (and so `SlewToTargetAsync`; the router serves `SlewToCoordinates`/`SlewToTarget` through the async forms and a bounded wait, #1660) check the altitude floor, throwing `InvalidValue`; Park, FindHome, MoveAxis, Sync and PulseGuide are exempt from that check. The live guard (`run_limit_guard()`, its own `util::AsyncOperation` slot) watches MoveAxis and tracking while a limit is set and stops them on an inside-to-outside crossing through `set_tracking(false)` and `move_axis(axis, 0.0)` with `mutex_` released; it is edge-triggered, skips gotos, Park and FindHome, and `cancel_async_tasks()` joins it first. ConformU runs with both limits off.
-- **Goto backlash compensation (#437) is off by default, covers gotos only, and is a fixed final approach.** `backlashStepsRA`/`backlashStepsDec` (microsteps, integer 0-100000, default 0) and `backlashEnabledRA`/`backlashEnabledDec` (default false) are in the catalog descriptor (`skywatcher_fields.h`) and the web form; a config without them behaves as before. Each axis has one approach side, fixed in `backlash_approach_sign_locked()`: RA the tracking direction of the site's hemisphere (counts up north, down south, as `ra_axis_sign_locked()`; while no site is set RA is not compensated, so Park and FindHome without a site send the plain goto), Dec increasing counts. When an axis is enabled with steps > 0 and a goto's move on it runs against that side, `dispatch_goto_locked()` sends the fast `:S` goto that many counts past the target, and the landing wait (`wait_for_slew_complete()`, through `send_final_approach_locked()`) sends the final leg once the first leg has landed by the rule every landing follows: `get_hardware_slewing_locked()` reads it stopped (a failed status read keeps the last answer for up to 10 s) and its count holds still across `kLandingSettle` (`wait_axis_stationary_locked()`). The leg is a slow GOTO (`:G` mode `2`) through `dispatch_goto_locked()`, under the goto's own `motion_generation_` and on the owing axes only (so it opens with that dispatch's `:K`), in the approach direction back onto the unchanged target, at a speed derived from the board's own `:s` (worm steps; a sixteenth of a worm turn per second, held under the slow-mode ceiling) and `:a`. A goto already in the approach direction, or of under one count, sends the same commands as before. **The driver never writes the position register (`:E`) for compensation**: the register always counts the motor, so a reversal, compensated or not, leaves it at most one gear gap from the output shaft and nothing builds up. The first design took up the slack before the move and then put the register back with `:E`; tracking, guide pulses and MoveAxis reverse the axis without compensation and never undid that shift, so the reported position could drift by the slack on each cycle (review of #437). The owed final leg carries the goto's `motion_generation_`: an AbortSlew, a MoveAxis, a pulse or a newer goto bumps it and the leg is dropped unsent, and a landing wait that gives up sends nothing. An earlier version polled `:f` itself and sent the leg the moment it read stopped, which skipped both rules: one failed read failed the goto with the mount `steps` past the target, and a leg sent while the last counts still arrive lands in the EQM-35 Pro window `kLandingSettle` exists for (review of #437). Only gotos that end in `wait_for_slew_complete()` are compensated (sky gotos and their landing refinements, Park, the count-frame FindHome); the AutoHome hunt passes `compensate_backlash=false` and waits on its own loop. The final leg runs while tracking is stopped and after the RA aim-ahead target was computed, so its duration shows up as RA lag at landing; a two-leg landing is not taken as a sample of `goto_overhead_seconds_`. `:s` is read at connect only for an enabled axis; a board that rejects it (Wave 100i) or answers 0 (EQ-AL55i) leaves that axis uncompensated with a WARN. **Guide pulses (`PulseGuide`) and rate motion (`MoveAxis`, `RightAscensionRate`/`DeclinationRate`) are deliberately not compensated** (CTO decision): autoguiders (PHD2 Dec backlash compensation, NINA) measure and correct backlash themselves, so a driver-side compensation would double it and make the guider oscillate, and a continuous move has no target to land on. A later issue may add rate or pulse compensation behind its own flag. Tests: `test_skywatcher_backlash.cpp`, over the fake mount's gear gap (`set_gear_gap()`, `shaft_degrees()`), which separates the motor the register counts from the shaft the sky sees, a coasting landing (`land_short_by()`, `commands_while_coasting()`) and a failed status read (`fail_status_replies()`).
-- The driver's blocking `slew_to_coordinates()` is not reachable over HTTP (the router serves the synchronous forms through the async calls, #1660). Called directly, one superseded by another generation-changing motion can throw `InvalidOperation` while the hardware GOTO continues to its target; the error reports that the synchronous wait lost ownership and does not prove the mount stopped.
+- **Goto backlash compensation (#437) is off by default, covers gotos only, and is a fixed final approach.** `backlashStepsRA`/`backlashStepsDec` (microsteps, integer 0-100000, default 0) and `backlashEnabledRA`/`backlashEnabledDec` (default false) are in the catalog descriptor (`skywatcher_fields.h`) and the web form; a config without them behaves as before. Each axis has one approach side, fixed in `backlash_approach_sign_locked()`: RA the tracking direction of the site's hemisphere (counts up north, down south, as `ra_axis_sign_locked()`; while no site is set RA is not compensated, so Park and FindHome without a site send the plain goto), Dec increasing counts. When an axis is enabled with steps > 0 and a goto's move on it runs against that side, `dispatch_goto_locked()` sends the fast `:S` goto that many counts past the target, and the landing wait (`wait_for_slew_complete()`, through `send_final_approach_locked()`) sends the final leg once the first leg has landed by the rule every landing follows: `get_hardware_slewing_locked()` reads it stopped (a failed status read keeps the last answer for up to 10 s) and its count holds still across `kLandingSettle` (`wait_axis_stationary_locked()`). The leg is a slow GOTO (`:G` mode `2`) through `dispatch_goto_locked()`, under the goto's own motion claim and on the owing axes only (so it opens with that dispatch's `:K`), in the approach direction back onto the unchanged target, at a speed derived from the board's own `:s` (worm steps; a sixteenth of a worm turn per second, held under the slow-mode ceiling) and `:a`. A goto already in the approach direction, or of under one count, sends the same commands as before. **The driver never writes the position register (`:E`) for compensation**: the register always counts the motor, so a reversal, compensated or not, leaves it at most one gear gap from the output shaft and nothing builds up. The first design took up the slack before the move and then put the register back with `:E`; tracking, guide pulses and MoveAxis reverse the axis without compensation and never undid that shift, so the reported position could drift by the slack on each cycle (review of #437). The owed final leg carries the goto's motion claim: an AbortSlew cancels it, a MoveAxis, a pulse or a newer goto takes it, and the leg is dropped unsent, and a landing wait that gives up sends nothing. An earlier version polled `:f` itself and sent the leg the moment it read stopped, which skipped both rules: one failed read failed the goto with the mount `steps` past the target, and a leg sent while the last counts still arrive lands in the EQM-35 Pro window `kLandingSettle` exists for (review of #437). Only gotos that end in `wait_for_slew_complete()` are compensated (sky gotos and their landing refinements, Park, the count-frame FindHome); the AutoHome hunt passes `compensate_backlash=false` and waits on its own loop. The final leg runs while tracking is stopped and after the RA aim-ahead target was computed, so its duration shows up as RA lag at landing; a two-leg landing is not taken as a sample of `goto_overhead_seconds_`. `:s` is read at connect only for an enabled axis; a board that rejects it (Wave 100i) or answers 0 (EQ-AL55i) leaves that axis uncompensated with a WARN. **Guide pulses (`PulseGuide`) and rate motion (`MoveAxis`, `RightAscensionRate`/`DeclinationRate`) are deliberately not compensated** (CTO decision): autoguiders (PHD2 Dec backlash compensation, NINA) measure and correct backlash themselves, so a driver-side compensation would double it and make the guider oscillate, and a continuous move has no target to land on. A later issue may add rate or pulse compensation behind its own flag. Tests: `test_skywatcher_backlash.cpp`, over the fake mount's gear gap (`set_gear_gap()`, `shaft_degrees()`), which separates the motor the register counts from the shaft the sky sees, a coasting landing (`land_short_by()`, `commands_while_coasting()`) and a failed status read (`fail_status_replies()`).
+- The driver's blocking `slew_to_coordinates()` is not reachable over HTTP (the router serves the synchronous forms through the async calls, #1660). Called directly, one superseded by a newer motion claim (a goto, Park, FindHome, MoveAxis or pulse that takes its axes) can throw `InvalidOperation` while the hardware GOTO continues to its target; the error reports that the synchronous wait lost ownership and does not prove the mount stopped.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Sync is bounded (#2407, maintainer decision 2026-11-24).** A Sync more than `util::kMaxSyncOffsetDegrees`
@@ -174,7 +174,11 @@ datagrams before each send so replies cannot get off-by-one.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
   in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
   the axis never stops. Dec pulses (and RA while not tracking) are software-timed
-  speed-mode nudges. Position override accumulation as per the SynScan lessons.
+  speed-mode nudges. Position override accumulation as per the SynScan lessons. A pulse-end restore (and the
+  dispatch-failure recovery) whose RA drive is in the duty regime (`ra_drive_needs_duty_locked()`: a duty rate
+  pre-armed by a `RightAscensionRate` or `SiteLatitude` write during the pulse, or a sub-floor or zero effective
+  rate) goes through `apply_ra_drive_locked()`, which stops RA for the duty worker, and skips the post-stop rate
+  verify; a `:I` write there clamps at the floor rate (#1720).
 - **A live `:I` on a running axis is not always applied** (EQM-35 Pro, MC firmware 3.39,
   2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
   rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the
@@ -316,7 +320,7 @@ datagrams before each send so replies cannot get off-by-one.
   `check_writable_locked()` refusal (`check_stop_allowed_locked()` keeps only the `NotConnected` check, so a lost link still
   sends nothing) and send their stop frames best effort. A reply that comes clears the latch as for any exchange and the
   call succeeds; a stop whose reply fails ends the call with the fault `DriverException`, sent but unconfirmed.
-  `AbortSlew` tries both axes' `:L`; before them it cancels the MoveAxis stop bodies, bumps `motion_generation_` and cancels
+  `AbortSlew` tries both axes' `:L`; before them it cancels the MoveAxis stop bodies, cancels both axes' motion claims and cancels
   the rate verify, and when a stop fails it leaves its commanded-state and tracking flags untouched. Its tracking restore is
   a start: skipped while faulted, and after an acked `:L` clears the latch the position read-back before the gate
   (`invalidate_position_cache_locked()`, eager) runs the board-restart check, so a restarted board is latched and sent
@@ -357,30 +361,68 @@ datagrams before each send so replies cannot get off-by-one.
   `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
   every exit of that body clears it, the early return of a cancelled body included (a
   superseded body leaves it to the operation that replaced it).
-- **Reap the pulse task at every motion boundary** (slews, park, home,
+- **End the pulse task at every motion boundary** (slews, park, home,
   sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
-  the next goto. A CANCELLED pulse task must not touch the hardware -- the
-  canceller stops or re-commands the axes itself, so a path that commands one
-  axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
-  `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
-  Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
-- **A pulse's or a MoveAxis's stop-wait owns only its own axis (#1706, #2067).** A command on the other
-  axis alone (a start or a stop, `bump_motion_generation_locked()`) carries that wait's generation along
-  (`pulse_owner_gen_`/`pulse_wait_gen_`, armed by `start_speed_motion_locked(..., axis_owner=true)`) instead
-  of superseding it; a command that owns both axes (goto, Park, sync, abort, home, reconnect) and a newer
-  same-axis command still supersede it. Test: `SkyWatcher async - a pulse on the other axis does not
-  supersede a MoveAxis stop-wait (#2067)`.
+  the next goto. A CANCELLED or SUPERSEDED pulse task must not touch the
+  hardware -- the canceller or the newer command stops or re-commands the
+  axes itself, so a path that commands one axis ends only that axis's pulse
+  (PulseGuide #620, MoveAxis #630; a no-op `MoveAxis(axis, 0)` ends none) and
+  sync stops both axes before `:E`. Only the stop paths (AbortSlew, sync,
+  `MoveAxis(axis, 0)`, disconnect) reap with a join; a newer pulse, a moving
+  MoveAxis, a slew, Park or FindHome supersedes the pulse without one
+  (decision 0006 rule 3, #2263, #2416; see the motion claims bullet below).
+  Gate before ending it: a refused slew, MoveAxis or sync changes nothing.
+- **Motion claims: `util::MotionOwner` (#2263).** Every motion command claims the axes it moves under
+  `mutex_` (`claim_axis_locked()` one axis, `claim_both_axes_locked()` both), and every unlocked stop-wait
+  checks its claim (`claim_lost_locked()`); AbortSlew `cancel()`s both axes. The driver-wide
+  `motion_generation_` and its per-axis follow hack (`pulse_owner_gen_`/`pulse_wait_gen_`) are gone: a
+  one-axis claim is not lost to a command on the other axis alone (#1706, #2067), and a claim on both axes
+  (goto, Park, sync, home, reconnect) or a newer same-axis claim takes it. Inside a slew, Park or FindHome
+  (`slew_claim_`, set by `SlewClaimScope` in the slew bodies and the synchronous slew) every claim is a
+  both-axes claim that replaces the operation's own, as the old counter did, so the post-slew rate check
+  and `slew_running()` keep their meaning; the scope calls `finished()` on every exit, a throw included,
+  under the lock hold that clears the Slewing flags, and a refused slot start calls it in
+  `start_slew_body()`. The body takes its `StateLock` before that scope exists, so a refused lock would leave the
+  claim open; it is not refused today, since a fresh slot thread's lock table is empty, and a cleanup for it must
+  store `last_slew_error_` (Slewing raises it) and take its locks through the gate, never `mutex_` untracked
+  (decision 0016 rule 6, #2467). A PulseGuide while `slew_running()` is refused with `InvalidOperation` (a Park
+  keeps its earlier `InvalidWhileParked` refusal), and so is one while the driver's own goto or FindHome flags
+  are up (`own_slew_in_flight_locked()`), because a jog between `start_goto()`'s or `find_home()`'s unlock and
+  the body's first dispatch takes an axis from the slew claim (#2503). Those flags include `restoring_tracking_`,
+  so a PulseGuide right after a GOTO is refused with `InvalidOperation` until the post-GOTO tracking restore ends
+  (Slewing reads true until then). A PulseGuide on the axis a non-zero
+  MoveAxis drives, from its claim (`jog_pending_`, over its dispatch stop-wait) until its stop is sent, is
+  refused with `InvalidOperation` before anything is sent, and the jog runs on; the other axis is not checked
+  (#2503, the maintainer decision of 2026-11-22, as #2467 for SynScan and #2506 for ZWO). A moving MoveAxis supersedes its own axis's pulse
+  (`supersede_pulse_locked()`: takes the pulse's state and sequence, `cancel()`s the slot, no join); the
+  pulse body checks its sequence under `mutex_` before every exchange and sends that axis nothing more.
+  A goto, Park or FindHome supersedes both pulses the same way inside `claim_slew_slot_locked()` (#2416),
+  and a PulseGuide the older pulse on its axis (the sequence bump plus a claim on the axis, which ends a
+  dispatch stop-wait the old pulse is parked in); a slew start the slot refuses after superseding a pulse
+  stops both axes, as for a slew body in flight. `MoveAxis(axis, 0)`, sync, AbortSlew and disconnect still
+  cancel and join the pulse. Tests:
+  `[motion-owner]`, and `SkyWatcher async - a pulse on the other axis does not supersede a MoveAxis
+  stop-wait (#2067)`.
 - **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins
   it when the next body starts or on disconnect) or the landing refinement
   re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
   stops the axes if it may have dispatched; a superseded one never touches them.
+  AbortSlew owns the end of a Park or FindHome it cancels (#2604, the #2586 decision): it cancels under the
+  operation lock, and after its own stops it drops `parking_` and `homing_` with the goto flags, so Slewing
+  reads false and SiteLongitude is accepted as soon as it returns. The woken body takes the lock back after
+  that, finds its flag down (`abandon_slew_body_locked()`) and sends nothing more; a landing settle wait reads
+  nothing after a cancel. An AbortSlew whose stop throws leaves the flag up, and the body still stops the axes.
   A goto that fails (a timed-out wait, a refused dispatch, a failed landing), async or
   synchronous, stops both axes before it drops Slewing (open-astro#2407), as a failed Park
   or FindHome does (`fail_async_phase_locked()`). It skips the stop when it was superseded
-  or when a newer command (MoveAxis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
-  because that command owns the axes. Tests: `SkyWatcher async - a goto that fails after RA started
-  stops the axes (#2407)` and its timeout and synchronous siblings.
+  or when a newer command (a MoveAxis that commands an axis, AbortSlew, a reconnect) cleared its `slew_error_epoch_`,
+  because that command owns the axes. A Park or FindHome body checks no epoch: a MoveAxis is refused while
+  parking and takes no slot claim during a FindHome, so it never supersedes either body, and a FindHome's
+  failure still stops the axes, drops `homing_` and keeps its error (#2552). The rate-0 MoveAxis on an axis with no jog clears a stored failure but starts
+  no epoch, since it commands nothing. Tests: `SkyWatcher async - a goto that fails after RA started
+  stops the axes (#2407)` and its timeout and synchronous siblings, and the `(#2552)` cases in
+  `test_skywatcher_async_slew_failure.cpp`.
 - **The rest of #2407's motion-safety rules** (#2396 AB-4, AB-7, AB-9; all fake-only, no Sky-Watcher hardware):
   - *Relink stop.* A GoTo, Park, FindHome or MoveAxis the driver had under way when the link dropped, a
     failure stop, cancelled-body stop, Unpark stop or cap stop that did not reach the board, an AbortSlew check that ran out
@@ -391,9 +433,16 @@ datagrams before each send so replies cannot get off-by-one.
     however short the outage. A GOTO-mode axis found running after a link loss is stopped too: it is never
     tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
     cannot attribute (tracking, most likely); a first connect with no loss stamp still stops nothing.
-  - *MoveAxis cap.* One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at most
-    (`enforce_move_axis_cap_locked()`, run by every status poll, so it adds no clock waiter); a new MoveAxis call on the axis restarts it. On expiry the axis gets `:L`,
-    RA's drive stays off (no tracking restore: the client that owned the jog is gone) and Slewing raises.
+  - *MoveAxis cap* (#2651). One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at
+    most. Each non-zero MoveAxis starts a body in that axis's own slot (`move_axis_cap_[axis]`) that waits on the
+    task clock until the window the move armed has passed; a new MoveAxis call on the axis, `MoveAxis(axis, 0)`, a
+    stop-completion body or AbortSlew supersedes it, and a disconnect joins it. On expiry the body runs
+    `util::run_motion_deadline()`: `:L` on that axis, verified by its running bit and its own axis angle, up to 3
+    stops in all. A verified stop leaves RA's drive off (no tracking restore: the client that owned the jog is gone)
+    and Slewing raises why (INFO). A stop that does not verify keeps the axis reading as moving, sets
+    `relink_stop_pending_` and stores the failure (`util::kStopNotVerifiedText` after 3 stops) for Slewing at WARN.
+    A start the slot refuses stops the axis just started and MoveAxis throws. Seam:
+    `set_move_axis_cap_spawn_for_testing()`.
   - *Non-convergence.* A landing still more than `kFarMissArcsec` (600") off after the three re-gotos is a
     failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
     keeps the old bound. The RA part is measured on the sky (times cos(dec)), so a good landing near the pole is
@@ -405,7 +454,8 @@ datagrams before each send so replies cannot get off-by-one.
   - *Verified AbortSlew.* After the `:L` pair, `abort_verify_` reads both axes every 250 ms; an axis that
     should be at rest (RA unless the abort restored tracking, Dec unless it restarted a DeclinationRate) and
     still runs gets `:L` again, three stops in all within 3 s. Not verified by then, Slewing raises "the mount
-    still reports motion after 3 stops" and the next connect owes a stop. A newer motion command ends the check.
+    still reports motion after 3 stops" and the next connect owes a stop. A newer motion command or stop ends the
+    check: it watches `motion_owner_.observe(kBothAxes)` (a claim that takes nothing, #2263).
   - Tests: the `[goto-safety]` cases in `test_skywatcher_async.cpp`, `test_skywatcher_async_slew_failure.cpp`
     and `test_skywatcher_serial.cpp` (fake knobs `ignore_instant_stops()` and `reject_ramped_stops()`; the
     owed-stop cases pause the status poll where its Slewing frame would also mark a driver motion).
@@ -414,7 +464,7 @@ datagrams before each send so replies cannot get off-by-one.
   (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:
   - A start does not wait for the body it replaces, so every initiator CLAIMS the
     slot under `mutex_` first (`claim_slew_slot_locked()`: bump the slot generation
-    and `motion_generation_`, clear `parking_`/`homing_`), then sets its flags, then
+    and claim both axes, clear `parking_`/`homing_`), then sets its flags, then
     calls `start_slew_body()` WITHOUT `mutex_`. A replaced body is Superseded: it
     checks `owns_slew_state_locked(ctx)` under `mutex_` before touching a flag or
     the axes. `MoveAxis` bumps `stop_generation_[axis]` under `mutex_` the same way.
@@ -423,7 +473,7 @@ datagrams before each send so replies cannot get off-by-one.
     check runs; Park and FindHome claim the slot themselves and are exempt.
   - A stop on one axis must not supersede the other axis's stop body, hence one
     generation per axis (the same-axis refinement near the stop body's tail stays
-    on `motion_generation_`). Test: `SkyWatcher slot - a stop on one axis does not
+    on the stop's motion claim). Test: `SkyWatcher slot - a stop on one axis does not
     supersede the other axis's stop body`.
   - Waits inside a body go through `BodyScope`'s thread-local context
     (`body_sleep()`, `body_stopped()`), so the helpers shared with the synchronous
@@ -598,7 +648,7 @@ below was one of them.
 - **A retry loop whose supersession test compares against a generation captured before the loop
   can only ever run once.** Review of the branch above: the rate check's second sample was
   unreachable, because the attempt-0 recovery is itself a motion command (its own
-  generation bump, `bump_motion_generation_locked(kAxisRa)`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
+  generation bump, then `bump_motion_generation_locked(kAxisRa)`, and `start_speed_motion_locked()` bumped it again; since #2263 both are motion claims), so attempt 1's first
   re-lock read the check's OWN restart as another command's supersession and returned. The
   "restart did not correct it" WARN could never be emitted, and a restart that also latched wrong
   ran at the wrong rate in silence -- the exact failure the check exists to surface. Fixed by
@@ -619,7 +669,7 @@ below was one of them.
   the span of a state flag, list every predicate that reads it and check each one still wants
   the wider span. Here `get_slewing_locked()` did, `axes_busy_locked()` did not, and the
   duty-cycle worker's start gate did -- so it names the new flag explicitly, because a burst
-  in that window would bump `motion_generation_` under the rate check's supersession guard and
+  in that window would claim RA (then: bump `motion_generation_`) under the rate check's supersession guard and
   make it skip. Same family as the per-axis `axes_busy_locked()` finding in #432: a predicate
   that bundles several questions eventually gets asked the one it answers wrongly.
 - **A measured estimate needs a test that the estimate MOVES, not that it helps.** The
@@ -723,8 +773,9 @@ against its checklist, 2026-09-06:
   #458: the branch is now `k * side`, and `k = s * eps` does consult the hemisphere on a
   board with a measured sense; the side label is still the sign of HA alone, so the
   flip contract below is unchanged.)
-  So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
-  OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
+  So the reported side already follows the hour-angle sign in both hemispheres by construction
+  (the OnStep driver now reports its mount's own side instead, because OnStepX keeps its side
+  past the meridian, #2179), and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
   the "pierEast" branch is the true physical east side below the equator, because there is no
   internal contradiction to expose (whichever side the code calls pierEast, it consistently
@@ -796,7 +847,8 @@ replaces a prior body for the SAME axis. A new loopback regression reproduces th
 dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
 `Slewing` clears promptly. The generation guard
 (`motion_generation_ == stop_task_generation`) is unchanged and still gates the
-tracking-restore tail — which is exactly what exposed the SECOND bug below.
+tracking-restore tail — which is exactly what exposed the SECOND bug below. (Since #2263 the
+guard is the stop's own one-axis motion claim, `claim_lost_locked(stop_task_claim)`.)
 
 #### KNOWN BUG (FIXED): cross-axis `motion_generation_` can block a same-axis tracking restore
 
@@ -845,6 +897,8 @@ assigns `tracking_` only after the wait returns; the restore tail therefore test
 a concurrent motion command` with the mount left tracking (issue #535, fixed). Gated by
 `SkyWatcher async - MoveAxis stop restore yields to a newer tracking command` and the
 `[stress]` case `MoveAxis stop racing SetTracking(false)`.
+Since #2263 the stop's claim is on its own axis alone, so a command on the other axis no longer takes it;
+the `same_axis_owner` refinement stays for a same-axis claim with no owner (a Tracking or rate write).
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
@@ -912,13 +966,16 @@ duty rate is armed arms nothing), for Dec the rate and `dec_offset_running_` (tw
 writes, A then B then A, clear the flag while the axis runs A). It applies any difference.
 The Dec side compares with the rate the restore read before its applier, whose stop-wait drops
 the lock, so a write in that wait is applied too. Every pass first checks, under the lock, that
-the pulse still owns its axis (its sequence and its stop reason): a reaper that cancelled the
-pulse owns the axes, and the old body sends the axis nothing. On this branch a MoveAxis joins
-the pulse body on its axis, so it cannot take the axis inside the release. The appliers keep
-going after a `stop_axis_and_wait_locked()` that returns false: here the wait follows the global
-motion generation, which a command on the other axis also moves, so returning early would drop
-the rate. Tests: `test_skywatcher_async.cpp`, the #2431 cases about a write between a pulse's
-restore and its release and a write in the restore's stop-wait.
+the pulse still owns its axis (its sequence and its stop reason): a MoveAxis that took the pulse
+over in the gap owns the stored rate, and the old body sends the axis nothing. A MoveAxis can
+also take the axis inside an applier's stop-wait. An applier whose `stop_axis_and_wait_locked()`
+returns false then returns before it writes `cmd_axis_rate_deg_s_` (the Dec sub-floor branch,
+`apply_ra_drive_locked()`, the duty worker's burst stop): the new owner's rate drives the
+dead-reckoned position, and a stale sub-floor rate over it froze the reported position while the
+axis slewed. A new owner with a restore must do the same at its release. Tests:
+`test_skywatcher_async.cpp`, the #2431 cases about a write between a pulse's restore and its
+release, a write in the restore's stop-wait, and a pulse superseded in its release window or in
+its release's stop-wait.
 
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are

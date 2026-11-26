@@ -45,7 +45,7 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF, in a `debian:trixie` container, the distribution AlpacaBridge ships for), `build-vendors-shard` (vendors ON, instrumented for gcov, three shards; each runs every third test through `CTEST_SHARD` in `run_all_tests.sh` and uploads its raw coverage JSON), `build-vendors` (the required check and the review bot's wait name it: passes only when all three shards passed, and merges their coverage into per-component and combined line coverage in the job summary; in the merge queue the shards collect no coverage and this job only checks them), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, run as one Catch2 shard per core in parallel processes, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, the `ci_preflight.sh` and `scripts/test_host_setup.sh` self-tests, and `node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF, in a `debian:trixie` container, the distribution AlpacaBridge ships for), `build-vendors-shard` (vendors ON, instrumented for gcov, three shards; each runs every third test through `CTEST_SHARD` in `run_all_tests.sh` and uploads its raw coverage JSON), `build-vendors` (the required check and the review bot's wait name it: passes only when all three shards passed, and merges their coverage into per-component and combined line coverage in the job summary; in the merge queue the shards collect no coverage and this job only checks them), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, run as one Catch2 shard per core in parallel processes, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_vendor_binaries.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, the `ci_preflight.sh` and `scripts/test_host_setup.sh` self-tests, and `node --check` and `node --test`), `cppcheck` (changed files), `zizmor` (workflow audit), and `duplication` (PMD CPD duplicated-line ratchet; not a required check yet).
 - **Merge queue** (`main` only): a PR into `main` lands through GitHub's merge queue, which runs
   `ci.yml` on the queued merge commit (`merge_group`) and merges only when the required checks
   pass on it. So a branch never has to be brought up to date with `main` before it merges: never
@@ -58,7 +58,7 @@ author must do. Read the docstring before changing a gate.
   `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
   job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
   `merge_group`, so a run the queue waits on is never cancelled.
-- **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
+- **PR body gates** (`.github/workflows/pr-body.yml`, required checks on `main`; every job skips on `merge_group`, because the body was judged on the PR): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));
   `pr-template` (`scripts/check_pr_template.py`, gate 2b3) needs every `## ` section of
@@ -68,8 +68,12 @@ author must do. Read the docstring before changing a gate.
   `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
   every record in `docs/decisions/` the PR changes.
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
-- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
-  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
+- **Merge gate** (`.github/workflows/merge-gate.yml`, `.github/scripts/merge-gate.sh`, the `merge-gate` check, on a merge group only):
+  a queued PR merges only when every check on its head ran green, not only the required ones (a skipped job does not count; the newest run of each name decides),
+  and the review bot's newest verdict written during the latest `review` run is "✅ Approved". Dependabot PRs, and a PR that edits
+  `claude-review.yml` and got no review comment, pass the verdict step with a note. It holds the queue once the ruleset requires `merge-gate`.
+- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the required `adr-authorization`
+  commit status; `adr-merge-queue.yml` reports that context on the queued merge commit, and never runs on a PR, so a job can't satisfy the check there): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
   comment, which holds until a push changes one of the PR's record files; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
   review bot gets the in-scope rules from the default branch's `scripts/check_adr_scope.py --list`, run
   over the base branch's records; when a base with records gives no list, the review does not run. The
@@ -94,8 +98,16 @@ author must do. Read the docstring before changing a gate.
   Tier 3 faults a fake after a camera, telescope, focuser, rotator or filter wheel operation has started
   and requires that failure after start is never a clean completion; every such tier-2 host needs a
   tier-3 recipe with a `recover`, which a guard case checks.
+- **Vendor binaries** (`scripts/check_vendor_binaries.py`, gate 2h, issue #2633): every file git
+  tracks as binary under `AlpacaCore/external/` has its sha256 in `AlpacaCore/external/SHA256SUMS`.
+  An SDK bump checks the new files against the vendor's download, then runs the script with
+  `--write` and commits the manifest in the same commit.
+- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.29.0 over the
+  authored C++ trees fails when the duplicated-line share is above `MAX_DUPLICATED_LINE_SHARE`. A line
+  covered by several duplications counts once. A PR that removes duplication lowers the constant;
+  never raise it. The pre-flight gate skips with `[SKIP] duplication (no java)` and never installs a JRE.
 - **Docs drift** (`scripts/check_docs_drift.py`, a step of the `static-checks` job): its docstring lists all
-  checks. The ones authors trip: bump the `zizmor` version and sha256 in `ci.yml` and
+  checks. The ones authors trip: bump the `zizmor` and the PMD versions and sha256s in `ci.yml` and
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
   heading needs its README brand item, the recounted brand word and a
@@ -107,20 +119,39 @@ author must do. Read the docstring before changing a gate.
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
   equal to `alpaca_errors.h` (check 17); never state a count of the
-  blocking-`get_connected()` drivers, name them; and keep every `std::regex` in `router.cpp` `static`.
+  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` and the
+  per-type `routes/*.cpp` sources `static`; and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
+  check list (`// NOLINT(bugprone-empty-catch): the poll retries`; check 28).
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors-shard` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
   (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job runs only after `test-optimized`
   passes, so a red suite publishes nothing. It also installs the `.deb` it
   builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does before
   every merge, so a nightly `.deb` that fails the check is never published.
-- **ConformU against the fake Sky-Watcher mount** (`.github/workflows/conformu-fake.yml`, issue #1637): the
-  test-only `fake_skywatcher_server` over `FakeSkyWatcherMount`, driven by `scripts/run_fake_conformu.sh`. It is not
-  a job in `ci.yml`: it runs on a PR only when the PR touches the workflow's `paths:` list (the Sky-Watcher driver,
-  the fake mount and server, the telescope interface, the HTTP layer, the run script and
-  `scripts/check_conformu_reports.py`, which decides whether the run passes), nightly on `main` at 04:47 UTC, and on
-  dispatch. Keep that list in step with the `fake_skywatcher_server` sources and the run script's imports. Its report is fake evidence, filed
-  under a `Fake*` path with a `FAKE REPORT:` first line. `scheduled-failure.yml` watches it by workflow name.
+- **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
+  test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
+  row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (each row restores the pinned ConformU tarball from an Actions cache keyed on its sha256, and a miss downloads it with retries, so a GitHub 5xx no longer fails a row; a `runs` job lists them, and builds libgpiod or the bundled
+  libgphoto2 first for a vendor that needs it; a full telescope row takes about 20 minutes on the arm64 runner, a switch row several (ConformU writes every
+  switch: 1.5 to 14 minutes on the arm64 runner: iOptron 1m25s, ToupTek 2m45s, OnStep 4m18s, and Gemini 14m22s for the hub's 24 switches), any other row about a minute). On a PR a telescope row runs the PR profile (`FAKE_CONFORMU_PROFILE=pr`, issue #2568):
+  ConformU's full-test settings without the extended rate-offset and pulse-guide tests, which pass only with exactly
+  those two configuration alerts (`check_pr_profile_run()`); its report names the profile on its first line and
+  `check_text()` refuses it in a commit, so a committed telescope report comes from the nightly or a dispatched run. On a PR the `runs` job keeps only the rows the PR's
+  files reach: a shared file the `paths:` list names (the core, the HTTP layer, the server, the run list, the
+  workflow) runs every row, a vendor's sources, fakes (`fake_<vendor>_*.h`) or reports run that vendor's rows, and a
+  file the list does not name (a changelog fragment, docs, a test case) selects nothing; the nightly run runs them all. The
+  server links each vendor that is built and compiles that vendor's hosts under `FAKE_CONFORMU_<VENDOR>`. The run list has one record per `kFakeConnectableRoster` row (`run`,
+  or `pending` with a slice and the reason it does not run) and a `no-fake` record per driver with no fake;
+  docs-drift check 30 holds it to the roster both ways, so a PR that adds a roster row adds its record. A row runs
+  only when its fake can pass ConformU on merit: a fake that does not model the device (a mount that never moves
+  or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. A new mount row's fake
+  answers its own wire commands from the shared `FakeMountMotionModel` (`AlpacaCore/tests/fake_mount_motion_model.h`:
+  GOTO travel time, tracking, pulses, MoveAxis, park, home, side of pier; #2614); the iOptron mount row is the first, in
+  `FakeIoptronMount`'s ConformU mode; the ZWO AM, Celestron, SynScan and OnStep mount rows stay `pending` until their fakes use it, and the two Sky-Watcher rows keep `FakeSkyWatcherBoard`'s own motor-step model. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
+  workflow's `paths:` list (the run rows' drivers and fakes, the server, the run rows' device interfaces, the HTTP
+  layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
+  whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the
+  `fake_conformu_server` sources and the run script's imports. Its reports are fake evidence, filed under a `Fake*`
+  path with a `FAKE REPORT:` first line. `scheduled-failure.yml` watches it by workflow name.
 - **Weekly link check** (`.github/workflows/link-check.yml`, issue #1362): lychee over the Markdown
   files, relative links offline and then `http(s)` links, Mondays and on dispatch only; a host it
   cannot check goes in `.lycheeignore` with a reason line. `scheduled-failure.yml` watches it by
@@ -131,9 +162,28 @@ author must do. Read the docstring before changing a gate.
   Release (a Release under 24 h old may still be missing), fails on any `not found` from `ldd`
   and, from 5.1 on (`--version` is not on `stable/5.0`), runs `alpacabridge --version`.
   `scheduled-failure.yml` watches it by workflow name.
+- **Closed threads are locked after 14 days** (`.github/workflows/lock-threads.yml`): every six hours
+  `dessant/lock-threads` locks issues and PRs closed with no activity for 14 days; threads closed from
+  2026-11-10 on get a comment pointing at a new issue, the older backlog is locked silently.
+  `scheduled-failure.yml` watches it by workflow name.
+- **Stale issues and PRs, dry run** (`.github/workflows/stale.yml`, issue #1363): daily, `actions/stale`
+  marks an issue after 90 days without activity and closes it 30 days later, a PR after 30 and 14;
+  P1, P2, `on hold`, `testing` and `safe-to-review` are exempt, and a draft PR is marked but never
+  closed (a second step marks PRs with closing off). It runs with `debug-only: 'true'` until the
+  maintainer has read two weeks of logs; going live is a later PR that flips it in both steps.
+  `scheduled-failure.yml` watches it by workflow name.
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`, issue #1364): weekly, on pushes to `main`
+  and on dispatch from `main`, uploads the Scorecard SARIF to code scanning with
+  `publish_results: false` (no public badge). It runs on `ubuntu-latest`, like CodeQL, because the
+  action's Docker image is amd64 only. It does not gate merges; `scheduled-failure.yml` watches it
+  by workflow name.
+- **Authored code badge** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to
+  `main` it writes `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on the
+  `badges` branch, which the README badge reads through img.shields.io/endpoint. Check 25 holds the
+  README line to that endpoint and never to a number, so never paste a count into the README.
 - **libgpiod and the bundled libgphoto2 are cached** (`deps-gpiod-...` key in `ci.yml`): the jobs that need them (the all-vendors shards, `sanitizers-tsan`, `clang-tidy`) restore one staging tree keyed on the libgpiod pin and `scripts/build_bundled_gphoto.sh`, build both into it only on a miss, and copy it into `/`. Bumping either pin or the script changes the key. `nightly-build.yml` still builds them every run.
-- **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
-  green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
+- **Every job in every workflow has a `timeout-minutes` bound** (issue #363; docs-drift check 27
+  fails a job without one, issue #2059), sized from healthy green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
   legitimately outgrows it, raise the number rather than trim the work. `claude-review` (90 min:
   up to 45 waiting for CI, then up to 45 for the review) is outlasted by the 95-minute verdict poll in

@@ -176,7 +176,7 @@ namespace {
 bool raw_port_looks_like_ifr_candidate(const std::string& port_path) {
     auto descriptor = util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return util::usb_tty_descriptor_matches(*descriptor, {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return util::usb_tty_descriptor_matches(*descriptor, ifr_usb_tokens());
 }
 }  // namespace
 #endif
@@ -432,9 +432,9 @@ private:
 
     void write_locked(const std::string& data) {
 #ifndef _WIN32
-        if (!util::tty_write_all(link_.fd(), data.c_str(), data.size())) {
+        if (!link_.write_all(data)) {  // the util::SerialLink verdict judges the errno (#2262)
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV) {
+            if (link_.lost()) {
                 fail_link_locked("iFR serial link lost (errno " + std::to_string(err) + ")");
             }
             throw AlpacaException("iFR write failed: " + util::errno_string(err), AlpacaError::DriverException);
@@ -454,8 +454,8 @@ private:
         spec.stop = util::ReadSpec::Stop::Terminator;
         spec.terminators = "#";
         spec.max_len = kMaxResponseLen;
-        const auto r = util::read_until(link_.fd(), spec,
-                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        const auto r =
+            util::read_until(link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::Terminator:
                 ALPACA_LOG_TRACE("iOptron", "iFR response: " + r.bytes);
@@ -484,8 +484,8 @@ private:
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
-        const auto r = util::read_until(link_.fd(), spec,
-                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(kAckTimeoutMs));
+        const auto r =
+            util::read_until(link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(kAckTimeoutMs));
         if (r.outcome == util::ReadOutcome::Length) {
             if (r.bytes == "1") return IfrAck::Accepted;
             if (r.bytes == "0") return IfrAck::Refused;
@@ -601,6 +601,11 @@ IfrAck IfrLink::rotator_set_reverse(bool reversed) { return impl_->command(rever
 void reset_ifr_link_registry_for_testing() {
     std::lock_guard<std::mutex> lock(registry_mutex());
     registry().clear();
+}
+
+const std::vector<std::string>& ifr_usb_tokens() {
+    static const std::vector<std::string> tokens{"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::ioptron

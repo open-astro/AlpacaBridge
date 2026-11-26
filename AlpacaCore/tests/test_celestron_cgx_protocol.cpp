@@ -43,6 +43,7 @@
 
 namespace {
 
+using alpacacore::test::require_alpaca_error;
 using alpacacore::vendor::celestron::AuxFrame;
 using alpacacore::vendor::celestron::decode_aux_frame;
 using alpacacore::vendor::celestron::encode_aux_frame;
@@ -103,9 +104,12 @@ TEST_CASE("Celestron CGX AUX link - resync clears a timeout but never reopens a 
     link.connect_serial(fake.slave_path());
 
     fake.set_muted(true);
-    CHECK_THROWS_AS(
-        link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-        alpacacore::AlpacaException);
+    require_alpaca_error(
+        [&] {
+            (void)link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension,
+                                         std::chrono::milliseconds(50));
+        },
+        alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(link.is_healthy());
     fake.set_muted(false);
     link.resync();
@@ -140,14 +144,14 @@ TEST_CASE("Celestron CGX AUX link - recovering a timed-out stream keeps the faul
     REQUIRE(link.is_healthy());
 
     fake.set_muted(true);
-    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-                    alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)); },
+                         alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(link.is_healthy());
     link.connect_serial(fake.slave_path(), alpacacore::vendor::celestron::AuxLinkSpeed::Baud115200,
                         std::chrono::milliseconds(0));
     CHECK_FALSE(link.is_healthy());
-    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
-                    alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)); },
+                         alpacacore::AlpacaError::DriverException);
     link.resync();
     CHECK_FALSE(link.is_healthy());
 
@@ -283,7 +287,8 @@ TEST_CASE("Celestron CGX AUX link - desync advances generation and recovers on t
         }
         mount.set_motor_identity(0x10, {7, 19}, {0x17, 0x88});
         const int sent = mount.count_command(0x10, 0xfe);
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(100)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(100)); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK(protocol.session_generation() == desynchronized);
         CHECK(mount.count_command(0x10, 0xfe) == sent);
         int exclusive = 0;
@@ -551,7 +556,7 @@ TEST_CASE("Fake Celestron CGX mount - sever cancels a held reply", "[celestron][
     mount.sever_link();
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
     REQUIRE(held);
-    CHECK_THROWS_AS(exchange.get(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)exchange.get(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(protocol.is_connected());
 }
 
@@ -643,6 +648,73 @@ TEST_CASE("Fake Celestron CGX mount - reports home completion independently per 
     CHECK(transact(0x11, 0x12).payload == std::vector<std::uint8_t>{0x00});
     mount.complete_axis_home(0x11);
     CHECK(transact(0x11, 0x12).payload == std::vector<std::uint8_t>{0xff});
+}
+
+TEST_CASE("Fake Celestron CGX mount - an auto-completed home answers searching to as many reads as asked",
+          "[celestron][cgx][protocol][integration]") {
+    // #2661: a raced case widens the searching reads so that every reader of one home start sees the search.
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    const auto transact = [&protocol](std::uint8_t command) {
+        return protocol.exchange(AuxFrame{.source = 0x00, .destination = 0x11, .command = command, .payload = {}},
+                                 std::chrono::milliseconds(500));
+    };
+    for (const int reads : {1, 3}) {
+        INFO("searching reads " << reads);
+        mount.set_auto_home_searching_reads(reads);
+        CHECK(transact(0x0b).payload.empty());
+        for (int read = 0; read < reads; ++read) CHECK(transact(0x12).payload == std::vector<std::uint8_t>{0x00});
+        CHECK(transact(0x12).payload == std::vector<std::uint8_t>{0xff});
+    }
+}
+
+TEST_CASE("Fake Celestron CGX mount - a scripted home search drives its legs, and a runaway drives until stopped",
+          "[celestron][cgx][protocol][integration]") {
+    using namespace std::chrono_literals;
+    using alpacacore::vendor::celestron::CgxAxis;
+    using HomeLeg = alpacacore::test::FakeCelestronCgxMount::HomeLeg;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {}), std::invalid_argument);
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {{2, 1000, 0}}), std::invalid_argument);
+    CHECK_THROWS_AS(mount.script_home_search(0x10, {{1, 0, 0}}), std::invalid_argument);
+    mount.set_physical_position(0x10, 0x001000);
+    // RA: 1,000 counts the wrong way, then home; Dec: away forever (a switch never found).
+    mount.script_home_search(0x10, {HomeLeg{1, 1000, 1000}, HomeLeg{0, 2000, 0}});
+    mount.script_home_search(0x11, {HomeLeg{-1, 500, 0}});
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    protocol.connect_serial(mount.slave_path());
+    protocol.start_axis_home(CgxAxis::RightAscension);
+    protocol.start_axis_home(CgxAxis::Declination);
+    mount.advance_motion(500ms);
+    CHECK(mount.axis_physical_position(0x10) == 0x001000U + 500);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 249);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::RightAscension));
+    CHECK_FALSE(protocol.is_axis_slew_done(CgxAxis::RightAscension));
+    mount.advance_motion(1s);  // the rest of the first leg, then 1,000 counts back toward home
+    CHECK(mount.axis_physical_position(0x10) == 0x001000U);
+    mount.advance_motion(10s);  // ends at the physical home
+    CHECK(mount.axis_physical_position(0x10) == 0U);
+    CHECK(protocol.is_axis_home_done(CgxAxis::RightAscension));
+    CHECK(protocol.is_axis_slew_done(CgxAxis::RightAscension));
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::Declination));
+
+    static_cast<void>(protocol.exchange(AuxFrame{.source = 0, .destination = 0x11, .command = 0x24, .payload = {0}},
+                                        std::chrono::milliseconds(500)));
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK(protocol.is_axis_home_done(CgxAxis::Declination));
+    // The script is used up: the next search is the usual one (no motion, explicit completion).
+    protocol.start_axis_home(CgxAxis::Declination);
+    mount.advance_motion(10s);
+    CHECK(mount.axis_physical_position(0x11) == 0x00ffffffU - 5749);
+    CHECK_FALSE(protocol.is_axis_home_done(CgxAxis::Declination));
 }
 
 TEST_CASE("Fake Celestron CGX mount - advances GOTO and tracking from elapsed simulated time",
@@ -762,12 +834,8 @@ TEST_CASE("Celestron CGX AUX link - a removed USB device is a lost link until th
     SECTION("pulled while a reply is in flight") {
         mount.fragment_next_reply();
         auto held = std::async(std::launch::async, [&] {
-            try {
-                static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(2000)));
-                return 0;  // no error
-            } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code();
-            }
+            return alpacacore::test::error_code_of(
+                [&] { static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(2000))); });
         });
         REQUIRE(mount.wait_for_reply_fragment(std::chrono::milliseconds(500)));
         const auto started = std::chrono::steady_clock::now();
@@ -821,7 +889,8 @@ TEST_CASE("Celestron CGX AUX link - requires reconnect after a timed-out reply",
     CHECK(protocol.is_connected());
 
     mount.set_muted(false);
-    CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(100)), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(100)); },
+                         alpacacore::AlpacaError::DriverException);
     protocol.disconnect();
     protocol.connect_serial(mount.slave_path());
     CHECK(protocol.exchange(request, std::chrono::milliseconds(100)).payload == std::vector<std::uint8_t>{7, 18});
@@ -881,10 +950,12 @@ TEST_CASE("Celestron CGX AUX link - logs the original transaction failure once w
         const double elapsed_ms = std::stod(messages[0].substr(elapsed_at + 12));
         CHECK((elapsed_ms >= (checksum_failure ? 0.0 : 50.0)));
         CHECK_FALSE(protocol.is_healthy());
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(50)); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK((messages.size() == 1));
         protocol.disconnect();
-        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.exchange(request, std::chrono::milliseconds(50)); },
+                             alpacacore::AlpacaError::NotConnected);
         CHECK((messages.size() == 1));
     }
 }

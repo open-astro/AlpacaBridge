@@ -33,6 +33,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -475,6 +476,142 @@ TEST_CASE("enforce_motion_deadline - a MoveAxis past its cap whose stop does not
     CHECK(mount.stops == 3);
 }
 
+// ── A timed motion's own slot body: run_motion_deadline ──────────────────────────────────────────────────────
+
+// #2651: the MoveAxis cap of every mount runs in a slot of its own, one body per MoveAxis, through one shared body.
+// Falsified by: a body that sends its stop before the deadline, or one that raises without the verified stop.
+TEST_CASE("run_motion_deadline - waits until the deadline, then stops, verifies and raises", "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) {
+        run_motion_deadline(ctx, clock, deadline, hooks, "MoveAxis on axis 0 ran 60 s, the longest allowed");
+    });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(kMaxMoveAxisDuration - 1ms);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    CHECK(mount.stops == 0);
+    clock.advance(1ms);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    CHECK(mount.stops == 1);
+    step_until_returned(clock, slot);
+    REQUIRE(slot.last_failure().has_value());
+    CHECK(*slot.last_failure() == "MoveAxis on axis 0 ran 60 s, the longest allowed");
+    CHECK(mount.stops == 1);
+}
+
+// Falsified by: a body that sends its stop at the deadline after MoveAxis(axis, 0), AbortSlew or a disconnect cancelled
+// it, so a stop reaches a mount that a newer command owns.
+TEST_CASE("run_motion_deadline - a body cancelled before its deadline sends nothing and raises nothing",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) { run_motion_deadline(ctx, clock, deadline, hooks, "expired"); });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(30s);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    slot.cancel();
+    clock.advance(kMaxMoveAxisDuration);
+    slot.cancel_all_and_join();
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
+// Falsified by: a body that waits on the clock through a cancel (clock.sleep_for, or ctx.wait_for with its result
+// ignored), so Disconnect's join blocks until the 60 s deadline and each renewal leaves a stale body asleep, until the
+// slot refuses a start (decision 0006, stale bodies). The case advances no virtual time before it checks the return.
+TEST_CASE("run_motion_deadline - a cancel ends the waiting body with no clock advance", "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    std::atomic<bool> returned{false};
+    slot.start([&](OperationContext& ctx) {
+        run_motion_deadline(ctx, clock, deadline, hooks, "expired");
+        returned = true;
+    });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    slot.cancel();
+    const bool ended = alpacacore::test::wait_until([&] { return returned.load(); }, 2000);
+    clock.advance(kMaxMoveAxisDuration);  // lets a body that slept through the cancel finish, so the join cannot hang
+    slot.cancel_all_and_join();
+    CHECK(ended);
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
+// Falsified by: a renewal (a new non-zero MoveAxis starts a new body with a new deadline) that leaves the old body's
+// deadline armed, so a renewed MoveAxis is stopped 60 s after the first call instead of the last.
+TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only the new deadline stops the mount",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    std::atomic<int> returned{0};
+    const auto start_move = [&] {
+        HoldWindow deadline;
+        deadline.arm(clock.now(), kMaxMoveAxisDuration);
+        slot.start([&clock, &hooks, &returned, deadline](OperationContext& ctx) {
+            run_motion_deadline(ctx, clock, deadline, hooks, "renewed MoveAxis ran 60 s");
+            ++returned;
+        });
+    };
+    start_move();
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(40s);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    start_move();  // the renewal at 40 s
+    // The superseded body wakes from the supersede, not from the clock: no virtual time passes here.
+    CHECK(alpacacore::test::wait_until([&] { return returned.load() == 1; }, 2000));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    clock.advance(21s);  // 61 s: the first deadline has passed
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    CHECK(mount.stops == 0);
+    clock.advance(39s);  // 100 s: the renewal's deadline
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    CHECK(mount.stops == 1);
+    step_until_returned(clock, slot);
+    REQUIRE(slot.last_failure().has_value());
+    CHECK(*slot.last_failure() == "renewed MoveAxis ran 60 s");
+}
+
+// Falsified by: a body that sends its stop after another motion command claimed the mount by bumping the shared
+// generation (decision 0006 rule 3: a slew supersedes the MoveAxis without a join).
+TEST_CASE("run_motion_deadline - a body superseded through the shared generation sends nothing at its deadline",
+          "[motion-guards]") {
+    FakeTaskClock clock;
+    ScriptedMount mount{clock};
+    HoldWindow deadline;
+    deadline.arm(clock.now(), kMaxMoveAxisDuration);
+    const auto hooks = mount.hooks();
+    OperationGeneration generation;
+    AsyncOperation slot("motion-guards-test", generation, clock);
+    slot.start([&](OperationContext& ctx) { run_motion_deadline(ctx, clock, deadline, hooks, "expired"); });
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    generation.bump();  // a slew claims the mount; a bump elsewhere does not wake the body
+    clock.advance(kMaxMoveAxisDuration);
+    REQUIRE(clock.wait_for_woken_settled(2s));
+    slot.cancel_all_and_join();
+    CHECK(mount.stops == 0);
+    CHECK_FALSE(slot.last_failure().has_value());
+}
+
 // ── Landing gate ──────────────────────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("LandingGate - landed only after two reads 500 ms apart agree within 30 arcsec", "[motion-guards]") {
@@ -509,6 +646,35 @@ TEST_CASE("LandingGate - a still mount more than 600 arcsec off in RA or Dec is 
         LandingGate gate(MountPosition{0.0, 80.0}, at(0ms));
         CHECK(gate.feed(read_at(0ms, 599.9 * ra_arcsec_hours, 80.0)) == Landing::Settling);
         CHECK(gate.feed(read_at(500ms, 599.9 * ra_arcsec_hours, 80.0)) == Landing::Landed);
+    }
+}
+
+// Falsified by: axis_miss_arcsec() returning the NaN that std::max keeps, so `NaN > tolerance` is false and a NaN or
+// infinite position reads as still and on target (#2464).
+TEST_CASE("LandingGate - a non-finite position is never still and never lands", "[motion-guards]") {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    SECTION("axis_miss_arcsec is +inf") {
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{nan, 20.0}, MountPosition{6.0, 20.0})));
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{6.0, nan}, MountPosition{6.0, 20.0})));
+        CHECK(std::isinf(axis_miss_arcsec(MountPosition{6.0, 20.0}, MountPosition{inf, 20.0})));
+    }
+    SECTION("NaN Dec") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(1000ms, 6.0, nan)) == Landing::Settling);
+    }
+    SECTION("NaN RA") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, nan, 20.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(500ms, nan, 20.0)) == Landing::Settling);
+    }
+    SECTION("a still mount on target after NaN reads still lands") {
+        LandingGate gate(MountPosition{6.0, 20.0}, at(0ms));
+        CHECK(gate.feed(read_at(0ms, 6.0, nan)) == Landing::Settling);
+        CHECK(gate.feed(read_at(100ms, 6.0, 20.0)) == Landing::Settling);
+        CHECK(gate.feed(read_at(600ms, 6.0, 20.0)) == Landing::Landed);
     }
 }
 
@@ -663,8 +829,8 @@ TEST_CASE("RelinkMotionStop - a loss during a GoTo or MoveAxis owes one stop unt
 // verified stop; an AbortSlew on the test thread cancels the slot under a stand-in for the driver mutex_ and sends its
 // own stop over a stand-in for the I/O lock. In the gated rounds the body's first stop blocks on a latch until the
 // AbortSlew has run, so the AbortSlew provably lands while the deadline body is inside its stop; the ungated rounds
-// let the two race freely. Either way the deadline body sends at most one stop and keeps no error: the canceller
-// owns the mount (decision 0006 rule 6).
+// let the two race freely. Either way the deadline body sends at most one stop (exactly one in the gated rounds; none
+// when the cancel lands before it) and keeps no error: the canceller owns the mount (decision 0006 rule 6).
 TEST_CASE("enforce_motion_deadline - an AbortSlew racing the deadline expiry leaves one owner of the stop",
           "[motion-guards][stress-guard]") {
     for (int round = 0; round < 100; ++round) {
@@ -724,7 +890,9 @@ TEST_CASE("enforce_motion_deadline - an AbortSlew racing the deadline expiry lea
         CHECK_FALSE(slot.last_failure().has_value());
         CHECK(abort_stops == 1);
         CHECK(body_stops <= 1);
-        CHECK(reads == 0);  // a cancelled stop reads nothing more
+        // A cancelled stop reads nothing more. In the ungated rounds this also holds only because the fake clock never
+        // advances during the stop's kStopVerifyPollInterval wait, so the cancel always lands before a first poll.
+        CHECK(reads == 0);
         if (gated) {
             CHECK(body_stops == 1);
         }

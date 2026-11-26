@@ -149,7 +149,7 @@ void check_getters_while_sync_holds(GetterWaitRig& rig, std::pair<std::uint8_t, 
     if (tracking_on) rig.driver->set_tracking(true);
     rig.clock.advance(1s);
     rig.mount.fragment_next_reply(filter);
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(3.0, 20.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(3.0, -87.0); });
     // Sync's settle loop sleeps on the fake clock; keep it moving until the reply is held.
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     bool held = false;
@@ -194,7 +194,7 @@ TEST_CASE("CGX coordinate getters answer from the frame while Sync waits on its 
           "[celestron][cgx][getter-wait]") {
     GetterWaitRig rig;
     rig.mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01});
-    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(3.0, 20.0); });
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(3.0, -87.0); });
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     bool held = false;
     while (!held && std::chrono::steady_clock::now() < deadline) {

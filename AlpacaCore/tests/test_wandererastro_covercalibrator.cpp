@@ -83,10 +83,13 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Unsupported actions", "[wander
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { (void)driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { (void)driver->command_bool("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { (void)driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },
@@ -164,22 +167,12 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - HaltCover is implemented", "[w
 
 #include "fake_serial_streamer.h"
 #include "fake_task_clock.h"
+#include "wandererastro_streamer_helpers.h"
 
 namespace {
 
-// Moves the fake clock by @p d, then waits (bounded, real time) for the
-// reader thread's next pass: its silence check is the one clock read a muted
-// or severed link makes per pass, taken under the lock the driver's getters
-// also take, so a getter called after this returns sees that pass's verdict.
-bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
-    clock.advance(d);
-    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
-}
-
-// set_muted() can land just after the streamer committed one more frame to the
-// pty; give the reader time to take it at the current virtual time before the
-// clock moves, or it would restart the silence window.
-void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+using alpacacore::test::wanderer::advance_one_pass;
+using alpacacore::test::wanderer::drain_after_mute;
 
 template <typename Pred>
 bool wait_until_cover(Pred pred, std::chrono::milliseconds limit) {
@@ -215,13 +208,14 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
     CHECK(driver->get_brightness() == 100);
 
     cover.set_muted(true);
-    drain_after_mute();
+    REQUIRE(drain_after_mute(cover, clock));
     // The 10 s limit is inclusive: exactly 10 s of silence still serves the cache.
     REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
     CHECK(driver->get_cover_state() == CoverState::Closed);
     CHECK(driver->get_brightness() == 100);
     // One millisecond more latches the fault.
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    const auto sent_before = cover.commands().size();
     CHECK(driver->get_cover_state() == CoverState::Unknown);
     CHECK(driver->get_connected());
     CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);  // surfaced to the management listing
@@ -234,7 +228,10 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
     require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->calibrator_on(50); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->calibrator_off(); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(cover.received("1001"));  // nothing went on the wire while faulted
+    // Nothing went on the wire while faulted, across all six refused calls.
+    REQUIRE(cover.wait_for_quiet(std::chrono::seconds(5)));  // the streamer has read whatever was written
+    CHECK_FALSE(cover.received("1001"));
+    CHECK(cover.commands().size() == sent_before);
 
     cover.set_muted(false);
     CHECK(wait_until_cover([&] { return driver->get_cover_state() == CoverState::Closed; },
@@ -313,7 +310,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Disconnect returns after the p
     // A silent link under a blocking-read retune: a VTIME-paced reader would
     // park in read() and never see its stop flag.
     cover.set_muted(true);
-    drain_after_mute();
+    REQUIRE(cover.wait_for_quiet(std::chrono::seconds(5)));
     alpacacore::test::wanderer::retune_to_blocking_read(cover.keepalive_fd());
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
@@ -335,7 +332,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Link fault restores retuned li
     // Bytes keep arriving but no frame parses (the wrong baud's garbage), so no
     // read ever times out and tty_read()'s own restore never runs.
     cover.set_frame("garbage\n");
-    drain_after_mute();
+    REQUIRE(alpacacore::test::wanderer::wait_for_frames(cover, 1));
     alpacacore::test::wanderer::set_line_speed(cover.keepalive_fd(), B9600);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     REQUIRE(alpacacore::test::wanderer::line_speed(cover.keepalive_fd()) == B9600);
@@ -367,4 +364,275 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - a frame from another product i
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, other.slave_path());
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---------------------------------------------------------------------------
+// Decision 0009 (issue #1988): a hangup is a lost link at once, a silence fault
+// standing for util::kLinkStalenessBound is one too, the loss reason is the one
+// fault text until the next Connect or Disconnect, and only the client relinks.
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/link_health.h>
+
+namespace {
+
+// kCoverFrame with the cover at its open angle, so a reconnect shows which cover answered.
+const char* const kReplugCoverFrame = "WandererCoverV4ProA20240301A10.0A270.0A270.0A12.5A0A0A0\n";
+
+// Every operational member answers NotConnected over a lost link, before any
+// cache or fault check; the name is static and keeps answering, and
+// DeviceState is the empty list.
+void require_cover_lost(alpacacore::CoverCalibratorDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    require_alpaca_error([&]() { (void)driver.get_cover_state(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_cover_moving(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_calibrator_state(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_brightness(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.open_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.halt_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.calibrator_on(10); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver.get_name() == "WandererAstro WandererCover V4");
+    CHECK(driver.get_device_state().empty());
+}
+
+}  // namespace
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_protocol_wrapper.cpp reader_loop treating a hangup
+// errno as a plain read error for the silence latch (no end_link_from_reader call).
+TEST_CASE(
+    "WandererAstro CoverCalibrator Driver - a cable pulled with the stream running loses the link at once "
+    "(#1988)",
+    "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the hangup can end the link
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Closed);
+    const std::string port = cover.slave_path();  // emptied by the cut
+
+    cover.sever_link();
+    // Real time: the reader meets the hangup on its next read.
+    CHECK(wait_until_cover([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_cover_lost(*driver);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    CHECK_FALSE(driver->get_device_firmware().has_value());  // the cached firmware date went with the link
+    CHECK(wait_until_cover([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                           std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp get_connected returning
+// connected_.load() alone.
+TEST_CASE("WandererAstro CoverCalibrator Driver - a command on a pulled cable fails NotConnected (#1988)",
+          "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    cover.sever_link();
+    // The write meets the dead port, or the reader already has: either way
+    // the command is NotConnected, never DriverException.
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_protocol_wrapper.cpp check_link_silence never
+// asking link_.fault_stale(now), so the fault stands with Connected true.
+TEST_CASE("WandererAstro CoverCalibrator Driver - a silence fault standing 30 s loses the link (#1988)",
+          "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = cover.slave_path();
+
+    cover.set_muted(true);
+    REQUIRE(drain_after_mute(cover, clock));
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(10001)));
+    // Faulted, not lost: Connected stays true, CoverState is Unknown and commands refuse with DriverException.
+    CHECK(driver->get_connected());
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Unknown);
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(advance_one_pass(clock, alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1)));
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(alpacacore::util::is_serial_port_in_use(port));
+
+    // The fault has now stood for the bound: the link is lost.
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    CHECK(wait_until_cover([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_cover_lost(*driver);
+    CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);
+    CHECK(wait_until_cover([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                           std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_protocol_wrapper.cpp disconnect not clearing
+// loss_reason_, so the reason outlives the Disconnect.
+TEST_CASE("WandererAstro CoverCalibrator Driver - the loss reason stays until the next Disconnect or Connect (#1988)",
+          "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugCoverFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(cover);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_link_fault().empty());
+
+    cover.sever_link();
+    REQUIRE(wait_until_cover([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    const std::string reason = driver->get_link_fault();
+    CHECK(reason.find("Serial link lost") != std::string::npos);
+    clock.advance(std::chrono::minutes(5));  // nothing ages the kept reason away
+    CHECK(driver->get_link_fault() == reason);
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp set_connected keeping
+// the idempotency check `connected == connected_.load()`, so a Connect over a lost link returns as already connected.
+TEST_CASE("WandererAstro CoverCalibrator Driver - a Connect over a lost link reopens without a Disconnect (#1988)",
+          "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugCoverFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(cover);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Closed);
+
+    cover.sever_link();
+    REQUIRE(wait_until_cover([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+
+    // No Disconnect: a Connect while the raw flag is still set must not be taken as already connected.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);  // the replugged cover's frame
+    CHECK(driver->get_link_fault().empty());
+
+    // A Disconnect over a lost link completes and clears the reason.
+    const std::string replugged_port = replugged.slave_path();
+    replugged.sever_link();
+    REQUIRE(wait_until_cover([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(replugged_port));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_protocol_wrapper.cpp connect's wait loop not
+// checking connect_hangup_, so it waits out serial_timeout_s.
+TEST_CASE("WandererAstro CoverCalibrator Driver - Connect fails at once when the port hangs up mid-wait (#1988)",
+          "[wandererastro][covercalibrator][unit][fake][link-lost]") {
+    // No frame for 60 s; the master closes 300 ms in. The connect waits up to
+    // serial_timeout_s (3 s), so a connect that returns well before it saw the hangup.
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300), std::chrono::seconds(60));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200);
+    std::thread severer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the cut lands mid-wait
+        cover.sever_link();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    severer.join();
+    CHECK(elapsed < std::chrono::milliseconds(2500));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a connect that never completed is not a lost session
+}
+
+namespace {
+// Real time: what the case waits for is the reader thread meeting the dead fd.
+template <typename Pred>
+bool wait_for_2262(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return pred();
+}
+}  // namespace
+
+// Issue #2262: EBADF on the device's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": its reader counted the read as a silent one and
+// Connected kept reading true until the silence fault, then the staleness bound, caught up.
+TEST_CASE("WandererAstro CoverCalibrator Driver - EBADF on the device's fd loses the link at once",
+          "[wandererastro][covercalibrator][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the EBADF can end the link
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    const std::string port = cover.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port, 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));  // the reader's read and a command's write both meet EBADF
+
+    CHECK(wait_for_2262([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK(
+        wait_for_2262([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}
+
+// FakeSerialStreamer WandererCover mode (#2694): the opt-in cover_deg_per_s argument moves the frame's angle toward
+// the commanded end at that rate. The ConformU factory uses the bench rate (conformu_covercalibrator_factories.h);
+// this case runs ten times faster. kCoverFrame is closed at 10 degrees and opens at 270, and the driver calls either
+// end reached within 10 degrees: the open travels 250 degrees before CoverState reads Open. The close may start before
+// the fake reaches 270 (anywhere from 260), so it travels at least 240 degrees before CoverState reads Closed.
+TEST_CASE("FakeSerialStreamer - cover mode opens and closes the cover after the travel time",
+          "[wandererastro][covercalibrator][unit][fake]") {
+    using std::chrono::milliseconds;
+    constexpr double kDegPerSecond = 200.0;
+    constexpr auto kOpenTravel = milliseconds(1250);   // 250 degrees at kDegPerSecond
+    constexpr auto kCloseTravel = milliseconds(1200);  // 240 degrees at kDegPerSecond
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, milliseconds(20), milliseconds(0), milliseconds(0),
+                                               kDegPerSecond);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Closed);
+
+    // Real time: what each wait waits for is the fake's angle, which moves on the steady clock.
+    auto start = std::chrono::steady_clock::now();
+    driver->open_cover();
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == alpacacore::CoverState::Open; },
+                           milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - start >= kOpenTravel);
+
+    start = std::chrono::steady_clock::now();
+    driver->close_cover();
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == alpacacore::CoverState::Closed; },
+                           milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - start >= kCloseTravel);
+    CHECK_NOTHROW(driver->set_connected(false));
 }

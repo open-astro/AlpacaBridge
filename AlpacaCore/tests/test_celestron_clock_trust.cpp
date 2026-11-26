@@ -976,9 +976,10 @@ TEST_CASE("Celestron host clock - a failed re-sync write is logged and leaves Co
     rig.driver->set_connected(false);
 }
 
-// A blocking SlewToCoordinates publishes Slewing before its pier read and its GOTO. When either throws, the slew is
-// stopped and its flags cleared, as an async body's failure does: a stale slewing_cached_ or slew_force_until_ held
-// every later re-sync for its whole bound and then gave up.
+// A blocking SlewToCoordinates publishes Slewing before its pier read and its GOTO. A pier read that throws puts back
+// what the publish overwrote (decision 0022 rule 2: nothing was sent), and a GOTO that throws stops the mount
+// (stop_after_failed_goto_locked()): either way no stale slewing_cached_ or hold is left to hold every later re-sync
+// for its whole bound.
 TEST_CASE("Celestron host clock - a blocking SlewToCoordinates whose dispatch throws holds no later re-sync",
           "[celestron][clock][telescope][unit]") {
     alpacacore::test::HostClockTrustGuard trusted(true);
@@ -991,8 +992,8 @@ TEST_CASE("Celestron host clock - a blocking SlewToCoordinates whose dispatch th
     CHECK_THROWS(rig.driver->slew_to_coordinates(west_of_meridian_ra_hours(), -40.0));
     rig.st->p_mute = false;
     rig.st->aligned = false;  // the re-sync leaves an aligned hand controller alone
-    // The failure is kept for Slewing, as the async body's is, until the next motion command.
-    CHECK_THROWS(rig.driver->get_slewing());
+    // The pier read sent nothing, so Slewing reads what it read before the call.
+    CHECK_FALSE(rig.driver->get_slewing());
 
     rig.driver->on_host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return rig.finished.load() == 1; }));

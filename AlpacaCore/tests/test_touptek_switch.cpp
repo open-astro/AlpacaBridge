@@ -14,13 +14,16 @@
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <cmath>
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
 
 namespace {
 
+using alpacacore::test::alpaca_error_message;
 using alpacacore::test::require_alpaca_error;
 
 }  // namespace
@@ -74,6 +77,46 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Not connected throws", "[touptek][
     require_alpaca_error([&]() { driver->set_switch_value(3, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Issue #2264: the value checks precede the connection and writability checks (ASCOM precedence), as on
+// the iMate.
+TEST_CASE("ToupTek StellaVita Switch Driver - value range is InvalidValue while disconnected",
+          "[touptek][switch][unit]") {
+    auto cfg = alpacacore::vendor::touptek::default_stellavita_config();
+    cfg.ports[0].writable = false;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // An on/off port takes 0-1.
+    require_alpaca_error([&]() { driver->set_switch_value(2, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, -1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::nan("")); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::numeric_limits<double>::infinity()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
+    // A PWM port takes 0-100.
+    require_alpaca_error([&]() { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(3, 100.0); }, alpacacore::AlpacaError::NotConnected);
+    // A read-only port: the value checks, then the connection check, then NotImplemented once connected.
+    require_alpaca_error([&]() { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 1.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Falsified by: touptek_switch_driver.cpp stellavita_profile() editing not_connected_message or a port's range_error.
+TEST_CASE("ToupTek StellaVita Switch Driver - error texts", "[touptek][switch][unit]") {
+    auto cfg = alpacacore::vendor::touptek::default_stellavita_config();
+    cfg.ports[1].pwm_enabled = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(alpaca_error_message([&]() { driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected) ==
+          "StellaVita not connected");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,1]");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(1, 101.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,100]");
+}
+
 // 4. Unsupported actions
 TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported actions", "[touptek][switch][unit]") {
     auto driver =
@@ -82,10 +125,12 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported actions", "[touptek][s
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 // 5. Device-specific behavior — per-port metadata and the boot-high DC ports.

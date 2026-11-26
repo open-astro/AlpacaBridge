@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::vendor::skywatcher {
 
@@ -154,10 +155,30 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
 /// factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: replaces the thread factory of one axis's (1 RA, 2 Dec) pulse slot,
+/// so a case can make a pulse dispatch fail. Call only while no pulse is in flight.
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, int axis,
+                                 std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam: whether the ownership window armed by the axis's last pulse is
+/// still open (1 RA, 2 Dec), read without the IsPulseGuiding guard.
+bool pulse_hold_active_for_testing(TelescopeDriver& driver, int axis);
+
+/// Test seam: the aperture diameter and focal length (metres) the driver holds, read without the
+/// connection check the ApertureDiameter and FocalLength members make, so a catalog case can check
+/// what a factory injected into a disconnected driver. {-1, -1} for a driver not from the factories above.
+std::pair<double, double> optics_for_testing(const TelescopeDriver& driver);
+
 /// Test seam: replaces the thread factory of the driver's AbortSlew stop-check slot (open-astro#2407), so a case
 /// can make that check fail to start. `driver` must come from the factories above; anything else is ignored.
 void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
                                         std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam (issue #2651): replaces the thread factory of both MoveAxis cap slots (one per axis), so a case can make
+/// a cap body's start fail. Call only while no start is in flight. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test seam: while paused the driver's status poll (decision 0010) wakes and
 /// samples nothing, so a case can age the snapshot's frame on the task clock
@@ -170,6 +191,11 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// window. Pass an empty function to clear it, and release anything the hook
 /// blocks on before the driver is destroyed.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs on the thread of a non-zero MoveAxis, after the rate command, with the driver locks
+/// released and the axis's cap body not yet started, so a case can land a second MoveAxis on the axis in that
+/// window (#2651). Pass an empty function to clear it, and release anything the hook blocks on first.
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seam: `hook` runs on the thread that changes the RA rate, in the window
 /// where it has released the driver locks and not yet started the rate-applied
@@ -188,6 +214,12 @@ void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::
 /// body there while another thread joins it. Pass an empty function to clear
 /// it, and release anything the hook blocks on before the driver is destroyed.
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs on a slot body's thread when a sleep of a body told to stop (cancelled or superseded)
+/// returns, with no driver lock held and before the body takes one back, so a case can act while a cancelled Park
+/// or FindHome body is still winding down (open-astro#2604). Pass an empty function to clear it, and release
+/// anything the hook blocks on before the driver is destroyed.
+void set_stopped_body_wake_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.

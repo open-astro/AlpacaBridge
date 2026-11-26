@@ -20,6 +20,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -29,6 +30,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "connect_hold_gate.h"
 
 namespace alpacacore::test {
 
@@ -45,12 +48,20 @@ namespace alpacacore::test {
 // - The synthetic frame payload is deterministic and is not a sensor model.
 // - Fake failures throw immediately; these seam tests do not cover the native
 //   wrapper's SVB_ERROR_GENERAL_ERROR retry policy.
+// - The SVB_ERROR_* to AlpacaError mapping lives in the native wrapper
+//   (map_error_code) and is not reachable from here: fail_with_removal() and
+//   remove_during_held_read() throw the NotConnected the wrapper makes of
+//   SVB_ERROR_CAMERA_REMOVED, and fail_next_with() any other code (InvalidValue
+//   for SVB_ERROR_INVALID_ID). Whether a real cable pull returns a removal code
+//   at all is unverified on hardware (issue #1986). A call on a closed id here
+//   is a DriverException, never the CAMERA_CLOSED the native SDK returns.
 // - Timeout results are returned directly by the seam; this fake does not
 //   verify the native wrapper's SVB_ERROR_TIMEOUT translation.
 class FakeSVBSDK final : public vendor::svbony::SVBSDK {
 public:
     // Test-only hook, null by default, before the fake mutex. Set before starting an operation and never
-    // change it while a call is in flight; capture-start callbacks also run under the driver's state lock.
+    // change it while a call is in flight; capture-start callbacks, and the capture-stop callbacks of
+    // AbortExposure and of a Disconnect's pre-join stop, also run under the driver's state lock.
     std::function<void(const std::string&)> before_call;
 
     using CameraInfo = vendor::svbony::SVBCameraInfo;
@@ -102,7 +113,7 @@ public:
         // Outside the mutex, so the delay holds only the caller (the driver's connect), not other fake calls.
         if (before_call) before_call("open_camera");
         const auto delay = std::chrono::milliseconds(open_delay_ms_.load());
-        if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        alpacacore::test::connect_hold(delay);  // connect_hold_gate.h
         std::lock_guard lock(mutex_);
         record_locked("open_camera");
         maybe_fail_locked("open_camera");
@@ -169,6 +180,7 @@ public:
         if (type == Control::FrameSpeedMode) frame_speed_written_at_ = std::chrono::system_clock::now();
     }
     ROI get_roi_format(int camera_id) override {
+        if (before_call) before_call("get_roi_format");
         std::lock_guard lock(mutex_);
         record_locked("get_roi_format");
         maybe_fail_locked("get_roi_format");
@@ -236,6 +248,7 @@ public:
         }
     }
     void stop_video_capture(int camera_id) override {
+        if (before_call) before_call("stop_video_capture");
         std::lock_guard lock(mutex_);
         record_locked("stop_video_capture");
         maybe_fail_locked("stop_video_capture");
@@ -289,8 +302,11 @@ public:
                 record_locked("get_video_data_complete");
                 ++completed_video_data_reads_;
                 video_data_cv_.notify_all();
-                throw alpacacore::AlpacaException("scripted late SVBONY read failure",
-                                                  alpacacore::AlpacaError::DriverException);
+                if (held_read_failure_code_ == alpacacore::AlpacaError::NotConnected) {
+                    throw alpacacore::AlpacaException("SVBGetVideoData: SVB_ERROR_CAMERA_REMOVED",
+                                                      alpacacore::AlpacaError::NotConnected);
+                }
+                throw alpacacore::AlpacaException("scripted late SVBONY read failure", held_read_failure_code_);
             }
         }
         video_data_held_ = false;
@@ -440,6 +456,14 @@ public:
     void fail_next_held_read() {
         std::lock_guard lock(mutex_);
         fail_after_held_read_ = true;
+        held_read_failure_code_ = alpacacore::AlpacaError::DriverException;
+    }
+    // The held read, once released, reports the camera removed (the wrapper's NotConnected), as an unplug during
+    // an exposure would.
+    void remove_during_held_read() {
+        std::lock_guard lock(mutex_);
+        fail_after_held_read_ = true;
+        held_read_failure_code_ = alpacacore::AlpacaError::NotConnected;
     }
     void block_video_data() {
         std::lock_guard lock(mutex_);
@@ -477,6 +501,16 @@ public:
         ++one_shot_failures_[std::move(method)];
     }
     void fail_next_capture_start() { fail_next("start_video_capture"); }
+    // The next call of `method` throws `code` with `message` (one-shot, queued per method, before fail_next()'s).
+    void fail_next_with(std::string method, int code, std::string message) {
+        std::lock_guard lock(mutex_);
+        scripted_errors_[std::move(method)].emplace_back(code, std::move(message));
+    }
+    // The next call of `method` reports the camera removed: the NotConnected the native wrapper throws for
+    // SVB_ERROR_CAMERA_REMOVED.
+    void fail_with_removal(const std::string& method) {
+        fail_next_with(method, alpacacore::AlpacaError::NotConnected, method + ": SVB_ERROR_CAMERA_REMOVED");
+    }
     void set_persistent_failure(std::string method, bool enabled = true) {
         std::lock_guard lock(mutex_);
         if (enabled)
@@ -530,6 +564,8 @@ private:
     std::set<int> capture_ids_;
     std::map<std::string, int> call_counts_;
     std::map<std::string, int> one_shot_failures_;
+    std::map<std::string, std::deque<std::pair<int, std::string>>> scripted_errors_;
+    int held_read_failure_code_{alpacacore::AlpacaError::DriverException};
     std::set<std::string> persistent_failures_;
     std::vector<std::string> events_;
     std::size_t last_buffer_capacity_{0};
@@ -554,6 +590,12 @@ private:
         events_.push_back(method);
     }
     void maybe_fail_locked(const std::string& method) {
+        if (auto scripted = scripted_errors_.find(method);
+            scripted != scripted_errors_.end() && !scripted->second.empty()) {
+            auto [code, message] = std::move(scripted->second.front());
+            scripted->second.pop_front();
+            throw alpacacore::AlpacaException(message, code);
+        }
         if (persistent_failures_.contains(method)) {
             throw alpacacore::AlpacaException("scripted persistent SVBONY failure: " + method,
                                               alpacacore::AlpacaError::DriverException);

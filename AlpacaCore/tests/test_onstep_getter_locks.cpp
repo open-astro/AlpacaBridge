@@ -53,6 +53,8 @@ namespace onstep = alpacacore::vendor::onstep;
 
 namespace {
 
+using alpacacore::test::error_code_of;
+using alpacacore::test::require_alpaca_error;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
@@ -766,9 +768,9 @@ TEST_CASE("OnStep getters - a connect on the wire holds up no getter and reads a
     while (!done.load() && sampled < 20) {
         const auto start = steady_clock::now();
         CHECK_FALSE(rig.driver->get_connected());
-        CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
-        CHECK_THROWS_AS(rig.driver->get_slewing(), alpacacore::AlpacaException);
-        CHECK_THROWS_AS(rig.driver->get_site_latitude(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)rig.driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)rig.driver->get_site_latitude(); }, alpacacore::AlpacaError::NotConnected);
         CHECK(rig.driver->get_device_state().empty());
         CHECK(std::chrono::duration_cast<milliseconds>(steady_clock::now() - start) < kGetterBudget);
         ++sampled;
@@ -797,20 +799,16 @@ TEST_CASE("OnStep getters - a getter during a clean disconnect's close reads as 
     bool connected_in_close = true;
     int ra_error = 0;
     int slewing_error = 0;
-    auto error_of = [](const std::function<void()>& read) {
-        try {
-            read();
-        } catch (const alpacacore::AlpacaException& e) {
-            return e.error_code();
-        }
-        return 0;
-    };
     onstep::set_disconnect_before_close_hook_for_testing(*rig.driver, [&] {
         hook_ran = true;
         std::thread reader([&] {
-            connected_in_close = rig.driver->get_connected();
-            ra_error = error_of([&] { (void)rig.driver->get_right_ascension(); });
-            slewing_error = error_of([&] { (void)rig.driver->get_slewing(); });
+            try {
+                connected_in_close = rig.driver->get_connected();
+                ra_error = error_code_of([&] { (void)rig.driver->get_right_ascension(); });
+                slewing_error = error_code_of([&] { (void)rig.driver->get_slewing(); });
+            } catch (...) {  // a non-Alpaca exception must fail the case, not end the run from this thread
+                ra_error = slewing_error = -1;
+            }
         });
         reader.join();
     });

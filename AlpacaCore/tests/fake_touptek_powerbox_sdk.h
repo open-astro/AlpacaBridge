@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
+
 namespace alpacacore::test {
 
 // Scripted StellaVita power box: in-memory port values, no GPIO chip. Shared by the
@@ -60,9 +62,12 @@ public:
     bool fail_open{false};
     // open() sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};
+    // While true every close() throws after counting the call; the real close() never throws, so this exists only
+    // to reach the driver's destruction warning.
+    bool fail_close{false};
 
     void open() override {
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
         std::lock_guard<std::mutex> lock(mutex_);
         ++open_calls_;
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
@@ -76,6 +81,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls_;
         open_.store(false, std::memory_order_release);
+        if (fail_close) throw AlpacaException("scripted close failure", AlpacaError::DriverException);
     }
 
     // Sets a line's level as the boot or a previous session left it (no open needed).

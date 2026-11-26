@@ -1,0 +1,3 @@
+### Fixed
+
+- **The WandererAstro cover, filter wheel, box and rotator drop `Connected` on `EBADF` too** (issue #2262 PR 4, decision 0009 point 2a). Their command writes go through the shared `util::SerialLink` verdict, and the readers feed it every read error, so `EBADF` on the port's fd is a lost link at once, as `EIO`, `ENXIO` and `ENODEV` already were (`Connected` false, operations `NotConnected`, the port released, "Serial link lost (errno 9)" kept until the next Connect or Disconnect). Before, a streaming device's reader counted it as silence and kept `Connected` true until the silence fault and the 30 s staleness bound caught up, and a command failed with `DriverException`. An `EBADF` logs one ERROR line naming the port, since it means a driver bug.

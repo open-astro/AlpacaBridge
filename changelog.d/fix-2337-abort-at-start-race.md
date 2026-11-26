@@ -1,0 +1,3 @@
+### Fixed
+
+- **An AbortExposure recorded while a StartExposure was starting can no longer let the aborted frame through**, `util::CaptureSession` and the Player One camera driver (iCAM rides it), issue #2260. The session now applies the abort recorded during the start reservation in the same step that would publish the exposure, so the exposure body never runs and no SDK exposure starts. Before, the body ran and the driver aborted it afterwards; a body that reached its download first made the abort refuse ("not possible while downloading") and served the aborted frame, which made the Player One abort-in-the-start-window case fail at random on CI (`CaptureSession - an abort during the reservation ends the start as it publishes, and no body runs`).

@@ -37,9 +37,10 @@ arrival verifier corrected larger projected RA undershoot when necessary; no
 tolerance or model offset was changed to obtain these results.
 
 BeyondPole Dec polarity now has northern rig evidence. Its first/reversed pulse
-excess remains unresolved; these figures must not be summarized as exact guide
-accuracy. RA comparisons use the measured approximately 14.9607 arcsec/s baseline,
-not an independent sky measurement.
+excess is the Dec reversal take-up recorded in the
+[2026-11-22 diagnosis](#2026-11-22-dec-reversal-take-up-diagnosis); these figures
+must not be summarized as exact guide accuracy. RA comparisons use the measured
+approximately 14.9607 arcsec/s baseline, not an independent sky measurement.
 
 The home-route abort was not a reference-preservation pass: its first subsequent
 RA read correctly refused with `encoder reference is unknown; run FindHome`.
@@ -261,10 +262,11 @@ same-direction one-second pulses were close to nominal. The 50% five-second
 settled errors (+0.63482 / -0.48033 arcsec) were within one arcsecond, but the
 50% S1 reversal (-2.83063) and 100% S5 (-1.50139) retain excess movement.
 
-The excess appears early rather than as a large post-inactive tail. Its root
-mechanism remains unresolved: this is not proof of backlash, a rate-scaling
-defect, optical sky displacement or universal guide accuracy. No compensation
-or rate correction was added. Cleanup recorded home true, tracking false and
+The excess appears early rather than as a large post-inactive tail. The
+[2026-11-22 diagnosis](#2026-11-22-dec-reversal-take-up-diagnosis) traces it to
+mechanical take-up on the first Dec motion after a reversal; this sequence alone
+does not prove that, nor optical sky displacement or universal guide accuracy.
+No compensation or rate correction was added. Cleanup recorded home true, tracking false and
 the original 50% guide rate restored. This bounded Dec sequence does not
 complete full RA/both-branch guiding or cancellation qualification.
 
@@ -338,10 +340,11 @@ Expected movement was +37.60275 arcsec. Errors are measured minus expected:
 In the delayed baselines, Dec changed by one encoder count (-0.0772476 arcsec)
 then stayed flat before guiding. Waiting did not remove the excess; these
 samples do not support leftover GOTO drift or merely an incorrect steady guide
-rate as a sufficient explanation. The mechanism is still unresolved, and the
-diagnostic's `PASS` denotes its completed sequence, not guide accuracy. No
-coordinate compensation or arrival sleep was added. Cleanup recorded home true
-and tracking false. Encoder measurements still do not establish optical accuracy.
+rate as a sufficient explanation. The excess fits the first-motion Dec take-up of
+the [2026-11-22 diagnosis](#2026-11-22-dec-reversal-take-up-diagnosis), which this
+diagnostic alone did not establish, and the diagnostic's `PASS` denotes its
+completed sequence, not guide accuracy. No coordinate compensation or arrival
+sleep was added. Cleanup recorded home true and tracking false. Encoder measurements still do not establish optical accuracy.
 
 ### Run 3: extended guides passed, return-to-start RA failed
 
@@ -351,7 +354,8 @@ at each HA **-9, +9, -3, +3**. The logged North/South differences were
 0.1–0.8 arcsec against the 1 arcsec tolerance; East/West differences were
 0.02 seconds of RA time against 0.07 seconds, with cross-axis checks passing.
 This successful sequence does **not** establish that the earlier intermittent
-guide excess is fixed; its mechanism and broader repeatability remain unresolved.
+guide excess is fixed; the [2026-11-22 diagnosis](#2026-11-22-dec-reversal-take-up-diagnosis)
+records it as a qualification limit (mechanical Dec take-up).
 
 The watchdog then stopped run 3 at **SyncToCoordinates return-to-start**:
 reported RA was **18.3 arcsec** from target, outside **±10 arcsec**. The initial
@@ -475,7 +479,7 @@ local logs/source/tests only; the main operator remains the sole hardware operat
 
 Following explicit user approval to save qualification, the report was published as
 [Linux-arm64-usb.txt](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-(since replaced; that path now holds the 2026-11-11 v6.0.0-beta.2 pass).
+(since replaced; that path now holds the 2026-11-22 `feat/cgx-aux-tcp-transport` pass).
 It was a new report; the CGX-L hand-controller report remains unchanged. The raw
 382-line operator log remains private and unchanged. The publication applies
 only the approved site/elevation and
@@ -494,8 +498,10 @@ Qualified hardware is the **bare northern CGX**, both motors **7.17.25 / model
 and final rebuilt server SHA-256 is exactly
 `9c353c8721c122561539928708b437b35aa7f28962df9fe423f4345108b096c9`.
 This is not direct-USB CGX-L, southern-site or optical-accuracy qualification.
-Native guide-wire behavior was unchanged; the earlier intermittent guide-onset
-excess remains unresolved despite this single complete successful run.
+Native guide-wire behavior was unchanged; this single complete successful run did
+not remove the earlier intermittent guide-onset excess, which the
+[2026-11-22 diagnosis](#2026-11-22-dec-reversal-take-up-diagnosis) records as a
+qualification limit.
 
 The private supervisor done record reports **exit 0**, cleanup home true and
 tracking false, original site/elevation, tracking rate and SlewSettleTime restored,
@@ -525,8 +531,81 @@ The main operator reports final static checks passed. At that checkpoint,
 documentation/report work was uncommitted and unpushed; it has since been
 committed to this PR. The documenting agent made no source edits or rig accesses.
 
+## 2026-11-22 Dec reversal take-up diagnosis
+
+Issue #2044. Bare northern CGX on direct USB, with no hand controller and no
+SkyPortal adapter on the AUX bus. Tracking was on at HA -1, Dec +9, and both
+guide rates were 0.25x (3.760 arcsec/s). Positions are the driver's Declination
+and RightAscension reads, taken 0 to 4 s after IsPulseGuiding went false. A 5 s
+pulse is expected to move 18.80 arcsec.
+
+**Dec, 5 s pulses in the order N, S, S, N, N, S, four times:**
+
+| Pulse | Count | Excess over expected |
+| --- | ---: | --- |
+| Same direction | 8 | -0.11 arcsec every time |
+| South after North | 8 | +0.51 to +0.74 arcsec (mean +0.62) |
+| North after South | 7 | +0.51 to +1.75 arcsec (mean +0.91) |
+
+Two of the 15 reversals went over ConformU's 1 arcsec tolerance (+1.21 and
++1.75). The earlier runs saw the large values only on South after North; here
+they came on North after South, so either direction of reversal can produce them.
+
+**Not settling.** Every Dec read was steady from 0.5 s to 4 s after the pulse
+ended; the only change was the first read, sometimes larger by one encoder count
+(0.08 arcsec). The extra motion is over before IsPulseGuiding goes false.
+
+**A short pulse takes it all.** N 5 s, S 0.2 s, S 5 s, then the mirror (S 5 s,
+N 0.2 s, N 5 s), twice each:
+
+| Pulse | Expected | Measured | Excess |
+| --- | ---: | ---: | ---: |
+| 0.2 s, first after a reversal (x4) | 0.75 | 1.31 to 1.54 | +0.56 to +0.79 |
+| 5 s that follows (x4) | 18.80 | 18.69 to 18.77 | -0.03 to -0.11 |
+| 5 s straight after a reversal (x1) | 18.80 | 20.70 | +1.90 |
+
+All values in arcsec. The extra is a fixed distance used up by the first motion
+after the Dec motor reverses, whatever the pulse length: even a 0.2 s pulse gets
+the full amount. That is the signature of backlash take-up. `MC_GET_POS_BACKLASH`
+(0x40) and `MC_GET_NEG_BACKLASH` (0x41) return 0 on both axes, so the motor
+controller's anti-backlash is off and the take-up is mechanical. The AUX guide
+commands for a reversal and a same-direction pulse are identical apart from the
+sign (strace, issue #2044).
+
+**RA is not affected while tracking.** 18 RA pulses, E, W, W, E, E, W three times,
+all landed within 0.2 arcsec of 18.80, reversals included. At a guide rate under
+1x with tracking on, an East or West pulse only speeds up or slows down the RA
+motor (1.25x or 0.75x sidereal); the motor never reverses, so there is no take-up.
+
+**ConformU at 0.5x**, the same day over WiFi and over USB: South-after-North
+pulses came out +0.4 to +0.6 arcsec and North +0.0 to +0.2; both runs passed.
+
+**Recorded limit (maintainer decision, 2026-11-24).** The first Dec pulse after a
+reversal reads +0.5 to +0.8 arcsec long, occasionally up to +1.9 (mechanical
+take-up, anti-backlash 0). ConformU's 1 arcsec PulseGuide Dec tolerance can fail
+now and then on such a pulse at 0.25x; at 0.5x it stayed within 1 arcsec in both
+2026-11-22 runs. RA is not affected while tracking. The driver does not
+compensate: it reads the motor encoders, and the encoder side of the Dec gear
+train was not proven against the sky. If the encoders are on the motor side, the
+reported take-up is motor turn that barely moves the sky, and a driver correction
+would make real guiding worse to satisfy a check of the reported position.
+Users should use the guider's Dec backlash compensation (PHD2) or guide Dec in
+one direction only. Revisit driver compensation only if a run with a camera on
+the mount shows the take-up is real sky motion.
+
+## Sync after FindHome
+
+Since #2411 a Sync more than 5 degrees on the sky from the current position is
+refused with `InvalidValue` ("the sync would move the pointing by ... degrees,
+more than the 5.00 degree limit"), and nothing changes. After FindHome the mount
+points at the pole, so a planetarium that homes and then syncs to a far object
+gets that error. Slew near the target first, then Sync. This applies over USB
+and WiFi.
+
 ## Remaining qualification
 
+- A run with a camera on the mount to tell whether the Dec reversal take-up
+  above is sky motion or encoder-only motion.
 - Optical alignment/pointing accuracy and real southern-hemisphere behavior need
   suitable hardware/site evidence; changing SiteLatitude in the northern lab is
   not southern qualification.

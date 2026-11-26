@@ -21,14 +21,19 @@
 #include <alpacacore/util/host_clock_trust.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <ctime>
 #include <exception>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -40,17 +45,21 @@
 
 namespace alpacacore::test {
 
-// The message of the AlpacaException fn throws, after requiring expected_code.
-inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-        return ex.what();
+// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
+// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
+// from the host at connect holds one, so it does not depend on the runner's NTP state.
+struct HostClockTrustGuard {
+    explicit HostClockTrustGuard(bool synchronized) {
+        util::HostClockTrust::reset_for_testing();
+        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
     }
-    FAIL("Expected AlpacaException");
-    return {};
-}
+    ~HostClockTrustGuard() {
+        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
+        util::HostClockTrust::reset_for_testing();
+    }
+    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
+    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
+};
 
 // A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
 struct Latch {
@@ -78,22 +87,6 @@ struct Latch {
     }
 };
 
-// Issue #2419: pins whether the host clock is trusted for a mount's own clock (util::HostClockTrust): the kernel
-// probe answers `synchronized` and the latch starts clear; both are restored on exit. A case whose mount sets its clock
-// from the host at connect holds one, so it does not depend on the runner's NTP state.
-struct HostClockTrustGuard {
-    explicit HostClockTrustGuard(bool synchronized) {
-        util::HostClockTrust::reset_for_testing();
-        util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
-    }
-    ~HostClockTrustGuard() {
-        util::ClientUtcWarning::set_host_synchronized_probe(nullptr);
-        util::HostClockTrust::reset_for_testing();
-    }
-    HostClockTrustGuard(const HostClockTrustGuard&) = delete;
-    HostClockTrustGuard& operator=(const HostClockTrustGuard&) = delete;
-};
-
 // Fails the test case unless fn throws an AlpacaException with expected_code.
 // A bare CHECK_THROWS_AS(..., AlpacaException) passes for any code.
 inline void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
@@ -103,6 +96,41 @@ inline void require_alpaca_error(const std::function<void()>& fn, int expected_c
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
     }
+}
+
+// The Alpaca error code fn throws, or 0 when it returns (ASCOM "no error"). When message is not null it receives
+// the exception's text. A non-Alpaca exception is not caught: on a test thread it fails the case. A call on a
+// worker thread, where an escaping exception ends the whole run, is worker_code_of (or sits in a catch-all).
+inline int error_code_of(const std::function<void()>& fn, std::string* message = nullptr) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        if (message != nullptr) *message = ex.what();
+        return ex.error_code();
+    }
+    return 0;
+}
+
+// error_code_of for a thread other than the test thread, where an escaping exception ends the whole run
+// instead of failing one case: a non-Alpaca exception returns -1. Never call it on the test thread.
+inline int worker_code_of(const std::function<void()>& fn) {
+    try {
+        return error_code_of(fn);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// The message of the AlpacaException fn throws, after requiring expected_code.
+inline std::string alpaca_error_message(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+        return ex.what();
+    }
+    FAIL("Expected AlpacaException");
+    return {};
 }
 
 // True once a Park has ended: the mount is parked, or a read reports the failure.
@@ -123,12 +151,20 @@ std::chrono::microseconds timed(Fn&& fn) {
 }
 
 // Runs `fn`, a call that waits on `clock` (a verified AbortSlew, #2412), on its own thread and steps the clock by
-// `step` until it returns, then rethrows what it threw. Fails the case when it has not returned after 60 s of real
-// time (the thread is released first, so it can be joined).
+// `step` until it returns, then rethrows what it threw. A step is taken only once what the previous step woke has
+// settled and a thread is parked on the clock that was not parked before `fn` started: the call's own thread, or a
+// thread it started and waits on (a connect worker, an op body). A thread already parked at the start (a paused status
+// poll) does not count, so virtual time follows the call's real progress, not the runner's speed: a call held in real
+// time (a slow wire reply) never moves the clock, so it cannot age a paused poll's frame past
+// util::kLinkStalenessBound (#2685). The loop polls `done` every 20 ms, so a call that returns without parking ends
+// it. Fails the case when it has not returned after 60 s of real time (the thread is released first, so it can be
+// joined).
 template <typename Fn>
 void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step = std::chrono::milliseconds(50)) {
+    using std::chrono::milliseconds;
     std::exception_ptr error;
     std::atomic<bool> done{false};
+    const auto parked_before = clock.waiter_threads();
     std::thread caller([&] {
         try {
             fn();
@@ -137,7 +173,21 @@ void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step 
         }
         done.store(true);
     });
-    const bool returned = clock.drain_until([&] { return done.load(); }, step, std::chrono::seconds(60));
+    const auto caller_id = caller.get_id();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        bool parked = clock.wait_for_waiter_thread(caller_id, milliseconds(20));
+        if (!parked) {
+            const auto waiting = clock.waiter_threads();
+            parked = std::any_of(waiting.begin(), waiting.end(),
+                                 [&](std::thread::id id) { return parked_before.count(id) == 0; });
+        }
+        if (parked && !done.load()) {
+            clock.advance(step);
+            static_cast<void>(clock.wait_for_woken_settled(milliseconds(100)));
+        }
+    }
+    const bool returned = done.load();
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -155,28 +205,85 @@ inline void tick(FakeTaskClock& clock, std::chrono::nanoseconds period, std::chr
     REQUIRE(clock.wait_for_waiters(1, bound));
 }
 
-// Connects the driver, then waits (up to `bound` of real time) for its poll body to park on the clock.
-// Returns whether it parked; a caller that must fail on a missed rendezvous wraps the call in REQUIRE.
-inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound) {
+// A driver's poll thread may not have parked on the clock yet when a case advances it right after the connect, and an
+// advance that lands before the thread registers its wait is lost to it (its first tick is then a period after the
+// later time). So the first advance waits, up to a second of real time, for any waiter to be there. Only a driver whose
+// poll has ended (a lost link) pays the second, and nothing is lost by it.
+inline void wait_for_a_parked_waiter(FakeTaskClock& clock) {
+    static_cast<void>(clock.wait_for_waiters(1, std::chrono::seconds(1)));
+}
+
+// Ages the clock past a driver's 30 s post-connect grace (31 s after `connected_at`, the clock's current time by
+// default) in steps of at most 5 s, waiting after each for what it woke to park again: a driver with a poll samples at
+// each step, so no getter reads a frame older than util::kLinkStalenessBound, which one 31 s jump would leave it.
+inline void age_past_connect_grace(FakeTaskClock& clock, FakeTaskClock::clock::time_point connected_at,
+                                   std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    constexpr auto kStep = std::chrono::seconds(5);
+    const auto target = connected_at + std::chrono::seconds(31);
+    wait_for_a_parked_waiter(clock);
+    while (clock.now() < target) {
+        clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
+        static_cast<void>(clock.wait_for_woken_settled(bound));
+    }
+}
+
+inline void age_past_connect_grace(FakeTaskClock& clock) { age_past_connect_grace(clock, clock.now()); }
+
+// A connected iOptron telescope parks two tasks on its clock: the state poll and the clock-sync body.
+// wait_for_a_parked_waiter() returns on the first, so a step taken before the poll has parked is lost to it, and its
+// connect frame then ages past util::kLinkStalenessBound (a getter reads "link lost"). Call it after the connect and
+// before the first step.
+inline constexpr std::size_t kIoptronConnectWaiters = 2;
+inline void wait_for_ioptron_connect_parked(FakeTaskClock& clock,
+                                            std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    REQUIRE(clock.wait_for_waiters(kIoptronConnectWaiters, bound));
+}
+
+// Advances the clock by `d` in steps of at most 5 s, waiting after each for what it woke to park again: a driver with
+// a poll samples at each step, so a getter that reads afterwards serves a frame measured at the end of `d`, and none
+// is older than util::kLinkStalenessBound (one long jump would leave it so). Each step of 250 ms or more is one poll
+// cycle (the poll sleeps one period per wake and skips the ticks a step spans, with no catch-up).
+inline void advance_polling(FakeTaskClock& clock, std::chrono::nanoseconds d,
+                            std::chrono::milliseconds bound = std::chrono::seconds(5)) {
+    constexpr auto kStep = std::chrono::seconds(5);
+    const auto target = clock.now() + d;
+    wait_for_a_parked_waiter(clock);
+    while (clock.now() < target) {
+        clock.advance(std::min<std::chrono::nanoseconds>(kStep, target - clock.now()));
+        static_cast<void>(clock.wait_for_woken_settled(bound));
+    }
+}
+
+// Connects the driver, then waits (up to `bound` of real time) for its poll body, and the `waiters` - 1 other tasks its
+// connect starts on the clock, to park. Returns whether they parked; a caller that must fail on a missed rendezvous
+// wraps the call in REQUIRE.
+inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound,
+                             std::size_t waiters = 1) {
     driver.set_connected(true);
-    return clock.wait_for_waiters(1, bound);
+    return clock.wait_for_waiters(waiters, bound);
 }
 
 // The poll period and the real-time bound a PolledRig ticks and parks with.
 struct RigTiming {
     std::chrono::nanoseconds period;
     std::chrono::milliseconds bound;
+    std::size_t waiters = 1;  // the tasks a connect parks on the clock (kIoptronConnectWaiters for iOptron)
 };
 
 // A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
 // first). A thin wrapper over connect_and_park(), tick() and require_alpaca_error(): it adds no rendezvous logic.
 // The factory builds the driver without connecting it, so a case can set up the fake before connect().
+// pause() and poll_now() forward to the driver's own poll seams, which a rig of a driver that has them passes in; a
+// call to one the rig was not given fails the test case.
 template <typename Fake, typename Driver>
 class PolledRig {
 public:
     using Factory = std::function<std::unique_ptr<Driver>(Fake&, FakeTaskClock&)>;
+    using PauseSeam = std::function<void(Driver&, bool)>;
+    using PollNowSeam = std::function<void(Driver&)>;
 
-    PolledRig(RigTiming timing, Factory make) : timing_(timing), driver_(make(fake_, clock_)) {}
+    PolledRig(RigTiming timing, Factory make, PauseSeam pause = {}, PollNowSeam poll_now = {})
+        : timing_(timing), pause_(std::move(pause)), poll_now_(std::move(poll_now)), driver_(make(fake_, clock_)) {}
 
     PolledRig(const PolledRig&) = delete;
     PolledRig& operator=(const PolledRig&) = delete;
@@ -189,10 +296,21 @@ public:
     }
 
     // connect_and_park(): whether the poll body parked on the clock. REQUIRE(rig.connect()) to fail on a miss.
-    bool connect() { return connect_and_park(*driver_, clock_, timing_.bound); }
+    bool connect() { return connect_and_park(*driver_, clock_, timing_.bound, timing_.waiters); }
 
     void tick(int n = 1) {
         for (int i = 0; i < n; ++i) alpacacore::test::tick(clock_, timing_.period, timing_.bound);
+    }
+
+    // The pause seam: a paused poll skips its cycles but keeps waiting on the clock.
+    void pause(bool on) {
+        if (!pause_) FAIL("PolledRig: no pause seam");
+        pause_(*driver_, on);
+    }
+    // The poll-now seam: one poll cycle on the calling thread.
+    void poll_now() {
+        if (!poll_now_) FAIL("PolledRig: no poll_now seam");
+        poll_now_(*driver_);
     }
 
     void expect_error(int code, const std::function<void()>& fn) { require_alpaca_error(fn, code); }
@@ -203,6 +321,8 @@ public:
 
 private:
     RigTiming timing_;
+    PauseSeam pause_;
+    PollNowSeam poll_now_;
     FakeTaskClock clock_;
     Fake fake_;
     std::unique_ptr<Driver> driver_;
