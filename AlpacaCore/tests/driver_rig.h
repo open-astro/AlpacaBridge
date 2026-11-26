@@ -150,10 +150,16 @@ std::chrono::microseconds timed(Fn&& fn) {
 }
 
 // Runs `fn`, a call that waits on `clock` (a verified AbortSlew, #2412), on its own thread and steps the clock by
-// `step` until it returns, then rethrows what it threw. Fails the case when it has not returned after 60 s of real
-// time (the thread is released first, so it can be joined).
+// `step` until it returns, then rethrows what it threw. A step is taken only once what the previous step woke has
+// settled and the call's own thread is parked on the clock (waiting up to 20 ms of real time for that, then stepping
+// anyway when any waiter is parked, as the call may wait on another thread), so virtual time follows the call's real
+// progress, not the runner's speed: a call held in real time (a slow wire reply) does not age a paused poll's frame
+// past util::kLinkStalenessBound (#2685). The loop polls `done` every 20 ms, so a call that returns without parking
+// ends it. Fails the case when it has not returned after 60 s of real time (the thread is released first, so it can
+// be joined).
 template <typename Fn>
 void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step = std::chrono::milliseconds(50)) {
+    using std::chrono::milliseconds;
     std::exception_ptr error;
     std::atomic<bool> done{false};
     std::thread caller([&] {
@@ -164,7 +170,16 @@ void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step 
         }
         done.store(true);
     });
-    const bool returned = clock.drain_until([&] { return done.load(); }, step, std::chrono::seconds(60));
+    const auto caller_id = caller.get_id();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        const bool parked = clock.wait_for_waiter_thread(caller_id, milliseconds(20)) || clock.waiter_count() > 0;
+        if (parked && !done.load()) {
+            clock.advance(step);
+            static_cast<void>(clock.wait_for_woken_settled(milliseconds(100)));
+        }
+    }
+    const bool returned = done.load();
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
