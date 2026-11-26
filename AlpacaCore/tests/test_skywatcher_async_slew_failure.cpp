@@ -22,6 +22,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
@@ -598,6 +599,60 @@ TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board refused is owed to t
     REQUIRE(mount.axis_running(2));
     reconnect_through_refused_disconnect_stop(*driver, mount);
     CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// #2651: the cap's stop is verified. A board that acknowledges the stop and runs on is stopped 3 times, one 250 ms
+// verify round after another, then Slewing raises the kept error and the cap sends nothing more for this move.
+TEST_CASE("SkyWatcher async - a MoveAxis cap stop the board ignores is sent 3 times and Slewing raises it",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    const auto step = [&](int count, std::chrono::milliseconds each, std::size_t waiters) {
+        for (int i = 0; i < count; ++i) {
+            REQUIRE(clock.wait_for_waiters(waiters, kRendezvous));
+            clock.advance(each);
+            REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+        }
+    };
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    mount.ignore_instant_stops(2, 10);  // the board acknowledges every ":L" and runs on
+    const int stops_before = mount.frames_seen('L');
+    step(59, std::chrono::seconds(1), kPollerWaiter + 1);
+    step(32, std::chrono::milliseconds(250), kPollerWaiter);  // the cap at 60 s, then its three verify rounds
+    CHECK(mount.frames_seen('L') == stops_before + 3);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran for 60 s with no new MoveAxis call") != std::string::npos);
+    CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
+    step(40, std::chrono::milliseconds(250), kPollerWaiter);
+    CHECK(mount.frames_seen('L') == stops_before + 3);  // no retry from the cap
+    reconnect_through_refused_disconnect_stop(*driver, mount);
+    driver->set_connected(false);
+}
+
+// #2651: a cap the slot cannot start fails closed: the axis just started is stopped and the MoveAxis throws.
+TEST_CASE("SkyWatcher async - a MoveAxis whose cap cannot start stops the axis and throws",
+          "[skywatcher][async][moveaxis][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    sw::set_move_axis_cap_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    try {
+        driver->move_axis(1, 1.0);
+        FAIL("Expected the MoveAxis to fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("could not start its time limit") != std::string::npos);
+    }
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
     driver->set_connected(false);
 }
 
