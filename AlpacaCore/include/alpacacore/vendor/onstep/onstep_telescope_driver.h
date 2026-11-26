@@ -67,6 +67,12 @@ void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::functi
 void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
                                             std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam (issue #2651): replaces the thread factory of both MoveAxis cap slots (one per axis), so a case can make
+/// a cap body's start fail or find its thread. Call only while no start is in flight. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: replaces the thread factory of the driver's Park/FindHome
 /// slot, so a case can hold a body's thread before it runs (#1430). Call only
 /// while no start is in flight. `driver` must come from the factories above;
@@ -116,6 +122,11 @@ void set_pulse_guide_gap_hook_for_testing(TelescopeDriver& driver, std::function
 /// those reads and the re-send would (decision 0006 rule 3, #1728). The hook
 /// must not call the driver. Pass an empty function to clear it.
 void set_move_axis_resend_before_send_hook_for_testing(TelescopeDriver& driver, std::function<bool()> hook);
+
+/// Test seam (issue #2651): runs in MoveAxis under the driver's state and operation locks, right before a move's
+/// rate command goes out, so a case can pass the cap's deadline while a renewal is on the wire. `driver` must come
+/// from the factories above; anything else is ignored.
+void set_move_axis_send_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seams of the host clock re-sync (open-astro#2419). `hook` runs at the start of each re-sync body, with no
 /// driver lock held, so a case can land a client command between the host clock change and the re-sync's write.
