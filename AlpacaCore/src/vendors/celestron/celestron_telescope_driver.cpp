@@ -104,6 +104,9 @@ constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 // location never reads; 30 s leaves one tick in about eight.
 constexpr auto kSitePollRetryDelay = std::chrono::seconds(30);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
+// #2409 (#2396 AB-9): the longest a MoveAxis runs with no new MoveAxis. The status poll stops an axis still moving
+// at its deadline (stop_overdue_move_axis()); every MoveAxis with a non-zero rate starts it again.
+constexpr auto kMaxMoveAxisDuration = std::chrono::seconds(60);
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
@@ -1367,8 +1370,6 @@ public:
                 return;  // taken over before the command went out: the new owner has the state
             }
         } catch (const std::exception& ex) {
-            // TODO: a jog flag with no running cap (cap restart where a jog flag is left set): the claim cancelled the
-            // cap bodies and this refused home leaves the flags, so that jog has no 60 s limit until it is renewed.
             fail_home(lock, std::string("FindHome dispatch failed: ") + ex.what());
             throw AlpacaException(last_slew_error_);
         } catch (...) {
@@ -1378,11 +1379,6 @@ public:
 
         homing_ = true;
         at_home_ = false;
-        // The home took both axes from any jog (claim_slew_locked() cancelled the caps), so no jog is left to report:
-        // as Park and the slews clear them once their command is out. Slewing would otherwise stay true after the
-        // home lands (#2651).
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
         set_slewing_locked(true);
         // homing_ reports Slewing from here on, so the hold of a GOTO this call took over ends here: a home that lands
         // inside that hold reads false at once (decision 0022 rule 2). Not at the claim: the hold keeps Slewing true
@@ -1539,9 +1535,6 @@ public:
                 set_slewing_locked(prev_slewing);
                 homing_ = prev_homing;
                 at_home_ = prev_at_home;
-                // TODO: a jog flag with no running cap (cap restart where a restored jog flag is set): the cap bodies
-                // were cancelled when the claim took the axes, so a restored jog has no 60 s limit until it is
-                // renewed.
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
@@ -1658,166 +1651,65 @@ public:
         send_failure_stop(pending.claim, pending.message, pending.home);
     }
 
-    // ── The MoveAxis cap (#2409, #2651) ──────────────────────────────────────────────────────────────────────────
-    // A non-zero MoveAxis starts a body in its own axis's slot (move_axis_cap_[axis]) that waits through its context
-    // until the 60 s window the move armed has passed, then runs util::run_motion_deadline()'s verified stop of that
-    // axis and keeps the outcome for Slewing until the next motion command or a reconnect. The body owns the move
-    // only while its claim holds (a renewal, a stop, a slew, Park, FindHome or AbortSlew takes the axis), and it sends
-    // through the send gate (send_motion_locked()), so a command that landed first is never followed by its stop. The
-    // stop takes no initiator_mutex_: set_connected() joins the bodies while it holds that lock.
-
-    // Starts the cap body of `axis`. `lock` (mutex_) held on entry; released for the start() (which must run with no
-    // driver mutex) and held again on return or throw. The caller's initiator_mutex_ stays held: no body takes it, and
-    // it keeps a newer MoveAxis out while a refused start's stop is on the wire. A start the slot refuses fails closed:
-    // the axis just started is stopped and MoveAxis throws.
-    void start_move_axis_cap(std::unique_lock<std::mutex>& lock, int axis, const util::MotionClaim& claim,
-                             util::HoldWindow window) {
-        lock.unlock();
-        try {
-            move_axis_cap_[axis].start([this, axis, claim, window](util::OperationContext& ctx) {
-                run_move_axis_cap(axis, claim, window, ctx);
-            });
-            lock.lock();
-            return;
-        } catch (const std::exception& ex) {
-            lock.lock();
-            const std::string why = ex.what();
-            std::string stop_error;
-            try {
-                const bool sent = send_motion_locked(
-                    lock, [this, &claim] { return connected_ && !lost_locked(claim); },
-                    [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
-                if (sent) {
-                    manual_axis_slewing_[axis] = false;
-                    motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
-                }
-            } catch (const std::exception& stop_ex) {
-                stop_error = stop_ex.what();
-            }
-            throw AlpacaException(
-                "MoveAxis could not start its time limit (" + why + ")" +
-                    (stop_error.empty() ? "; the axis was stopped" : "; stopping the axis failed: " + stop_error),
-                AlpacaError::DriverException);
+    // #2409 (#2396 AB-9): a poll tick stops an axis whose MoveAxis ran kMaxMoveAxisDuration with no new MoveAxis, as
+    // MoveAxis(axis, 0) stops it, and keeps the failure for Slewing until the next motion command or a reconnect. A
+    // client causes it, so it is logged at INFO (decision 0007 rule 9); a stop that fails is a device failure, logged
+    // at ERROR once per overdue MoveAxis, and is tried again on every tick. try_lock, as the failure stops:
+    // set_connected joins the poll while it holds initiator_mutex_. A busy lock (an initiator is dispatching) leaves it
+    // for the next tick. One axis per tick: a second axis overdue at the same time is stopped on the next tick, about 1
+    // s later.
+    void stop_overdue_move_axis() const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || !move_axis_overdue_locked().has_value()) return;
         }
-    }
-
-    static std::string move_axis_cap_ran_text(int axis) {
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(util::kMaxMoveAxisDuration).count();
-        return "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
-               " s with no new MoveAxis";
-    }
-
-    void run_move_axis_cap(int axis, util::MotionClaim claim, util::HoldWindow window, util::OperationContext& ctx) {
-        const std::string expired = move_axis_cap_ran_text(axis) + "; the driver stopped it";
-        try {
-            util::run_motion_deadline(ctx, clock_, window, move_axis_cap_hooks(axis, claim, ctx), expired);
-        } catch (const AlpacaException& ex) {
-            keep_move_axis_cap_outcome(axis, claim, ctx, expired, ex);
-        }
-    }
-
-    // True while the cap body of `axis` still owns its move: connected, not cancelled or superseded, no newer command
-    // took the axis (its claim holds) and the axis still jogs. Caller holds mutex_.
-    bool move_axis_cap_owns_locked(int axis, const util::MotionClaim& claim, const util::OperationContext& ctx) const {
-        return connected_ && ctx.stop_reason() == util::StopReason::None && !lost_locked(claim) &&
-               manual_axis_slewing_[axis];
-    }
-
-    // The hooks of one axis's verified stop. Each runs with no driver lock held between exchanges (decision 0016).
-    // The stop is the axis's rate 0 through the send gate, which checks ownership in the step that takes the gate. The
-    // verification reads that axis alone: the hand controller's GOTO flag is the whole mount's and reads false during a
-    // jog (and is not read at all while the other axis jogs), and the position is the axis's own coordinate (azimuth
-    // and altitude on an alt-az mount, RA and Dec otherwise) with the other field pinned.
-    util::StopVerifyHooks move_axis_cap_hooks(int axis, const util::MotionClaim& claim, util::OperationContext& ctx) {
-        util::StopVerifyHooks hooks;
-        hooks.send_stop = [this, axis, claim, &ctx] {
-            std::unique_lock<std::mutex> lock(mutex_);
-            const auto owns = [&] { return move_axis_cap_owns_locked(axis, claim, ctx); };
-            if (!owns()) return;
-            send_motion_locked(lock, owns,
-                               [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
-        };
-        hooks.read_status = [this, axis]() -> std::optional<util::MotionStatusReading> {
-            bool hc = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_) return std::nullopt;
-                if (manual_axis_slewing_[1 - axis]) {
-                    return util::MotionStatusReading{false, clock_.now()};  // the other axis's jog is not this axis's
-                }
-                hc = hc_available_;
-            }
-            auto& protocol = CelestronProtocolWrapper::instance();
-            // As AbortSlew's verification reads it: the hand controller's GOTO flag, else this axis's slew-done.
-            const bool moving = hc ? protocol.is_goto_in_progress() : !protocol.is_slew_done(axis);
-            return util::MotionStatusReading{moving, clock_.now()};
-        };
-        hooks.read_position = [this, axis]() -> std::optional<util::PositionReading> {
-            bool hc = false;
-            bool precise = false;
-            bool alt_az = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_) return std::nullopt;
-                hc = hc_available_;
-                precise = use_precise_commands_;
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
+        if (!ilock.owns_lock()) return;
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!connected_) return;
+        const std::optional<int> overdue = move_axis_overdue_locked();
+        if (!overdue) return;
+        const int axis = *overdue;
+        const util::MotionClaim claim = move_axis_claim_[axis];
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(kMaxMoveAxisDuration).count();
+        const std::string message = "MoveAxis on axis " + std::to_string(axis) + " ran " + std::to_string(seconds) +
+                                    " s with no new MoveAxis; the driver stopped it";
+        std::string stop_error;
+        const bool sent = send_motion_locked(
+            lock, [this, claim] { return connected_ && !lost_locked(claim); },
+            [&] {
                 try {
-                    alt_az = alignment_mode_locked() == AlignmentMode::AltAz;
-                } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch): an unknown model reads RA/Dec
+                    CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
+                } catch (const std::exception& e) {
+                    stop_error = e.what();
                 }
-            }
-            auto& protocol = CelestronProtocolWrapper::instance();
-            const int bits = precise ? 24 : 16;
-            // The axis's coordinate: axis 0 reports it as hours (the field axis_miss_arcsec scales back by 15).
-            double first = 0.0;
-            double second = 0.0;
-            if (!hc) {
-                first = decode_ra_hours(protocol.get_mc_position(0), 24);
-                second = decode_angle(protocol.get_mc_position(1), 24);
-            } else if (alt_az) {
-                // TODO: near the zenith the azimuth of a tracking alt-az mount moves faster than StillnessCheck's
-                // tolerance, so an axis-0 cap stop can read as not verified; the check needs a tracking-rate allowance.
-                const auto raw = protocol.get_alt_az_raw(precise);
-                first = util::wrap_degrees(decode_angle(raw.first, bits)) / 15.0;
-                second = decode_angle(raw.second, bits);
-            } else {
-                const auto raw = protocol.get_ra_dec_raw(precise);
-                first = decode_ra_hours(raw.first, bits);
-                second = decode_angle(raw.second, bits);
-            }
-            const util::MountPosition position{axis == 0 ? first : 0.0, axis == 0 ? 0.0 : second};
-            return util::PositionReading{position, clock_.now()};
-        };
-        return hooks;
-    }
-
-    // What the cap kept, only while the body still owns its move: the stop verified, so the axis stands still and
-    // Slewing raises the text (a client can cause it: INFO, decision 0007 rule 9); or the stop did not verify, so the
-    // flag stays and Slewing raises the failure while the axis may still move (WARN).
-    void keep_move_axis_cap_outcome(int axis, const util::MotionClaim& claim, const util::OperationContext& ctx,
-                                    const std::string& expired, const AlpacaException& ex) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!move_axis_cap_owns_locked(axis, claim, ctx)) {
-            return;  // a newer command, a stop, AbortSlew or a disconnect owns the axis
-        }
+            });
+        if (!sent) return;  // a newer motion command owns the mount
         last_home_error_.clear();
-        if (ex.what() != expired) {
-            last_slew_error_ =
-                move_axis_cap_ran_text(axis) + "; the stop failed: " + ex.what() + "; the mount may still be moving";
-            ALPACA_LOG_WARN("Celestron", last_slew_error_);
-            return;
+        if (stop_error.empty()) {
+            motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
+            manual_axis_slewing_[axis] = false;
+            move_axis_deadline_[axis] = util::TaskClock::clock::time_point::max();
+            move_axis_stop_failure_logged_[axis] = false;
+            last_slew_error_ = message;
+            ALPACA_LOG_INFO("Celestron", message);  // a client can cause it: decision 0007 rule 9
+        } else {
+            last_slew_error_ = message + "; the stop failed: " + stop_error + "; the mount may still be moving";
+            // The poll retries the stop every tick until one lands; a device failure is logged once per overdue
+            // MoveAxis, not once a second (a new MoveAxis or a stop that lands re-arms it).
+            if (!std::exchange(move_axis_stop_failure_logged_[axis], true)) {
+                ALPACA_LOG_ERROR("Celestron", last_slew_error_);  // the stop itself failed: a device failure
+            }
         }
-        motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, axis));
-        manual_axis_slewing_[axis] = false;
-        last_slew_error_ = expired;
-        ALPACA_LOG_INFO("Celestron", last_slew_error_);
     }
 
-    // Under mutex_: a slew, Park, FindHome, AbortSlew, a connect and a disconnect end both caps. Never joins (decision
-    // 0006 rule 3).
-    void cancel_move_axis_caps_locked() const {
-        move_axis_cap_[0].cancel();
-        move_axis_cap_[1].cancel();
+    // The first axis whose MoveAxis is past its deadline. Under mutex_.
+    std::optional<int> move_axis_overdue_locked() const {
+        const auto now = clock_.now();
+        for (int axis = 0; axis < 2; ++axis) {
+            if (manual_axis_slewing_[axis] && now >= move_axis_deadline_[axis]) return axis;
+        }
+        return std::nullopt;
     }
 
     // An initiator that took the mount from claim `superseded` (live_slew_claim_locked() before its claim) and then
@@ -2590,9 +2482,6 @@ public:
             [&] {
                 set_slewing_locked(prev_slewing);
                 at_home_ = prev_at_home;
-                // TODO: a jog flag with no running cap (cap restart where a restored jog flag is set): the cap bodies
-                // were cancelled when the claim took the axes, so a restored jog has no 60 s limit until it is
-                // renewed.
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
@@ -2799,7 +2688,7 @@ public:
         util::MotionClaim mine;  // a stop's stays empty, so it is never lost: the initiator lock keeps others out
         if (moving) {
             mine = motion_owner_.claim(util::MotionCommand::MoveAxis, axis);
-            move_axis_claim_[axis] = mine;  // #2409: the cap's stop acts only while this MoveAxis owns the axis
+            move_axis_claim_[axis] = mine;  // #2409: the bound's stop acts only while this MoveAxis owns the axis
             pulse_ops_[axis].cancel();
         } else {
             motion_owner_.cancel(stop_goto ? util::MotionOwner::kBothAxes
@@ -2824,11 +2713,9 @@ public:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         manual_axis_slewing_[axis] = moving;
-        // A renewal or a stop ends the cap of the move it replaces (decision 0006 rules 3 and 6): its stop checks the
-        // claim just taken (or the cancel just made) in the send gate, so a body that woke at its deadline while this
-        // command was on the wire finds itself cancelled.
-        move_axis_cap_[axis].cancel();
-        util::HoldWindow cap_window;
+        move_axis_deadline_[axis] =
+            moving ? clock_.now() + kMaxMoveAxisDuration : util::TaskClock::clock::time_point::max();
+        move_axis_stop_failure_logged_[axis] = false;
         // MoveAxis ends a pulse on this axis (superseded or joined above): the pulse's window, its correction and
         // its hold on the other axis close (decision 0022 rule 2). A moving axis also ends the hold a pulse on the
         // other axis put on it, which no longer describes where it points.
@@ -2845,15 +2732,9 @@ public:
                 lock, [this, &mine] { return !lost_locked(mine); },
                 [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
         }
-        if (moving) {
-            cap_window.arm(clock_.now(), util::kMaxMoveAxisDuration);
-        }
         clear_motion_errors_locked();
         if (verify_stop) {
             start_stop_check(lock, "MoveAxis");  // the GOTO's stops, verified as AbortSlew's are (#2409)
-        }
-        if (moving) {
-            start_move_axis_cap(lock, axis, mine, cap_window);
         }
     }
 
@@ -2921,7 +2802,6 @@ public:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        cancel_move_axis_caps_locked();
         // #2409, the shared verified stop: an acknowledged stop is not a stopped mount. When a motion was under way,
         // Slewing stays true while a body on its own slot (abort_verify_, so its start never reaps a slew body's
         // thread) checks the mount stopped, sending the stop again as
@@ -3083,7 +2963,10 @@ private:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        cancel_move_axis_caps_locked();
+        move_axis_deadline_[0] = util::TaskClock::clock::time_point::max();
+        move_axis_deadline_[1] = util::TaskClock::clock::time_point::max();
+        move_axis_stop_failure_logged_[0] = false;
+        move_axis_stop_failure_logged_[1] = false;
         sync_completed_this_session_ = false;
         skip_next_ra_learn_ = false;
         flip_in_progress_ = false;
@@ -3355,8 +3238,6 @@ private:
         abort_verify_.cancel_all_and_join();
         slew_.cancel_all_and_join();
         join_pulse_bodies();
-        move_axis_cap_[0].cancel_all_and_join();
-        move_axis_cap_[1].cancel_all_and_join();
     }
 
     // The stop paths (AbortSlew, disconnect, relink, the destructor) end both pulse bodies by cancelling and joining
@@ -3394,7 +3275,6 @@ private:
     bool claim_slew_locked() {
         const bool displaced = claim_slew_slot_locked();
         slew_claim_ = motion_owner_.claim(util::MotionCommand::Slew);
-        cancel_move_axis_caps_locked();  // the slew took both axes: no cap has a move left to stop
         pulse_ops_[0].cancel();
         pulse_ops_[1].cancel();
         clear_pulse_guiding_locked();
@@ -3494,7 +3374,6 @@ private:
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        cancel_move_axis_caps_locked();
     }
 
 public:
@@ -3918,6 +3797,7 @@ private:
             home_plan = sample_plan_locked(true);
         }
         retry_pending_stop();
+        stop_overdue_move_axis();
         if (check_home) {
             // A FindHome in flight is completed here, not by a getter. The exchanges (the completion check, the
             // position read when it is done, and the stops of a third failure) run with mutex_ free; the result is
@@ -4984,6 +4864,12 @@ private:
     mutable util::HoldWindow slew_hold_;  // under mutex_; Slewing's 8 s hold from a GOTO's start (decision 0022)
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
+    // #2409: when each axis's MoveAxis reaches kMaxMoveAxisDuration, on the task clock. Under mutex_.
+    mutable util::TaskClock::clock::time_point move_axis_deadline_[2] = {util::TaskClock::clock::time_point::max(),
+                                                                         util::TaskClock::clock::time_point::max()};
+    // #2409: whether the cap stop's failure was logged for this overdue MoveAxis (logged once, not every poll tick).
+    // Under mutex_.
+    mutable bool move_axis_stop_failure_logged_[2] = {false, false};
     // #2409: a relink found driver motion under way when the link was lost; the next connect_session() that opens the
     // port sends the stops before anything else. Kept across a failed open and a Disconnect, since the mount may still
     // be moving then too, and re-armed when the stop fails, so a handshake step that then fails keeps it for the
@@ -5143,12 +5029,6 @@ private:
     // thread; any claim of the slew slot cancels it. Declared last, so it is destroyed (and joins) first.
     util::OperationGeneration abort_verify_generation_;
     util::AsyncOperation abort_verify_{"Celestron AbortSlew stop check", abort_verify_generation_, clock_};
-    // Issue #2651: the 60 s MoveAxis cap of each axis (run_move_axis_cap()); a generation of its own per axis, so a
-    // renewal on one axis never supersedes the other's body. Declared after everything the bodies touch.
-    std::array<util::OperationGeneration, 2> move_axis_cap_generation_;
-    mutable std::array<util::AsyncOperation, 2> move_axis_cap_{
-        {{"Celestron MoveAxis cap 0", move_axis_cap_generation_[0], clock_},
-         {"Celestron MoveAxis cap 1", move_axis_cap_generation_[1], clock_}}};
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(

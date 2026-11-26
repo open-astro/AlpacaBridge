@@ -133,20 +133,6 @@ public:
         ignored_stops_ = n;
     }
 
-    /// The directional stops (":Qe", ":Qw", ":Qn", ":Qs") are received and counted but stop nothing while on, as a
-    /// mount that keeps jogging through a stop (#2651).
-    void set_ignore_axis_stops(bool on) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ignore_axis_stops_ = on;
-    }
-    /// While a jog runs on the second axis (":Mn" or ":Ms"), every position read moves that axis's coordinate by
-    /// @p degrees: ":GD", and ":GA" with ":GR" on an alt-az mount, where a jog on either axis moves the sky position
-    /// (#2651).
-    void set_second_axis_drift(double degrees) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        second_axis_drift_degrees_ = degrees;
-    }
-
     /// The mount keeps reporting "slewing" past slew_end until cleared (a GOTO that never settles).
     void hold_running(bool on) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -271,11 +257,6 @@ public:
     bool jogging() {
         std::lock_guard<std::mutex> lock(mutex_);
         return jog_[0] || jog_[1] || jog_[2] || jog_[3];
-    }
-    /// The axes with a jog on (0: east or west, 1: north or south): the MoveAxis cap bodies (#2651) a case has running.
-    int jogging_axes() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return static_cast<int>(jog_[0] || jog_[1]) + static_cast<int>(jog_[2] || jog_[3]);
     }
     /// At the home position: a ":hC" slew has landed and nothing has moved the mount since.
     bool at_home() {
@@ -487,12 +468,10 @@ private:
         }
         if (command == ":GR") {
             settle_locked();
-            if (alt_az_ && second_axis_drifts_locked()) ra_hours_ += second_axis_drift_degrees_ / 15.0;
             return hms(ra_hours_) + "#";
         }
         if (command == ":GD") {
             settle_locked();
-            if (second_axis_drifts_locked()) dec_degrees_ += second_axis_drift_degrees_;
             return dms(dec_degrees_) + "#";
         }
         if (command == ":Gr") return hms(target_ra_) + "#";
@@ -503,10 +482,7 @@ private:
         if (command == ":GS") return "00:00:00#";
         if (command == ":Gm") return "W#";
         if (command == ":Gh") return homed_ ? "1#" : "0#";
-        if (command == ":GA") {
-            if (alt_az_ && second_axis_drifts_locked()) altitude_degrees_ += second_axis_drift_degrees_;
-            return dms(altitude_degrees_) + "#";
-        }
+        if (command == ":GA") return "+45*00:00#";
         if (command == ":GZ") return "180*00:00#";
         if (command == ":GMGE") return site_reply_ + "#";
         if (command == ":GMTI") return time_reply_ + "#";
@@ -555,7 +531,7 @@ private:
             return {};
         }
         if (command == ":Qe" || command == ":Qw" || command == ":Qn" || command == ":Qs") {
-            if (!ignore_axis_stops_) jog_[jog_index(command[2])] = false;
+            jog_[jog_index(command[2])] = false;
             return {};
         }
         if (command == ":Me" || command == ":Mw" || command == ":Mn" || command == ":Ms") {
@@ -674,10 +650,6 @@ private:
     bool low_power_ = false, ra_stall_ = false, dec_stall_ = false, alt_az_ = false;
     util::TaskClock::clock::time_point ra_guide_end_{}, dec_guide_end_{};
     bool jog_[4] = {false, false, false, false};
-    bool ignore_axis_stops_ = false;
-    double second_axis_drift_degrees_ = 0.0;
-    double altitude_degrees_ = 45.0;  // ":GA"
-    bool second_axis_drifts_locked() const { return second_axis_drift_degrees_ != 0.0 && (jog_[2] || jog_[3]); }
     std::string site_reply_ = "-33*51:24&-151*12:55";  // ":GMGE" lat&lon, west-positive: -33.856784, 151.215297 E
     std::string time_reply_ = "01/02/2026&03:04:05&+00:00";
 
