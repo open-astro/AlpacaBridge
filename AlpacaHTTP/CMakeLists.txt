@@ -468,6 +468,10 @@ if(ALPACAHTTP_BUILD_TESTS)
         target_link_libraries(fake_conformu_server alpacacore_gphoto)
         target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_GPHOTO)
     endif()
+    if(TARGET alpacacore_remotealpaca)
+        target_link_libraries(fake_conformu_server alpacacore_remotealpaca)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_REMOTEALPACA)
+    endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
     # working directory for the same reason as test_routing (relative

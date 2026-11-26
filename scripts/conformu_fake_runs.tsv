@@ -40,7 +40,7 @@ wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/Wande
 wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
 bisque	telescope	-	no-fake	6	-	no fake exists yet
 weewx	observingconditions	-	no-fake	6	-	no fake exists yet
-remotealpaca	observingconditions	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
+remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet

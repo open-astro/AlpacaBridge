@@ -1,0 +1,3 @@
+### Changed (CI)
+
+- **Fake ConformU: the remotealpaca ObservingConditions row runs**, issue #2696 (#2078 slice 6e). `fake_conformu_server` hosts the remotealpaca ObservingConditions driver over the scripted upstream of its unit tests (`AlpacaUpstreamScript` through `FakeHttpClient`, in process; `AlpacaCore/tests/conformu_observingconditions_factories.h`). It passes ConformU 4.6.0-rc.1 with no errors, issues or timing findings, so the row is `run`, with its report under `AlpacaCore/conformu/Remote Alpaca/Fake/`. The `ConformU fake` workflow's paths list gains the remotealpaca sources, the factory, `fake_http_client.h`, `alpaca_upstream_script.h`, `connect_hold_gate.h` (which most fakes include) and the ObservingConditions interface. Fake evidence only.

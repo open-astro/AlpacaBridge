@@ -48,6 +48,7 @@
 #include "conformu_covercalibrator_factories.h"
 #include "conformu_filterwheel_factories.h"
 #include "conformu_focuser_factories.h"
+#include "conformu_observingconditions_factories.h"
 #include "conformu_rotator_factories.h"
 #include "conformu_switch_factories.h"
 #include "conformu_telescope_factories.h"
@@ -285,6 +286,13 @@ const std::vector<ConformuHost> kHosts = {
     {"svbony", "camera", "fake_svbony_sdk.h", alpacacore::DeviceType::Camera, "svbony-fake",
      "SVBONY camera (fake SDK, test only)", "ALPACACORE_ENABLE_SVBONY",
      "FakeSVBSDK (simulated SVBONY camera SDK, in process)", [] { return true; }, driver_of(cu::make_svbony_camera)},
+#endif
+#ifdef FAKE_CONFORMU_REMOTEALPACA
+    {"remotealpaca", "observingconditions", "fake_http_client.h", alpacacore::DeviceType::ObservingConditions,
+     "remotealpaca-fake", "Remote Alpaca Observing Conditions (fake upstream, test only)",
+     "ALPACACORE_ENABLE_REMOTEALPACA",
+     "AlpacaUpstreamScript over FakeHttpClient (a scripted upstream Alpaca ObservingConditions device, in process)",
+     [] { return true; }, driver_of(cu::make_remotealpaca_observingconditions)},
 #endif
 #ifdef FAKE_CONFORMU_GPHOTO
     {"gphoto", "camera", "fake_gphoto_sdk.h", alpacacore::DeviceType::Camera, "gphoto-fake",
