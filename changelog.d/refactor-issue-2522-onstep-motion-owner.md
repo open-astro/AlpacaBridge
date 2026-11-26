@@ -1,0 +1,3 @@
+### Fixed
+
+- **OnStep: PulseGuide refused during an OnStep 4.x home with switches** (AlpacaCore, issue #2522): OnStep 4.x has no `h` in `:GU#`, so a home with switches shows only `g` while it runs, and the #2504 refusal let a guide pulse go out into it. The driver now keeps who owns the axes in the per-axis motion owner (`util::MotionOwner`), as the other mount drivers do: a GOTO, Park or FindHome claims both axes from the command until a status shows the motion ended (for a home: no GOTO, no `h` and no `g`), a MoveAxis and a PulseGuide claim their own axis, and AbortSlew, Unpark, MoveAxis(axis, 0) and a disconnect cancel. A PulseGuide while the claim is held is refused with InvalidOperation and nothing is sent; the other refusals and texts are unchanged.
