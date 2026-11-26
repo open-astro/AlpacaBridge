@@ -2090,7 +2090,8 @@ TEST_CASE("ZWO goto-safety - a MoveAxis on the other axis that lands as the cap 
         static_cast<void>(wait_until([&] { return rig.mount.count(":Mn") > 0; }, 500));
     });
     rig.connect();
-    REQUIRE_NOTHROW(rig.driver->move_axis(0, 1.0));  // axis 1 idle: the cap's call includes ":Q" unless a jog is pending
+    REQUIRE_NOTHROW(
+        rig.driver->move_axis(0, 1.0));  // axis 1 idle: the cap's call includes ":Q" unless a jog is pending
     run_polls(rig, std::chrono::seconds(56));
     REQUIRE(rig.mount.count(":Qe") == 0);
     const auto from = static_cast<std::ptrdiff_t>(rig.mount.commands().size());
