@@ -12,14 +12,14 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch or Telescope device for the
-// remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's
-// poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the
-// client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope or Focuser device for
+// the remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the
+// driver's poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers
+// the client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
 // Telescope, per Axis), keeps the upstream's Connected and AveragePeriod (a Rotator's moves, Sync and Reverse, a
-// FilterWheel's moves and a Switch's writes) as a real server does, and counts calls per member. A Telescope keeps its
-// slews, park, home, MoveAxis, pulses, syncs and settings as a real mount does. An unscripted member answers 0x400 (not
-// implemented), as a real server does.
+// FilterWheel's moves, a Switch's writes, and a Focuser's moves and TempComp) as a real server does, and counts calls
+// per member. A Telescope keeps its slews, park, home, MoveAxis, pulses, syncs and settings as a real mount does. An
+// unscripted member answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
@@ -45,7 +45,7 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -66,7 +66,9 @@ public:
     // set (InvalidOperation). A slew, Park or FindHome lands at once unless hold_motion(true): then it runs until
     // finish_motion() or AbortSlew. A MoveAxis runs until MoveAxis(axis, 0) or AbortSlew; a pulse until
     // finish_pulse(). While parked a motion command, a sync and AbortSlew answer InvalidWhileParked (0x408).
-    explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
+    // Focuser: an absolute Focuser 4 upstream (Platform 7) named "Alpaca Simulator Focuser" at 25000 of MaxStep 50000,
+    // not moving, StepSize 20, 5.0 degrees, TempComp available and off. A Move runs until finish_move() (or a Halt).
+    explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) : kind_(kind) {
         set("connecting", "false");
         if (kind == Kind::Telescope) {
             telescope_ = true;
@@ -113,6 +115,21 @@ public:
             set("destinationsideofpier", "0");
             set_mount_locked(6.0, 30.0);
             set_motion_locked();
+            return;
+        }
+        if (kind == Kind::Focuser) {
+            set("interfaceversion", "4");
+            set("name", "\"Alpaca Simulator Focuser\"");
+            set("description", "\"ASCOM Alpaca Simulator Focuser\"");
+            set("absolute", "true");
+            set("maxstep", "50000");
+            set("maxincrement", "50000");
+            set("stepsize", "20");
+            set("tempcompavailable", "true");
+            set("tempcomp", "false");
+            set("temperature", "5.0");
+            set("position", "25000");
+            set("ismoving", "false");
             return;
         }
         if (kind == Kind::FilterWheel) {
@@ -245,16 +262,21 @@ public:
         return connected_;
     }
 
-    // A Rotator: ends the running move at its target (Position the target, MechanicalPosition the target less the Sync
-    // offset, IsMoving false).
+    // Ends the running move at its target, IsMoving false. A Rotator: Position the target, MechanicalPosition the
+    // target less the Sync offset. A Focuser: Position the target.
     void finish_move() {
         std::lock_guard<std::mutex> lock(mutex_);
         replies_[{"ismoving", ""}] = {"false", 0, {}};
+        if (kind_ == Kind::Focuser) {
+            if (!focuser_target_.empty()) replies_[{"position", ""}] = {focuser_target_, 0, {}};
+            focuser_target_.clear();
+            return;
+        }
         if (rotator_target_) set_rotator_locked(*rotator_target_, *rotator_target_ - (position_ - mechanical_));
         rotator_target_.reset();
     }
 
-    // A Rotator: the member and the Position of the last move PUT, as sent ("" before any).
+    // A Rotator or a Focuser: the member and the Position of the last move PUT, as sent ("" before any).
     std::string last_move() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_move_;
@@ -361,6 +383,13 @@ private:
             connected_ = lower(field(params, "Connected")) == "true";
         } else if (member == "averageperiod") {
             replies_[{"averageperiod", ""}] = {decode(field(params, "AveragePeriod")), 0, {}};
+        } else if (kind_ == Kind::Focuser && member == "move") {
+            // The move runs until finish_move() or a Halt.
+            focuser_target_ = decode(field(params, "Position"));
+            last_move_ = member + " " + focuser_target_;
+            replies_[{"ismoving", ""}] = {"true", 0, {}};
+        } else if (kind_ == Kind::Focuser && member == "tempcomp") {
+            replies_[{"tempcomp", ""}] = {lower(field(params, "TempComp")), 0, {}};
         } else if (member == "move" || member == "moveabsolute" || member == "movemechanical") {
             // The move runs until finish_move() or a Halt; TargetPosition is where it goes, as a real rotator has it.
             const std::string sent = decode(field(params, "Position"));
@@ -374,6 +403,7 @@ private:
             replies_[{"ismoving", ""}] = {"true", 0, {}};
         } else if (member == "halt") {
             rotator_target_.reset();
+            focuser_target_.clear();
             replies_[{"ismoving", ""}] = {"false", 0, {}};
         } else if (member == "sync") {
             // The offset moves; MechanicalPosition stays.
@@ -670,6 +700,8 @@ private:
     std::optional<double> target_ra_;
     std::optional<double> target_dec_;
     std::vector<std::string> puts_;
+    const Kind kind_;
+    std::string focuser_target_;  // a Focuser's running move; empty while none runs
 };
 
 }  // namespace alpacacore::test
