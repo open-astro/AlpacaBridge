@@ -2013,8 +2013,8 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
         }
         // A verb no Alpaca endpoint accepts (POST, DELETE) is a wrong verb
-        // too; a foreign Origin is still refused with 403 first, so the
-        // cross-origin guard UTCDate carries (#401) stays in front.
+        // too; a foreign Origin is still refused with 403 first: the device
+        // guard runs before the verb check (decision 0007 rule 2).
         {
             const auto send = [&](const std::string& verb, const std::string& member, const std::string& origin) {
                 std::ostringstream raw;
@@ -2033,9 +2033,8 @@ int main() {
             EXPECT(send("POST", "utcdate", "").status_code() == 400);
             EXPECT(send("POST", "utcdate", "http://evil.example").status_code() == 403);
             EXPECT(send("DELETE", "altitude", "http://evil.example").status_code() == 403);
-            // The Site* setters' #444 guard sits in their PUT branch only, so
-            // a forged POST reaches the router's verb check; it must be
-            // refused with 403 there, not answered 400 (or 200/0x400 before #574).
+            // A forged POST to a Site* setter is refused with 403, not
+            // answered 400 (or 200/0x400 before #574).
             EXPECT(send("POST", "sitelatitude", "http://evil.example").status_code() == 403);
             EXPECT(send("POST", "sitelatitude", "").status_code() == 400);
         }
@@ -12306,6 +12305,98 @@ int main() {
         for (int number = 12001; number <= 12128; ++number) {
             remove_device(router, "zzz", "focuser", number);
         }
+    }
+
+    {
+        // case: a cross-origin device PUT that reaches a driver gets 403 and never calls it (decision 0007 rule 2)
+        // The guard used to sit only on the wrong-verb path (and on UTCDate and
+        // Site*), so a cross-origin PUT reached the driver and only the missing
+        // CORS preflight answer stood in the way. Same-origin and no-Origin PUTs
+        // (NINA, ConformU, Ara) still reach the driver.
+        struct CountingTelescope : route_table_stubs::TelescopeStub {
+            using TelescopeStub::TelescopeStub;
+            int calls = 0;
+            void slew_to_coordinates_async(double, double) override { ++calls; }
+        };
+        struct CountingCamera : route_table_stubs::CameraStub {
+            using CameraStub::CameraStub;
+            int calls = 0;
+            void start_exposure(double, bool) override { ++calls; }
+        };
+        struct CountingFocuser : route_table_stubs::FocuserStub {
+            using FocuserStub::FocuserStub;
+            int calls = 0;
+            void move(int) override { ++calls; }
+        };
+        struct CountingSwitch : route_table_stubs::SwitchStub {
+            using SwitchStub::SwitchStub;
+            int calls = 0;
+            void set_switch(int, bool) override { ++calls; }
+        };
+        auto telescope = std::make_shared<CountingTelescope>(9871);
+        auto camera = std::make_shared<CountingCamera>(9872);
+        auto focuser = std::make_shared<CountingFocuser>(9873);
+        auto sw = std::make_shared<CountingSwitch>(9874);
+        auto connect = std::make_shared<ConnectStubDriver>(9875);
+        auto command = std::make_shared<CommandRecordingStubDriver>(9876);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        for (const std::shared_ptr<alpacacore::AlpacaDriver>& device :
+             std::initializer_list<std::shared_ptr<alpacacore::AlpacaDriver>>{telescope, camera, focuser, sw, connect,
+                                                                               command}) {
+            EXPECT(registry.register_device(device));
+        }
+        alpacahttp::Router router;
+        const auto send = [&](const std::string& path, const std::string& body, const std::string& origin) {
+            std::ostringstream raw;
+            raw << "PUT " << path << " HTTP/1.1\r\nHost: localhost\r\n";
+            if (!origin.empty()) {
+                raw << "Origin: " << origin << "\r\n";
+            }
+            raw << "Content-Type: application/x-www-form-urlencoded\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            return router.route(request, 1);
+        };
+        struct Case {
+            std::string path;
+            std::string body;
+            std::string second_body;  // the no-Origin request; differs only for Connected
+            std::function<int()> calls;
+        };
+        const Case cases[] = {
+            {"/api/v1/telescope/9871/slewtocoordinatesasync", "RightAscension=1&Declination=2&ClientID=1", "",
+             [&] { return telescope->calls; }},
+            {"/api/v1/camera/9872/startexposure", "Duration=1&Light=true&ClientID=1", "",
+             [&] { return camera->calls; }},
+            {"/api/v1/focuser/9873/move", "Position=100&ClientID=1", "", [&] { return focuser->calls; }},
+            {"/api/v1/switch/9874/setswitch", "Id=0&State=true&ClientID=1", "", [&] { return sw->calls; }},
+            {"/api/v1/covercalibrator/9875/connected", "Connected=true&ClientID=1", "Connected=false&ClientID=1",
+             [&] { return connect->connect_count + connect->disconnect_count; }},
+            {"/api/v1/covercalibrator/9876/action", "Action=x&Parameters=y&ClientID=1", "",
+             [&] { return command->calls; }},
+        };
+        for (const auto& c : cases) {
+            const auto blocked = send(c.path, c.body + "&ClientTransactionID=55", "http://evil.example");
+            EXPECT(blocked.status_code() == 403);
+            const auto json = nlohmann::json::parse(blocked.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ClientTransactionID", 0U) == 55U);
+            EXPECT(json.value("ErrorMessage", "") == "Cross-origin device method requests are not allowed");
+            EXPECT(c.calls() == 0);
+
+            EXPECT(send(c.path, c.body, "http://localhost").status_code() == 200);
+            EXPECT(c.calls() == 1);
+            EXPECT(send(c.path, c.second_body.empty() ? c.body : c.second_body, "").status_code() == 200);
+            EXPECT(c.calls() == 2);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9871);
+        registry.unregister_device(alpacacore::DeviceType::Camera, 9872);
+        registry.unregister_device(alpacacore::DeviceType::Focuser, 9873);
+        registry.unregister_device(alpacacore::DeviceType::Switch, 9874);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9875);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9876);
     }
 
     std::cout << "All routing tests passed!\n";

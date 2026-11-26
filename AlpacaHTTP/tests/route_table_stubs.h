@@ -66,7 +66,7 @@ using namespace alpacacore;
     bool command_bool(std::string_view, bool) override { return false; }                                    \
     std::string command_string(std::string_view, bool) override { return {}; }
 
-class CameraStub final : public alpacacore::CameraDriver {
+class CameraStub : public alpacacore::CameraDriver {
 public:
     explicit CameraStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Camera, "camera")
@@ -192,7 +192,7 @@ private:
     std::optional<alpacacore::AlpacaException> last_exposure_error_;
 };
 
-class TelescopeStub final : public alpacacore::TelescopeDriver {
+class TelescopeStub : public alpacacore::TelescopeDriver {
 public:
     explicit TelescopeStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Telescope, "telescope")
@@ -303,7 +303,7 @@ private:
     std::vector<int> focus_offsets_;  // last set, so a test can read back what the router parsed
 };
 
-class FocuserStub final : public alpacacore::FocuserDriver {
+class FocuserStub : public alpacacore::FocuserDriver {
 public:
     explicit FocuserStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Focuser, "focuser")
