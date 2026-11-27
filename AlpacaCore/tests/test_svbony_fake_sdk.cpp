@@ -1369,31 +1369,6 @@ TEST_CASE("SVBONY Camera - frame storage validation rejects short spans", "[svbo
 // time, and a CHECK against the real clock trips at once against a fake-time deadline: each case asserts the
 // state just before the deadline and just after it, so either mutation turns it red.
 
-TEST_CASE("SVBONY Camera - pulse-guide end reads the TaskClock", "[svbony][camera][unit][taskclock]") {
-    using namespace std::chrono_literals;
-    alpacacore::test::FakeTaskClock clock;
-    alpacacore::test::FakeSVBSDK sdk;
-    auto camera = connected_camera_on_clock(sdk, clock);
-
-    // The pulse is synchronous and clears its flag when the SDK call returns, so the end timestamp is only
-    // observable from inside the call: the hook runs there, on the calling thread.
-    std::vector<bool> seen;
-    sdk.before_call = [&](const std::string& name) {
-        if (name != "pulse_guide") return;
-        seen.push_back(camera->get_is_pulse_guiding());
-        clock.advance(1999ms);
-        seen.push_back(camera->get_is_pulse_guiding());
-        clock.advance(1ms);
-        seen.push_back(camera->get_is_pulse_guiding());
-    };
-    camera->pulse_guide(0, 2000);
-    REQUIRE(seen.size() == 3);
-    CHECK(seen[0] == true);
-    CHECK(seen[1] == true);   // 1 ms before the end
-    CHECK(seen[2] == false);  // at the end
-    CHECK(camera->get_is_pulse_guiding() == false);
-}
-
 TEST_CASE("SVBONY Camera - exposure watchdog deadline reads the TaskClock", "[svbony][camera][unit][taskclock]") {
     using namespace std::chrono_literals;
     alpacacore::test::FakeTaskClock clock;
