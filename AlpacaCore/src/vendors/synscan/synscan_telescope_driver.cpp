@@ -1210,13 +1210,14 @@ public:
                 double landed_first_arcsec = 0.0;   // RA or azimuth, unprojected
                 double landed_second_arcsec = 0.0;  // Dec or altitude
                 hooks.repeat_allowed = [&] {
-                    return goto_repeat_allowed_locked(landed_miss_arcsec, landed_first_arcsec, landed_second_arcsec,
-                                                      [&](double a, double b) {
-                        return park_altaz ? util::angular_separation_arcsec(a, b, park_target_first, park_target_second)
-                                          : util::angular_separation_arcsec(a * kHoursToDegrees, b,
-                                                                            park_target_first * kHoursToDegrees,
-                                                                            park_target_second);
-                    });
+                    return goto_repeat_allowed_locked(
+                        landed_miss_arcsec, landed_first_arcsec, landed_second_arcsec, [&](double a, double b) {
+                            return park_altaz
+                                       ? util::angular_separation_arcsec(a, b, park_target_first, park_target_second)
+                                       : util::angular_separation_arcsec(a * kHoursToDegrees, b,
+                                                                         park_target_first * kHoursToDegrees,
+                                                                         park_target_second);
+                        });
                 };
                 hooks.verify_at_target = [&]() -> std::string {
                     const RawSample raw =
@@ -4650,10 +4651,9 @@ private:
                 if (far_miss_repeated) {
                     throw AlpacaException(miss + " after a repeat GOTO", AlpacaError::DriverException);
                 }
-                if (!goto_repeat_allowed_locked(std::max(ra_error_arcsec, dec_error_arcsec), ra_error_arcsec,
-                                                dec_error_arcsec, [&](double a, double b) {
-                                                    return util::axis_miss_arcsec({a, b}, {ra, dec});
-                                                })) {
+                if (!goto_repeat_allowed_locked(
+                        std::max(ra_error_arcsec, dec_error_arcsec), ra_error_arcsec, dec_error_arcsec,
+                        [&](double a, double b) { return util::axis_miss_arcsec({a, b}, {ra, dec}); })) {
                     // Refused, or stopped short by a limit: the same GOTO would be refused or stopped again.
                     throw AlpacaException(miss + "; the GOTO was not repeated: the mount did not travel most of the " +
                                               "way to the target (refused, or stopped by a limit)",
