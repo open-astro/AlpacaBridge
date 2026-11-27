@@ -1549,8 +1549,12 @@ private:
         return stopped;
     }
 
-    // Connect and Disconnect, after close_pulses() joined every pulse body: a kept pulse failure ends here.
-    void reset_pulse_guide_state_locked() { pulse_failure_.reset(); }
+    // Connect and Disconnect, after close_pulses() joined every pulse body: a kept pulse failure ends here, and so
+    // does a count a body left behind when it threw before its decrement (the slot keeps that throw).
+    void reset_pulse_guide_state_locked() {
+        pulse_failure_.reset();
+        pulses_running_.store(0);
+    }
 
     // A pulse body (#2735). A pulse queued behind another sends nothing when a Disconnect, a Connect or the
     // destructor closed the pulse slot after it started (pulse_epoch_), and fails with NotConnected when the link is

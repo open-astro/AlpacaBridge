@@ -1033,6 +1033,59 @@ TEST_CASE("SVBONY Camera Driver - a second PulseGuide during a pulse queues behi
     CHECK(eventually([&] { return !camera->get_is_pulse_guiding(); }));
 }
 
+// #2735: a Disconnect closes the pulse slot, so a pulse queued behind the SDK call in flight sends nothing once that
+// call returns; the Disconnect waits only for the call in flight.
+TEST_CASE("SVBONY Camera Driver - a pulse queued when a Disconnect closes the slot never reaches the SDK",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> disconnected{false};
+    PulseCaseCleanup cleanup{clock, {}, {&disconnected}};
+    camera->pulse_guide(0, 1000);
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));  // pulse A is inside SVBPulseGuide
+    camera->pulse_guide(2, 500);                 // pulse B queues behind it
+    cleanup.threads.emplace_back([&] {
+        static_cast<void>(alpacacore::test::worker_code_of([&] { camera->set_connected(false); }));
+        disconnected = true;
+    });
+    CHECK_FALSE(eventually([&] { return disconnected.load(); }, 300ms));  // the Disconnect waits for pulse A
+    clock.advance(1000ms);
+    CHECK(eventually([&] { return disconnected.load(); }));
+    CHECK(sdk.call_count("pulse_guide") == 1);
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+}
+
+// Decision 0006 rule 2 on SVBONY (#2735): with pulse A in the SDK and three newer pulses queued behind it, a fifth
+// PulseGuide waits 2 s on the clock for room and is refused with InvalidOperation. The refusal gives back its count,
+// so IsPulseGuiding still reads true for the four, and false once they have all returned.
+TEST_CASE("SVBONY Camera Driver - a PulseGuide refused behind four pending pulses changes nothing",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> refused{false};
+    std::atomic<int> code{-1};
+    PulseCaseCleanup cleanup{clock, {}, {&refused}};
+    camera->pulse_guide(0, 5000);
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    for (int i = 0; i < 3; ++i) {
+        camera->pulse_guide(1, 5000);
+    }
+    cleanup.threads.emplace_back([&] {
+        code = alpacacore::test::worker_code_of([&] { camera->pulse_guide(2, 5000); });
+        refused = true;
+    });
+    REQUIRE(clock.wait_for_waiters(2, 2000ms));  // the fifth start waits on the clock for room
+    clock.advance(2000ms);                       // its 2 s bound; pulse A (5 s) is still in the SDK
+    REQUIRE(eventually([&] { return refused.load(); }));
+    CHECK(code.load() == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(camera->get_is_pulse_guiding());
+    CHECK(sdk.call_count("pulse_guide") == 1);
+    CHECK(clock.drain_until([&] { return !camera->get_is_pulse_guiding(); }, 1000ms, 5000ms));
+    CHECK(sdk.call_count("pulse_guide") == 4);
+}
+
 // The ASCOM async FAQ (ascom-contract "A failed async operation body keeps its error"): a pulse whose SDK call fails
 // is raised by IsPulseGuiding until the next PulseGuide or a Disconnect clears it (the Connect clear is in the removal
 // case above).
