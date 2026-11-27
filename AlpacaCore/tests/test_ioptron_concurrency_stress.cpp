@@ -255,6 +255,7 @@ TEST_CASE("iOptron telescope - AbortSlew during a slew races the stop check",
     CHECK_FALSE(mount.moving());
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
 
