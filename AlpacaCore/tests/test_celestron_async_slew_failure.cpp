@@ -1402,6 +1402,29 @@ void step_virtual(alpacacore::test::FakeTaskClock& clock, std::chrono::seconds t
     }
 }
 
+// The same in 250 ms steps: a cap's verified stop reads once per round of its own (#2651), so a step of a second is
+// too coarse to let one verify.
+void step_virtual_fine(alpacacore::test::FakeTaskClock& clock, std::chrono::seconds total) {
+    for (auto spent = std::chrono::milliseconds(0); spent < total; spent += std::chrono::milliseconds(250)) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+}
+
+// Runs `move_axis` (a non-zero MoveAxis), then waits until its cap body waits on the clock, so the cap's 60 s starts
+// at this virtual time. The steps above take any waiter as their rendezvous, and the status poll is one: a cap body
+// that reached its wait after the first step stamped a later deadline and could fire after the case's last step
+// (#2651). The rendezvous is the wait count, which only the new body's wait raises once the poll is parked (no step
+// runs here); a replaced body may still be registered for a moment.
+template <typename Fn>
+void start_cap(alpacacore::test::FakeTaskClock& clock, Fn&& move_axis) {
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the status poll
+    const auto before = clock.wait_count();
+    move_axis();
+    REQUIRE(clock.wait_for_wait_count(before + 1, std::chrono::seconds(5)));
+}
+
 // The rate-0 fixed-rate moves the fake recorded for `axis` (device 0x10 RA, 0x11 Dec; ops 0x24/0x25, rate byte 0;
 // one stop sends both).
 int axis_stop_count(FakeCelestronHandset& st, int axis) {
@@ -1426,25 +1449,25 @@ TEST_CASE("Celestron MoveAxis - a MoveAxis with no new MoveAxis for 60 s is stop
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     const int axis = GENERATE(0, 1);
 
-    REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+    start_cap(clock, [&] { REQUIRE_NOTHROW(driver->move_axis(axis, 1.0)); });
     const int stops_before = axis_stop_count(*st, axis);
     step_virtual(clock, std::chrono::seconds(58));
     CHECK(read_slewing(*driver) == SlewingRead::True);  // short of the bound: still running
     CHECK(axis_stop_count(*st, axis) == stops_before);
-    step_virtual(clock, std::chrono::seconds(4));
+    step_virtual_fine(clock, std::chrono::seconds(6));  // the cap at 60 s, its verified stop after it
     std::string message;
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
-    CHECK(axis_stop_count(*st, axis) > stops_before);
+    CHECK(axis_stop_count(*st, axis) == stops_before + 2);  // one stop (both fixed-rate commands), verified at once
     // The next motion command clears it.
     REQUIRE_NOTHROW(driver->move_axis(axis, 0.0));
     CHECK(read_slewing(*driver) == SlewingRead::False);
     driver->set_connected(false);
 }
 
-// #2409 review: the poll retries a failed cap stop every tick until one lands; the failure is logged at ERROR once per
-// overdue MoveAxis, not once a second.
-TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is logged once",
+// #2409 review, #2651: a cap stop the mount never answers is sent 3 times by the cap's verified stop and no more; the
+// failure it keeps is logged at WARN once per overdue MoveAxis.
+TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is sent 3 times and logged once",
           "[celestron][telescope][async][goto-safety]") {
     std::atomic<int> stop_errors{0};
     struct SinkGuard {
@@ -1453,7 +1476,7 @@ TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is logged once",
     } sink_guard;
     alpacacore::logging::set_log_sink(
         [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
-            if (level == alpacacore::logging::LogLevel::Error && component == "Celestron" &&
+            if (level == alpacacore::logging::LogLevel::Warn && component == "Celestron" &&
                 message.find("with no new MoveAxis") != std::string_view::npos &&
                 message.find("the stop failed") != std::string_view::npos) {
                 ++stop_errors;
@@ -1465,15 +1488,29 @@ TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is logged once",
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The status poll would fail against the silent mount too, and on a loaded host enough of its failures reach the
+    // link-loss threshold before the third stop: the driver closes the transport, so that stop finds no link.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
-    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    start_cap(clock, [&] { REQUIRE_NOTHROW(driver->move_axis(0, 1.0)); });
     step_virtual(clock, std::chrono::seconds(59));
     st->silent.store(true);  // every stop from here on goes unanswered
-    step_virtual(clock, std::chrono::seconds(6));
+    // Each exchange of the cap body with the silent mount waits out the 1 s serial timeout in real time, so a round's
+    // reads and resend take longer than the steps above wait for a woken body. Step one stop round (1 s) at a time,
+    // each once the body is parked again beside the paused poll, until the WARN: it comes after the third stop, so the
+    // count is final by then.
+    const auto bound = Clock::now() + std::chrono::seconds(60);
+    while (stop_errors.load() < 1 && Clock::now() < bound) {
+        if (!clock.wait_for_waiters(2, std::chrono::milliseconds(100))) continue;
+        clock.advance(std::chrono::seconds(1));
+        clock.wait_for_woken_settled(std::chrono::seconds(10));
+    }
     st->silent.store(false);
     CHECK(stop_errors.load() == 1);
-    // The stop was retried on later ticks, not only sent once.
-    CHECK(st->muted_ra_stops.load() >= 2);
+    // The stop was sent again by the verified stop, 3 times in all, and not again after that.
+    CHECK(st->muted_ra_stops.load() == 3);
+    step_virtual_fine(clock, std::chrono::seconds(10));
+    CHECK(st->muted_ra_stops.load() == 3);
     driver->set_connected(false);
 }
 
@@ -1486,16 +1523,142 @@ TEST_CASE("Celestron MoveAxis - each new MoveAxis starts the 60 s bound again",
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    start_cap(clock, [&] { REQUIRE_NOTHROW(driver->move_axis(0, 1.0)); });
     step_virtual(clock, std::chrono::seconds(40));
-    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));  // a client renewing its move
+    start_cap(clock, [&] { REQUIRE_NOTHROW(driver->move_axis(0, 1.0)); });  // a client renewing its move
     const int stops_before = axis_stop_count(*st, 0);
     step_virtual(clock, std::chrono::seconds(40));  // 80 s after the first MoveAxis, 40 s after the second
     CHECK(read_slewing(*driver) == SlewingRead::True);
     CHECK(axis_stop_count(*st, 0) == stops_before);
-    step_virtual(clock, std::chrono::seconds(22));
+    step_virtual(clock, std::chrono::seconds(19));  // 59 s after the second MoveAxis
+    step_virtual_fine(clock, std::chrono::seconds(6));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    CHECK(axis_stop_count(*st, 0) == stops_before + 2);
+    driver->set_connected(false);
+}
+
+// #2651 review: a rate command that throws (a serial timeout) may still have reached the mount, so the jog it started
+// keeps its 60 s cap and the cap's stop goes out.
+TEST_CASE("Celestron MoveAxis - a rate command that throws still leaves the jog its 60 s cap",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->silent.store(true);  // the rate command goes unanswered
+    start_cap(clock, [&] { CHECK_THROWS(driver->move_axis(0, 1.0)); });
+    st->silent.store(false);
+    const int stops_before = axis_stop_count(*st, 0);
+    step_virtual(clock, std::chrono::seconds(59));
+    step_virtual_fine(clock, std::chrono::seconds(8));
     CHECK(axis_stop_count(*st, 0) > stops_before);
+    driver->set_connected(false);
+}
+
+// #2651 review: a cap the slot refuses (no thread) leaves no jog running uncapped: MoveAxis stops the axis it just
+// started and fails.
+TEST_CASE("Celestron MoveAxis - a cap the slot cannot start stops the axis and fails the MoveAxis",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_move_axis_cap_spawn_for_testing(
+        *driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+
+    const int stops_before = axis_stop_count(*st, 0);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although no cap limits the move");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("MoveAxis could not start its time limit") != std::string::npos);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(axis_stop_count(*st, 0) > stops_before);  // the axis just started is stopped
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651: the cap stop is verified, and a mount that keeps moving through it is stopped 3 times, then Slewing raises the
+// kept error and nothing more goes out for this move.
+TEST_CASE("Celestron MoveAxis - a cap stop the mount ignores is sent 3 times and Slewing raises it",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    start_cap(clock, [&] { REQUIRE_NOTHROW(driver->move_axis(0, 1.0)); });  // RA: the fake handset drifts RA only
+    const int stops_before = axis_stop_count(*st, 0);
+    step_virtual(clock, std::chrono::seconds(59));
+    st->unsettled.store(true);  // the mount keeps moving through every stop
+    step_virtual_fine(clock, std::chrono::seconds(8));
+    CHECK(axis_stop_count(*st, 0) == stops_before + 3 * 2);
+    std::string message;
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
+    CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
+    step_virtual_fine(clock, std::chrono::seconds(10));
+    CHECK(axis_stop_count(*st, 0) == stops_before + 3 * 2);  // no retry from the cap
+    st->unsettled.store(false);
+    driver->set_connected(false);
+}
+
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis(axis, 0) takes the axis, so the cap whose 60 s passes right after it
+// sends no stop of its own.
+TEST_CASE("Celestron MoveAxis - a MoveAxis(axis, 0) that lands as the cap fires gets no cap stop after it",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int axis = GENERATE(0, 1);
+
+    REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+    step_virtual(clock, std::chrono::seconds(59));
+    REQUIRE_NOTHROW(driver->move_axis(axis, 0.0));
+    const int stops_after_client = axis_stop_count(*st, axis);
+    step_virtual_fine(clock, std::chrono::seconds(8));  // the first move's 60 s passes
+    CHECK(axis_stop_count(*st, axis) == stops_after_client);
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// #2651: FindHome takes both axes from a MoveAxis, as Park and the slews do, so the jog no longer reports Slewing once
+// the home lands, and the MoveAxis cap sends no stop and raises nothing at the jog's 60 s.
+TEST_CASE("Celestron MoveAxis - a FindHome over a jog reads not slewing once home and leaves no cap",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int axis = GENERATE(0, 1);
+
+    REQUIRE_NOTHROW(driver->move_axis(axis, 1.0));
+    step_virtual(clock, std::chrono::seconds(5));
+    REQUIRE_NOTHROW(driver->find_home());
+    st->no_motion.store(true);  // the mount that took the home reports no GOTO on L
+    const int stops_before = axis_stop_count(*st, axis);
+    step_virtual(clock, std::chrono::seconds(3));  // the status poll sees MC_LEVEL_DONE
+    REQUIRE(driver->get_at_home());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    step_virtual(clock, std::chrono::seconds(60));  // past the jog's 60 s
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(axis_stop_count(*st, axis) == stops_before);
     driver->set_connected(false);
 }
 

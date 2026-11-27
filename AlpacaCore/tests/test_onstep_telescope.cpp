@@ -14,6 +14,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_guards.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
 
@@ -936,13 +937,13 @@ struct MoveAxisFake {
         REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     }
 
-    // Starts or changes a move, and waits until the new re-send body waits on
+    // Starts or changes a move, and waits until the new re-send body and the new cap body wait on
     // the clock: a replaced body may still be registered for a moment, so the
-    // rendezvous is the wait count, which only the new body's wait raises.
+    // rendezvous is the wait count, which only the new bodies' waits raise.
     void start_move(alpacacore::TelescopeDriver& driver, int axis, double rate) {
         const auto before = clock.wait_count();
         driver.move_axis(axis, rate);
-        REQUIRE(clock.wait_for_wait_count(before + 1, std::chrono::seconds(5)));
+        REQUIRE(clock.wait_for_wait_count(before + 2, std::chrono::seconds(5)));
     }
 
     // One re-send interval (7 s) with the re-send body waiting for it.
@@ -1261,6 +1262,34 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis whose re-send cannot start stops
         CHECK(fake.logged(":Qn#", 1));
         CHECK(fake.logged(":Qs#", 1));
     }
+    fake.guide_active->store(false);  // the mount stopped
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651 review: the same for the 60 s cap body. A cap the slot refuses leaves no jog running uncapped: MoveAxis stops
+// the axis it just started and fails.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis whose cap cannot start stops the axis and fails",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    alpacacore::vendor::onstep::set_move_axis_cap_spawn_for_testing(
+        *driver, [](const std::function<void()>&) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    fake.guide_active->store(true);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although no cap limits the move");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(fake.logged(":Me#", 1));
+    CHECK(fake.logged(":Qe#", 1));
+    CHECK(fake.logged(":Qw#", 1));
     fake.guide_active->store(false);  // the mount stopped
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -4687,10 +4716,136 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis past its cap is stopped and Slew
     fake.advance(std::chrono::seconds(4));  // 60 s from the start
     CHECK(fake.count(":Qe#") == 1);
     CHECK(fake.count(":Qw#") == 1);
+    fake.guide_active->store(false);  // the mount obeys the stop; the cap verifies it (#2651)
+    for (int i = 0; i < 6; ++i) {
+        fake.advance(std::chrono::milliseconds(500));  // the verify's reads, one per round
+    }
     const auto resends = fake.count(":Me#");
     fake.advance(std::chrono::seconds(7));
     CHECK(fake.count(":Me#") == resends);  // no re-send after the cap
     require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
+// #2651 (decision 0006 rules 3 and 6): a MoveAxis renewal claims its axis before its rate command, so the cap of the
+// move it renews sends no stop while the renewal holds the wire, even when the first move's 60 s passes then.
+TEST_CASE("OnStep Telescope Driver - a renewal that lands as the cap fires is not stopped by the old cap",
+          "[onstep][telescope][unit][goto-safety]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    for (int i = 0; i < 8; ++i) {
+        fake.advance(std::chrono::seconds(7));  // 56 s
+    }
+    REQUIRE(fake.count(":Qe#") == 0);
+    std::atomic<bool> fired{false};
+    alpacacore::vendor::onstep::set_move_axis_send_hook_for_testing(*driver, [&] {
+        if (!fired.exchange(true)) fake.clock.advance(std::chrono::seconds(6));  // 62 s, mid-renewal
+    });
+    fake.start_move(*driver, 0, 1.0);
+    alpacacore::vendor::onstep::set_move_axis_send_hook_for_testing(*driver, nullptr);
+    fake.advance(std::chrono::seconds(7));
+    CHECK(fake.count(":Qe#") == 0);
+    CHECK(fake.count(":Qw#") == 0);
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #2651 (review): two MoveAxis calls on one axis start their cap bodies after the driver locks are released, so the
+// older call's start can land after the newer one's. The older body would replace the newer one and stop the newer jog
+// at the older call's 60 s: the newer jog must keep its own.
+TEST_CASE("OnStep Telescope Driver - an older MoveAxis whose cap starts last leaves the newer jog its own 60 s",
+          "[onstep][telescope][unit][goto-safety]") {
+    alpacacore::test::Latch older_held;  // declared first: it outlives the driver the hook below is set on
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);
+    std::atomic<int> calls{0};
+    alpacacore::vendor::onstep::set_move_axis_cap_before_start_hook_for_testing(*driver, [&] {
+        if (calls.fetch_add(1) == 0) older_held.block();  // only the first (older) call waits here
+    });
+    std::thread older([&] { driver->move_axis(0, 1.0); });
+    REQUIRE(older_held.wait_entered());
+    fake.advance(std::chrono::seconds(7));
+    fake.start_move(*driver, 0, 1.0);  // the newer call starts its cap body first, 7 s later
+    older_held.release();
+    older.join();
+    alpacacore::vendor::onstep::set_move_axis_cap_before_start_hook_for_testing(*driver, nullptr);
+    // The re-send body and the newer cap body both wait on the clock before time moves again: start_move()'s
+    // rendezvous also counts the re-send body's wait, so the cap body may not be waiting yet.
+    REQUIRE(fake.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    for (int i = 0; i < 8; ++i) {
+        fake.advance(std::chrono::seconds(7));  // 63 s from the older call: past its 60 s, short of the newer's 67 s
+    }
+    CHECK(fake.count(":Qe#") == 0);
+    CHECK(fake.count(":Qw#") == 0);
+    CHECK(driver->get_slewing());
+    fake.advance(std::chrono::seconds(7));  // past the newer jog's own 60 s
+    CHECK(fake.logged(":Qe#", 1));          // the stop is serial I/O after the wake: wait for it in real time
+    driver->set_connected(false);
+}
+
+// #2651: the cap no longer rides on the re-send body. Firmware that never sends 'g' ends the re-send body at its first
+// tick, and the 60 s cap still stops the axis.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis on firmware without status g is still stopped at 60 s",
+          "[onstep][telescope][unit][goto-safety]") {
+    MoveAxisFake fake(false);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.start_move(*driver, 0, 1.0);
+    fake.advance(std::chrono::seconds(7));  // the re-send body's first tick ends it: no 'g'
+    fake.advance(std::chrono::seconds(52));
+    CHECK(fake.count(":Qe#") == 0);
+    fake.advance(std::chrono::seconds(1));  // 60 s from the start
+    CHECK(fake.count(":Qe#") == 1);
+    CHECK(fake.count(":Qw#") == 1);
+    for (int i = 0; i < 6; ++i) {
+        fake.advance(std::chrono::milliseconds(500));  // the verify's reads, one per round
+    }
+    std::string message;
+    try {
+        (void)driver->get_slewing();
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(message.find("MoveAxis on axis 0 ran 60 s, the longest allowed; the driver stopped it") != std::string::npos);
+    driver->set_connected(false);
+}
+
+// #2651: a cap stop the mount ignores (it still reports motion) is sent 3 times, then Slewing raises the kept error and
+// nothing more goes out for this move.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis cap stop the mount ignores is sent 3 times and Slewing raises it",
+          "[onstep][telescope][unit][goto-safety]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    fake.guide_active->store(true);  // the mount keeps moving through every stop
+    fake.start_move(*driver, 0, 1.0);
+    for (int i = 0; i < 8; ++i) {
+        fake.advance(std::chrono::seconds(7));  // 56 s
+    }
+    fake.advance(std::chrono::seconds(4));  // 60 s: the first stop
+    for (int i = 0; i < 16; ++i) {
+        fake.advance(std::chrono::milliseconds(500));  // 8 s of verify rounds
+    }
+    CHECK(fake.count(":Qe#") == 3);
+    CHECK(fake.count(":Qw#") == 3);
+    std::string message;
+    try {
+        (void)driver->get_slewing();
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
+    fake.advance(std::chrono::seconds(30));
+    CHECK(fake.count(":Qe#") == 3);  // no further retry from the cap
     driver->set_connected(false);
 }
 
@@ -4819,7 +4974,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis whose cap stop fails is never re
     } sink_guard;
     alpacacore::logging::set_log_sink(
         [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
-            if (level == alpacacore::logging::LogLevel::Error && component == "OnStep" &&
+            if (level == alpacacore::logging::LogLevel::Warn && component == "MotionGuards" &&
                 message.find("the stop failed") != std::string::npos) {
                 ++cap_errors;
             }
@@ -4843,7 +4998,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis whose cap stop fails is never re
     for (int i = 0; i < 5; ++i) {
         fake.advance(std::chrono::seconds(7));
     }
-    CHECK(cap_errors.load() == 1);            // one stop attempt, no spin
+    CHECK(cap_errors.load() == 3);            // the guard's 3 stops, no spin and no further retry
     CHECK(resends.load() == resends_before);  // never re-sent after the cap
     CHECK(fake.clock.waiter_count() == 0);    // the re-send body has ended
     // The dropped connection is a lost link (the stop met the hangup), so every member answers NotConnected first
@@ -4862,9 +5017,11 @@ TEST_CASE("OnStep Telescope Driver - a stored motion failure does not outlive a 
     fake.guide_active->store(true);
     fake.start_move(*driver, 0, 1.0);
     fake.advance(std::chrono::seconds(60));  // the cap: the axis is stopped
+    fake.guide_active->store(false);         // the mount obeys the stop; the cap verifies it (#2651)
+    for (int i = 0; i < 6; ++i) {
+        fake.advance(std::chrono::milliseconds(500));  // the verify's reads, one per round
+    }
     require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
-
-    fake.guide_active->store(false);
     driver->set_connected(false);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     CHECK_NOTHROW((void)driver->get_slewing());
