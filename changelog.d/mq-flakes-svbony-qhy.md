@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **Two merge-queue flakes: SVBONY pulse-guide removal and QHY late exposure** (AlpacaCore tests). "a removal error from a pulse guide drops Connected" read IsPulseGuiding after the loss closed the handle but before the pulse drain stored its failure, and got `true` with no error; it now waits for the error to land. "an exposure the SDK still reports running is read once its time has passed (#2721)" could advance the fake task clock before the exposure poll registered its next wait, so that wait never expired; it now meets the waiter with `wait_for_wait_count` before the advance. Test-only: no driver change.
