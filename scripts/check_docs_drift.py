@@ -2986,6 +2986,12 @@ def _adoption_file_findings(names, records):
     return findings
 
 
+def _adoption_names(root):
+    """Every file name under docs/adoption/, so a misnamed roster is reported rather than skipped."""
+    folder = Path(root) / ADOPTION_DIR
+    return sorted(p.name for p in folder.iterdir() if p.is_file()) if folder.is_dir() else []
+
+
 def _adoption_bodies(root):
     """[(where, `## Adoption` body)] for every roster file under docs/adoption/."""
     out = []
@@ -3007,7 +3013,7 @@ def check_decision_adoption(root=ROOT):
                 files[path] = full.read_text(encoding="utf-8", errors="replace")
     records = {p.name: p.read_text(encoding="utf-8", errors="replace")
                for p in (root / DECISION_DIR).glob("0*.md")}
-    findings = _adoption_file_findings([p.name for p in (root / ADOPTION_DIR).glob("0*.md")], records)
+    findings = _adoption_file_findings(_adoption_names(root), records)
     adopting = 0
     for where, body in _adoption_bodies(root):
         if body is None:
@@ -3021,8 +3027,8 @@ def check_decision_adoption(root=ROOT):
     return findings
 
 
-# Rosters for records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
-MIN_ADOPTION_RECORDS = 6
+# One roster each for records 0005, 0006, 0009, 0010, 0014, 0015, 0016, 0017, 0020, 0022 and 0027.
+MIN_ADOPTION_RECORDS = 11
 
 
 def _adoption_unfinished_rows(where, body):
@@ -4833,6 +4839,15 @@ def self_test():
           any("0003-gone.md" in x and "no decision record" in x for x in f))
     f = _adoption_file_findings(["0002-second.md"], pair_records)
     check("adoption files: a roster of a retired record is reported", any("retired" in x for x in f))
+    f = _adoption_file_findings(["10-snapshot.md", "README.md"], pair_records)
+    check("adoption files: a file not named NNNN-<slug>.md is reported, not skipped",
+          any("10-snapshot.md" in x for x in f) and any("README.md" in x for x in f))
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / ADOPTION_DIR).mkdir(parents=True)
+        for stray in ("0001-example.md", "10-snapshot.md", "README.md"):
+            (Path(tmp) / ADOPTION_DIR / stray).write_text("x", encoding="utf-8")
+        check("adoption files: every file in the folder is listed, not only 0*.md",
+              _adoption_names(tmp) == ["0001-example.md", "10-snapshot.md", "README.md"])
 
     pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
               "\n      - name: Next\n          ver=9.9.9\n")
