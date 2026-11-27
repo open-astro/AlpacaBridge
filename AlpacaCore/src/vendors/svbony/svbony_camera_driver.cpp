@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
@@ -36,6 +37,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace alpacacore::vendor::svbony {
 
@@ -110,9 +112,7 @@ public:
           roi_start_x_effective_(0),
           roi_start_y_effective_(0),
           start_x_(0),
-          start_y_(0),
-          pulse_guiding_(false),
-          pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
+          start_y_(0) {
         preload_camera_info_locked();
     }
 
@@ -120,6 +120,8 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // A pulse body reaches the SDK and the session (a loss): joined before either goes (#2735).
+        close_pulses();
         // The SDK stop first, then the join: the exposure body is gone before the camera closes (decision 0020
         // rules 5 and 8).
         (void)stop_and_join_exposure();
@@ -221,6 +223,7 @@ public:
             bool closed = false;
             ~ReopenIfConnected() {
                 if (closed && driver.link_.is_open()) {
+                    driver.open_pulses();
                     try {
                         driver.session_.open();
                     } catch (const std::exception& e) {
@@ -237,6 +240,9 @@ public:
             // that passed its connection check before this disconnect raises NotConnected and runs no body. A
             // stop that fails is kept for ImageReady (session fail) and the disconnect goes on to close the camera.
             (void)stop_and_join_exposure();
+            // #2735: the same for the pulse slot. A queued pulse sends nothing; one inside SVBPulseGuide, which has no
+            // cancel, is waited for (at most its own duration). A PulseGuide from here on raises NotConnected.
+            close_pulses();
             reopen.closed = true;
         }
         std::unique_lock<std::mutex> lock(mutex_);
@@ -290,6 +296,7 @@ public:
             if (opened_.load()) {
                 session_.disconnect_and_join();
             }
+            close_pulses();  // the pulse bodies a lost link left (#2735)
             release_open(/*swallow_all=*/true);
             opened_.store(false);
             {
@@ -407,6 +414,8 @@ public:
                 unit_label_ = serial.empty() ? "SVBONY camera id " + std::to_string(resolved_id)
                                              : "SVBONY camera " + printable(serial);
             }
+            // Before the publish: until it, a PulseGuide still meets the link check under mutex_.
+            open_pulses();
             lock.lock();
             camera_id_ = resolved_id;
             camera_info_ = std::move(info);
@@ -735,20 +744,20 @@ public:
         return session_.image_ready();
     }
 
+    // True while a pulse the client asked for has not returned from SVBPulseGuide, queued ones included (#2735). The
+    // newest pulse's failure is raised until the next PulseGuide or a Connect or Disconnect (the ASCOM async FAQ).
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_.load()) {
-            return false;
+        if (pulses_running_.load() > 0) {
+            return true;
         }
-        // Expiry check and clear under ONE mutex_ hold: an unlocked
-        // store(false) after the check could overwrite a concurrent
-        // pulse_guide's fresh flag/end-time write and falsely report
-        // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
-        if (clock_.now() >= pulse_guiding_end_) {
-            pulse_guiding_.store(false);
-            return false;
+        if (pulses_running_.load() > 0) {
+            return true;
         }
-        return true;
+        if (pulse_failure_) {
+            throw AlpacaException(pulse_failure_->second, pulse_failure_->first);
+        }
+        return false;
     }
 
     double get_last_exposure_duration() const override {
@@ -1031,42 +1040,43 @@ public:
             break;
         }
 
-        // Serialise pulse guides against each other (M18 sweep): without this,
-        // an overlapping call's flag/end-time writes interleave with ours, and
-        // the first pulse's completion clear below would falsely report
-        // IsPulseGuiding=false while the second pulse is still in flight.
-        // SVBPulseGuide blocks for the pulse duration, so an overlapping call
-        // simply queues here (never holding mutex_ — status polls stay live).
-        std::lock_guard<std::mutex> pulse_lock(pulse_guide_serial_mutex_);
-
-        // Publish "guiding" BEFORE the blocking call: SVBPulseGuide returns
-        // only after the pulse completes, so setting the flag afterwards
-        // reported IsPulseGuiding=false during the guide and true for a
-        // spurious extra duration afterwards. The end timestamp is written
-        // first (under mutex_) so a reader that observes the flag can never
-        // read a stale epoch end time and self-clear early. No detached
-        // clear thread: the call is synchronous, so the flag is cleared
-        // right after it returns (and on throw), and the timestamp-based
-        // getter covers readers while the call is in flight.
+        // #2735: SVBPulseGuide returns only after the pulse, so the call runs in pulse_slot_ and PulseGuide returns at
+        // once (ConformU's 1 s target), as on the QHY camera (#1736). A new pulse supersedes the running body without
+        // a join; a superseded pulse is still a pulse the client asked for, so it queues on pulse_guide_serial_mutex_
+        // and guides once the SDK call before it returns. With three older pulses still queued the slot waits at most
+        // 2 s and refuses with InvalidOperation (decision 0006 rule 2). One initiator at a time, so a refusal rolls
+        // back exactly; no body takes pulse_initiator_mutex_.
+        std::lock_guard<std::mutex> initiator(pulse_initiator_mutex_);
+        if (!pulses_open_) {
+            throw_not_connected();
+        }
+        const std::uint64_t epoch = pulse_epoch_.load();
+        std::uint64_t pulse = 0;
+        int id = -1;
+        std::optional<std::pair<int, std::string>> previous_failure;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
-            pulse_guiding_.store(true);
+            ensure_connected();
+            if (camera_id_ < 0) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            id = camera_id_;
+            previous_failure = std::exchange(pulse_failure_, std::nullopt);
+            pulses_running_.fetch_add(1);
+            pulse = ++pulse_count_;
         }
-        // SVBPulseGuide blocks on the camera side for the full pulse — it
-        // must NOT hold mutex_ (it would stall every status poll for the
-        // duration), so this keeps the bare id snapshot like the exposure
-        // body. The disconnect path publishes disconnected before closing,
-        // so the worst case is an SDK error on a closed id, not a
-        // use-after-free (issue #116).
         try {
-            const int id = camera_id_value();
-            on_link(LinkCaller::Unlocked, [&] { sdk_.pulse_guide(id, guide_direction, duration); });
+            pulse_slot_.start([this, id, guide_direction, duration, pulse, epoch](util::OperationContext&) {
+                run_pulse(id, guide_direction, duration, pulse, epoch);
+            });
         } catch (...) {
-            pulse_guiding_.store(false);
+            // A refused start changes nothing: the count, the sequence and the kept failure go back.
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulses_running_.fetch_sub(1);
+            --pulse_count_;
+            pulse_failure_ = std::move(previous_failure);
             throw;
         }
-        pulse_guiding_.store(false);
     }
 
     void start_exposure(double duration, bool light) override {
@@ -1383,12 +1393,19 @@ private:
     // under mutex_: a body's own stop result, read before a newer one, never overwrites it.
     mutable std::uint64_t capture_stop_epoch_{0};
 
-    mutable std::atomic<bool> pulse_guiding_;
-    std::chrono::steady_clock::time_point pulse_guiding_end_;
-    // Serialises pulse_guide against itself (M18 sweep): SVBPulseGuide blocks
-    // for the pulse duration, and the flag clear after it must not race a
-    // second in-flight pulse's flag/end-time publish. Taken before mutex_, never under it: pulse_guide takes
-    // mutex_ under it to publish the flag, and its loss path (note_loss) takes mutex_ too.
+    // Pulse guide (#2735). pulse_initiator_mutex_ orders pulse_guide(), close_pulses() and open_pulses(), is taken
+    // before mutex_ and never by a body; it guards pulses_open_ (false from a Disconnect's close of the pulse slot
+    // until the next Connect publishes). pulse_epoch_ is bumped by every close: a queued body started before it sends
+    // nothing. pulses_running_ counts the pulses whose body has not returned (IsPulseGuiding), pulse_count_ numbers
+    // them and pulse_failure_ keeps the newest one's failure; the three are written under mutex_.
+    std::mutex pulse_initiator_mutex_;
+    bool pulses_open_{false};
+    std::atomic<std::uint64_t> pulse_epoch_{0};
+    std::atomic<int> pulses_running_{0};
+    std::uint64_t pulse_count_{0};
+    std::optional<std::pair<int, std::string>> pulse_failure_;
+    // Serialises the SVBPulseGuide calls (M18 sweep): a superseded pulse body queues here behind the one in the SDK.
+    // Taken by a body before mutex_, never under it: the loss path (note_loss) and the body's end take mutex_.
     std::mutex pulse_guide_serial_mutex_;
 
     // Decision 0020: the exposure, its state, the LastExposure* values, the kept failure and the watchdog (the
@@ -1396,11 +1413,15 @@ private:
     // the exposure body touches: destroyed first, so the body is joined before they die. Mutable because the
     // loss path of a const getter fails the exposure in flight.
     mutable util::CaptureSession session_{"SVBONY", clock_, std::chrono::seconds(15)};
+    // The pulse bodies (#2735, decision 0006). Declared after every member a body uses, the session included (a loss
+    // fails the exposure in flight): destroyed first, so a body is joined before they die.
+    util::OperationGeneration pulse_generation_;
+    util::AsyncOperation pulse_slot_{"svbony-pulse-guide", pulse_generation_, clock_};
 
     // Which lock a device call's caller holds, so a loss closes the dead handle under mutex_ (on_link()).
     enum class LinkCaller : std::uint8_t {
         StateLocked,  // the caller holds mutex_ (with_camera-style short calls)
-        Unlocked,     // the caller holds no driver lock (AbortExposure is StateLocked; PulseGuide is this)
+        Unlocked,     // the caller holds no driver lock (AbortExposure is StateLocked; the pulse body is this)
         Body,         // the exposure body: its own throw ends the exposure, and it closes the handle on its way out
     };
 
@@ -1528,11 +1549,55 @@ private:
         return stopped;
     }
 
-    void reset_pulse_guide_state_locked() {
-        // A disconnect racing an in-flight pulse must not leave
-        // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_.store(false);
-        pulse_guiding_end_ = {};
+    // Connect and Disconnect, after close_pulses() joined every pulse body: a kept pulse failure ends here.
+    void reset_pulse_guide_state_locked() { pulse_failure_.reset(); }
+
+    // A pulse body (#2735). A pulse queued behind another sends nothing when a Disconnect, a Connect or the
+    // destructor closed the pulse slot after it started (pulse_epoch_), and fails with NotConnected when the link is
+    // gone. Only the newest pulse of the current connection keeps its failure, as the slot keeps only its newest
+    // body's (decision 0006); an older one's is logged.
+    void run_pulse(int id, SVBGuideDirection direction, int duration, std::uint64_t pulse, std::uint64_t epoch) {
+        std::optional<std::pair<int, std::string>> failure;
+        {
+            std::lock_guard<std::mutex> serial(pulse_guide_serial_mutex_);
+            if (pulse_epoch_.load() == epoch) {
+                try {
+                    ensure_connected();
+                    on_link(LinkCaller::Unlocked, [&] { sdk_.pulse_guide(id, direction, duration); });
+                } catch (const AlpacaException& e) {
+                    failure.emplace(e.error_code(), e.what());
+                } catch (const std::exception& e) {
+                    failure.emplace(AlpacaError::DriverException, e.what());
+                } catch (...) {
+                    failure.emplace(AlpacaError::DriverException, "SVBONY pulse guide failed: non-std exception");
+                }
+            }
+        }
+        if (failure) {
+            ALPACA_LOG_WARN("SVBONY", "PulseGuide failed: " + printable(failure->second));
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (failure && pulse == pulse_count_ && pulse_epoch_.load() == epoch) {
+            pulse_failure_ = std::move(failure);
+        }
+        pulses_running_.fetch_sub(1);
+    }
+
+    // Disconnect, a Connect and the destructor: refuse new pulses, end the queued ones and join every body. Called
+    // without mutex_ (a body takes it). A body inside SVBPulseGuide, which takes no cancel, is waited for: at most its
+    // pulse, kDefaultMaxPulseGuideMs.
+    void close_pulses() {
+        {
+            std::lock_guard<std::mutex> initiator(pulse_initiator_mutex_);
+            pulses_open_ = false;
+            pulse_epoch_.fetch_add(1);
+        }
+        pulse_slot_.cancel_all_and_join();
+    }
+
+    void open_pulses() {
+        std::lock_guard<std::mutex> initiator(pulse_initiator_mutex_);
+        pulses_open_ = true;
     }
 
     FrameConfig frame_config_locked() const {
@@ -1846,18 +1911,10 @@ private:
         }
     }
 
-    int camera_id_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_id_ < 0) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
-        return camera_id_;
-    }
-
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
     // cannot close the camera underneath the SDK call (driver-lifecycle.instructions.md shape (a)).
     // Fast register/control calls only — the exposure body and the
-    // duration-blocking pulse_guide keep their bare id snapshots. Must NOT
+    // duration-blocking pulse body keep their bare id snapshots. Must NOT
     // be called with mutex_ already held (non-recursive mutex).
     template <typename Fn>
     auto with_camera(Fn&& fn) const -> decltype(fn(0)) {
