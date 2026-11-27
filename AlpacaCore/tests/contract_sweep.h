@@ -1217,6 +1217,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "telescope", "fake_http_client.h"},            // the same, as a Telescope
     {"remotealpaca", "focuser", "fake_http_client.h"},              // the same, as a Focuser
     {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
+    {"weewx", "observingconditions", "fake_http_client.h"},         // a scripted WeeWX JSON feed
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},

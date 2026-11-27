@@ -31,3 +31,7 @@ Tests run the poll on `FakeTaskClock` (`test_weewx_observingconditions.cpp`, wit
 `LoopbackHttpServer`, which the production factory's libcurl client reaches through its trailing clock argument); the
 staleness loss under contention is a `[stress]` case in `test_weewx_concurrency_stress.cpp`, over `FakeHttpClient`
 behind `LockedHttpClient`.
+
+The fake ConformU row (`scripts/conformu_fake_runs.tsv`, #2697) runs the driver over `FakeHttpClient` with a scripted
+feed of all seven sensors (`conformu_observingconditions_factories.h`), with the poll on the real task clock; it is
+fake evidence only.

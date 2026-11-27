@@ -37,6 +37,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <functional>
 #include <future>
 #include <limits>
@@ -149,6 +150,11 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 
 #include "alpaca_upstream_script.h"
+#include "fake_http_client.h"
+#endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+
 #include "fake_http_client.h"
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
@@ -3040,6 +3046,44 @@ Tier2Host tier2_host_remotealpaca_covercalibrator() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_WEEWX
+// The WeeWX feed over FakeHttpClient (recipe of test_weewx_observingconditions.cpp). Connect makes one fetch, so the
+// hold is that fetch's delay, a connect_hold() site (connect_hold_gate.h): kHold keeps it open past kHoldWindow, and
+// the 5 s fetch timeout is never reached because the fake does not apply it. The failing leg is a feed that refuses
+// every connection, as a stopped web server does.
+Tier2Host tier2_host_weewx_observingconditions() {
+    Tier2Host h{"weewx_observingconditions",
+                "weewx",
+                "observingconditions",
+                "fake_http_client.h",
+                DeviceType::ObservingConditions,
+                "weewx_observingconditions",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto http = std::make_shared<alpacacore::test::FakeHttpClient>([] {
+            const long long now = static_cast<long long>(std::time(nullptr));
+            return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},"outHumidity":{"value":40.0},)"
+                   R"("dateTime":{"value":)" +
+                   std::to_string(now) + "}}}}";
+        });
+        if (hold) http->set_delay(kHold);
+        if (refuse) http->refuse_next(1000000);
+        alpacacore::vendor::weewx::WeeWxHttpConfig config;
+        config.url = "http://127.0.0.1:11111/weewx.json";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, http->client());
+        hosted.fake = http;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GEMINI
 // FakeGeminiFocuser over a pty; its handshake delay is the hold knob that makes Connecting
 // deterministic (recipe of test_gemini_focuser.cpp).
@@ -3647,6 +3691,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+#define CS2_WEEWX(X) X(weewx_observingconditions, PRB)
+#else
+#define CS2_WEEWX(X)
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
 #define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
 #else
@@ -3696,6 +3745,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_IOPTRON(X) \
     CS2_ASTROASIS(X) \
     CS2_REMOTEALPACA(X) \
+    CS2_WEEWX(X) \
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
@@ -5346,6 +5396,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
     CS2_ENABLED("remotealpaca")
+#endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+    CS2_ENABLED("weewx")
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS2_ENABLED("gemini")
