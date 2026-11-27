@@ -3279,7 +3279,7 @@ TEST_CASE("QHY Camera Driver - an exposure the SDK still reports running is read
     driver->set_connected(true);
     const auto waits = clock.wait_count();
     driver->start_exposure(2.0, true);
-    // The body has armed and waits in its poll, so the exposure end is fixed on the task clock and the advance wakes it.
+    // The body has armed and waits in its poll: the exposure end is fixed on the task clock, so the advance wakes it.
     REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
     CHECK(fake.call_count("get_exposure_remaining") > 0);
     CHECK(fake.call_count("get_single_frame") == 0);
