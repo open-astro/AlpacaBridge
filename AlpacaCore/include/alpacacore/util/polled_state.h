@@ -51,9 +51,11 @@ namespace alpacacore::util {
  *   refuses the cache (served() throws DriverException) but the probe keeps
  *   running; the next good probe clears it.
  * - A fault that has stood for util::kLinkStalenessBound, or a frame older
- *   than it, sets the loss latch once and calls `on_lost()` on the poll thread
- *   with no driver lock held, then the poll ends (no autonomous reconnect,
- *   decision 0009). reset() clears the latch for the next connect.
+ *   than it with no probe answered since, sets the loss latch once and calls
+ *   `on_lost()` on the poll thread with no driver lock held, then the poll
+ *   ends (no autonomous reconnect, decision 0009). A probe whose frame a
+ *   write dropped still proves the link, but never makes the frame fresher.
+ *   reset() clears the latch for the next connect.
  * - lose_link(), from the probe on positive evidence that the transport is
  *   gone (decision 0009 rule 2a), sets the same latch at once; the poll ends
  *   after its current cycle and calls `on_lost()` once, as above.
@@ -130,6 +132,7 @@ public:
         std::lock_guard<std::mutex> lock(health_mutex_);
         health_.reset();
         ++epoch_;  // after the snapshot reset: a verdict read from the old frame can no longer latch
+        answered_at_.reset();
         lost_.store(false);
         lost_notified_.store(false);
     }
@@ -148,7 +151,7 @@ public:
         throw_if_lost();
         const auto epoch = current_epoch();
         const auto reading = snapshot_.read();
-        if (reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound) {
+        if (reading.has_value() && link_silent(*reading)) {
             latch_lost(epoch);
             throw_if_lost();
         }
@@ -214,6 +217,19 @@ private:
         return epoch == epoch_ && !lost_.exchange(true);
     }
 
+    // A frame older than the bound, and no probe answered within it: the frame's age alone would
+    // lose a healthy link whose every poll a write-through dropped.
+    bool link_silent(const Reading& reading) const {
+        auto alive = reading.measured_at;
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (answered_at_.has_value() && *answered_at_ > alive) {
+                alive = *answered_at_;
+            }
+        }
+        return clock_.now() - alive >= kLinkStalenessBound;
+    }
+
     void throw_if_lost() const {
         if (lost_.load()) {
             throw AlpacaException(config_.log_tag + " link lost; set Connected false then true to reconnect",
@@ -226,6 +242,7 @@ private:
     // the lines state the fact only.
     void poll_once() {
         const auto token = snapshot_.begin_poll();
+        const auto epoch = current_epoch();
         std::optional<Frame> frame;
         try {
             frame = probe_();
@@ -237,6 +254,9 @@ private:
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.on_reply()) {
                 ALPACA_LOG_INFO(config_.log_tag, "Communications restored");
+            }
+            if (epoch == epoch_) {  // a probe from before a reset() proves nothing about the new session
+                answered_at_ = clock_.now();
             }
         }
         snapshot_.publish(token, std::move(*frame));
@@ -256,7 +276,7 @@ private:
         }
         if (!lost) {
             const auto reading = snapshot_.read();
-            lost = reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound;
+            lost = reading.has_value() && link_silent(*reading);
         }
         if (lost && latch_lost(epoch)) {
             ALPACA_LOG_ERROR(
@@ -309,6 +329,8 @@ private:
     PolledLinkHealth health_;
     // Bumped by reset() under health_mutex_: a loss verdict latches only in the connection it read.
     std::uint64_t epoch_ = 0;
+    // Task-clock time the last probe answered, in this epoch; freshness (`measured_at`) never reads it.
+    std::optional<TaskClock::clock::time_point> answered_at_;
     mutable std::atomic<bool> lost_{false};
     std::atomic<bool> lost_notified_{false};
     std::atomic<bool> paused_{false};

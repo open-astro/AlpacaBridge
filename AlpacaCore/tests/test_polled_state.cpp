@@ -483,7 +483,7 @@ TEST_CASE("PolledState - lose_link sets lost at once and the poll ends and calls
     CHECK_FALSE(rig.state->link_lost());
 }
 
-// Falsified by: polled_state.h:served() age the frame alone against kLinkStalenessBound, ignoring the last answered probe.
+// Falsified by: polled_state.h:link_silent() compare only measured_at against kLinkStalenessBound.
 TEST_CASE("PolledState - a write landing in every poll does not latch link loss on a healthy device",
           "[polled_state][unit]") {
     Rig rig;
