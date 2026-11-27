@@ -4658,7 +4658,8 @@ TEST_CASE("iOptron DestinationSideOfPier - after a +1 h Sync it names the side t
     REQUIRE_FALSE(driver->get_slewing());
     clock.advance(std::chrono::seconds(31));
 
-    const int landed = physical_side_for_ra(sent_ra);  // where the fake now is
+    CHECK(mount.ra_hours() == Catch::Approx(sent_ra).margin(1e-4));  // the fake's position: it landed there
+    const int landed = physical_side_for_ra(mount.ra_hours());
     CHECK(landed == 0);
     CHECK(destination == landed);
     CHECK(driver->get_side_of_pier() == landed);
