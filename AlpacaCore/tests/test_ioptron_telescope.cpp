@@ -790,8 +790,9 @@ TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Telescope Driver - AbortSlew on a reset connection after a latched fault answers NotConnected (#728)",
-          "[ioptron][telescope][unit][fake][fault]") {
+TEST_CASE(
+    "iOptron Telescope Driver - AbortSlew on a reset connection after a latched fault answers NotConnected (#728)",
+    "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     alpacacore::test::FakeTaskClock clock;
