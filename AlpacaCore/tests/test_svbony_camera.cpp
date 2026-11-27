@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -891,16 +892,178 @@ TEST_CASE("SVBONY Camera Driver - a PulseGuide longer than the bound is InvalidV
     camera->set_connected(false);
 }
 
+// #2735: the pulse runs in its body, so PulseGuide returns and the removal drops Connected there; IsPulseGuiding
+// raises the loss until a Connect clears it.
 TEST_CASE("SVBONY Camera Driver - a removal error from a pulse guide drops Connected",
           "[svbony][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeSVBSDK sdk;
     auto camera = svbony_connected_camera(sdk);
     sdk.fail_with_removal("pulse_guide");
 
+    camera->pulse_guide(0, 10);
+    REQUIRE(eventually([&] { return !camera->get_connected(); }));
+    REQUIRE(eventually([&] { return sdk.open_count() == 0; }));
+    const auto [code, text] = error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); });
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    CHECK(text == "pulse_guide: SVB_ERROR_CAMERA_REMOVED");
     require_alpaca_error([&] { camera->pulse_guide(0, 10); }, alpacacore::AlpacaError::NotConnected);
-    CHECK_FALSE(camera->get_connected());
+
+    camera->set_connected(true);
+    REQUIRE(camera->get_connected());
     CHECK_FALSE(camera->get_is_pulse_guiding());
-    CHECK(sdk.open_count() == 0);
+}
+
+// --- #2735: PulseGuide returns at once and the SDK pulse runs in a util::AsyncOperation slot ------------------
+
+namespace {
+
+// Ends what a pulse case leaves behind, the clock-blocked SDK pulse included: steps the clock until every thread
+// the case started has returned, then joins them. Declared after the camera, so it runs before the driver dies.
+struct PulseCaseCleanup {
+    alpacacore::test::FakeTaskClock& clock;
+    std::vector<std::thread> threads;
+    std::vector<std::atomic<bool>*> done;
+    ~PulseCaseCleanup() {
+        static_cast<void>(clock.drain_until(
+            [&] {
+                return std::all_of(done.begin(), done.end(), [](const std::atomic<bool>* d) { return d->load(); });
+            },
+            100ms, 5000ms));
+        for (auto& t : threads) {
+            if (t.joinable()) t.join();
+        }
+    }
+};
+
+std::unique_ptr<alpacacore::CameraDriver> svbony_camera_with_timed_pulses(alpacacore::test::FakeSVBSDK& sdk,
+                                                                          alpacacore::test::FakeTaskClock& clock) {
+    sdk.set_timing_clock(&clock);  // SVBPulseGuide blocks for its pulse on the case's clock
+    return svbony_camera_on_clock(sdk, clock);
+}
+
+}  // namespace
+
+// The red case of #2735: SVBPulseGuide blocks for the pulse, and PulseGuide ran it on the request thread, so every
+// 2 s ConformU pulse took 2 s against the 1 s target. PulseGuide now returns while the fake SDK's pulse is still
+// blocked on the task clock, and IsPulseGuiding reads true until the SDK call returns.
+TEST_CASE("SVBONY Camera Driver - PulseGuide returns before the pulse ends and IsPulseGuiding holds until it does",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> returned{false};
+    PulseCaseCleanup cleanup{clock, {}, {&returned}};
+    cleanup.threads.emplace_back([&] {
+        static_cast<void>(alpacacore::test::worker_code_of([&] { camera->pulse_guide(0, 2000); }));
+        returned = true;
+    });
+
+    CHECK(eventually([&] { return returned.load(); }));  // no clock advance: the pulse has not ended
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));           // the pulse body is inside SVBPulseGuide
+    CHECK(camera->get_is_pulse_guiding());
+    clock.advance(1999ms);
+    CHECK(camera->get_is_pulse_guiding());
+    clock.advance(1ms);
+    CHECK(eventually([&] { return !camera->get_is_pulse_guiding(); }));
+    CHECK(sdk.call_count("pulse_guide") == 1);
+}
+
+// Decision 0006 and #2735: a Disconnect cancels and joins the pulse slot, so it waits for the body inside
+// SVBPulseGuide (which takes no cancel) and the camera closes only after the SDK call returned.
+TEST_CASE("SVBONY Camera Driver - a Disconnect during a pulse joins the pulse body before the camera closes",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> pulse_returned{false};
+    std::atomic<bool> disconnected{false};
+    std::atomic<bool> guiding_at_close{true};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "close_camera") guiding_at_close = camera->get_is_pulse_guiding();
+    };
+    PulseCaseCleanup cleanup{clock, {}, {&pulse_returned, &disconnected}};
+    cleanup.threads.emplace_back([&] {
+        static_cast<void>(alpacacore::test::worker_code_of([&] { camera->pulse_guide(1, 2000); }));
+        pulse_returned = true;
+    });
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    cleanup.threads.emplace_back([&] {
+        static_cast<void>(alpacacore::test::worker_code_of([&] { camera->set_connected(false); }));
+        disconnected = true;
+    });
+
+    CHECK_FALSE(eventually([&] { return disconnected.load(); }, 300ms));  // waits for the pulse in the SDK
+    CHECK(sdk.call_count("close_camera") == 0);
+    clock.advance(2000ms);
+    REQUIRE(eventually([&] { return disconnected.load(); }));
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK_FALSE(guiding_at_close.load());
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    require_alpaca_error([&] { camera->pulse_guide(0, 10); }, alpacacore::AlpacaError::NotConnected);
+    sdk.before_call = nullptr;
+}
+
+// The QHY rule (#1736) on SVBONY (#2735): a PulseGuide while one runs supersedes the running body without a join and
+// returns at once; the new pulse queues behind the SDK call in flight and guides once it returns. IsPulseGuiding stays
+// true across the hand-over: the older pulse ending does not clear it.
+TEST_CASE("SVBONY Camera Driver - a second PulseGuide during a pulse queues behind it and IsPulseGuiding holds",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> returned{false};
+    PulseCaseCleanup cleanup{clock, {}, {&returned}};
+    cleanup.threads.emplace_back([&] {
+        static_cast<void>(alpacacore::test::worker_code_of([&] {
+            camera->pulse_guide(0, 1000);
+            static_cast<void>(clock.wait_for_waiters(1, 2000ms));  // the first pulse is inside SVBPulseGuide
+            camera->pulse_guide(2, 500);
+        }));
+        returned = true;
+    });
+
+    CHECK(eventually([&] { return returned.load(); }));
+    CHECK(sdk.call_count("pulse_guide") == 1);  // the second waits for the SDK call in flight
+    const auto waits = clock.wait_count();
+    clock.advance(1000ms);  // the first pulse ends; the second enters the SDK
+    REQUIRE(clock.wait_for_wait_count(waits + 1, 2000ms));
+    CHECK(sdk.call_count("pulse_guide") == 2);
+    CHECK(camera->get_is_pulse_guiding());
+    clock.advance(499ms);
+    CHECK(camera->get_is_pulse_guiding());
+    clock.advance(1ms);
+    CHECK(eventually([&] { return !camera->get_is_pulse_guiding(); }));
+}
+
+// The ASCOM async FAQ (ascom-contract "A failed async operation body keeps its error"): a pulse whose SDK call fails
+// is raised by IsPulseGuiding until the next PulseGuide or a Disconnect clears it (the Connect clear is in the removal
+// case above).
+TEST_CASE("SVBONY Camera Driver - a failed pulse is raised by IsPulseGuiding until the next PulseGuide or a Disconnect",
+          "[svbony][camera][unit][fake-sdk][issue2735]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_next("pulse_guide");
+    camera->pulse_guide(0, 10);
+    std::pair<int, std::string> raised{0, ""};
+    REQUIRE(eventually([&] {
+        raised = error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); });
+        return raised.first != 0;
+    }));
+    CHECK(raised.first == alpacacore::AlpacaError::DriverException);
+    CHECK(raised.second == "scripted one-shot SVBONY failure: pulse_guide");
+    CHECK(camera->get_connected());
+
+    SECTION("the next PulseGuide clears it") {
+        camera->pulse_guide(0, 10);
+        CHECK(eventually([&] { return error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); }).first == 0 &&
+                                      !camera->get_is_pulse_guiding(); }));
+        CHECK(sdk.call_count("pulse_guide") == 2);
+    }
+    SECTION("a Disconnect clears it") {
+        camera->set_connected(false);
+        CHECK(error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); }).first == 0);
+        CHECK_FALSE(camera->get_is_pulse_guiding());
+    }
 }
 
 // Rule 2 with decision 0020 rule 3: the body ends at the removal with no further read, Connected reads false, the
