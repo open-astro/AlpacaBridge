@@ -403,6 +403,35 @@ TEST_CASE("iOptron AbortSlew - a second AbortSlew keeps the stop check",
     rig.driver->set_connected(false);
 }
 
+// Falsified by: ioptron_telescope_driver.cpp run_stop_verify() dropping the `generation == slew_operation_generation_`
+// terms (owns_locked and the catch): the old check would send :Q# into the client's MoveAxis.
+TEST_CASE("iOptron AbortSlew - a MoveAxis ends the stop check, which sends no more stops",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    rig.driver->move_axis(0, rig.driver->get_axis_rate_ranges(0).front().first);
+    const int stops = rig.stops();
+    advance_for(rig.clock, std::chrono::seconds(5));
+    CHECK(rig.stops() == stops);  // no :Q# stops the client's move
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: the same generation terms as the MoveAxis case; Park moves the generation too.
+TEST_CASE("iOptron AbortSlew - a Park ends the stop check, which sends no more stops",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    rig.driver->park();
+    const int stops = rig.stops();
+    advance_for(rig.clock, std::chrono::seconds(5));
+    CHECK(rig.stops() == stops);
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
 // Falsified by: ioptron_telescope_driver.cpp abort_slew() never raising the stop-not-verified failure for Slewing.
 TEST_CASE("iOptron AbortSlew - a mount that ignores every stop gets 3 :Q# and Slewing raises",
           "[ioptron][telescope][abort][unit][goto-safety]") {
