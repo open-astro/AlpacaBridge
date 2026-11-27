@@ -866,6 +866,24 @@ TEST_CASE("FakeZWOSDK - the ConformU camera takes every bin up to MaxBin and a f
     }
 }
 
+// The wrapper reports each camera's SDK slot (zwo_sdk_wrapper.cpp enumerate_cameras, get_camera_info_by_index), and
+// the dew heater's index binding matches on it (#2697). Falsified by: FakeZWOSDK::enumerate_cameras or
+// get_camera_info_by_index leaving slot_index at its -1 default.
+TEST_CASE("FakeZWOSDK - enumeration and the index lookup report each camera's SDK slot", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    sdk.set_units({{3, "serial-a"}, {7, "serial-b"}});
+    const auto cameras = sdk.enumerate_cameras();
+    REQUIRE(cameras.size() == 2);
+    CHECK(cameras[0].camera_id == 3);
+    CHECK(cameras[0].slot_index == 0);
+    CHECK(cameras[1].camera_id == 7);
+    CHECK(cameras[1].slot_index == 1);
+    alpacacore::vendor::zwo::ZWOCameraInfo info;
+    REQUIRE(sdk.get_camera_info_by_index(1, info));
+    CHECK(info.camera_id == 7);
+    CHECK(info.slot_index == 1);
+}
+
 TEST_CASE("FakeZWOSDK - a target temperature outside the SDK's range is refused as InvalidValue",
           "[zwo][camera][unit]") {
     // Falsified by: the TargetTemperature caps spanning -500 to 300 and the fake storing any value (-273.25 C and

@@ -69,6 +69,8 @@
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include "fake_zwo_asiair_gpiod.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
@@ -2096,6 +2098,109 @@ Tier2Host tier2_host_zwo_rotator() {
     };
     return h;
 }
+// The dew heater of the fake camera (FakeZWOSDK's AntiDewHeater control) through ZWOSdkDewHeaterSdk: a before_call
+// hook on open_camera holds the connect open, fail_open fails it. The fake and the seam live in one holder, because
+// the driver keeps a reference to the seam and the seam one to the fake.
+struct ZwoDewHold {
+    alpacacore::test::FakeZWOSDK fake;
+    alpacacore::vendor::zwo::ZWOSdkDewHeaterSdk sdk{fake};
+};
+
+Tier2Host tier2_host_zwo_switch() {
+    Tier2Host h{"zwo_switch", "zwo", "switch", "fake_zwo_sdk.h", DeviceType::Switch, "zwo_switch", {}, true, {}, ""};
+    const auto make = [](ZwoDewHold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, s.sdk);
+    };
+    h.connectable = [make](bool hold) {
+        auto dew = std::make_shared<ZwoDewHold>();
+        if (hold) {
+            dew->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
+            };
+        }
+        return host_over(dew, make);
+    };
+    h.failing = [make]() {
+        auto dew = std::make_shared<ZwoDewHold>();
+        dew->fake.fail_open = true;
+        return host_over(dew, make);
+    };
+    return h;
+}
+
+// The ASIAIR Pro over the process-wide libgpiod stub chip (fake_zwo_asiair_gpiod.h): the request hold keeps the
+// connect open; a chip that does not exist fails it in the real gpiod_chip_open(). The holder boots every line high
+// and clears the hold when the host ends.
+struct AsiairStubChip {
+    explicit AsiairStubChip(std::chrono::milliseconds hold) {
+        alpacacore::test::stub_reset_levels(1);
+        alpacacore::test::stub_set_request_hold(hold);
+    }
+    ~AsiairStubChip() { alpacacore::test::stub_set_request_hold(std::chrono::milliseconds(0)); }
+    AsiairStubChip(const AsiairStubChip&) = delete;
+    AsiairStubChip& operator=(const AsiairStubChip&) = delete;
+};
+
+Tier2Host tier2_host_zwo_switch_asiair() {
+    Tier2Host h{"zwo_switch_asiair",
+                "zwo",
+                "switch",
+                "fake_zwo_asiair_gpiod.h",
+                DeviceType::Switch,
+                "zwo_switch_asiair",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto chip = std::make_shared<AsiairStubChip>(hold ? kHold : std::chrono::milliseconds(0));
+        return host_over(chip, [](AsiairStubChip&) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_asiair_switch(0, alpacacore::test::stub_asiair_pro_config());
+        });
+    };
+    h.failing = []() {
+        auto config = alpacacore::vendor::zwo::default_asiair_pro_config();
+        config.gpio_chip_path = "/dev/gpiochip-asiair-absent";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, config);
+        return hosted;
+    };
+    return h;
+}
+
+// The ASIAIR Plus (RK3568) over the ioctl stub playing pwm_gpio_compat (fake_zwo_asiair_plus_ioctl.h); a device that
+// does not exist fails the connect.
+Tier2Host tier2_host_zwo_switch_asiair_plus() {
+    Tier2Host h{"zwo_switch_asiair_plus",
+                "zwo",
+                "switch",
+                "fake_zwo_asiair_plus_ioctl.h",
+                DeviceType::Switch,
+                "zwo_switch_asiair_plus",
+                {},
+                false,
+                {},
+                ""};
+    h.connecting_unobservable =
+        "PwmGpioMiscBackend::open() (pwm_gpio_misc_backend.cpp) only opens the device and reads its sysfs driver link; "
+        "it sends no ioctl, so the stub of fake_zwo_asiair_plus_ioctl.h has no connect call to hold";
+    h.connectable = [](bool) {
+        auto device = std::make_shared<alpacacore::test::StubDeviceFile>(alpacacore::test::compat_device());
+        return host_over(device, [](const alpacacore::test::StubDeviceFile& f) -> std::unique_ptr<AlpacaDriver> {
+            auto config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+            config.device_path = f.path;
+            return alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, config, f.sysfs_root());
+        });
+    };
+    h.failing = []() {
+        auto config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+        config.device_path = "/dev/pwm-gpio-misc-absent";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, config);
+        return hosted;
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -3640,7 +3745,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 // CAM = a camera, which has static probes (#2259) and also gets the ImageArray and while-exposing cases.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB) X(zwo_switch, PRB) X(zwo_switch_asiair, PRB) X(zwo_switch_asiair_plus, PRB)
 #else
 #define CS2_ZWO(X)
 #endif

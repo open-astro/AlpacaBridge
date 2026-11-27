@@ -15,17 +15,19 @@
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <string>
+#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_zwo_asiair_gpiod.h"
 #include "power_port_test_dir.h"
-#include "zwo_asiair_stubs.h"
 
-// The libgpiod calls reach the in-memory chip of zwo_asiair_stubs.h (issues #772, #300) when a case names
+// The libgpiod calls reach the in-memory chip of fake_zwo_asiair_gpiod.h (issues #772, #300) when a case names
 // kStubChip; the default /dev/gpiochip0 still reaches the real library.
 namespace {
 
@@ -318,6 +320,32 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - a Disconnect before any Connect keeps 
 
 // Issue #1862: every ISwitchV3 member while connected, each value checked against the stub chip. Port 2 boots
 // off and Port 4 is a PWM port.
+// The stub chip's request hold (#2697), which the contract sweep's tier-2 host uses to keep a connect in flight.
+// Falsified by: zwo_asiair_stubs.cpp gpiod_chip_request_lines() not calling connect_hold().
+TEST_CASE("FakeZwoAsiairGpiod stub chip - a request hold keeps the connect open until it ends",
+          "[zwo][switch][asiair][unit]") {
+    constexpr std::chrono::milliseconds kRequestHold{300};
+    stub_reset_levels(1);
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, alpacacore::test::stub_asiair_pro_config());
+    alpacacore::test::stub_set_request_hold(kRequestHold);
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->connect();
+    std::this_thread::sleep_for(kRequestHold / 3);
+    // Inside the hold the chip has claimed nothing and the connect is still open.
+    CHECK(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(stub_claimed());
+    while (driver->get_connecting() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    alpacacore::test::stub_set_request_hold(std::chrono::milliseconds(0));
+    CHECK(std::chrono::steady_clock::now() - t0 >= kRequestHold);
+    REQUIRE(driver->get_connected());
+    CHECK(stub_claimed());
+    driver->set_connected(false);
+    CHECK_FALSE(stub_claimed());
+}
+
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - every ISwitchV3 member answers while connected",
           "[zwo][switch][asiair][unit][gpio]") {
     alpacacore::test::TempPowerPortDir dir;

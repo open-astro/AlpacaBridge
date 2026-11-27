@@ -1192,6 +1192,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "filterwheel", "fake_zwo_efw_sdk.h"},
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
+    {"zwo", "switch", "fake_zwo_sdk.h"},                // the dew heater of the fake camera: zwo_switch
+    {"zwo", "switch", "fake_zwo_asiair_gpiod.h"},       // the ASIAIR Pro over the libgpiod stub: zwo_switch_asiair
+    {"zwo", "switch", "fake_zwo_asiair_plus_ioctl.h"},  // the ASIAIR Plus RK3568: zwo_switch_asiair_plus
     {"celestron", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_celestron_cgx_mount.h"},        // direct USB backend
     {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
