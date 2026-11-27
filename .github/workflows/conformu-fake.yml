@@ -203,24 +203,27 @@ jobs:
           NEEDS_GPHOTO = {"gphoto"}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
-                         "ifr": "iOptron", "celestron": "Celestron", "synscan": "SynScan", "qhy": "QHY", "playerone": "Player One",
+                         "ifr": "iOptron", "celestron": "Celestron", "synscan": "SynScan", "qhy": "QHY",
+                         "playerone": "Player One",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
                          "altair": "Altair", "remotealpaca": "Remote Alpaca",
                          "wandererastro": "WandererAstro"}
-          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
-          # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h serves the
-          # Celestron, SynScan and OnStep rows, so a change to it selects those rows only by the row's own fake name.
-          VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
-                          "AlpacaCore/tests/conformu_telescope_factories.h": "ioptron",
-                          "AlpacaCore/tests/fake_mount_motion_model.h": "ioptron",
-                          "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
-                          "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher",
-                          "AlpacaCore/tests/locked_iguider_v4l2.h": "ioptron",
-                          "AlpacaCore/tests/locked_gphoto_sdk.h": "gphoto",
-                          "AlpacaCore/tests/fake_raw_decoder.h": "gphoto",
-                          "scripts/build_bundled_gphoto.sh": "gphoto",
-                          "AlpacaCore/tests/conformu_observingconditions_factories.h": "remotealpaca",
-                          "AlpacaCore/tests/alpaca_upstream_script.h": "remotealpaca"}
+          # Test files that serve only the listed vendors' rows, beside their fake_<vendor>_*.h headers. A fake_*.h
+          # that is not named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h
+          # serves the ZWO, Celestron, SynScan and OnStep rows, so a change to it selects those rows only by the row's
+          # own fake name.
+          VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": ["onstep"],
+                          "AlpacaCore/tests/conformu_telescope_factories.h": ["ioptron", "synscan", "celestron"],
+                          "AlpacaCore/tests/fake_mount_motion_model.h": ["ioptron", "synscan", "celestron"],
+                          "AlpacaCore/tests/nexstar_hc_wire.h": ["synscan", "celestron"],
+                          "AlpacaCore/tests/conformu_skywatcher_factory.h": ["skywatcher"],
+                          "AlpacaCore/tests/skywatcher_fake_clock.h": ["skywatcher"],
+                          "AlpacaCore/tests/locked_iguider_v4l2.h": ["ioptron"],
+                          "AlpacaCore/tests/locked_gphoto_sdk.h": ["gphoto"],
+                          "AlpacaCore/tests/fake_raw_decoder.h": ["gphoto"],
+                          "scripts/build_bundled_gphoto.sh": ["gphoto"],
+                          "AlpacaCore/tests/conformu_observingconditions_factories.h": ["remotealpaca"],
+                          "AlpacaCore/tests/alpaca_upstream_script.h": ["remotealpaca"]}
           changed_path = os.path.join(os.environ["RUNNER_TEMP"], "changed.txt")
           changed = None
           if os.path.exists(changed_path):
@@ -265,8 +268,8 @@ jobs:
               mine += ["AlpacaCore/include/alpacacore/vendor/%s/" % d for d in dirs]
               mine += ["AlpacaCore/conformu/%s/Fake/" % REPORT_DIRS.get(vendor, vendor)]
               mine += ["AlpacaCore/tests/fake_%s_" % d for d in dirs]  # the vendor's other fakes (a shared board)
-              return any(p.startswith(tuple(mine)) or p == "AlpacaCore/tests/" + fake or VENDOR_FILES.get(p) in dirs
-                         for p in changed)
+              return any(p.startswith(tuple(mine)) or p == "AlpacaCore/tests/" + fake
+                         or any(v in dirs for v in VENDOR_FILES.get(p, ())) for p in changed)
 
           rows = []
           with open("scripts/conformu_fake_runs.tsv", encoding="utf-8") as f:
