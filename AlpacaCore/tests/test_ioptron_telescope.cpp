@@ -2342,6 +2342,24 @@ struct HeldSlewBody {
 // Past the driver's 30 s post-connect cache, so reads after a 1 s cache age reach the mount.
 void pass_connect_cache(FakeTaskClock& clock) { clock.advance(std::chrono::seconds(31)); }
 
+// Issue #2760: AbortSlew, the 300 s cap stop and the MoveAxis dead-man stop are followed by a stop check that polls on
+// the task clock every 250 ms. Steps the fake clock that way, letting every woken body settle, until done() or
+// `limit` of virtual time has passed: one big advance() would show the check a single read and make it send :Q#
+// again.
+bool advance_verify_until(FakeTaskClock& clock, const std::function<bool()>& done,
+                          std::chrono::seconds limit = std::chrono::seconds(8)) {
+    for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
+        if (done()) return true;
+        const auto waits = clock.wait_count();
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(5));
+        // The check reads the mount over real I/O between its waits: give it the turn to wait again (or to end)
+        // before the next step, or the steps would pass while it is still reading.
+        clock.wait_for_wait_count(waits + 1, std::chrono::milliseconds(50));
+    }
+    return done();
+}
+
 constexpr double kGuideRateDegPerSec = 0.5 * 360.0 / 86164.0905;  // the driver's default guide rate
 
 }  // namespace
@@ -3037,7 +3055,9 @@ TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before
     driver->abort_slew();
     CHECK(mount.count(":Q#") == 1);
     mount.set_system_status(0);  // the stop
-    clock.advance(std::chrono::seconds(1));
+    // Its stop check verifies (about 1 s of virtual time from when its body started waiting) and ends.
+    CHECK(advance_verify_until(clock, [] { return false; }, std::chrono::seconds(3)) == false);
+    CHECK(mount.count(":Q#") == 1);
     CHECK_FALSE(driver->get_slewing());  // status 0 is the mount's own answer again
     clock.advance(std::chrono::seconds(130));
     CHECK_NOTHROW(driver->get_slewing());
@@ -4560,21 +4580,7 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
 
 // Issue #2760: the 300 s cap stop and the MoveAxis dead-man stop are verified like AbortSlew's (the shared
 // util::run_verified_stop): FakeIoptronMount::ignore_stops(1) misses the first :Q#, and a second goes out within the
-// 3 s the check has. Steps the fake clock by the 250 ms verify poll until done() or `limit` of virtual time passes.
-namespace {
-
-bool advance_verify_until(FakeTaskClock& clock, const std::function<bool()>& done,
-                          std::chrono::seconds limit = std::chrono::seconds(8)) {
-    for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
-        if (done()) return true;
-        clock.advance(std::chrono::milliseconds(250));
-        clock.wait_for_woken_settled(std::chrono::seconds(5));
-    }
-    return done();
-}
-
-}  // namespace
-
+// 3 s the check has.
 TEST_CASE("iOptron motion bound - a dead-man stop the mount ignored once is sent again and verified",
           "[ioptron][telescope][unit][fake][goto-safety]") {
     FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);

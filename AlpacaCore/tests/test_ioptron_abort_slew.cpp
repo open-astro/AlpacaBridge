@@ -307,8 +307,12 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
                    std::chrono::seconds limit = std::chrono::seconds(8)) {
     for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
         if (done()) return true;
+        const auto waits = clock.wait_count();
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(5));
+        // The check reads the mount over real I/O between its waits: give it the turn to wait again (or to end)
+        // before the next step, or the steps would pass while it is still reading.
+        clock.wait_for_wait_count(waits + 1, std::chrono::milliseconds(50));
     }
     return done();
 }
