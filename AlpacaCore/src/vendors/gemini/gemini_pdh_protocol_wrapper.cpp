@@ -15,7 +15,11 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -34,11 +38,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <alpacacore/util/serial_link.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::gemini {
 

@@ -38,9 +38,8 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-
 #include "celestron_landing_model.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 

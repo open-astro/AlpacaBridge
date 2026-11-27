@@ -11,7 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
@@ -20,6 +22,8 @@
 #include <cstdio>
 #include <ctime>
 #include <exception>
+#include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,20 +32,13 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-#include "getter_stall_probe.h"
-#include "sidereal_time_check.h"
-
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_mount.h"
-
-#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
-#include <alpacacore/util/error_handling.h>
-
-#include <functional>
-#include <limits>
+#include "getter_stall_probe.h"
+#include "sidereal_time_check.h"
 
 namespace {
 

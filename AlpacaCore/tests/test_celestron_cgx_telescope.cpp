@@ -19,16 +19,21 @@
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <stdexcept>
@@ -36,13 +41,6 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-
-#include <cstdio>
-#include <memory>
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"

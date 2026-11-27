@@ -14,7 +14,12 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cctype>
@@ -26,12 +31,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <alpacacore/util/serial_link.h>
-#include <alpacacore/util/serial_read.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::gemini {
 
@@ -521,14 +520,10 @@ public:
     }
 
     // The util::SerialLink verdict (#2262): lock-free, never waits on an exchange.
-    bool link_alive() const noexcept {
-        return !link_.lost();
-    }
+    bool link_alive() const noexcept { return !link_.lost(); }
 
     // The text the link kept when it was lost; the link's own leaf mutex, never held across an exchange.
-    std::string link_fault() const {
-        return link_.fault();
-    }
+    std::string link_fault() const { return link_.fault(); }
 
     bool get_light_on() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -700,9 +695,7 @@ private:
         throw AlpacaException(reason, AlpacaError::NotConnected);
     }
 
-    void close_serial() {
-        link_.close();
-    }
+    void close_serial() { link_.close(); }
 
     void write_data(const std::string& data) {
         if (!link_.write_all(data)) {
@@ -742,9 +735,7 @@ private:
 
     // Drop input already queued: a reply that landed after its own command's
     // read timed out would otherwise be read as the next command's reply.
-    void discard_stale_input_locked() {
-        tcflush(link_.fd(), TCIFLUSH);
-    }
+    void discard_stale_input_locked() { tcflush(link_.fd(), TCIFLUSH); }
 
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Flat panel command: " + cmd);

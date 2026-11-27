@@ -3809,7 +3809,7 @@ private:
     static LocalTimeInfo compute_local_timezone_info(std::time_t now) {
         LocalTimeInfo info;
         std::tm local_tm {};
-        std::tm utc_tm {};
+        std::tm utc_tm{};
         // Reentrant: the clock-sync body runs on its own thread (std::localtime / std::gmtime share one buffer).
         localtime_r(&now, &local_tm);
         gmtime_r(&now, &utc_tm);

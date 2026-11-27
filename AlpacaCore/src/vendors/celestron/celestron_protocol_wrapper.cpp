@@ -34,14 +34,13 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <limits>
 #include <mutex>
 #include <set>
 #include <thread>
-
-#include <filesystem>
 
 namespace alpacacore::vendor::celestron {
 

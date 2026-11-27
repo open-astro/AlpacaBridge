@@ -540,16 +540,11 @@ public:
           discovery_candidates_(std::move(discovery_candidates)),
           resolver_(std::move(resolver)),
           connected_(false),
-          connection_type_(ConnectionType::Serial)
-          ,
+          connection_type_(ConnectionType::Serial),
           serial_fd_(-1),
-          socket_fd_(-1)
-    {
-    }
+          socket_fd_(-1) {}
 
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     bool connect(const ConnectionInfo& info) {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -42,11 +42,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-#include "sidereal_time_check.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 

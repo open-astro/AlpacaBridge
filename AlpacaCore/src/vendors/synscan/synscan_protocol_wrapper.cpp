@@ -35,13 +35,12 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
-
-#include <filesystem>
 
 namespace alpacacore::vendor::synscan {
 

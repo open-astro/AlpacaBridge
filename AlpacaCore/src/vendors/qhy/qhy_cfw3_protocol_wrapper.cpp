@@ -25,6 +25,11 @@
 #include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -38,12 +43,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::qhy {
 
@@ -615,7 +614,7 @@ private:
     Cfw3ConnectionConfig config_;
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};
-    bool in_connect_ = false;  // guarded by mutex_
+    bool in_connect_ = false;         // guarded by mutex_
     util::SerialLink link_;           // held across logical disconnects (see connect())
     int serial_fd_ = -1;              // link_.fd() while the link is open, else -1
     std::string opened_port_config_;  // config path the held link was opened from

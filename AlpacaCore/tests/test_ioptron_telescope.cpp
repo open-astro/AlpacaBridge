@@ -41,13 +41,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-
 #include "concurrency_stress.h"
-#include "fake_mount_server.h"
-#include "fake_task_clock.h"
 #include "connect_hold_gate.h"
+#include "driver_rig.h"
 #include "fake_ioptron_mount.h"
+#include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #include "gps_status_check.h"

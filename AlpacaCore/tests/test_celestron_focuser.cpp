@@ -20,6 +20,9 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -39,11 +42,6 @@
 #include "catch2_compat.h"
 #include "connect_hold_gate.h"
 #include "driver_rig.h"
-
-#include <fcntl.h>
-#include <termios.h>
-#include <unistd.h>
-
 #include "fake_celestron_focuser.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"

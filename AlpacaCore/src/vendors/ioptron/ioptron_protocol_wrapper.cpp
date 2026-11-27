@@ -14,6 +14,9 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -37,17 +40,12 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
-
-#include <alpacacore/util/serial_link.h>
-#include <alpacacore/util/serial_port_registry.h>
-#include <alpacacore/util/serial_read.h>
-
-#include <filesystem>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -1168,7 +1166,8 @@ public:
 
 private:
     bool connect_serial(const std::string& port_path, int baud_rate) {
-        ALPACA_LOG_INFO("iOptron", "connect_serial() called with port: [" + port_path + "], baud: " + std::to_string(baud_rate));
+        ALPACA_LOG_INFO("iOptron",
+                        "connect_serial() called with port: [" + port_path + "], baud: " + std::to_string(baud_rate));
         // Linux/macOS serial port
         ALPACA_LOG_INFO("iOptron", "Opening serial port: [" + port_path + "]");
         
@@ -1200,10 +1199,10 @@ private:
             return false;
         }
         ALPACA_LOG_INFO("iOptron", "Serial port configured successfully");
-        
+
         return true;
     }
-    
+
     void disconnect_serial() {
         if (link_) {
             const int fd = link_.fd();
@@ -1222,7 +1221,7 @@ private:
             link_.close();  // releases TIOCEXCL and the registry claim
         }
     }
-    
+
     bool connect_network(const std::string& host, int port) {
         ALPACA_LOG_INFO("iOptron", "connect_network() called with host: [" + host + "], port: " + std::to_string(port));
         constexpr int kConnectTimeoutMs = 7000;
@@ -1291,14 +1290,14 @@ private:
 
         return true;
     }
-    
+
     void disconnect_network() {
         if (socket_fd_ >= 0) {
             close(socket_fd_);
             socket_fd_ = -1;
         }
     }
-    
+
     bool write_data(const std::string& data) {
         if (connection_type_ == ConnectionType::Serial) {
             return write_serial(data);
@@ -1306,7 +1305,7 @@ private:
             return write_network(data);
         }
     }
-    
+
     bool write_serial(const std::string& data) {
         return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
     }
@@ -1492,7 +1491,7 @@ private:
     std::string fault_;
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
-    
+
     util::SerialLink link_;
     int socket_fd_;
     std::string last_connect_error_;  // operator-facing reason the last connect failed (guarded by mutex_)

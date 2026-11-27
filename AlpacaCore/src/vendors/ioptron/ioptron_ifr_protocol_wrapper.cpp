@@ -14,7 +14,13 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -31,13 +37,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <alpacacore/util/serial_link.h>
-#include <alpacacore/util/serial_port_registry.h>
-#include <alpacacore/util/serial_read.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -375,9 +374,7 @@ public:
     }
 
 private:
-    bool link_open_locked() const {
-        return static_cast<bool>(link_);
-    }
+    bool link_open_locked() const { return static_cast<bool>(link_); }
 
     void ensure_open_locked() const {
         if (lost_.load() || !link_open_locked()) {

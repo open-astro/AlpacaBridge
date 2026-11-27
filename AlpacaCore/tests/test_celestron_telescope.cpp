@@ -44,18 +44,17 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-#include "gps_status_check.h"
-#include "sidereal_time_check.h"
-
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_celestron_handset.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "gps_status_check.h"
 #include "hc_motion_rig.h"
 #include "pty_responder.h"
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 

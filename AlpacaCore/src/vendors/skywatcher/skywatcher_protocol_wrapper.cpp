@@ -19,7 +19,6 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -33,13 +32,12 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <filesystem>
-
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <sstream>

@@ -21,6 +21,11 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -34,12 +39,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::qhy {
 
@@ -471,9 +470,7 @@ public:
     // Lock-free on purpose: the driver's get_connected() is a FAST-timing
     // property and must not queue behind an in-flight transaction. The latch is
     // the util::SerialLink verdict (#2262), kept across the port release.
-    bool link_alive() const noexcept {
-        return !link_.lost();
-    }
+    bool link_alive() const noexcept { return !link_.lost(); }
 
     std::int32_t get_position() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -728,7 +725,7 @@ private:
     // The connected port (#1202): registry claim + fd + TIOCEXCL, and the lost-link verdict link_alive() reads
     // (#2262, issue #527's latch), kept across the port release until the next connect() or a disconnect().
     util::SerialLink link_;
-    int serial_fd_ = -1;     // link_.fd() while the link is open, else -1
+    int serial_fd_ = -1;  // link_.fd() while the link is open, else -1
 };
 
 QFocuserProtocolWrapper::QFocuserProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
