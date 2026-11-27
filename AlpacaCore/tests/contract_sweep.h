@@ -91,6 +91,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -196,6 +197,7 @@ inline int platform7_interface_version(DeviceType t) {
             return 4;
         case DeviceType::FilterWheel:
         case DeviceType::Switch:
+        case DeviceType::SafetyMonitor:
             return 3;
         case DeviceType::CoverCalibrator:
         case DeviceType::ObservingConditions:
@@ -211,6 +213,9 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
         case DeviceType::Focuser:  // every focuser clamps a Move to 0..MaxStep (with_clamping_focuser says so)
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
+        case DeviceType::SafetyMonitor:
+            return "ISafetyMonitor has no member that takes an argument: IsSafe is its one member (protocol document, "
+                   "ASCOM ISafetyMonitorV3)";
         default:
             return "";
     }
@@ -700,6 +705,17 @@ inline ContractEntry contract_entry_remotealpaca_observingconditions() {
         },
         kSrcAgents);
 }
+inline ContractEntry contract_entry_remotealpaca_safetymonitor() {
+    return make_entry(
+        "remotealpaca_safetymonitor", "remotealpaca", "safetymonitor", DeviceType::SafetyMonitor,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteDeviceConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_safetymonitor(n, config);
+        },
+        kSrcAgents);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -964,7 +980,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions)
+#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions) X(remotealpaca_safetymonitor)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1103,6 +1119,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"remotealpaca", "observingconditions", "fake_http_client.h"},  // a scripted upstream (alpaca_upstream_script.h)
+    {"remotealpaca", "safetymonitor", "fake_http_client.h"},        // the same, as a SafetyMonitor
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1155,6 +1172,8 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"celestron_cgx_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp"},
     {"remotealpaca_observingconditions", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp"},
+    {"remotealpaca_safetymonitor", "remotealpaca",
+     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

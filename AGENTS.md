@@ -70,7 +70,7 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - `set_connected(false)` clears driver state before the SDK close; a connect guards all
   post-open init so a throw closes the handle.
 - `InvalidValue` precedes the connection check; every other member throws
-  `NotConnected` while disconnected
+  `NotConnected` while disconnected (a SafetyMonitor's `IsSafe` reads `false` on a lost link)
   ([ascom-contract](.github/instructions/ascom-contract.instructions.md#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it)).
 - `get_name()` is brand + model only; paths and driver state go in `get_description()`
   ([ascom-contract](.github/instructions/ascom-contract.instructions.md#name-is-brand-and-model-all-drivers)).

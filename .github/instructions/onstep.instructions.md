@@ -297,9 +297,9 @@ command channel. Nothing scans the network; the host is typed in.
   connect there. The factory passes a saved port outside 1-65535 as 0 (range-checked before the cast,
   decision 0007 rule 4), and the wrapper's connect refuses an empty host or a port outside 1-65535 with
   the field in the message ("... (host)", "... (tcpPort)"), opening nothing.
-- **Connect** (`connect_network()`): a numeric IPv4 address or a host name (`getaddrinfo`, IPv4; the
-  lookup is not bounded by the timeout), a non-blocking connect that waits at most the response timeout,
-  then `TCP_NODELAY` (one small write per command). An unreachable controller fails Connect within the
+- **Connect** (`connect_network()`, through `util::connect_tcp`, #2711): a numeric IPv4 address or a
+  host name (IPv4), looked up and connected within one response timeout, then `TCP_NODELAY` (one small
+  write per command). A failed connect logs at INFO (decision 0007 rule 9). An unreachable controller fails Connect within the
   response timeout ("could not connect to <host>:<port>: no answer within <n> ms"), a refusal at once
   ("... Connection refused"); both are the connect error the client and `LastConnectError` see.
 - **Link loss** follows decision 0009 as the serial link does: a TCP hangup (the controller closed or

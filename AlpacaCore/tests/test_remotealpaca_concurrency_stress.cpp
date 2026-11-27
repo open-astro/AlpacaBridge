@@ -10,15 +10,17 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions proxied device (issues
-// #101, #1753). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only
-// LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll and the command bodies run during the
-// storm. The last case races refused-connection losses against the lifecycle and the commands.
+// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions and SafetyMonitor proxied
+// devices (issues #101, #1753). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the
+// test-only LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll and the command bodies run
+// during the storm. The last case of each device races refused-connection losses against the lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 
 #include <atomic>
 #include <chrono>
@@ -30,6 +32,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_http_client.h"
+#include "fake_task_clock.h"
 #include "locked_http_client.h"
 
 using alpacacore::AlpacaDriver;
@@ -51,6 +54,24 @@ std::unique_ptr<alpacacore::ObservingConditionsDriver> make_driver(alpacacore::t
     return remote::create_remotealpaca_observingconditions(
         0, stress_config(), std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {},
         alpacacore::util::default_task_clock());
+}
+
+// `clock` defaults to the real task clock; the refused-connection case passes a fake one it ticks.
+std::unique_ptr<alpacacore::SafetyMonitorDriver> make_safetymonitor(
+    alpacacore::test::FakeHttpClient& http,
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    return remote::create_remotealpaca_safetymonitor(
+        0, stress_config(), std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {}, clock);
+}
+
+// Every member the SafetyMonitor serves, each in its own guard.
+void operate_safetymonitor(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& sm = static_cast<alpacacore::SafetyMonitorDriver&>(d);
+    guard([&] { static_cast<void>(sm.get_is_safe()); });
+    guard([&] { static_cast<void>(sm.get_device_state()); });
+    guard([&] { static_cast<void>(sm.get_name()); });
+    guard([&] { static_cast<void>(sm.get_description()); });
+    guard([&] { static_cast<void>(sm.get_link_fault()); });
 }
 
 // Every member the driver serves, each in its own guard so one throw skips no later call.
@@ -143,6 +164,102 @@ TEST_CASE("Remote Alpaca observing conditions - refused-connection losses race c
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
     CHECK(upstream.calls("refresh") > 0);     // commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca safety monitor - concurrent connect/disconnect/operate stress",
+          "[remotealpaca][safetymonitor][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor};
+    upstream.install(http);
+    auto driver = make_safetymonitor(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down; nothing else (no fault, no command).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_safetymonitor(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca safety monitor - destruction races an in-flight connect",
+          "[remotealpaca][safetymonitor][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_safetymonitor(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca safety monitor - racing disconnect is never dropped",
+          "[remotealpaca][safetymonitor][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_safetymonitor(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// One call in 20 is refused, so a poll loses the link at once while lifecycle threads connect and disconnect it and
+// readers race IsSafe. The storm is shorter than one real poll period, so the driver polls on a fake task clock that a
+// ticker thread advances a period at a time; a poll the ticker outruns lets the frame age past the loss bound, the
+// other loss path (the module's, found by the poll or by IsSafe's own read). A lost link reads IsSafe false with no
+// exception, so the guard allows NotConnected only, from a never-connected, connecting or client-disconnected driver;
+// the scripted upstream always reads safe, so a false read is a lost link's answer, and the case requires one. TSan
+// checks the loss path's writes (connected_, the kept reason, the module's loss latch) against IsSafe's lost() read.
+TEST_CASE("Remote Alpaca safety monitor - refused-connection losses race connects, disconnects and IsSafe",
+          "[remotealpaca][safetymonitor][stress]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 20 == 19) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_safetymonitor(http, clock);
+    std::atomic<bool> storm{true};
+    std::thread ticker([&clock, &storm] {
+        while (storm.load()) {
+            clock.advance(std::chrono::seconds(1));  // one poll period: every parked poll samples once
+            std::this_thread::yield();
+        }
+    });
+
+    std::atomic<int> unsafe_reads{0};
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &unsafe_reads](AlpacaDriver& d) {
+        auto& sm = static_cast<alpacacore::SafetyMonitorDriver&>(d);
+        guard([&] {
+            if (!sm.get_is_safe()) unsafe_reads.fetch_add(1);
+        });
+        operate_safetymonitor(guard, d);
+    });
+
+    storm.store(false);
+    ticker.join();
+    // The last connect() may still own its connection task, so a bare set_connected(false) can be recorded against
+    // it and return before the task has run (open-astro#326): settle instead, then read the kept reason.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
+    CHECK(unsafe_reads.load() > 0);           // the loss path ran during the storm
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
