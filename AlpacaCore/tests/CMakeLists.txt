@@ -346,6 +346,8 @@ endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
     list(APPEND TEST_SOURCES test_bisque_telescope_snapshot.cpp)
+    # FakeBisqueMount's ConformU mode on the shared motion model (#2697).
+    list(APPEND TEST_SOURCES test_bisque_fake_motion_mode.cpp)
     # Connected takes no lock the connect holds (issue #910).
     list(APPEND TEST_SOURCES test_bisque_getter_locks.cpp)
     # In the [stress] pool for the connect/disconnect lifecycle (PR #115
