@@ -70,7 +70,7 @@ Checks:
   7. Every relative path referenced in AGENTS.md, CONTEXT.md, README.md (issue
      #693: the most-read file in the repo was in no scan), scoped instructions,
      docs/agents/ agent-skills config, .claude/skills/ Claude skills, and
-     docs/failures/ and docs/decisions/
+     docs/failures/, docs/decisions/ and docs/adoption/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
      `` `docs/...` ``, etc.) that looks like a real repo path actually exists.
      A `<vendor>`-style placeholder span under AlpacaCore/src/vendors/ or
@@ -1200,7 +1200,7 @@ def _tracked_paths(root=ROOT):
     # doc written but not yet `git add`ed is reported as drift (issue #556a);
     # the skills tree is nested, so its pattern is recursive to match the
     # rglob that scans it.
-    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md",
+    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md", "docs/adoption/*.md",
                     "docs/agents/*.md", ".claude/skills/**/*.md"):
         tracked.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
     tracked_dirs = set()
@@ -1363,7 +1363,7 @@ def check_agents_md_paths_exist(root=ROOT):
         doc = path.relative_to(root).as_posix()
         doc_failures, _ = _check_doc_path_refs(doc, 0, "skill doc floor", root=root)
         failures.extend(doc_failures)
-    for directory in ("docs/failures", "docs/decisions"):
+    for directory in ("docs/failures", "docs/decisions", ADOPTION_DIR):
         paths = sorted((root / directory).glob("*.md"))
         tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob)" + directory + "/*.md"], root=root).stdout.splitlines()
         for missing in sorted(set(tracked_memory) - {p.relative_to(root).as_posix() for p in paths}):
@@ -4011,6 +4011,16 @@ def self_test():
                   found is not None and any("SKILL.md" in f and "scripts/skill_nope.py" in f for f in found))
             check("agents md check: a drifted span in an agent doc is reported",
                   found is not None and any("docs/agents/x.md" in f and "scripts/agent_nope.py" in f for f in found))
+
+            # The Adoption rosters left docs/decisions/ (#2777); their path
+            # spans stay checked.
+            roster = repo_fixture("roster")
+            (roster / "docs/adoption").mkdir(parents=True)
+            (roster / "docs/adoption/0001-x.md").write_text("See `scripts/roster_nope.py`.\n", encoding="utf-8")
+            found = run_check(roster)
+            check("agents md check: a drifted span in a docs/adoption roster is reported",
+                  found is not None and any("docs/adoption/0001-x.md" in f and "scripts/roster_nope.py" in f
+                                            for f in found))
 
             # CONTEXT.md, the domain glossary, is scanned like AGENTS.md; a
             # rename must not silently drop it from the check.
