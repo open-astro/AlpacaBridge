@@ -51,9 +51,11 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_celestron_cgx_mount.h"
+#include "fake_celestron_handset.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "hc_motion_rig.h"
 #include "pty_responder.h"
 #endif
 
@@ -3150,5 +3152,92 @@ TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model
     CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
     require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
                          alpacacore::AlpacaError::NotConnected);
+}
+#endif
+
+#ifndef _WIN32
+// FakeCelestronHandset in ConformU mode (#2692): the NexStar hand-controller wire answered from FakeMountMotionModel.
+// The cases talk to the responder directly, on a clock they advance (hc_motion_rig.h).
+namespace {
+
+using std::chrono::seconds;
+using ModelledNexStar = alpacacore::test::HcMotionRig<alpacacore::test::FakeCelestronHandset>;
+
+}  // namespace
+
+TEST_CASE("FakeCelestronHandset ConformU mode: a GOTO reports slewing and the target only after its travel time",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    REQUIRE(rig.handset.motion() != nullptr);
+    rig.handset.goto_stops_tracking.store(
+        false);  // the landed position is read a minute on: tracking is the next case's
+    rig.ask(std::string("T") + '\x03');
+    const double aim_ra = std::fmod(rig.handset.motion()->lst_hours() + 1.0, 24.0);
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("r" + ModelledNexStar::pair_of(aim_ra * 15.0, -30.0)) == "#");
+
+    CHECK(rig.slewing());
+    CHECK(rig.ask(std::string("P\x01\x10\x13\0\0\0\x01", 8)) == std::string("\x00#", 2));  // MC_SLEW_DONE: busy
+    rig.advance(seconds(5));
+    CHECK(rig.slewing());
+    const double mid = rig.dec_degrees();
+    CHECK(mid != Catch::Approx(dec_before).margin(0.5));
+    CHECK(mid != Catch::Approx(-30.0).margin(0.5));  // on its way, not there
+
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.ask(std::string("P\x01\x10\x13\0\0\0\x01", 8)) == std::string("\xFF#"));  // MC_SLEW_DONE: done
+    CHECK(rig.dec_degrees() == Catch::Approx(-30.0).margin(1e-3));
+    CHECK(ModelledNexStar::ra_gap_hours(rig.ra_hours(), aim_ra) == Catch::Approx(0.0).margin(1e-4));
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: a Sync re-labels the reported position",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0)) == "#");  // 6 h, +40 degrees
+    CHECK(rig.dec_degrees() != Catch::Approx(dec_before).margin(1.0));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));
+    CHECK_FALSE(rig.slewing());  // a sync moves nothing
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: tracking holds RA, a GOTO leaves it stopped until a T write",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    REQUIRE(rig.ask(std::string("T") + '\x03') == "#");
+    CHECK(rig.ask("t") == std::string("\x03#"));
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));  // tracking: the sky position holds
+
+    // A GOTO to the spot it is on lands at once but leaves the RA motor at rate 0 (CGX-L fw 7.18), whatever `t` says.
+    REQUIRE(rig.ask("r" + ModelledNexStar::pair_of(rig.ra_hours() * 15.0, 40.0)) == "#");
+    CHECK(rig.ask("t") == std::string("\x03#"));
+    rig.advance(seconds(600));
+    const double drifted = 6.0 + 600.0 * 360.98564736629 / 86400.0 / 15.0;  // 600 s of sidereal time east
+    CHECK(rig.ra_hours() == Catch::Approx(drifted).margin(1e-3));
+    rig.ask(std::string("T") + '\x03');
+    const double held = rig.ra_hours();
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(held).margin(1e-4));  // the T write resumed tracking
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: an AUX guide pulse moves its axis for its duration and then stops",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x03');
+    REQUIRE(rig.ask("p") == "W#");  // pierEast: the hour angle is positive
+    // MTR_AUX_GUIDE on Dec at +100% of sidereal for 200 cs: south on a west-pier ('W') mount.
+    REQUIRE(rig.ask(std::string("P\x03\x11\x26\x64\xC8\0\0", 8)) == "#");
+    rig.advance(seconds(1));
+    const double after_one = rig.dec_degrees();
+    CHECK(after_one < 40.0 - 0.9 * 360.98564736629 / 86400.0);
+    rig.advance(seconds(5));
+    const double after_pulse = rig.dec_degrees();
+    CHECK(after_pulse == Catch::Approx(40.0 - 2.0 * 360.98564736629 / 86400.0).margin(1e-4));  // 2 s, then held
+    rig.advance(seconds(5));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_pulse).margin(1e-6));
 }
 #endif

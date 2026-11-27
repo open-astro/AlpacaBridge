@@ -26,7 +26,19 @@
 //
 // Counters and knobs are atomics: the server's handler thread writes them while the test thread reads.
 //
+// Two modes. The scripted default (the constructor with a tracking state and a position) is what the driver cases
+// use. ConformU mode (the constructor with a FakeMountMotionModel::Config, #2692) answers from one
+// FakeMountMotionModel instead: a GOTO (HC r/R, or the AUX MC_GOTO pair) moves the position over its travel time, a
+// Sync re-labels it, tracking follows the sky, MTR_AUX_GUIDE pulses and variable-rate moves move their axis, and the
+// site and clock reads and writes are kept. The KNOWN PARITY GAPS below are the scripted default's, except where a
+// line says ConformU mode.
+//
 // KNOWN PARITY GAPS (what the real hand controller does and this fake does not):
+// - ConformU mode: an Alt-Az GOTO (b/B) is not modelled and gets no reply. A variable- or fixed-rate move runs its axis
+//   on top of tracking (RA positive raises RA, Dec positive is north on either pier); which way a real CGX-L runs for
+//   each code and whether the move replaces tracking are not measured. A GOTO leaves the RA motor at rate 0 until a
+//   `T` write (`goto_stops_tracking`, CGX-L fw 7.18: "axis 0 stays at rate=0 after goto completion", see
+//   restore_tracking_after_slew in the driver), whatever `t` says. A horizon is not refused.
 // - The reported position moves only on a landed GOTO (celestron_landing_model.h, #2409: the HC GOTO r/R, or a
 //   pass-through motor GOTO pair) or set_position(); miss_landing keeps it, a GOTO that came to rest far from its
 //   target. e/E/z/Z answer one pair for both frames. A Sync (s/S) is acknowledged and re-labels nothing.
@@ -51,14 +63,18 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "celestron_landing_model.h"
+#include "fake_mount_motion_model.h"
 #include "fake_mount_server.h"
+#include "nexstar_hc_wire.h"
 
 namespace alpacacore::test {
 
@@ -83,6 +99,26 @@ public:
         tracking_on.store(tracking == CelestronTracking::EqNorth);
     }
 
+    /// ConformU mode (#2692): answers from a FakeMountMotionModel built from @p motion (see the file comment). The
+    /// knobs that script the position (tracking_on, miss_landing, unsettled, no_motion, goto_never_ends,
+    /// set_position()) do not apply; the fault knobs (silent, reject_goto, gates, ...) do.
+    /// @param clock the TaskClock the driver under test reads
+    FakeCelestronHandset(util::TaskClock& clock, FakeMountMotionModel::Config motion)
+        : clock_(clock), landing_(""), motion_(std::make_unique<FakeMountMotionModel>(std::move(motion))) {}
+
+    /// The motion model of a ConformU-mode handset; null for the scripted default.
+    FakeMountMotionModel* motion() const { return motion_.get(); }
+
+    /// The model setup of the fake ConformU row: the made-up Sydney Opera House site (never a real observing site) and
+    /// a 4 degree/s GOTO. Park and home are the driver's own GOTO and level-start targets, so the model's are unused.
+    static FakeMountMotionModel::Config conformu_motion_config() {
+        FakeMountMotionModel::Config config;
+        config.latitude_degrees = -33.856784;
+        config.longitude_degrees = 151.215297;
+        config.slew_deg_per_s = 4.0;
+        return config;
+    }
+
     FakeCelestronHandset(const FakeCelestronHandset&) = delete;
     FakeCelestronHandset& operator=(const FakeCelestronHandset&) = delete;
 
@@ -101,8 +137,10 @@ public:
     std::atomic<unsigned char> firmware_major{5};
     std::atomic<unsigned char> firmware_minor{35};
     /// The `p` reply: 'W' (OTA west of the pier, normal pointing) or 'E' on a GEM; an Alt-Az HC answers an undefined
-    /// byte (reference, "Pier Side").
+    /// byte (reference, "Pier Side"). ConformU mode answers from the hour angle instead.
     std::atomic<char> pier_side{'W'};
+    /// ConformU mode: a GOTO stops the RA motor's tracking until the next `T` write (see the file comment).
+    std::atomic<bool> goto_stops_tracking{true};
 
     // ---- Fault knobs, all off by default ------------------------------------------------------------------------
 
@@ -238,6 +276,7 @@ public:
     }
 
     bool goto_in_progress() const {
+        if (motion_) return motion_->slewing();
         if (!goto_seen.load() || no_motion.load()) return false;
         if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started_.load()));
@@ -276,7 +315,11 @@ private:
         }
         if (reject_goto.load()) return "";
         if (odd_goto_reply.load()) return "1#";
-        landing_.land(chunk, miss_landing.load());
+        if (motion_) {
+            if (!start_modelled_goto(chunk)) return "";  // an Alt-Az GOTO: not modelled
+        } else {
+            landing_.land(chunk, miss_landing.load());
+        }
         hold_for(gate_ms, &gate_entered, &gate_left);
         goto_started_.store(clock_.now().time_since_epoch().count());
         goto_seen.store(true);
@@ -327,6 +370,7 @@ private:
             case 7:
             case 36:  // fixed-rate move, positive / negative
             case 37:
+                if (motion_) modelled_motor_command(chunk);
                 return "#";
             default:
                 return std::string("\xFF#");  // unknown command: one garbage byte before the '#'
@@ -361,6 +405,7 @@ private:
                 return std::string(aligned.load() ? "\x01#" : "\x00#", 2);
             case 'p':  // pier side: 'W' or 'E' '#'
                 hold_for(pier_hold_ms, &pier_hold_entered, nullptr);
+                if (motion_) return std::string(1, motion_->pier_side() == 0 ? 'W' : 'E') + "#";  // 'W' = pierEast
                 return std::string(1, pier_side.load()) + "#";
             case 'e':
             case 'E':
@@ -376,6 +421,14 @@ private:
                     std::snprintf(text.data(), text.size(), "%06X00,20000500#",
                                   static_cast<unsigned>(0x12AB05 + 0x200 * drift_reads.fetch_add(1)) & 0xFFFFFFu);
                     return text.data();
+                }
+                if (motion_) {
+                    if (chunk[0] == 'z' || chunk[0] == 'Z') {
+                        return hc_wire::axis_pair(motion_->azimuth_degrees(), motion_->altitude_degrees(),
+                                                  chunk[0] == 'z');
+                    }
+                    const auto state = motion_->state();
+                    return hc_wire::axis_pair(state.ra_hours * 15.0, state.dec_degrees, chunk[0] == 'e');
                 }
                 std::lock_guard<std::mutex> lock(mutex_);
                 return position_.empty() ? landing_.position() + "#" : position_;
@@ -409,23 +462,39 @@ private:
                     return "#";  // answered, but the GOTO runs on
                 }
                 goto_seen.store(false);
+                if (motion_) motion_->stop();
                 return "#";
             case 't':  // tracking mode: chr(mode) '#'
+                if (motion_) return std::string(1, static_cast<char>(tracking_mode_.load())) + "#";
                 return tracking_on.load() ? std::string("\x02#") : std::string("\x00#", 2);
             case 'T':  // set tracking mode: '#'
                 t_count.fetch_add(1);
                 if (reject_next_tracking_write.exchange(false)) return "";
+                if (motion_ && chunk.size() > 1) {
+                    tracking_mode_.store(static_cast<unsigned char>(chunk[1]));
+                    motion_->set_tracking(chunk[1] != 0);
+                }
                 return "#";
             case 's':  // sync: '#'
-            case 'S':
+            case 'S': {
+                double ra_degrees = 0.0;
+                double dec_degrees = 0.0;
+                if (motion_ && hc_wire::parse_aim(chunk, ra_degrees, dec_degrees)) {
+                    motion_->set_position(ra_degrees / 15.0, dec_degrees);
+                }
                 return "#";
+            }
             case 'h':  // time: eight binary bytes '#': 12:00:00 on 1 Jan 2026, UTC, no DST
+                if (motion_) return hc_wire::time_bytes(*motion_, clock_offset_s_.load()) + "#";
                 return std::string("\x0c\x00\x00\x01\x01\x1a\x00\x00", 8) + "#";
             case 'H':  // set time: '#'
+                if (motion_) hc_wire::apply_time(*motion_, chunk, clock_offset_s_);
                 return "#";
-            case 'w':  // site: eight binary bytes '#' (0/0)
+            case 'w':  // site: eight binary bytes '#' (0/0 in the scripted default)
+                if (motion_) return hc_wire::site_bytes(*motion_) + "#";
                 return std::string(8, '\0') + "#";
             case 'W':  // set site: '#'
+                if (motion_) hc_wire::apply_site(*motion_, chunk);
                 return "#";
             case 'P':
                 return passthrough(chunk);
@@ -434,12 +503,67 @@ private:
         }
     }
 
+    // ---- ConformU mode: the commands the motion model answers (#2692) ----
+
+    // Starts the modelled GOTO of an HC r/R, or of the AUX MC_GOTO pair, whose Dec command (device 0x11) lands it, as
+    // CelestronLanding reads that pair. False for an Alt-Az GOTO, which is not modelled.
+    bool start_modelled_goto(const std::string& chunk) {
+        double ra_degrees = 0.0;
+        double dec_degrees = 0.0;
+        if (chunk[0] == 'b' || chunk[0] == 'B') return false;
+        if (chunk[0] == 'P') {
+            landing_.land(chunk);
+            if (static_cast<unsigned char>(chunk[2]) != 0x11 ||
+                !hc_wire::parse_aim("r" + landing_.position(), ra_degrees, dec_degrees)) {
+                return true;  // the RA half of the pair: held until the Dec half names the target
+            }
+        } else if (!hc_wire::parse_aim(chunk, ra_degrees, dec_degrees)) {
+            return true;
+        }
+        if (goto_stops_tracking.load()) motion_->set_tracking(false);
+        (void)motion_->goto_radec(ra_degrees / 15.0, dec_degrees);
+        return true;
+    }
+
+    // MTR_AUX_GUIDE ("P" 3 dev 0x26 velocity duration_cs): velocity is a signed percentage of the sidereal rate, on top
+    // of tracking; positive RA is west (lowers RA), and positive Dec is south on a west-pier ('W') mount, north on an
+    // east-pier one. A variable-rate (6/7: "P" 3 dev code hi lo) or fixed-rate (36/37: "P" 2 dev code rate) move runs
+    // the axis until its stop; see the file comment for what is not measured.
+    void modelled_motor_command(const std::string& chunk) {
+        using Axis = FakeMountMotionModel::Axis;
+        const int dev = static_cast<unsigned char>(chunk[2]);
+        const int code = static_cast<unsigned char>(chunk[3]);
+        const Axis axis = dev == 0x10 ? Axis::Ra : Axis::Dec;
+        if (dev != 0x10 && dev != 0x11) return;
+        if (code == 0x26) {
+            const double rate = static_cast<signed char>(chunk[4]) / 100.0 * FakeMountMotionModel::kSiderealDegPerSec;
+            const auto duration = std::chrono::milliseconds(10 * static_cast<unsigned char>(chunk[5]));
+            const bool west_pier = motion_->pier_side() == 0;
+            motion_->pulse(axis, axis == Axis::Ra ? -rate : (west_pier ? -rate : rate), duration);
+            return;
+        }
+        double deg_per_s = 0.0;
+        if (code == 6 || code == 7) {
+            const double rate =
+                ((static_cast<unsigned char>(chunk[4]) << 8) | static_cast<unsigned char>(chunk[5])) / 4.0 / 3600.0;
+            deg_per_s = code == 6 ? rate : -rate;
+        } else {
+            const int step = std::min<int>(static_cast<unsigned char>(chunk[4]), 9);
+            deg_per_s = hc_wire::kFixedRateSidereal[step] * FakeMountMotionModel::kSiderealDegPerSec *
+                        (code == 36 ? 1.0 : -1.0);
+        }
+        motion_->move_axis(axis, deg_per_s);
+    }
+
     util::TaskClock& clock_;
     std::atomic<Clock::rep> goto_started_{0};
     std::mutex mutex_;  // position_, last_goto_text_
     std::string position_;  // pinned by set_position(); empty: the landing model answers
     CelestronLanding landing_;
     std::string last_goto_text_;
+    std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only
+    std::atomic<int> tracking_mode_{0};             // ConformU mode: the mode `t` reads back, as last written
+    std::atomic<std::int64_t> clock_offset_s_{0};   // ConformU mode: handset clock less the model's, set by H
 };
 
 }  // namespace alpacacore::test

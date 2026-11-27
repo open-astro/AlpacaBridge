@@ -38,6 +38,7 @@
 #include "fake_mount_server.h"
 #include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
+#include "hc_motion_rig.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -1293,49 +1294,7 @@ namespace {
 
 using std::chrono::seconds;
 
-struct ModelledHandset {
-    alpacacore::test::FakeTaskClock task_clock;
-    std::shared_ptr<alpacacore::test::FakeMountMotionModel::TimePoint> now =
-        std::make_shared<alpacacore::test::FakeMountMotionModel::TimePoint>(
-            alpacacore::test::FakeMountMotionModel::TimePoint{seconds(1767225600)});  // 2026-01-01 00:00:00 UTC
-    alpacacore::test::FakeSynScanHandset handset;
-
-    ModelledHandset() : handset(task_clock, config(now)) {}
-
-    static alpacacore::test::FakeMountMotionModel::Config config(
-        const std::shared_ptr<alpacacore::test::FakeMountMotionModel::TimePoint>& clock) {
-        auto c = alpacacore::test::FakeSynScanHandset::conformu_motion_config();
-        c.clock = [clock] { return *clock; };
-        return c;
-    }
-    void advance(seconds by) { *now += by; }
-    std::string ask(const std::string& command) { return handset.responder()(command); }
-
-    // The precise "RRRRRR00,DDDDDD00#" pair a position command carries or the handset answers.
-    static std::string pair_of(double first_degrees, double second_degrees) {
-        std::string pair = alpacacore::test::hc_wire::axis_pair(first_degrees, second_degrees, true);
-        pair.pop_back();  // the '#'
-        return pair;
-    }
-    static void parse_pair(const std::string& reply, double& first_degrees, double& second_degrees) {
-        first_degrees = std::stoul(reply.substr(0, 6), nullptr, 16) / 16777216.0 * 360.0;
-        second_degrees = std::stoul(reply.substr(9, 6), nullptr, 16) / 16777216.0 * 360.0;
-        if (second_degrees > 180.0) second_degrees -= 360.0;
-    }
-    double ra_hours() {
-        double ra = 0.0, dec = 0.0;
-        parse_pair(ask("e"), ra, dec);
-        return ra / 15.0;
-    }
-    double dec_degrees() {
-        double ra = 0.0, dec = 0.0;
-        parse_pair(ask("e"), ra, dec);
-        return dec;
-    }
-    bool slewing() { return ask("L") == "1#"; }
-    // The shortest wrapped difference of two RA values, hours.
-    static double ra_gap_hours(double a, double b) { return std::remainder(a - b, 24.0); }
-};
+using ModelledHandset = alpacacore::test::HcMotionRig<alpacacore::test::FakeSynScanHandset>;
 
 }  // namespace
 
