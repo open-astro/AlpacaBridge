@@ -1286,8 +1286,13 @@ TEST_CASE("SynScan - a park GOTO the mount never moves for, or a limit stops hal
         }
         driver->park();
         REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
-        alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
-                                               alpacacore::AlpacaError::DriverException);
+        try {
+            static_cast<void>(driver->get_slewing());
+            FAIL("Slewing must raise the failed Park");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("not repeated") != std::string::npos);
+        }
         CHECK_FALSE(driver->get_at_park());
         CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
         CHECK(st->goto_snapshot().size() == 1);
@@ -1315,8 +1320,13 @@ TEST_CASE("SynScan - a park GOTO a limit stops in the last quarter is not repeat
     st->goto_fraction.store(0.9);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
-    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
-                                           alpacacore::AlpacaError::DriverException);
+    try {
+        static_cast<void>(driver->get_slewing());
+        FAIL("Slewing must raise the failed Park");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("not repeated") != std::string::npos);
+    }
     CHECK_FALSE(driver->get_at_park());
     CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
     CHECK(st->goto_snapshot().size() == 1);
