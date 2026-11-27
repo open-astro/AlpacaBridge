@@ -203,6 +203,16 @@ after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
+### Camera frame layout (ZWO, SVBONY, Player One, ToupTek and Altair, QHY)
+
+A camera driver builds its `ImageArray` through `util::build_frame_image`
+(`AlpacaCore/include/alpacacore/util/frame_layout.h`): it describes the SDK buffer
+(format, stride, source size), the window (crop offset, output size) and the edge
+rule (`ZeroFill`, or `ReplicateOne` for the #977 one-pixel deficit), and passes its
+vendor name for the refusal text. Never copy pixels, swap BGR or read 16-bit samples
+in a driver; the module refuses a short buffer and validates the result. iGuider
+`crop_luma` and gPhoto build their own.
+
 ### Camera argument order (all camera vendors)
 
 A camera member refuses in one order on every brand (#2259), so a client writes one error handler:

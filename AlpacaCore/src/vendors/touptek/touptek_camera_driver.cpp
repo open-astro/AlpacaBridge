@@ -16,6 +16,7 @@
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/frame_layout.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -1252,7 +1253,7 @@ public:
             // num+1 real pixels and the buffer stride crops the last one (see
             // the NB below). Where it does not fit (num is the odd maximum of
             // the axis, e.g. 4168/3 = 1389, or an edge-touching sub-frame), keep
-            // the ungrown span: the SDK delivers num-1 and build_image_array
+            // the ungrown span: the SDK delivers num-1 and frame_image
             // fills the one missing edge row/column from its neighbour, since
             // that pixel does not exist on the sensor. The origin is never
             // moved by a whole binned pixel to make the grown span fit.
@@ -1268,7 +1269,7 @@ public:
             // grown span, make the SDK frame one pixel wider/taller than
             // requested, so got_w/got_h from PullImageV4 can exceed
             // active_num_x/active_num_y — this is NOT an off-by-one. The body
-            // lays the frame out at that wider stride and build_image_array reads
+            // lays the frame out at that wider stride and frame_image reads
             // the first active_num_x columns of each row (the SDK rejects a
             // rowPitch shorter than the delivered row with E_INVALIDARG, measured
             // on the GPCMOS01200KPF, so the stride can never be the requested
@@ -1402,7 +1403,7 @@ public:
                 // nRowPitch is the destination row stride in OUR buffer and must
                 // hold a whole delivered row — a pitch shorter than the frame's
                 // row (the requested width against a one-wider frame) is
-                // E_INVALIDARG on hardware. build_image_array reads the first
+                // E_INVALIDARG on hardware. frame_image reads the first
                 // active_num_x columns of each stride_px-wide row.
                 const bool got = c.wait_for_signal() &&
                                  sdk_local.pull_image(handle, pixel_buffer.data(), active_16bit ? 16 : 8,
@@ -1437,8 +1438,8 @@ public:
                 }
 
                 auto image = std::make_shared<const ImageArray>(
-                    build_image_array(pixel_buffer, active_16bit, stride_px, active_num_x, active_num_y,
-                                      static_cast<int>(got_w), static_cast<int>(got_h)));
+                    frame_image(pixel_buffer, active_16bit, stride_px, active_num_x, active_num_y,
+                                static_cast<int>(got_w), static_cast<int>(got_h)));
                 {
                     // An abort or a disconnect that stopped the stream discards the
                     // frame even when the read succeeded; the session drops it past
@@ -1913,59 +1914,32 @@ private:
     // native) bytes per pixel — the same stride passed as PullImageV4's
     // nRowPitch (M14); stride_px >= out_width, and the first out_width columns
     // of each row are the image.
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int stride_px, int out_width,
-                                 int out_height, int actual_width, int actual_height) const {
-        ImageArray image;
-        image.width = out_width;
-        image.height = out_height;
-        image.rank = 2;
-        if (out_width <= 0 || out_height <= 0 || actual_width <= 0 || actual_height <= 0 || stride_px < out_width) {
-            alpacacore::util::throw_invalid_camera_image("invalid ToupTek frame dimensions");
-        }
-        // start_exposure() sizes the sensor-space ROI so the SDK delivers at
-        // least num pixels per axis wherever the sensor has them. The one case
-        // it cannot is an odd num at the sensor edge with bin >= 2: digital
-        // binning rounds its output down to even, and the extra row or column
-        // that would fix it is off the sensor (#977). That frame is exactly one
-        // short; fill the missing edge from its neighbour rather than fail
-        // every full-frame exposure at that bin. Anything shorter than that is
-        // a malformed frame (#913), and the exposure body has already checked
-        // the frame against the size the ROI math predicted.
-        if (actual_width + 1 < out_width || actual_height + 1 < out_height) {
-            alpacacore::util::throw_invalid_camera_image(
-                "ToupTek frame is more than one pixel smaller than the requested ROI");
-        }
-        const int last_col = std::min(actual_width, out_width) - 1;
-        const int last_row = std::min(actual_height, out_height) - 1;
-        const std::size_t bpp = is_16bit ? 2 : 1;
-        const std::size_t output_pixels = static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height);
-        const std::size_t stored_pixels = static_cast<std::size_t>(stride_px) * static_cast<std::size_t>(out_height);
-        if (stored_pixels > buffer.size() / bpp) {
-            alpacacore::util::throw_invalid_camera_image("ToupTek frame buffer is shorter than its dimensions");
-        }
-        image.data.resize(output_pixels);
-        for (int row = 0; row < out_height; ++row) {
-            for (int col = 0; col < out_width; ++col) {
-                // Rows are laid out at stride_px (PullImageV4's nRowPitch); a
-                // delivered width above out_width is cropped by reading only the
-                // first out_width columns, and one below it has only the last
-                // column missing, which reads its neighbour.
-                const std::size_t src_idx =
-                    static_cast<std::size_t>(std::min(row, last_row)) * static_cast<std::size_t>(stride_px) +
-                    static_cast<std::size_t>(std::min(col, last_col));
-                const std::size_t dst_idx =
-                    static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) + static_cast<std::size_t>(col);
-                const std::size_t byte_idx = src_idx * bpp;
-                if (byte_idx + bpp <= buffer.size()) {
-                    image.data[dst_idx] =
-                        is_16bit ? static_cast<std::int32_t>(static_cast<std::uint16_t>(buffer[byte_idx]) |
-                                                             (static_cast<std::uint16_t>(buffer[byte_idx + 1]) << 8))
-                                 : static_cast<std::int32_t>(buffer[byte_idx]);
-                }
-            }
-        }
-        alpacacore::util::validate_image_array(image);
-        return image;
+    //
+    // start_exposure() sizes the sensor-space ROI so the SDK delivers at
+    // least num pixels per axis wherever the sensor has them. The one case
+    // it cannot is an odd num at the sensor edge with bin >= 2: digital
+    // binning rounds its output down to even, and the extra row or column
+    // that would fix it is off the sensor (#977). That frame is exactly one
+    // short; the module fills the missing edge from its neighbour rather than
+    // failing every full-frame exposure at that bin. Anything shorter than that
+    // is a malformed frame (#913), and the exposure body has already checked
+    // the frame against the size the ROI math predicted.
+    static ImageArray frame_image(const std::vector<std::uint8_t>& buffer, bool is_16bit, int stride_px, int out_width,
+                                  int out_height, int actual_width, int actual_height) {
+        // A delivered frame wider than the pitch or taller than the buffer holds only what fits: the columns and rows
+        // past that are not image the buffer carries.
+        const std::size_t stride = static_cast<std::size_t>(std::max(stride_px, 0));
+        const std::size_t row_bytes = stride * (is_16bit ? 2 : 1);
+        const int rows_held =
+            row_bytes == 0
+                ? 0
+                : static_cast<int>(std::min<std::size_t>(buffer.size() / row_bytes, std::numeric_limits<int>::max()));
+        const alpacacore::util::FrameLayout layout{
+            is_16bit ? alpacacore::util::FrameFormat::Mono16 : alpacacore::util::FrameFormat::Mono8, stride,
+            std::min(actual_width, stride_px), std::min(actual_height, rows_held)};
+        const alpacacore::util::FrameWindow window{0, 0, out_width, out_height};
+        return alpacacore::util::build_frame_image(buffer, layout, window,
+                                                   alpacacore::util::FrameEdgeRule::ReplicateOne, "ToupTek");
     }
 };
 

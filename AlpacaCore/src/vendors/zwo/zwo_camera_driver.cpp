@@ -16,6 +16,7 @@
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/frame_layout.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -1030,8 +1031,7 @@ private:
                 sdk_running_ = false;
             }
             last_download_ns_.store(clock_.now().time_since_epoch().count());
-            ImageArray image = build_image_array(buffer, request.frame);
-            util::validate_image_array(image);
+            ImageArray image = frame_image(buffer, request.frame);
             static_cast<void>(c.image_ready(std::make_shared<const ImageArray>(std::move(image))));
         } catch (const std::exception& e) {
             stop_left_running(id);
@@ -1233,7 +1233,7 @@ private:
     int roi_height_effective_;
     // Offset of the client-requested start inside the padded SDK ROI (the
     // applied start is shifted left/up when the pad would overflow the
-    // sensor); build_image_array crops at this offset.
+    // sensor); frame_image crops at this offset.
     int roi_crop_x_;
     int roi_crop_y_;
     int start_x_;
@@ -1604,7 +1604,7 @@ private:
     // The padded ROI can push start+width past the sensor when the client
     // requests an edge-touching sub-frame; shift the applied start left/up so
     // the SDK window stays on-sensor while still covering the requested
-    // region, and record the crop offset so build_image_array reads
+    // region, and record the crop offset so frame_image reads
     // the requested pixels out of the padded buffer (ToupTek approach).
     void apply_start_pos_locked(int active_camera_id) {
         int max_width = camera_info_.max_width / bin_x_;
@@ -2030,97 +2030,27 @@ private:
         return bytes;
     }
 
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, const ExposureFrame& frame) const {
-        const std::size_t required = image_buffer_size(frame);
-        if (buffer.size() < required) {
-            util::throw_invalid_camera_image("ZWO frame buffer is shorter than the reported ROI");
+    // The ImageArray of one downloaded frame: the SDK buffer is effective_width x effective_height, the window starts
+    // crop_x, crop_y into it, and an uncovered edge reads 0.
+    static ImageArray frame_image(const std::vector<std::uint8_t>& buffer, const ExposureFrame& frame) {
+        util::FrameFormat format = util::FrameFormat::Mono8;
+        switch (frame.image_type) {
+            case ZWOImageType::Raw8:
+            case ZWOImageType::Y8:
+                break;
+            case ZWOImageType::Raw16:
+                format = util::FrameFormat::Mono16;
+                break;
+            case ZWOImageType::Rgb24:
+                format = util::FrameFormat::Bgr24;  // ASI RGB24 frames are BGR; Alpaca channels are RGB.
+                break;
+            case ZWOImageType::Unknown:
+                util::throw_invalid_camera_image("ZWO frame format is unsupported");
         }
-        ImageArray image;
-        image.width = frame.width;
-        image.height = frame.height;
-        const int out_width = frame.width;
-        const int out_height = frame.height;
-        const int eff_width = frame.effective_width;
-        const int eff_height = frame.effective_height;
-        if (frame.image_type == ZWOImageType::Rgb24) {
-            image.rank = 3;
-            image.data.resize(util::validate_image_shape(image).element_count);
-            std::size_t buffer_stride = static_cast<std::size_t>(eff_width) * 3;
-            for (int row = 0; row < out_height; ++row) {
-                const std::int64_t src_row = static_cast<std::int64_t>(row) + frame.crop_y;
-                for (int col = 0; col < out_width; ++col) {
-                    const std::int64_t src_col = static_cast<std::int64_t>(col) + frame.crop_x;
-                    std::size_t out_base = (static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) +
-                                            static_cast<std::size_t>(col)) *
-                                           3;
-                    if (src_row < eff_height && src_col < eff_width) {
-                        const std::size_t src_base =
-                            static_cast<std::size_t>(src_row) * buffer_stride + static_cast<std::size_t>(src_col) * 3;
-                        if (src_base + 2 < buffer.size()) {
-                            // ASI RGB24 frames are BGR; Alpaca channels are RGB.
-                            image.data[out_base] = buffer[src_base + 2];
-                            image.data[out_base + 1] = buffer[src_base + 1];
-                            image.data[out_base + 2] = buffer[src_base];
-                            continue;
-                        }
-                    }
-                    image.data[out_base] = 0;
-                    image.data[out_base + 1] = 0;
-                    image.data[out_base + 2] = 0;
-                }
-            }
-            return image;
-        }
-
-        image.rank = 2;
-        image.data.resize(util::validate_image_shape(image).element_count);
-        if (frame.image_type == ZWOImageType::Raw16) {
-            for (int row = 0; row < out_height; ++row) {
-                for (int col = 0; col < out_width; ++col) {
-                    std::size_t out_index = static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) +
-                                            static_cast<std::size_t>(col);
-                    const std::int64_t src_row = static_cast<std::int64_t>(row) + frame.crop_y;
-                    const std::int64_t src_col = static_cast<std::int64_t>(col) + frame.crop_x;
-                    if (src_row < eff_height && src_col < eff_width) {
-                        const std::size_t offset =
-                            (static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
-                             static_cast<std::size_t>(src_col)) *
-                            2;
-                        if (offset + 1 < buffer.size()) {
-                            const std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
-                                                        static_cast<std::uint16_t>(buffer[offset + 1] << 8);
-                            image.data[out_index] = static_cast<std::int32_t>(value);
-                            continue;
-                        }
-                    }
-                    image.data[out_index] = 0;
-                }
-            }
-            return image;
-        }
-
-        if (frame.image_type != ZWOImageType::Raw8 && frame.image_type != ZWOImageType::Y8) {
-            util::throw_invalid_camera_image("ZWO frame format is unsupported");
-        }
-        for (int row = 0; row < out_height; ++row) {
-            for (int col = 0; col < out_width; ++col) {
-                std::size_t out_index =
-                    static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) + static_cast<std::size_t>(col);
-                const std::int64_t src_row = static_cast<std::int64_t>(row) + frame.crop_y;
-                const std::int64_t src_col = static_cast<std::int64_t>(col) + frame.crop_x;
-                if (src_row < eff_height && src_col < eff_width) {
-                    const std::size_t buffer_index =
-                        static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
-                        static_cast<std::size_t>(src_col);
-                    if (buffer_index < buffer.size()) {
-                        image.data[out_index] = buffer[buffer_index];
-                        continue;
-                    }
-                }
-                image.data[out_index] = 0;
-            }
-        }
-        return image;
+        const util::FrameLayout layout{format, static_cast<std::size_t>(frame.effective_width), frame.effective_width,
+                                       frame.effective_height};
+        const util::FrameWindow window{frame.crop_x, frame.crop_y, frame.width, frame.height};
+        return util::build_frame_image(buffer, layout, window, util::FrameEdgeRule::ZeroFill, "ZWO");
     }
 };
 
