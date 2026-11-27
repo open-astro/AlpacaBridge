@@ -129,7 +129,9 @@ author must do. Read the docstring before changing a gate.
   (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job runs only after `test-optimized`
   passes, so a red suite publishes nothing. It also installs the `.deb` it
   builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does before
-  every merge, so a nightly `.deb` that fails the check is never published.
+  every merge, so a nightly `.deb` that fails the check is never published. When `main`'s
+  `.github/workflows` tree differs from the built commit's by the time the tag moves, the run skips
+  publishing with a warning: GitHub refuses that `GITHUB_TOKEN` ref write (403), and the next run builds the new tip.
 - **ConformU against the drivers' fakes** (`ConformU fake`, `.github/workflows/conformu-fake.yml`, issues #1637, #2078): the
   test-only `fake_conformu_server`, driven by `scripts/run_fake_conformu.sh`, which runs ConformU for each `run`
   row of `scripts/conformu_fake_runs.tsv` (the rows are whatever `run` records the list holds; the list is the one owner, not this sentence), one matrix job per row (each row restores the pinned ConformU tarball from an Actions cache keyed on its sha256, and a miss downloads it with retries, so a GitHub 5xx no longer fails a row; a `runs` job lists them, and builds libgpiod or the bundled
