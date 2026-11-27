@@ -1186,6 +1186,96 @@ TEST_CASE("SVBONY Camera Driver - a pulse queued behind a link loss raises the l
     CHECK_FALSE(camera->get_connected());
 }
 
+// #2748 with decision 0009 point 3: a loss that a getter finds while SVBPulseGuide runs leaves the camera open, so the
+// SDK pulse never runs on a closed id. The drain closes it once, after the pulse returns, or a Disconnect that joins
+// the drain does; either way the camera is closed exactly once. With nothing in flight a loss still closes at once:
+// "a removal error on a control read drops Connected".
+TEST_CASE("SVBONY Camera Driver - a loss a getter finds during a pulse closes the camera only after the pulse returns",
+          "[svbony][camera][unit][fake-sdk][taskclock][link][issue2748]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> disconnected{true};
+    PulseCaseCleanup cleanup{clock, {}, {&disconnected}};
+    camera->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));  // the drain is inside SVBPulseGuide
+    sdk.fail_with_removal("get_control_value");
+
+    require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(sdk.call_count("close_camera") == 0);  // the pulse still runs on the id
+    CHECK(sdk.open_count() == 1);
+    // Lost, IsPulseGuiding raises the loss first (#2792), while the drain still runs.
+    require_alpaca_error([&] { static_cast<void>(camera->get_is_pulse_guiding()); },
+                         alpacacore::AlpacaError::NotConnected);
+
+    SECTION("the drain closes it once the pulse returns") {
+        clock.advance(2000ms);
+        REQUIRE(wait_until([&] { return sdk.call_count("close_camera") == 1; }, 20s));
+        CHECK(sdk.open_count() == 0);
+        camera->set_connected(false);  // the Disconnect of the lost camera closes nothing more
+    }
+    SECTION("a Disconnect joins the pulse, then closes it once") {
+        disconnected = false;
+        cleanup.threads.emplace_back([&] {
+            static_cast<void>(alpacacore::test::worker_code_of([&] { camera->set_connected(false); }));
+            disconnected = true;
+        });
+        CHECK_FALSE(wait_until([&] { return disconnected.load(); }, 300ms));  // waits for the pulse in the SDK
+        CHECK(sdk.call_count("close_camera") == 0);
+        clock.advance(2000ms);
+        REQUIRE(wait_until([&] { return disconnected.load(); }, 20s));
+        CHECK(sdk.open_count() == 0);
+    }
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK(sdk.closes_during_pulse() == 0);
+}
+
+// #2748: a loss the pulse itself finds behaves the same. The drain closes the camera once on its way out, and the
+// Disconnect that follows closes nothing more.
+TEST_CASE("SVBONY Camera Driver - a loss the pulse finds closes the camera once on the drain's way out",
+          "[svbony][camera][unit][fake-sdk][link][issue2748]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("pulse_guide");
+
+    camera->pulse_guide(0, 10);
+    REQUIRE(wait_until([&] { return !camera->get_connected(); }, 20s));
+    REQUIRE(wait_until([&] { return sdk.call_count("close_camera") == 1; }, 20s));
+    CHECK(sdk.open_count() == 0);
+    camera->set_connected(false);
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK(sdk.closes_during_pulse() == 0);
+}
+
+// #2748, the sibling site: an exposure body that meets the loss while a pulse runs leaves the close to the drain,
+// which closes the camera once after the pulse returns.
+TEST_CASE("SVBONY Camera Driver - an exposure body that meets a loss during a pulse leaves the close to the drain",
+          "[svbony][camera][unit][fake-sdk][taskclock][link][issue2748]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    ReleaseReadOnExit release{sdk};
+    std::atomic<bool> settled{false};
+    PulseCaseCleanup cleanup{clock, {}, {&settled}};
+    camera->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));  // the drain is inside SVBPulseGuide
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    sdk.remove_during_held_read();
+    sdk.release_video_data();
+
+    REQUIRE(wait_until([&] { return !camera->get_connected(); }, 20s));
+    CHECK_FALSE(wait_until([&] { return sdk.call_count("close_camera") > 0; }, 300ms));  // the body has returned
+    CHECK(sdk.open_count() == 1);
+    clock.advance(2000ms);
+    REQUIRE(wait_until([&] { return sdk.call_count("close_camera") == 1; }, 20s));
+    settled = true;
+    CHECK(sdk.open_count() == 0);
+    CHECK(sdk.closes_during_pulse() == 0);
+}
+
 // The ASCOM async FAQ (ascom-contract "A failed async operation body keeps its error"): a pulse whose SDK call fails
 // is raised by IsPulseGuiding until the next PulseGuide or a Disconnect clears it (the Connect clear is in the removal
 // case above).

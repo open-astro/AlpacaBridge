@@ -144,6 +144,7 @@ public:
             throw alpacacore::AlpacaException("Fake SVBONY camera closed during an active frame read",
                                               alpacacore::AlpacaError::DriverException);
         }
+        if (pulses_in_sdk_.contains(camera_id)) ++closes_during_pulse_;  // #2748: the id SVBPulseGuide still runs on
         capture_ids_.erase(camera_id);
         release_read_ = true;
         video_data_cv_.notify_all();
@@ -374,9 +375,12 @@ public:
             pulses_.push_back(Pulse{direction, duration_ms, std::this_thread::get_id()});
             maybe_fail_locked("pulse_guide");
             require_open_locked(camera_id);
+            pulses_in_sdk_.insert(camera_id);
         }
         // Outside the mutex, like open_camera's delay: only the caller waits for the pulse.
         timing_.block_for(std::chrono::milliseconds(duration_ms));
+        std::lock_guard lock(mutex_);
+        pulses_in_sdk_.erase(pulses_in_sdk_.find(camera_id));
     }
     float get_sensor_pixel_size(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -575,6 +579,11 @@ public:
         std::lock_guard lock(mutex_);
         return open_count_;
     }
+    // close_camera() calls made while a pulse_guide() on the same id had not returned (#2748).
+    int closes_during_pulse() const {
+        std::lock_guard lock(mutex_);
+        return closes_during_pulse_;
+    }
     std::size_t last_buffer_capacity() const {
         std::lock_guard lock(mutex_);
         return last_buffer_capacity_;
@@ -607,6 +616,8 @@ private:
     }();
     std::set<int> opened_ids_;
     std::set<int> capture_ids_;
+    std::multiset<int> pulses_in_sdk_;  // ids with a pulse_guide() call that has not returned
+    int closes_during_pulse_{0};
     std::map<std::string, int> call_counts_;
     std::map<std::string, int> one_shot_failures_;
     std::map<std::string, std::deque<std::pair<int, std::string>>> scripted_errors_;
