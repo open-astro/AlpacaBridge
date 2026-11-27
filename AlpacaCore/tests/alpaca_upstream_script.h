@@ -297,6 +297,13 @@ public:
 
     static std::string number(double value) { return std::to_string(value); }
 
+    // A Telescope: while true, each RightAscension read moves RA 0.01 h on while axis 0 runs a MoveAxis, and each
+    // Declination read moves Dec 0.1 deg on while axis 1 does (false, the default: the position stays).
+    void move_positions(bool move) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        move_positions_ = move;
+    }
+
     // A Telescope: slews, Park and FindHome run until finish_motion() (or AbortSlew) while true; they land at once
     // while false (the default).
     void hold_motion(bool hold) {
@@ -345,6 +352,11 @@ public:
             } else if (member == "connected") {
                 reply = {connected_ ? "true" : "false", 0, {}};
             } else {
+                if (telescope_ && move_positions_ && request.method == "GET") {
+                    if (member == "rightascension" && axis_rate_[0] != 0.0)
+                        set_mount_locked(mount_ra_ + 0.01, mount_dec_);
+                    if (member == "declination" && axis_rate_[1] != 0.0) set_mount_locked(mount_ra_, mount_dec_ + 0.1);
+                }
                 const auto it = replies_.find({member, key_of(params)});
                 if (it != replies_.end()) reply = it->second;
             }
@@ -484,7 +496,10 @@ private:
         if (member == "moveaxis") {
             if (parked) return refused_parked;
             const int axis = std::stoi(value("Axis"));
-            if (axis < 0 || axis > 1) return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            const auto can = replies_.find({"canmoveaxis", value("Axis")});
+            if (axis < 0 || axis > 2 || can == replies_.end() || can->second.value_json != "true") {
+                return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            }
             const double rate = number_of("Rate");
             if (std::abs(rate) > 4.0) return Reply{{}, 0x401, "MoveAxis rate " + value("Rate") + " is too fast"};
             axis_rate_[axis] = rate;
@@ -618,13 +633,15 @@ private:
 
     // Slewing, AtPark and SideOfPier from the running motion, the axes and the park.
     void set_motion_locked() {
-        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0;
+        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0 || axis_rate_[2] != 0.0;
         replies_[{"slewing", ""}] = {moving ? "true" : "false", 0, {}};
         replies_[{"atpark", ""}] = {at_park_ ? "true" : "false", 0, {}};
         if (replies_.find({"sideofpier", ""}) == replies_.end()) replies_[{"sideofpier", ""}] = {"0", 0, {}};
     }
 
     void set_mount_locked(double ra, double dec) {
+        mount_ra_ = ra;
+        mount_dec_ = dec;
         replies_[{"rightascension", ""}] = {number(ra), 0, {}};
         replies_[{"declination", ""}] = {number(dec), 0, {}};
     }
@@ -694,6 +711,9 @@ private:
     // A Telescope's motion, axes, park, targets and the PUTs it took.
     bool telescope_ = false;
     bool hold_motion_ = false;
+    bool move_positions_ = false;
+    double mount_ra_ = 0.0;
+    double mount_dec_ = 0.0;
     bool at_park_ = false;
     std::optional<Motion> motion_;
     std::array<double, 3> axis_rate_{0.0, 0.0, 0.0};

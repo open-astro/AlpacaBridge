@@ -205,14 +205,16 @@ bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bar
   while disconnected (the last Connect's answer, false before any) under one state-lock hold.
 - **Snapshot.** The frame is the twelve ITelescopeV4 `DeviceState` members, twelve GETs per poll: `RightAscension`,
   `Declination`, `Altitude`, `Azimuth`, `SiderealTime`, `UTCDate`, `Slewing`, `Tracking`, `AtPark`, `AtHome`,
-  `SideOfPier`, `IsPulseGuiding`. `UTCDate` and `SiderealTime` are served advanced by the frame's age. A stale frame
+  `SideOfPier`, `IsPulseGuiding`. `UTCDate` is a `util::UtcOffset` anchored where the poll read it, or where this
+  server wrote it (decision 0014); `SiderealTime` is served advanced by the frame's age. A stale frame
   is served; a latched fault refuses it; `DeviceState` is the telescope base's, its `TimeStamp` the frame's age.
 - **Commands** refuse in the gate's order (`util/telescope_command_gate.h`): the argument ranges every telescope
   shares (`InvalidValue`), connected, the link fault; the upstream judges parked, Tracking and its own ranges, and its
   error passes through. The async slews, `Park`, `FindHome`, a `SideOfPier` write and a non-zero `MoveAxis` write
   `Slewing` true through; only a poll writes it false, never a fault or a loss. `PulseGuide` writes `IsPulseGuiding`
   true, `Unpark` `AtPark` false, the syncs the synced position; a coordinate slew or sync reads the upstream's targets
-  back (a read with no reply leaves them). `DestinationSideOfPier` is forwarded in the command slot.
+  back (a read with no reply leaves them). `DestinationSideOfPier` is a live upstream GET in the command slot, so it
+  can queue behind a slow motion PUT (each call is bounded by the 5 s per-call timeout).
 - **Stops.** `AbortSlew` and `MoveAxis(axis, 0)` are forwarded even while the link is faulted (refused only for a lost
   link); `AbortSlew` leaves `Slewing` to the poll (ITelescopeV4: true until the motion stopped).
 - **Not proxied:** the synchronous slews (`SlewToCoordinates`, `SlewToTarget`, `SlewToAltAz`) answer
