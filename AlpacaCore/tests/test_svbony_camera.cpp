@@ -1001,9 +1001,9 @@ TEST_CASE("SVBONY Camera Driver - a Disconnect during a pulse joins the pulse bo
     sdk.before_call = nullptr;
 }
 
-// The QHY rule (#1736) on SVBONY (#2735): a PulseGuide while one runs supersedes the running body without a join and
-// returns at once; the new pulse queues behind the SDK call in flight and guides once it returns. IsPulseGuiding stays
-// true across the hand-over: the older pulse ending does not clear it.
+// #2735: a PulseGuide while one runs returns at once; its pulse goes on the driver's queue and the drain sends it once
+// the SDK call in flight returns. IsPulseGuiding stays true across the hand-over: the older pulse ending does not
+// clear it.
 TEST_CASE("SVBONY Camera Driver - a second PulseGuide during a pulse queues behind it and IsPulseGuiding holds",
           "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1056,9 +1056,41 @@ TEST_CASE("SVBONY Camera Driver - a pulse queued when a Disconnect closes the sl
     CHECK_FALSE(camera->get_is_pulse_guiding());
 }
 
-// Decision 0006 rule 2 on SVBONY (#2735): with pulse A in the SDK and three newer pulses queued behind it, a fifth
-// PulseGuide waits 2 s on the clock for room and is refused with InvalidOperation. The refusal gives back its count,
-// so IsPulseGuiding still reads true for the four, and false once they have all returned.
+// Decision 0006 rule 6 on SVBONY (#2735): the queued pulses go out in request order, each exactly once, and all from
+// the one drain body that sent the first. No newer PulseGuide supersedes a body that still has pulses to send, so no
+// superseded body sends a pulse (a body per pulse, each superseded by the next, sent them from four threads).
+TEST_CASE("SVBONY Camera Driver - queued pulses go out once each, in request order, from one drain body",
+          "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
+    using Direction = alpacacore::vendor::svbony::SVBGuideDirection;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_with_timed_pulses(sdk, clock);
+    std::atomic<bool> settled{false};
+    PulseCaseCleanup cleanup{clock, {}, {&settled}};
+    camera->pulse_guide(0, 1000);                // North: in the SDK
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    camera->pulse_guide(1, 300);                 // South, East and West queue behind it
+    camera->pulse_guide(2, 200);
+    camera->pulse_guide(3, 100);
+    CHECK(sdk.call_count("pulse_guide") == 1);
+    REQUIRE(clock.drain_until([&] { return !camera->get_is_pulse_guiding(); }, 100ms, 5000ms));
+    settled = true;
+
+    const auto pulses = sdk.pulses();
+    REQUIRE(pulses.size() == 4);
+    CHECK(sdk.call_count("pulse_guide") == 4);
+    const std::vector<Direction> want_direction{Direction::North, Direction::South, Direction::East, Direction::West};
+    const std::vector<int> want_duration{1000, 300, 200, 100};
+    for (std::size_t i = 0; i < pulses.size(); ++i) {
+        CHECK(pulses[i].direction == want_direction[i]);
+        CHECK(pulses[i].duration_ms == want_duration[i]);
+        CHECK(pulses[i].thread == pulses[0].thread);
+    }
+}
+
+// #2735: with pulse A in the SDK and three newer pulses queued behind it (kMaxQueuedPulses), a fifth PulseGuide is
+// refused at once with InvalidOperation and changes nothing: IsPulseGuiding still reads true for the four, which all
+// go out, and false once they have returned.
 TEST_CASE("SVBONY Camera Driver - a PulseGuide refused behind four pending pulses changes nothing",
           "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1076,14 +1108,37 @@ TEST_CASE("SVBONY Camera Driver - a PulseGuide refused behind four pending pulse
         code = alpacacore::test::worker_code_of([&] { camera->pulse_guide(2, 5000); });
         refused = true;
     });
-    REQUIRE(clock.wait_for_waiters(2, 2000ms));  // the fifth start waits on the clock for room
-    clock.advance(2000ms);                       // its 2 s bound; pulse A (5 s) is still in the SDK
-    REQUIRE(eventually([&] { return refused.load(); }));
+    REQUIRE(eventually([&] { return refused.load(); }));  // no clock advance: the refusal does not wait
     CHECK(code.load() == alpacacore::AlpacaError::InvalidOperation);
     CHECK(camera->get_is_pulse_guiding());
     CHECK(sdk.call_count("pulse_guide") == 1);
-    CHECK(clock.drain_until([&] { return !camera->get_is_pulse_guiding(); }, 1000ms, 5000ms));
+    CHECK(clock.drain_until([&] { return !camera->get_is_pulse_guiding(); }, 1000ms, 10000ms));
     CHECK(sdk.call_count("pulse_guide") == 4);
+}
+
+// #2735 with decision 0009: a pulse queued behind a pulse that lost the link sends nothing; the drain fails it with
+// the loss reason, and IsPulseGuiding raises that text.
+TEST_CASE("SVBONY Camera Driver - a pulse queued behind a link loss raises the loss text",
+          "[svbony][camera][unit][fake-sdk][link][issue2735]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    std::atomic<bool> queued{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "pulse_guide" || queued.exchange(true)) return;
+        camera->pulse_guide(1, 10);           // queues behind this call (the drain thread holds no driver lock)
+        sdk.fail_with_removal("pulse_guide");  // and this call reports the camera removed
+    };
+    camera->pulse_guide(0, 10);
+    std::pair<int, std::string> raised{0, ""};
+    REQUIRE(eventually([&] {
+        raised = error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); });
+        return raised.first != 0;
+    }));
+    sdk.before_call = nullptr;
+    CHECK(raised.first == alpacacore::AlpacaError::NotConnected);
+    CHECK(raised.second == "pulse_guide: SVB_ERROR_CAMERA_REMOVED");
+    CHECK(sdk.call_count("pulse_guide") == 1);
+    CHECK_FALSE(camera->get_connected());
 }
 
 // The ASCOM async FAQ (ascom-contract "A failed async operation body keeps its error"): a pulse whose SDK call fails
