@@ -67,6 +67,9 @@ on:
       - "AlpacaCore/tests/conformu_focuser_factories.h"
       - "AlpacaCore/tests/fake_zwo_eaf_sdk.h"
       - "AlpacaCore/tests/fake_mount_server.h"
+      - "AlpacaCore/tests/fake_celestron_handset.h"
+      - "AlpacaCore/tests/fake_synscan_handset.h"
+      - "AlpacaCore/tests/nexstar_hc_wire.h"
       - "AlpacaCore/tests/onstep_controller_model.h"
       - "AlpacaCore/tests/conformu_telescope_factories.h"
       - "AlpacaCore/tests/fake_ioptron_mount.h"
@@ -200,13 +203,13 @@ jobs:
           NEEDS_GPHOTO = {"gphoto"}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
-                         "ifr": "iOptron", "qhy": "QHY", "playerone": "Player One",
+                         "ifr": "iOptron", "celestron": "Celestron", "synscan": "SynScan", "qhy": "QHY", "playerone": "Player One",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
                          "altair": "Altair", "remotealpaca": "Remote Alpaca",
                          "wandererastro": "WandererAstro"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
-          # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
-          # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
+          # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h serves the
+          # Celestron, SynScan and OnStep rows, so a change to it selects those rows only by the row's own fake name.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
                           "AlpacaCore/tests/conformu_telescope_factories.h": "ioptron",
                           "AlpacaCore/tests/fake_mount_motion_model.h": "ioptron",

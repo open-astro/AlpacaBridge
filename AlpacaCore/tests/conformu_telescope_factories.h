@@ -19,9 +19,22 @@
 // builds. It lives here, not in AlpacaHTTP, so the vendor headers stay out of AlpacaHTTP (scripts/check_layering.py).
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 
+#ifdef FAKE_CONFORMU_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+
+#include "fake_celestron_handset.h"
+#include "fake_mount_server.h"
+#endif
+#ifdef FAKE_CONFORMU_SYNSCAN
+#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
+
+#include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
+#endif
 #ifdef FAKE_CONFORMU_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
@@ -45,6 +58,48 @@ inline std::unique_ptr<TelescopeDriver> make_ioptron_telescope(int device_number
     connection.tcp_port = ioptron_mount().port();
     return vendor::ioptron::create_ioptron_telescope_with_site(device_number, connection, -33.856784, 151.215297, 42.0,
                                                                /*sync_time_on_connect=*/true);
+}
+#endif
+
+// The hand-controller rows (#2692): the handset fake in ConformU mode behind a FakeMountServer on loopback TCP, the
+// driver on the real task clock and the made-up Sydney Opera House site (never a real site). The handset is declared
+// first, so it outlives the server that holds its responder.
+#ifdef FAKE_CONFORMU_CELESTRON
+struct NexStarHost {
+    FakeCelestronHandset handset{util::default_task_clock(), FakeCelestronHandset::conformu_motion_config()};
+    FakeMountServer server{handset.responder()};
+};
+inline NexStarHost& nexstar_mount() {
+    static NexStarHost host;
+    return host;
+}
+inline std::unique_ptr<TelescopeDriver> make_nexstar_telescope(int device_number) {
+    vendor::celestron::ConnectionInfo connection;
+    connection.type = vendor::celestron::ConnectionType::Network;
+    connection.host = "127.0.0.1";
+    connection.tcp_port = nexstar_mount().server.port();
+    return vendor::celestron::create_celestron_telescope_with_site(device_number, connection, -33.856784, 151.215297,
+                                                                   42.0, /*sync_time_on_connect=*/true);
+}
+#endif
+
+#ifdef FAKE_CONFORMU_SYNSCAN
+struct SynScanHost {
+    FakeSynScanHandset handset{util::default_task_clock(), FakeSynScanHandset::conformu_motion_config()};
+    FakeMountServer server{handset.responder()};
+};
+inline SynScanHost& synscan_mount() {
+    static SynScanHost host;
+    return host;
+}
+inline std::unique_ptr<TelescopeDriver> make_synscan_telescope(int device_number) {
+    vendor::synscan::ConnectionInfo connection;
+    connection.type = vendor::synscan::ConnectionType::Network;
+    connection.host = "127.0.0.1";
+    connection.tcp_port = synscan_mount().server.port();
+    return vendor::synscan::create_synscan_telescope_with_site(device_number, connection,
+                                                               vendor::synscan::SynScanVersion::V4, -33.856784,
+                                                               151.215297, 42.0, /*sync_time_on_connect=*/true);
 }
 #endif
 

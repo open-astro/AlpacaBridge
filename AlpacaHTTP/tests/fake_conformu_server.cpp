@@ -122,6 +122,18 @@ const std::vector<ConformuHost> kHosts = {
      "FakeIoptronMount (simulated HAE16 EQ over loopback TCP, motion from FakeMountMotionModel)",
      [] { return cu::ioptron_mount().ok(); }, driver_of(cu::make_ioptron_telescope)},
 #endif
+#ifdef FAKE_CONFORMU_CELESTRON
+    {"celestron", "telescope", "fake_mount_server.h", alpacacore::DeviceType::Telescope, "celestron-fake",
+     "Celestron NexStar mount (fake, test only)", "ALPACACORE_ENABLE_CELESTRON",
+     "FakeCelestronHandset (simulated NexStar hand controller over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::nexstar_mount().server.ok(); }, driver_of(cu::make_nexstar_telescope)},
+#endif
+#ifdef FAKE_CONFORMU_SYNSCAN
+    {"synscan", "telescope", "fake_mount_server.h", alpacacore::DeviceType::Telescope, "synscan-fake",
+     "SynScan mount (fake, test only)", "ALPACACORE_ENABLE_SYNSCAN",
+     "FakeSynScanHandset (simulated SynScan hand controller over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::synscan_mount().server.ok(); }, driver_of(cu::make_synscan_telescope)},
+#endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h", alpacacore::DeviceType::Focuser, "zwo-fake",
      "ZWO EAF (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOEAFSDK (simulated EAF SDK, in process)",
