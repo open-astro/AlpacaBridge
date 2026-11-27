@@ -249,7 +249,8 @@ TEST_CASE("ZWO motion owner - MoveAxis on one axis leaves a pulse on the other a
     rig.driver->move_axis(axis, rate);
     CHECK(rig.driver->get_is_pulse_guiding());
     CHECK((axis == 0 ? rig.driver->get_declination() : rig.driver->get_right_ascension()) == guided);
-    rig.wait_for_blocked_caller();  // the drain waits out the first step, besides the poll loop
+    rig.wait_for_blocked_caller(rate != 0.0 ? 2 : 1);  // the drain waits out the first step, besides the poll loop and,
+                                                       // for a jog, its cap body
     rig.advance(3000ms);
     CHECK(rig.mount.wait_for_count(guide, 2, kReal));  // the second step reached the mount
     CHECK(rig.driver->get_is_pulse_guiding());
@@ -316,7 +317,7 @@ TEST_CASE("ZWO motion owner - a pulse ending during an other-axis jog leaves tha
     REQUIRE(rig.mount.wait_for_count(":Mgn", 1, kReal));
     if (!jog_first) rig.driver->move_axis(0, 1.0);
     rig.mount.set_position(13.0, 45.0);  // the jog moved RA
-    rig.wait_for_blocked_caller();       // the drain waits out its step, besides the poll loop
+    rig.wait_for_blocked_caller(2);      // the drain waits out its step, besides the poll loop and the jog's cap body
     const int pairs = rig.mount.count(":GR");
     rig.advance(1000ms);
     REQUIRE(rig.mount.wait_for_count(":GR", pairs + 1, kReal));  // the drain's reconciliation read

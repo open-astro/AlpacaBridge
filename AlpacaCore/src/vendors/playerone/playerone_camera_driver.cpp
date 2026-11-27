@@ -16,6 +16,7 @@
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/frame_layout.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -1302,8 +1303,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     sdk_exposure_started_ = false;
                 }
-                ImageArray img =
-                    build_image_array(raw, sdk_frame_w, sdk_frame_h, active_num_x, active_num_y, active_format);
+                ImageArray img = frame_image(raw, sdk_frame_w, sdk_frame_h, active_num_x, active_num_y, active_format);
                 static_cast<void>(c.image_ready(std::make_shared<const ImageArray>(std::move(img))));
             } catch (const std::exception& e) {
                 stop_running_exposure();
@@ -1718,65 +1718,28 @@ private:
         session_.discard_image();
     }
 
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, int src_w, int src_h, int out_w, int out_h,
-                                 PlayerOneImageFormat format) const {
-        ImageArray image;
-        image.width = out_w;
-        image.height = out_h;
-        image.rank = format == PlayerOneImageFormat::Rgb24 ? 3 : 2;
-        const auto output_shape = alpacacore::util::validate_image_shape(image);
-        // The SDK buffer is src_w × src_h (aligned). The returned ImageArray is
-        // out_w × out_h (what the client requested). Copy the overlapping
-        // region; any trailing row/col is left zeroed.
-        const int copy_w = std::min(src_w, out_w);
-        const int copy_h = std::min(src_h, out_h);
-        const std::size_t out_pixels = output_shape.width * output_shape.height;
-
-        if (format == PlayerOneImageFormat::Raw16) {
-            image.data.assign(out_pixels, 0);
-            const std::size_t src_stride = static_cast<std::size_t>(src_w) * 2;
-            for (int y = 0; y < copy_h; ++y) {
-                const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
-                for (int x = 0; x < copy_w; ++x) {
-                    const std::size_t j = row_off + static_cast<std::size_t>(x) * 2;
-                    std::uint16_t px =
-                        static_cast<std::uint16_t>(buffer[j]) | (static_cast<std::uint16_t>(buffer[j + 1]) << 8);
-                    image.data[static_cast<std::size_t>(y) * out_w + x] = static_cast<std::int32_t>(px);
-                }
-            }
-        } else if (format == PlayerOneImageFormat::Raw8 || format == PlayerOneImageFormat::Mono8) {
-            image.data.assign(out_pixels, 0);
-            const std::size_t src_stride = static_cast<std::size_t>(src_w);
-            for (int y = 0; y < copy_h; ++y) {
-                const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
-                for (int x = 0; x < copy_w; ++x) {
-                    const std::size_t j = row_off + static_cast<std::size_t>(x);
-                    image.data[static_cast<std::size_t>(y) * out_w + x] = static_cast<std::int32_t>(buffer[j]);
-                }
-            }
-        } else if (format == PlayerOneImageFormat::Rgb24) {
-            // Present RGB24 as rank-3 (H x W x 3). Pack each channel into its
-            // plane as ASCOM clients expect.
-            image.data.assign(output_shape.element_count, 0);
-            const std::size_t src_stride = static_cast<std::size_t>(src_w) * 3;
-            for (int y = 0; y < copy_h; ++y) {
-                const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
-                for (int x = 0; x < copy_w; ++x) {
-                    const std::size_t j = row_off + static_cast<std::size_t>(x) * 3;
-                    // Player One RGB24 is stored as B,G,R per pixel; transpose
-                    // to R,G,B for Alpaca clients.
-                    std::int32_t b = buffer[j];
-                    std::int32_t g = buffer[j + 1];
-                    std::int32_t r = buffer[j + 2];
-                    const std::size_t out_i = (static_cast<std::size_t>(y) * out_w + x) * 3;
-                    image.data[out_i + 0] = r;
-                    image.data[out_i + 1] = g;
-                    image.data[out_i + 2] = b;
-                }
-            }
+    // The SDK buffer is src_w x src_h (aligned); the client gets out_w x out_h from its top-left corner. Any
+    // trailing row or column the buffer lacks reads 0.
+    static ImageArray frame_image(const std::vector<std::uint8_t>& buffer, int src_w, int src_h, int out_w, int out_h,
+                                  PlayerOneImageFormat format) {
+        util::FrameFormat layout_format = util::FrameFormat::Mono8;
+        switch (format) {
+            case PlayerOneImageFormat::Raw16:
+                layout_format = util::FrameFormat::Mono16;
+                break;
+            case PlayerOneImageFormat::Rgb24:
+                layout_format =
+                    util::FrameFormat::Bgr24;  // Player One RGB24 is B,G,R per pixel; Alpaca planes are R,G,B.
+                break;
+            case PlayerOneImageFormat::Raw8:
+            case PlayerOneImageFormat::Mono8:
+                break;
+            default:
+                util::throw_invalid_camera_image("Player One frame format is unsupported");
         }
-        alpacacore::util::validate_image_array(image);
-        return image;
+        const util::FrameLayout layout{layout_format, static_cast<std::size_t>(std::max(src_w, 0)), src_w, src_h};
+        const util::FrameWindow window{0, 0, out_w, out_h};
+        return util::build_frame_image(buffer, layout, window, util::FrameEdgeRule::ZeroFill, "Player One");
     }
 };
 

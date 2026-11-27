@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator and Telescope.
+3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator, Telescope and Focuser.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -238,18 +238,46 @@ bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bar
   (`NotConnected`), and the caps are joined after the stops. The first stop with no reply owes the relink stop. `AbortSlew` and
   `MoveAxis(axis, 0)` cancel a cap only once the upstream answered the stop.
 
+#### The Focuser proxied device (issue #1753 slice 5, #2707)
+
+The same config, self-loop check, Connect (Platform 7 is `IFocuserV4`; a version 3 or older upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound.
+
+- **Connect** reads `Absolute`, `MaxStep`, `MaxIncrement`, `StepSize` and `TempCompAvailable` once, each a value or the
+  upstream's error (an upstream that lacks one, `StepSize` most often, answers `NotImplemented`, served unchanged).
+  They are static metadata: they keep answering while the link is faulted. `Absolute` also answers while
+  disconnected: the last Connect's value, true before any.
+- **Snapshot.** The frame is `IsMoving`, `Position`, `Temperature` and `TempComp`, each a value or the upstream's
+  error. A stale frame is served, never refused (decision 0010 rule 6): each getter answers the last poll's value until
+  the loss bound. A latched fault refuses the frame with `DriverException`. `DeviceState` is the focuser base's, from
+  the same getters, its `TimeStamp` the frame's age (`device_state_age()`).
+- **Move** clamps an absolute target to `0..MaxStep` (#2028; `with_clamping_focuser` in the sweep) and sends a relative
+  step as given. It is refused while the link is faulted. Its body forwards `Move` and writes `IsMoving` true through:
+  always for an absolute Move (the frame's `Position` can be a poll period old, so it is no evidence the target is
+  reached), and for a relative step that is not 0. A step of 0 leaves the polled value, since an earlier move may still
+  run. `Position` stays the measured one until the next poll.
+- **Halt** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
+  (`NotConnected`). Its body writes `IsMoving` false through. A Halt sent while a Move's body runs waits for it (the
+  caller order of `run_command()`), so it reaches the upstream after the Move.
+- **TempComp write** is forwarded (the upstream refuses it with its own error when it has no compensation), refused
+  while faulted, and written through on success.
+- A refused connection on any of the three is a lost link at once; another call with no reply is `DriverException`.
+  Actions and `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
 `test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
-`test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop), the contract sweep
-and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
+`test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop),
+`test_remotealpaca_focuser.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
 `AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
 `Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
 `finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
 `finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`,
 `Kind::Telescope` a German mount whose slews land at once or, with `hold_motion(true)`, run until `finish_motion()`
-or AbortSlew) with the poll on `FakeTaskClock`. The contract sweep's snapshot
+or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until `finish_move()` or a Halt) with the poll on
+`FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
 ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row

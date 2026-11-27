@@ -861,8 +861,9 @@ TEST_CASE("ToupTek camera - odd full frame at bin 3 fills the missing sensor edg
 
 // #913 still holds: a frame below what the ROI math predicts is malformed. Here
 // the fake answers 3 columns for a grown 8-pixel span at bin 2 (4 expected);
-// build_image_array alone would accept a one-column deficit, so this pins the
-// worker's check against the predicted size.
+// frame_image alone (build_frame_image with FrameEdgeRule::ReplicateOne) would
+// accept a one-column deficit, so this pins the worker's check against the
+// predicted size.
 TEST_CASE("ToupTek camera - a frame shorter than the binned ROI contract still fails",
           "[touptek][camera][unit][fakesdk]") {
     auto fake = make_fake_with_camera();

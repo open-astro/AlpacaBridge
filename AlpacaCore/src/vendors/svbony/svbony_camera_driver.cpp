@@ -15,6 +15,7 @@
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/frame_layout.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
@@ -1260,7 +1261,7 @@ public:
 
                 // Convert and validate locally; publish neither data nor ready
                 // until the entire frame has passed validation.
-                ImageArray image = build_image_array(buffer, frame_config);
+                ImageArray image = frame_image(buffer, frame_config);
                 static_cast<void>(c.image_ready(std::make_shared<const ImageArray>(std::move(image))));
             } catch (const std::exception& e) {
                 // Decision 0020 rule 5: a body that ends early stops the SDK capture it started. A lost link makes no
@@ -1572,7 +1573,7 @@ private:
     // the SVBONY divisors (width%8, height%2) so no requested pixel is lost
     // (aligning DOWN dropped up to 7 right columns / 1 bottom row and
     // zero-padded them into the image), and crop back to the requested window
-    // in build_image_array. If padding pushes the span past the sensor
+    // in frame_image. If padding pushes the span past the sensor
     // edge, shift the SDK origin left/up instead of shrinking, so the requested
     // window stays inside the delivered frame. A request that exceeds even the
     // aligned full frame clamps down; the unreachable edge rows/cols stay
@@ -1941,7 +1942,7 @@ private:
         roi_dirty_ = true;
     }
 
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, const FrameConfig& config) const {
+    ImageArray frame_image(const std::vector<std::uint8_t>& buffer, const FrameConfig& config) const {
         ImageArray image;
         image.width = config.width;
         image.height = config.height;
@@ -1969,64 +1970,15 @@ private:
         const int crop_x = std::max(0, config.start_x - config.roi_start_x);
         const int crop_y = std::max(0, config.start_y - config.roi_start_y);
 
+        util::FrameFormat format = util::FrameFormat::Mono8;
         if (config.image_type == SVBImageType::Rgb24) {
-            image.rank = 3;
-            const auto output_shape = util::validate_image_shape(image);
-            image.data.assign(output_shape.element_count, 0);
-            const std::size_t buffer_stride = static_cast<std::size_t>(eff_width) * 3;
-            for (int row = 0; row < out_height; ++row) {
-                const int src_row = row + crop_y;
-                if (src_row >= eff_height) break;
-                for (int col = 0; col < out_width; ++col) {
-                    const int src_col = col + crop_x;
-                    if (src_col >= eff_width) break;
-                    const std::size_t j =
-                        static_cast<std::size_t>(src_row) * buffer_stride + static_cast<std::size_t>(src_col) * 3;
-                    // SVBONY RGB24 is stored as B,G,R per pixel; transpose to
-                    // R,G,B for Alpaca clients (matches the Player One driver).
-                    const std::int32_t b = buffer[j];
-                    const std::int32_t g = buffer[j + 1];
-                    const std::int32_t r = buffer[j + 2];
-                    const std::size_t out_i = (static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) +
-                                               static_cast<std::size_t>(col)) *
-                                              3;
-                    image.data[out_i + 0] = r;
-                    image.data[out_i + 1] = g;
-                    image.data[out_i + 2] = b;
-                }
-            }
-            util::validate_image_array(image);
-            return image;
+            format = util::FrameFormat::Bgr24;  // SVBONY RGB24 is stored B,G,R per pixel; Alpaca planes are R,G,B.
+        } else if (config.image_type == SVBImageType::Raw16 || config.image_type == SVBImageType::Y16) {
+            format = util::FrameFormat::Mono16;
         }
-
-        image.rank = 2;
-        const auto output_shape = util::validate_image_shape(image);
-        image.data.assign(output_shape.element_count, 0);
-
-        const bool is_16bit = (config.image_type == SVBImageType::Raw16 || config.image_type == SVBImageType::Y16);
-        const std::size_t bpp = is_16bit ? 2 : 1;
-        for (int row = 0; row < out_height; ++row) {
-            const int src_row = row + crop_y;
-            if (src_row >= eff_height) break;
-            for (int col = 0; col < out_width; ++col) {
-                const int src_col = col + crop_x;
-                if (src_col >= eff_width) break;
-                const std::size_t out_index =
-                    static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) + static_cast<std::size_t>(col);
-                const std::size_t offset = (static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
-                                            static_cast<std::size_t>(src_col)) *
-                                           bpp;
-                if (is_16bit) {
-                    const std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
-                                                static_cast<std::uint16_t>(buffer[offset + 1] << 8);
-                    image.data[out_index] = static_cast<std::int32_t>(value);
-                } else {
-                    image.data[out_index] = buffer[offset];
-                }
-            }
-        }
-        util::validate_image_array(image);
-        return image;
+        const util::FrameLayout layout{format, static_cast<std::size_t>(eff_width), eff_width, eff_height};
+        const util::FrameWindow window{crop_x, crop_y, out_width, out_height};
+        return util::build_frame_image(buffer, layout, window, util::FrameEdgeRule::ZeroFill, "SVBONY");
     }
 };
 

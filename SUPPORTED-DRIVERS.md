@@ -435,6 +435,8 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel de
 
 ## Focuser Drivers
 
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Focuser device of another Alpaca server through this one. `IsMoving` and `Position` are the values of the last poll of the other server; a `Move` reads `IsMoving` true at once, and `Halt` is sent even while the polls fail. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
+
 ### Astroasis
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -574,7 +576,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel de
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch and Telescope devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope and Focuser devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 

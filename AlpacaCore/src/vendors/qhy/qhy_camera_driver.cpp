@@ -16,6 +16,7 @@
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/frame_layout.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
@@ -1576,8 +1577,7 @@ private:
         expected_shape.height = request.num_y;
         expected_shape.rank = frame.channels == 3 ? 3 : 2;
         alpacacore::util::validate_image_shape(expected_shape);
-        auto image = std::make_shared<ImageArray>(build_image_array(frame));
-        alpacacore::util::validate_image_array(*image);
+        auto image = std::make_shared<ImageArray>(frame_image(frame));
 
         // Published under mutex_ with the stop check, so an AbortExposure or a disconnect that stopped this exposure
         // never sees its late frame served (a late successful SDK return after AbortExposure is not an accepted
@@ -2295,108 +2295,30 @@ private:
         start_y_ = start_y;
     }
 
-    // The ImageArray of one downloaded frame (the body builds it before it publishes).
-    static ImageArray build_image_array(const QhyFrame& frame) {
-        ImageArray image;
-        image.width = frame.image_width;
-        image.height = frame.image_height;
-
-        if (image.width <= 0 || image.height <= 0 || frame.buffer.empty()) {
+    // The ImageArray of one downloaded frame (the body builds it before it publishes). The SDK buffer is the frame's
+    // own width x height; a window larger than it reads 0 past the edge.
+    static ImageArray frame_image(const QhyFrame& frame) {
+        if (frame.image_width <= 0 || frame.image_height <= 0 || frame.buffer.empty()) {
             alpacacore::util::throw_invalid_camera_image("invalid QHY dimensions or empty frame buffer");
         }
-
-        const uint32_t eff_w = frame.width > 0 ? frame.width : static_cast<uint32_t>(frame.image_width);
-        const uint32_t eff_h = frame.height > 0 ? frame.height : static_cast<uint32_t>(frame.image_height);
+        const int eff_w = frame.width > 0 ? static_cast<int>(frame.width) : frame.image_width;
+        const int eff_h = frame.height > 0 ? static_cast<int>(frame.height) : frame.image_height;
         const uint32_t bpp = frame.bpp;
         const uint32_t ch = frame.channels;
-
-        if (eff_w == 0 || eff_h == 0 || (bpp != 8 && bpp != 16) || (ch != 1 && ch != 3) || (ch == 3 && bpp != 8)) {
+        if (eff_w <= 0 || eff_h <= 0 || (bpp != 8 && bpp != 16) || (ch != 1 && ch != 3) || (ch == 3 && bpp != 8)) {
             alpacacore::util::throw_invalid_camera_image("unsupported QHY frame layout");
         }
-        constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-        if (static_cast<std::size_t>(eff_w) > kMaxSize / eff_h) {
-            alpacacore::util::throw_invalid_camera_image("QHY frame dimensions overflow the buffer size");
-        }
-        const std::size_t frame_pixels = static_cast<std::size_t>(eff_w) * eff_h;
-        const std::size_t samples_per_pixel = ch;
-        const std::size_t bytes_per_sample = bpp / 8;
-        if (frame_pixels > kMaxSize / samples_per_pixel ||
-            frame_pixels * samples_per_pixel > kMaxSize / bytes_per_sample ||
-            frame_pixels * samples_per_pixel * bytes_per_sample > frame.buffer.size()) {
-            alpacacore::util::throw_invalid_camera_image("QHY frame buffer is shorter than its dimensions");
-        }
-
-        // Color (3-channel) output
-        if (ch == 3) {
-            image.rank = 3;
-            image.data.resize(static_cast<std::size_t>(image.width) *
-                              static_cast<std::size_t>(image.height) * 3);
-            const std::size_t buf_stride = static_cast<std::size_t>(eff_w) * 3;
-            const std::size_t out_stride = static_cast<std::size_t>(image.width) * 3;
-            for (int row = 0; row < image.height; ++row) {
-                if (static_cast<uint32_t>(row) >= eff_h) break;
-                const std::size_t src = static_cast<std::size_t>(row) * buf_stride;
-                const std::size_t dst = static_cast<std::size_t>(row) * out_stride;
-                const std::size_t copy = std::min(buf_stride, out_stride);
-                // QHY RGB24 frames are BGR (SDK API manual, "Image data structure"); Alpaca planes are RGB.
-                for (std::size_t i = 0; i + 2 < copy && src + i + 2 < frame.buffer.size(); i += 3) {
-                    image.data[dst + i] = frame.buffer[src + i + 2];
-                    image.data[dst + i + 1] = frame.buffer[src + i + 1];
-                    image.data[dst + i + 2] = frame.buffer[src + i];
-                }
-            }
-            return image;
-        }
-
-        // Monochrome output
-        image.rank = 2;
-        const std::size_t pixel_count = static_cast<std::size_t>(image.width) *
-                                        static_cast<std::size_t>(image.height);
-        image.data.resize(pixel_count, 0);
-
-        if (bpp == 16) {
-            for (int row = 0; row < image.height; ++row) {
-                for (int col = 0; col < image.width; ++col) {
-                    const std::size_t out_idx =
-                        static_cast<std::size_t>(row) * static_cast<std::size_t>(image.width) +
-                        static_cast<std::size_t>(col);
-                    if (static_cast<uint32_t>(row) < eff_h && static_cast<uint32_t>(col) < eff_w) {
-                        const std::size_t src =
-                            (static_cast<std::size_t>(row) * static_cast<std::size_t>(eff_w) +
-                             static_cast<std::size_t>(col)) * 2;
-                        if (src + 1 < frame.buffer.size()) {
-                            // GetQHYCCDSingleFrame fills the buffer with native
-                            // little-endian uint16 samples (low byte first), the same
-                            // layout PHD2's cam_qhy and INDI's qhy_ccd read it as. The
-                            // previous high-byte-first read swapped every pixel: a
-                            // QHY5III585M frame came out as noise with ringed stars and
-                            // the guider's star detector found nothing.
-                            uint16_t val = static_cast<uint16_t>(frame.buffer[src]) |
-                                           (static_cast<uint16_t>(frame.buffer[src + 1]) << 8);
-                            image.data[out_idx] = static_cast<std::int32_t>(val);
-                        }
-                    }
-                }
-            }
-        } else {
-            // 8-bit
-            for (int row = 0; row < image.height; ++row) {
-                for (int col = 0; col < image.width; ++col) {
-                    const std::size_t out_idx =
-                        static_cast<std::size_t>(row) * static_cast<std::size_t>(image.width) +
-                        static_cast<std::size_t>(col);
-                    if (static_cast<uint32_t>(row) < eff_h && static_cast<uint32_t>(col) < eff_w) {
-                        const std::size_t src =
-                            static_cast<std::size_t>(row) * static_cast<std::size_t>(eff_w) +
-                            static_cast<std::size_t>(col);
-                        if (src < frame.buffer.size()) {
-                            image.data[out_idx] = static_cast<std::int32_t>(frame.buffer[src]);
-                        }
-                    }
-                }
-            }
-        }
-        return image;
+        // QHY RGB24 frames are BGR (SDK API manual, "Image data structure"); Alpaca planes are RGB.
+        const auto format =
+            ch == 3 ? alpacacore::util::FrameFormat::Bgr24
+                    : (bpp == 16 ? alpacacore::util::FrameFormat::Mono16 : alpacacore::util::FrameFormat::Mono8);
+        // GetQHYCCDSingleFrame fills a 16-bit buffer with native little-endian samples (low byte first), the same
+        // layout PHD2's cam_qhy and INDI's qhy_ccd read; a high-byte-first read once turned a QHY5III585M frame into
+        // noise the guider's star detector could not use.
+        const alpacacore::util::FrameLayout layout{format, static_cast<std::size_t>(eff_w), eff_w, eff_h};
+        const alpacacore::util::FrameWindow window{0, 0, frame.image_width, frame.image_height};
+        return alpacacore::util::build_frame_image(frame.buffer, layout, window,
+                                                   alpacacore::util::FrameEdgeRule::ZeroFill, "QHY");
     }
 };
 
