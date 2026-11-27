@@ -650,8 +650,8 @@ TEST_CASE("Bisque Telescope Driver - non-finite slew coordinates and MoveAxis ra
         CHECK_NOTHROW(validate_ra_dec(0.0, -90.0));
         CHECK_NOTHROW(validate_ra_dec(23.999, 90.0));
         CHECK_NOTHROW(validate_move_axis_rate(0.0));
-        CHECK_NOTHROW(validate_move_axis_rate(-2.5));
-        CHECK_NOTHROW(validate_move_axis_rate(4.0));
+        CHECK_NOTHROW(validate_move_axis_rate(-2.0));
+        CHECK_NOTHROW(validate_move_axis_rate(2.0));
     }
 }
 
@@ -1221,6 +1221,35 @@ TEST_CASE("Bisque MoveAxis - 1e-9 is a move and a smaller rate is a stop (#2582)
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
+// #2808: ITelescopeV4 MoveAxis raises InvalidValue for a rate outside AxisRates (ConformU "MoveAxis Primary/Secondary
+// ... move axis value > maximum rate"). AxisRates is 0 to 512x sidereal on both axes, so a |rate| above the maximum is
+// refused before the connection check and sends no start; exactly the maximum, either sign, still moves.
+TEST_CASE("Bisque MoveAxis - a rate beyond the AxisRates maximum is InvalidValue and the maximum moves (#2808)",
+          "[bisque][telescope][unit][moveaxis]") {
+    const int axis = GENERATE(0, 1);
+    const double sign = GENERATE(1.0, -1.0);
+    CAPTURE(axis, sign);
+    ClockedBisque rig;
+    const auto [min_rate, max_rate] = rig.driver->get_axis_rate_range(axis);
+    REQUIRE(min_rate == 0.0);
+
+    require_alpaca_error([&] { rig.driver->move_axis(axis, sign * (max_rate + 1.0)); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->move_axis(axis, sign * std::nextafter(max_rate, 10.0)); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(rig.mount.move_starts.load() == 0);
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, sign * max_rate));
+    CHECK(rig.mount.move_starts.load() == 1);
+    REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+
+    // Argument validation precedes the connection check (#627).
+    auto disconnected = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(rig.server.port()));
+    require_alpaca_error([&] { disconnected->move_axis(axis, sign * (max_rate + 1.0)); },
+                         alpacacore::AlpacaError::InvalidValue);
+}
+
 TEST_CASE("Bisque AtHome - Park clears it (#2461)", "[bisque][telescope][findhome][taskclock]") {
     ClockedBisque rig;
     home(rig);
@@ -1248,6 +1277,27 @@ TEST_CASE("Bisque AtHome - Tracking on clears it and Tracking off does not (#246
     CHECK(rig.driver->get_at_home());
     REQUIRE_NOTHROW(rig.driver->set_tracking(true));
     CHECK_FALSE(rig.driver->get_at_home());
+}
+
+// #2807: ITelescopeV4 Tracking = true raises InvalidWhileParked while AtPark is true (ConformU "Parked:Tracking =
+// true"), and no SetTracking reaches TheSkyX. Tracking = false stays allowed on a parked mount and is sent.
+TEST_CASE("Bisque Tracking - true is refused while parked and false is still sent (#2807)",
+          "[bisque][telescope][unit][park]") {
+    ClockedBisque rig;
+    rig.driver->set_connected(false);
+    rig.mount.parked = true;  // the connect reads IsParked
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    REQUIRE(rig.driver->get_at_park());
+    const int sends = rig.mount.set_tracking_commands.load();
+
+    require_alpaca_error([&] { rig.driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.set_tracking_commands.load() == sends);
+
+    REQUIRE_NOTHROW(rig.driver->set_tracking(false));
+    CHECK(rig.mount.set_tracking_commands.load() == sends + 1);
+    CHECK_FALSE(rig.driver->get_tracking());
+    CHECK(rig.driver->get_at_park());
 }
 
 TEST_CASE("Bisque AbortSlew - a getter does not stall behind a pending pulse guide",
@@ -2004,6 +2054,54 @@ TEST_CASE("Bisque park - AbortSlew during the park poll returns at once and a sl
     rig.mount.park_polls_needed = 0;
     CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
     REQUIRE_NOTHROW(parked.get());
+}
+
+// #2806: ITelescopeV4 AbortSlew raises InvalidWhileParked while AtPark is true (ConformU "Parked:AbortSlew"). The
+// refusal sends TheSkyX nothing and leaves the mount parked.
+TEST_CASE("Bisque AbortSlew - a parked mount refuses it with InvalidWhileParked and is sent nothing (#2806)",
+          "[bisque][telescope][unit][park]") {
+    ClockedBisque rig;
+    rig.driver->set_connected(false);
+    rig.mount.parked = true;  // the connect reads IsParked
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    REQUIRE(rig.driver->get_at_park());
+    const int aborts = rig.mount.abort_commands.load();
+    const int stops = rig.mount.move_stops.load();
+
+    require_alpaca_error([&] { rig.driver->abort_slew(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.abort_commands.load() == aborts);
+    CHECK(rig.mount.move_stops.load() == stops);
+    CHECK(rig.driver->get_at_park());
+}
+
+// #2806: only AtPark refuses AbortSlew. A Park still in flight (sent, IsParked not yet true) is not AtPark, so an
+// AbortSlew then still reaches TheSkyX and cancels the Park (ascom-contract: AbortSlew during a park clears parking_).
+TEST_CASE("Bisque AbortSlew - during a Park in flight it still sends Abort and cancels the Park (#2806)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // A failing check must not leave the park poll running: its future would wait for it.
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+    REQUIRE_FALSE(rig.driver->get_at_park());
+    const int aborts = rig.mount.abort_commands.load();
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK(rig.mount.abort_commands.load() == aborts + 1);
+
+    rig.mount.park_polls_needed = 0;  // the next IsParked reports parked; the cancelled Park must not set AtPark
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+    CHECK_FALSE(rig.driver->get_at_park());
 }
 
 // #1838: the slew gate drops mutex_ for IsTracking. A disconnect that lands in that gap must refuse the slew

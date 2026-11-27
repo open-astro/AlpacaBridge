@@ -37,6 +37,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <functional>
 #include <future>
 #include <limits>
@@ -68,6 +69,8 @@
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include "fake_zwo_asiair_gpiod.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
@@ -139,6 +142,7 @@
 #include "locked_astroasis_hid_transport.h"
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -148,6 +152,11 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 
 #include "alpaca_upstream_script.h"
+#include "fake_http_client.h"
+#endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+
 #include "fake_http_client.h"
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
@@ -2092,6 +2101,109 @@ Tier2Host tier2_host_zwo_rotator() {
     };
     return h;
 }
+// The dew heater of the fake camera (FakeZWOSDK's AntiDewHeater control) through ZWOSdkDewHeaterSdk: a before_call
+// hook on open_camera holds the connect open, fail_open fails it. The fake and the seam live in one holder, because
+// the driver keeps a reference to the seam and the seam one to the fake.
+struct ZwoDewHold {
+    alpacacore::test::FakeZWOSDK fake;
+    alpacacore::vendor::zwo::ZWOSdkDewHeaterSdk sdk{fake};
+};
+
+Tier2Host tier2_host_zwo_switch() {
+    Tier2Host h{"zwo_switch", "zwo", "switch", "fake_zwo_sdk.h", DeviceType::Switch, "zwo_switch", {}, true, {}, ""};
+    const auto make = [](ZwoDewHold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, s.sdk);
+    };
+    h.connectable = [make](bool hold) {
+        auto dew = std::make_shared<ZwoDewHold>();
+        if (hold) {
+            dew->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
+            };
+        }
+        return host_over(dew, make);
+    };
+    h.failing = [make]() {
+        auto dew = std::make_shared<ZwoDewHold>();
+        dew->fake.fail_open = true;
+        return host_over(dew, make);
+    };
+    return h;
+}
+
+// The ASIAIR Pro over the process-wide libgpiod stub chip (fake_zwo_asiair_gpiod.h): the request hold keeps the
+// connect open; a chip that does not exist fails it in the real gpiod_chip_open(). The holder boots every line high
+// and clears the hold when the host ends.
+struct AsiairStubChip {
+    explicit AsiairStubChip(std::chrono::milliseconds hold) {
+        alpacacore::test::stub_reset_levels(1);
+        alpacacore::test::stub_set_request_hold(hold);
+    }
+    ~AsiairStubChip() { alpacacore::test::stub_set_request_hold(std::chrono::milliseconds(0)); }
+    AsiairStubChip(const AsiairStubChip&) = delete;
+    AsiairStubChip& operator=(const AsiairStubChip&) = delete;
+};
+
+Tier2Host tier2_host_zwo_switch_asiair() {
+    Tier2Host h{"zwo_switch_asiair",
+                "zwo",
+                "switch",
+                "fake_zwo_asiair_gpiod.h",
+                DeviceType::Switch,
+                "zwo_switch_asiair",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto chip = std::make_shared<AsiairStubChip>(hold ? kHold : std::chrono::milliseconds(0));
+        return host_over(chip, [](AsiairStubChip&) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_asiair_switch(0, alpacacore::test::stub_asiair_pro_config());
+        });
+    };
+    h.failing = []() {
+        auto config = alpacacore::vendor::zwo::default_asiair_pro_config();
+        config.gpio_chip_path = "/dev/gpiochip-asiair-absent";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, config);
+        return hosted;
+    };
+    return h;
+}
+
+// The ASIAIR Plus (RK3568) over the ioctl stub playing pwm_gpio_compat (fake_zwo_asiair_plus_ioctl.h); a device that
+// does not exist fails the connect.
+Tier2Host tier2_host_zwo_switch_asiair_plus() {
+    Tier2Host h{"zwo_switch_asiair_plus",
+                "zwo",
+                "switch",
+                "fake_zwo_asiair_plus_ioctl.h",
+                DeviceType::Switch,
+                "zwo_switch_asiair_plus",
+                {},
+                false,
+                {},
+                ""};
+    h.connecting_unobservable =
+        "PwmGpioMiscBackend::open() (pwm_gpio_misc_backend.cpp) only opens the device and reads its sysfs driver link; "
+        "it sends no ioctl, so the stub of fake_zwo_asiair_plus_ioctl.h has no connect call to hold";
+    h.connectable = [](bool) {
+        auto device = std::make_shared<alpacacore::test::StubDeviceFile>(alpacacore::test::compat_device());
+        return host_over(device, [](const alpacacore::test::StubDeviceFile& f) -> std::unique_ptr<AlpacaDriver> {
+            auto config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+            config.device_path = f.path;
+            return alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, config, f.sysfs_root());
+        });
+    };
+    h.failing = []() {
+        auto config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+        config.device_path = "/dev/pwm-gpio-misc-absent";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, config);
+        return hosted;
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -3008,6 +3120,76 @@ Tier2Host tier2_host_remotealpaca_focuser() {
     h.failing = [make]() { return make(false, true); };
     return h;
 }
+
+// The proxied CoverCalibrator over the scripted upstream, as the rotator host: its Connect makes some fifteen calls,
+// so a 50 ms per-call hold keeps the handshake open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_covercalibrator() {
+    Tier2Host h{"remotealpaca_covercalibrator",
+                "remotealpaca",
+                "covercalibrator",
+                "fake_http_client.h",
+                DeviceType::CoverCalibrator,
+                "remotealpaca_covercalibrator",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream =
+            std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::CoverCalibrator);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(50));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_covercalibrator(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_WEEWX
+// The WeeWX feed over FakeHttpClient (recipe of test_weewx_observingconditions.cpp). Connect makes one fetch, so the
+// hold is that fetch's delay, a connect_hold() site (connect_hold_gate.h): kHold keeps it open past kHoldWindow, and
+// the 5 s fetch timeout is never reached because the fake does not apply it. The failing leg is a feed that refuses
+// every connection, as a stopped web server does.
+Tier2Host tier2_host_weewx_observingconditions() {
+    Tier2Host h{"weewx_observingconditions",
+                "weewx",
+                "observingconditions",
+                "fake_http_client.h",
+                DeviceType::ObservingConditions,
+                "weewx_observingconditions",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto http = std::make_shared<alpacacore::test::FakeHttpClient>([] {
+            const long long now = static_cast<long long>(std::time(nullptr));
+            return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},"outHumidity":{"value":40.0},)"
+                   R"("dateTime":{"value":)" +
+                   std::to_string(now) + "}}}}";
+        });
+        if (hold) http->set_delay(kHold);
+        if (refuse) http->refuse_next(1000000);
+        alpacacore::vendor::weewx::WeeWxHttpConfig config;
+        config.url = "http://127.0.0.1:11111/weewx.json";
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, http->client());
+        hosted.fake = http;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -3639,7 +3821,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 // CAM = a camera, which has static probes (#2259) and also gets the ImageArray and while-exposing cases.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB) X(zwo_switch, PRB) X(zwo_switch_asiair, PRB) X(zwo_switch_asiair_plus, PRB)
 #else
 #define CS2_ZWO(X)
 #endif
@@ -3686,9 +3868,14 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_covercalibrator, PRB)
 #else
 #define CS2_REMOTEALPACA(X)
+#endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+#define CS2_WEEWX(X) X(weewx_observingconditions, PRB)
+#else
+#define CS2_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
@@ -3739,6 +3926,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_IOPTRON(X) \
     CS2_ASTROASIS(X) \
     CS2_REMOTEALPACA(X) \
+    CS2_WEEWX(X) \
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
@@ -5416,6 +5604,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
     CS2_ENABLED("remotealpaca")
 #endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+    CS2_ENABLED("weewx")
+#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS2_ENABLED("gemini")
 #endif
@@ -5868,6 +6059,20 @@ constexpr double kSnapshotValueMargin = 0.01;
     SNAP_ROT("MechanicalPosition", get_mechanical_position())
     SNAP_ROT("IsMoving", get_is_moving())
 #undef SNAP_ROT
+    return g;
+}
+
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_covercalibrator_getters() {
+    using alpacacore::CoverCalibratorDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_CC(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<CoverCalibratorDriver&>(d).call); }});
+    SNAP_CC("CoverState", get_cover_state())
+    SNAP_CC("CoverMoving", get_cover_moving())
+    SNAP_CC("CalibratorState", get_calibrator_state())
+    SNAP_CC("CalibratorChanging", get_calibrator_changing())
+    SNAP_CC("Brightness", get_brightness())
+#undef SNAP_CC
     return g;
 }
 
@@ -6485,6 +6690,29 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_switch() {
     return rig_owner;
 }
 
+// As the rotator rig, over a CoverCalibrator upstream with its cover Closed and its calibrator Off.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_covercalibrator() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::CoverCalibrator);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_covercalibrator(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::CoverCalibratorDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_safetymonitor_getters() {
     return {{"IsSafe", [](AlpacaDriver& d) {
                  return snap_text(static_cast<alpacacore::SafetyMonitorDriver&>(d).get_is_safe());
@@ -6591,7 +6819,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_covercalibrator, snapshot_covercalibrator_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif

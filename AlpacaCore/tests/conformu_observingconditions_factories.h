@@ -30,6 +30,15 @@
 #include "fake_http_client.h"
 #endif
 
+#ifdef FAKE_CONFORMU_WEEWX
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+
+#include <ctime>
+#include <string>
+
+#include "fake_http_client.h"
+#endif
+
 namespace alpacacore::test::conformu {
 
 #ifdef FAKE_CONFORMU_REMOTEALPACA
@@ -52,6 +61,27 @@ inline std::unique_ptr<ObservingConditionsDriver> make_remotealpaca_observingcon
     config.port = 32323;
     return vendor::remotealpaca::create_remotealpaca_observingconditions(
         device_number, config, remotealpaca_upstream().client(), {}, util::default_task_clock());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_WEEWX
+// The scripted client of the WeeWX tests (fake_http_client.h), answering every fetch with a WeeWX JSON feed that
+// carries all seven sensors the driver serves, observed at the time of the fetch. No request leaves the process.
+// The poll runs on the real task clock at the default 900 s interval.
+inline FakeHttpClient& weewx_feed() {
+    static FakeHttpClient http([] {
+        const long long now = static_cast<long long>(std::time(nullptr));
+        return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},"outHumidity":{"value":40.0},)"
+               R"("dewpoint":{"value":26.6},"wind_speed":{"value":10.0},"barometer":{"value":30.0},)"
+               R"("sqm":{"value":21.3},"sqmTemp":{"value":41.0},"dateTime":{"value":)" +
+               std::to_string(now) + "}}}}";
+    });
+    return http;
+}
+inline std::unique_ptr<ObservingConditionsDriver> make_weewx_observingconditions(int device_number) {
+    vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://127.0.0.1:32324/weewx.json";  // never fetched: every request goes to the fake
+    return vendor::weewx::create_weewx_observingconditions(device_number, config, weewx_feed().client());
 }
 #endif
 

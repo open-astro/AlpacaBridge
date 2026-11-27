@@ -1,0 +1,3 @@
+### Changed (CI)
+
+- **Fake ConformU: the WeeWX ObservingConditions row runs**, issue #2697 (#2078 slice 6f). `fake_conformu_server` hosts the WeeWX driver over the scripted client of its unit tests (`FakeHttpClient`, in process), answering a JSON feed with all seven sensors the driver serves (`AlpacaCore/tests/conformu_observingconditions_factories.h`). The row gets a `kFakeConnectableRoster` row and a tier-2 contract-sweep host. It passes ConformU 4.6.0-rc.1 with no errors, issues or timing findings, so the row is `run`, with its report under `AlpacaCore/conformu/WeeWX/Fake/`. The `ConformU fake` workflow's paths list gains the WeeWX sources. Fake evidence only.
