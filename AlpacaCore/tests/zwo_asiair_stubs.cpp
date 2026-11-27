@@ -10,10 +10,9 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The libgpiod and ioctl() stubs of zwo_asiair_stubs.h (issues #772, #300, #1862). This is the only file in
-// alpacacore_tests that may define these C symbols.
-
-#include "zwo_asiair_stubs.h"
+// The libgpiod stub of fake_zwo_asiair_gpiod.h and the ioctl() stub of fake_zwo_asiair_plus_ioctl.h (issues #772,
+// #300, #1862). This is the only file in alpacacore_tests, and in fake_conformu_server (#2697), that may define these
+// C symbols.
 
 #include <dlfcn.h>
 #include <gpiod.h>
@@ -24,10 +23,15 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+
+#include "connect_hold_gate.h"
+#include "fake_zwo_asiair_gpiod.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
 
 namespace alpacacore::test {
 
@@ -44,6 +48,7 @@ struct GpiodStub {
     int releases = 0;
     char chip = 0;     // identity of the stub chip
     char request = 0;  // identity of the stub request
+    std::atomic<std::int64_t> request_hold_ms{0};  // read before the mutex: a held request blocks nobody else
 };
 
 GpiodStub& stub() {
@@ -211,6 +216,8 @@ bool stub_claimed() {
     return stub().claimed;
 }
 
+void stub_set_request_hold(std::chrono::milliseconds hold) { stub().request_hold_ms.store(hold.count()); }
+
 IoctlStub& ioctl_stub() {
     static IoctlStub s;
     return s;
@@ -315,6 +322,7 @@ void gpiod_chip_close(gpiod_chip* chip) {
 gpiod_line_request* gpiod_chip_request_lines(gpiod_chip* chip, gpiod_request_config* req_cfg,
                                              gpiod_line_config* line_cfg) {
     if (chip == stub_chip()) {
+        alpacacore::test::connect_hold(std::chrono::milliseconds(stub().request_hold_ms.load()));
         std::lock_guard<std::mutex> lock(stub().m);
         if (stub().claimed) {
             errno = EBUSY;  // the chip refuses a line another request holds

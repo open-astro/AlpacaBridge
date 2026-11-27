@@ -39,7 +39,7 @@ wandererastro	covercalibrator	fake_serial_streamer.h	run	6	AlpacaCore/conformu/W
 wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
 bisque	telescope	-	no-fake	6	-	no fake exists yet
-weewx	observingconditions	-	no-fake	6	-	no fake exists yet
+weewx	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/WeeWX/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 remotealpaca	safetymonitor	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	rotator	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
@@ -48,16 +48,16 @@ remotealpaca	switch	fake_http_client.h	pending	6	-	not yet tried: slice 6 decide
 remotealpaca	telescope	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	focuser	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	covercalibrator	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
-zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
-zwo	switch	-asiair	no-fake	6	-	no fake exists yet
-zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet
+zwo	switch	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_sdk-Linux-arm64.txt	-
+zwo	switch	fake_zwo_asiair_gpiod.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_gpiod-Linux-arm64.txt	-
+zwo	switch	fake_zwo_asiair_plus_ioctl.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_plus_ioctl-Linux-arm64.txt	-
 wandererastro	rotator	-	no-fake	6	-	no fake exists yet
-touptek	switch	-thermal	no-fake	6	-	no fake exists yet
-touptek	filterwheel	-	no-fake	6	-	no fake exists yet
-touptek	focuser	-	no-fake	6	-	no fake exists yet
-ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
-ioptron	camera	-	no-fake	6	-	no fake exists yet
-playerone	switch	-	no-fake	6	-	no fake exists yet
+touptek	switch	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	filterwheel	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-filterwheel-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	focuser	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-focuser-fake_touptek_sdk-Linux-arm64.txt	-
+ioptron	filterwheel	fake_ioptron_ieaf.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-filterwheel-fake_ioptron_ieaf-Linux-arm64.txt	-
+ioptron	camera	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_playerone_sdk-Linux-arm64.txt	-
+playerone	switch	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-switch-fake_playerone_sdk-Linux-arm64.txt	-
 qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	fake_gemini_flatpanel_rev2.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel_rev2-Linux-arm64.txt	-
 gemini	covercalibrator	fake_gemini_flatpanel_lite.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel_lite-Linux-arm64.txt	-

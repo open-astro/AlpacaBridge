@@ -1192,6 +1192,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "filterwheel", "fake_zwo_efw_sdk.h"},
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
+    {"zwo", "switch", "fake_zwo_sdk.h"},                // the dew heater of the fake camera: zwo_switch
+    {"zwo", "switch", "fake_zwo_asiair_gpiod.h"},       // the ASIAIR Pro over the libgpiod stub: zwo_switch_asiair
+    {"zwo", "switch", "fake_zwo_asiair_plus_ioctl.h"},  // the ASIAIR Plus RK3568: zwo_switch_asiair_plus
     {"celestron", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_celestron_cgx_mount.h"},        // direct USB backend
     {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
@@ -1203,6 +1206,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "switch", "fake_mount_server.h"},   // the auxiliary features on the controller's shared link (#2222)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"ioptron", "filterwheel", "fake_ioptron_ieaf.h"},  // the iEFW on the iEAF fake (model code 99)
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
     {"ifr", "rotator", "fake_ioptron_ifr.h"},
     // The iMate PowerBox, compiled only with libgpiod.
@@ -1217,6 +1221,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "telescope", "fake_http_client.h"},            // the same, as a Telescope
     {"remotealpaca", "focuser", "fake_http_client.h"},              // the same, as a Focuser
     {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
+    {"weewx", "observingconditions", "fake_http_client.h"},         // a scripted WeeWX JSON feed
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},       // the Pro firmware: gemini_covercalibrator_pro
     {"gemini", "covercalibrator", "fake_gemini_flatpanel_rev2.h"},  // the same fake as Rev2: gemini_covercalibrator_v2
@@ -1227,8 +1232,13 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
+    {"ioptron", "camera", "fake_playerone_sdk.h"},  // the iCAM: the Player One driver behind the iOptron factory
+    {"playerone", "switch", "fake_playerone_sdk.h"},  // the thermal switch over the camera SDK fake
     {"touptek", "camera", "fake_touptek_sdk.h"},
-    // The StellaVita backend; the thermal switch has no fake.
+    {"touptek", "switch", "fake_touptek_sdk.h"},  // the thermal switch backend: touptek_switch_thermal
+    {"touptek", "filterwheel", "fake_touptek_sdk.h"},
+    {"touptek", "focuser", "fake_touptek_sdk.h"},
+    // The StellaVita backend.
     {"touptek", "switch", "fake_touptek_powerbox_sdk.h"},
     {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},

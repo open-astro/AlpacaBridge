@@ -110,13 +110,16 @@ static_assert(std::chrono::milliseconds(kPulseGuideMaxMs + 1000 + 1000) < util::
               "a pulse must end inside the link-loss bound");
 
 // Bisque's limits and orders for the telescope command gate (#2258). PulseGuide is capped at 25 s (see pulse_guide());
-// MoveAxis moves axes 0 and 1 at any finite rate (the nearest of the nine presets); the guide rate is 0 to 1x sidereal
-// on both axes (open-astro#775). Every family checks the link fault before the parked check (check_link_locked()).
+// MoveAxis moves axes 0 and 1 at a |rate| up to the AxisRates maximum, 512x sidereal, snapped to the nearest of the
+// nine presets; a larger |rate| is InvalidValue (ITelescopeV4, #2808). AxisRates starts at 0, so there is no minimum
+// magnitude to refuse. The guide rate is 0 to 1x sidereal on both axes (open-astro#775). Every family checks the link
+// fault before the parked check (check_link_locked()).
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.pulse_guide_max_ms = kPulseGuideMaxMs;
     limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
     limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;  // what get_axis_rate_range() reports
     // Bisque's stop is |rate| < 1e-9, strictly under: 1e-9 itself stays a move (#2582, #2606).
     limits.move_axis_stop_epsilon = util::kMoveAxisStopBelow1e9;
     limits.move_axis_order = util::ParkedFaultOrder::FaultFirst;
@@ -538,7 +541,14 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        check_link_now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_link_locked();
+            // ITelescopeV4: Tracking = true is InvalidWhileParked while AtPark is true (#2807); false stays allowed.
+            if (tracking && parked_) {
+                throw AlpacaException("Tracking is not allowed while parked", AlpacaError::InvalidWhileParked);
+            }
+        }
         auto& protocol = BisqueProtocolWrapper::instance();
         // ignore_rates=true uses sidereal. The exchange runs without mutex_.
         protocol.set_tracking(tracking, true, 0.0, 0.0);
@@ -1289,6 +1299,11 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         // Only a lost link refuses: a latched fault still lets the stop try, as OnStep and SynScan do (#2102).
         check_connected();
+        // ITelescopeV4: InvalidWhileParked while AtPark is true (#2806). A Park still in flight (parking_) is not
+        // AtPark, so AbortSlew still cancels it.
+        if (parked_) {
+            throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
+        }
         // #2410: what was moving, so a stop that fails or is not verified keeps reporting it (fail closed).
         const bool slew_was_active = slewing_cached_;
         const bool axes_were_active[2] = {manual_axis_slewing_[0], manual_axis_slewing_[1]};
