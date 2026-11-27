@@ -20,6 +20,7 @@
 #include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/tcp_connect.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1612,84 +1613,23 @@ private:
         return "";
     }
 
-    // The TCP command channel of a Wi-Fi or Ethernet OnStepX (#2220). The connect waits at most the response timeout
-    // (0 or less: kDefaultResponseTimeoutMs), so an unreachable controller fails Connect within it; a refusal fails it
-    // at once. Either way last_connect_error_ names the host and port. The host name lookup (getaddrinfo) is not
-    // bounded by the timeout; a numeric address needs none.
+    // The TCP command channel of a Wi-Fi or Ethernet OnStepX (#2220). The host name lookup and the connect end within
+    // the response timeout (0 or less: kDefaultResponseTimeoutMs) through util::connect_tcp (#2711), so an unreachable
+    // controller fails Connect within it; a refusal fails it at once. Either way last_connect_error_ names the host,
+    // the port and why.
     bool connect_network(const ConnectionInfo& info) {
         const std::string endpoint = info.host + ":" + std::to_string(info.tcp_port);
         const int timeout_ms = info.response_timeout_ms > 0 ? info.response_timeout_ms : kDefaultResponseTimeoutMs;
-        const auto fail = [&](const std::string& why) {
-            if (socket_fd_ >= 0) {
-                close(socket_fd_);
-                socket_fd_ = -1;
-            }
-            last_connect_error_ = "could not connect to " + endpoint + ": " + why;
-            ALPACA_LOG_ERROR("OnStep", "Network connect failed: " + last_connect_error_);
+        const util::TcpConnectResult connected =
+            util::connect_tcp(info.host, info.tcp_port, timeout_ms, nullptr, {}, AF_INET);
+        if (connected.fd < 0) {
+            last_connect_error_ = "could not connect to " + endpoint + ": " + connected.error;
+            // Client-triggerable, so below WARNING (decision 0007 rule 9); the client gets the reason.
+            ALPACA_LOG_INFO("OnStep", "Network connect failed: " + last_connect_error_);
             return false;
-        };
+        }
+        socket_fd_ = connected.fd;
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<std::uint16_t>(info.tcp_port));  // 1-65535, endpoint_fault()
-        if (inet_pton(AF_INET, info.host.c_str(), &addr.sin_addr) <= 0) {
-            addrinfo hints{};
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-            addrinfo* result = nullptr;
-            const int rc = getaddrinfo(info.host.c_str(), nullptr, &hints, &result);
-            if (rc != 0 || result == nullptr) {
-                if (result != nullptr) {
-                    freeaddrinfo(result);
-                }
-                return fail(std::string("host not found (") + gai_strerror(rc) + ")");
-            }
-            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-            freeaddrinfo(result);
-        }
-
-        socket_fd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (socket_fd_ < 0) {
-            return fail(util::errno_string(errno));
-        }
-        if (!util::set_nonblocking(socket_fd_)) {
-            return fail("the socket could not be made non-blocking");
-        }
-        const int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-        if (rc < 0 && errno != EINPROGRESS) {
-            return fail(util::errno_string(errno));  // ECONNREFUSED on loopback, ENETUNREACH with no route
-        }
-        if (rc < 0) {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-            struct pollfd pfd {};
-            pfd.fd = socket_fd_;
-            pfd.events = POLLOUT;
-            int poll_rc = 0;
-            do {
-                poll_rc = poll(&pfd, 1, util::detail::wait_ms_until(deadline));
-            } while (poll_rc < 0 && errno == EINTR);
-            if (poll_rc == 0) {
-                return fail("no answer within " + std::to_string(timeout_ms) + " ms");
-            }
-            if (poll_rc < 0) {
-                return fail(util::errno_string(errno));
-            }
-            int sock_err = 0;
-            socklen_t len = sizeof(sock_err);
-            if (getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0) {
-                return fail(util::errno_string(errno));
-            }
-            if (sock_err != 0) {
-                return fail(util::errno_string(sock_err));  // a refusal or a reset during the handshake
-            }
-        }
-        if (!util::clear_nonblocking(socket_fd_)) {
-            return fail("the socket could not be made blocking again");
-        }
-
-        // One small write per command, each waiting for its reply or drain: no Nagle delay behind an unacked one.
-        int one = 1;
-        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(kSocketTimeoutMs) * 1000;

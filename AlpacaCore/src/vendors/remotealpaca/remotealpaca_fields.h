@@ -12,8 +12,8 @@
 
 #pragma once
 
-// remotealpaca ObservingConditions catalog field declarations (decision 0023, issue #1753 slice 3), shared by
-// remotealpaca_schema.cpp (no vendor header) and remotealpaca_catalog.cpp (the factory, vendor header allowed). No
+// remotealpaca catalog field declarations (decision 0023, issue #1753), one set for every proxied device type, shared
+// by remotealpaca_schema.cpp (no vendor header) and remotealpaca_catalog.cpp (the factory, vendor header allowed). No
 // vendor header here either: the schema file includes this one and compiles in every build (including vendors-OFF).
 // The keys say "upstream" so none collides with the router's own deviceNumber. No field declares a required, min or
 // max rule: Source::Persisted only warns on one and registers the device, so the factory refuses a missing host and
@@ -38,12 +38,14 @@ namespace alpacacore::catalog {
 inline const Field<std::string> kRemoteAlpacaHost{.key = "upstreamHost", .default_value = "", .role = Role::Host};
 // Its HTTP port, 1 to 65535. 32323 is the ASCOM Alpaca Simulators' default.
 inline const Field<std::int64_t> kRemoteAlpacaPort{.key = "upstreamPort", .default_value = 32323};
-// The upstream's own ObservingConditions device number, not this server's.
+// The upstream's own device number of the proxied type, not this server's.
 inline const Field<std::int64_t> kRemoteAlpacaDeviceNumber{.key = "upstreamDeviceNumber", .default_value = 0};
 // The poll period, 1 to 60 seconds (#1753 maintainer decision, 2026-11-16).
 inline const Field<std::int64_t> kRemoteAlpacaPollSeconds{.key = "pollPeriodSeconds", .default_value = 2};
 
-inline const std::vector<FieldRef>& remotealpaca_observingconditions_fields() {
+// The fields of every remotealpaca device type: the descriptor is per (vendor, device type), so each type declares
+// them (http-integration instructions, "Declare EVERY persisted field").
+inline const std::vector<FieldRef>& remotealpaca_device_fields() {
     static const std::vector<FieldRef> fields{kRemoteAlpacaHost.ref(), kRemoteAlpacaPort.ref(),
                                               kRemoteAlpacaDeviceNumber.ref(), kRemoteAlpacaPollSeconds.ref()};
     return fields;

@@ -73,6 +73,7 @@
                         <option value="focuser">Focuser</option>
                         <option value="observingconditions">Observing Conditions</option>
                         <option value="rotator">Rotator</option>
+                        <option value="safetymonitor">Safety Monitor</option>
                         <option value="switch">Switch</option>
                         <option value="telescope">Telescope</option>
                     </select>
@@ -1756,8 +1757,10 @@
                     </div>
                 </div>
 
-                <!-- Remote Alpaca: a device of another Alpaca server (the upstream), served here as a device of this server -->
-                <div id="remotealpaca-config" data-vendor="remotealpaca" data-device-type="observingconditions" class="vendor-config" style="display: none;">
+                <!-- Remote Alpaca: a device of another Alpaca server (the upstream), served here as a device of this server.
+                     One sub-section per device type, with the same four fields (same pattern as the iFR block). -->
+                <div id="remotealpaca-config" data-vendor="remotealpaca" class="vendor-config" style="display: none;">
+                  <div id="remotealpaca-observingconditions-fields" data-device-type="observingconditions" style="display: none;">
                     <h3>Remote Alpaca Observing Conditions</h3>
 
                     <div class="form-group">
@@ -1780,6 +1783,31 @@
                         <input type="number" id="remotealpaca-poll-period" name="remoteAlpacaPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
                         <small>How often this server reads the other server, 1 to 60 seconds.</small>
                     </div>
+                  </div>
+                  <div id="remotealpaca-safetymonitor-fields" data-device-type="safetymonitor" style="display: none;">
+                    <h3>Remote Alpaca Safety Monitor</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-safety-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-safety-host" name="remoteAlpacaSafetyHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-safety-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-safety-port" name="remoteAlpacaSafetyPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-safety-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-safety-device-number" name="remoteAlpacaSafetyDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the SafetyMonitor device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-safety-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-safety-poll-period" name="remoteAlpacaSafetyPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds. The safety monitor reads unsafe once the link is lost: at once when the other server refuses the connection, otherwise after 3 poll periods (at least 30 seconds) with no answer. Until then it serves the last answer, and it reports an error after three failed reads in a row.</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),

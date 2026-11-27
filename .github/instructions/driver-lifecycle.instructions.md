@@ -226,7 +226,9 @@ vendor-agnostic; do them in the driver from the start.
 **ASCOM contract precedence (ConformU enforces this)**
 - Parameter/range validation (`InvalidValue`) precedes the connection check — an
   out-of-range id/index is `InvalidValue` even while disconnected. Every property
-  otherwise throws `NotConnected` when disconnected (no early-return that skips it).
+  otherwise throws `NotConnected` when disconnected (no early-return that skips it). The one
+  exception is a SafetyMonitor's `IsSafe` on a lost link, which returns `false`
+  ([decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md) rule 3, #1753).
 
 **Config round-trip (silent data loss on save)**
 - Every persisted field declared per device type in the vendor's catalog schema

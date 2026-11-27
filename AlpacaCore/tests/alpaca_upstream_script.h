@@ -12,10 +12,11 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions device for the remotealpaca driver tests (issue #1753 slice 3): the
-// responder a FakeHttpClient answers with, so the driver's poll runs on the fake task clock with no socket. The
-// loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP; this one answers per member and
-// per SensorName, keeps the upstream's Connected and AveragePeriod as a real server does, and counts calls per member.
+// A scripted upstream ObservingConditions or SafetyMonitor device for the remotealpaca driver tests (issue #1753
+// slices 3 and 4): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake task clock with
+// no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP; this one answers
+// per member and per SensorName, keeps the upstream's Connected and AveragePeriod as a real server does, and counts
+// calls per member.
 // An unscripted member answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
@@ -39,13 +40,23 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    // An ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every sensor: sensor i
-    // reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
-    AlpacaUpstreamScript() {
+    enum class Kind { ObservingConditions, SafetyMonitor };
+
+    // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
+    // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
+    // SafetyMonitor: a SafetyMonitor 3 upstream (Platform 7) named "Alpaca Simulator Safety Monitor" reading safe.
+    explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
+        set("connecting", "false");
+        if (kind == Kind::SafetyMonitor) {
+            set("interfaceversion", "3");
+            set("name", "\"Alpaca Simulator Safety Monitor\"");
+            set("description", "\"ASCOM Alpaca Simulator SafetyMonitor\"");
+            set("issafe", "true");
+            return;
+        }
         set("interfaceversion", "2");
         set("name", "\"Alpaca Simulator Weather\"");
         set("description", "\"ASCOM Alpaca Simulator ObservingConditions\"");
-        set("connecting", "false");
         set("averageperiod", "0");
         for (std::size_t i = 0; i < std::size(kSensorNames); ++i) {
             set_sensor(kSensorNames[i], 10.0 + static_cast<double>(i));

@@ -26,6 +26,7 @@
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/rotator_driver.h>
+#include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -139,6 +140,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 
 #include "alpaca_upstream_script.h"
 #include "fake_http_client.h"
@@ -834,6 +836,12 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_temperature", [&] { (void)o.get_temperature(); }});
             p.push_back({"get_humidity", [&] { (void)o.get_humidity(); }});
             p.push_back({"get_pressure", [&] { (void)o.get_pressure(); }});
+            break;
+        }
+        case DeviceType::SafetyMonitor: {
+            // Never connected: NotConnected, not false (only a lost link reads IsSafe false, decision 0009 rule 3).
+            auto& m = dynamic_cast<alpacacore::SafetyMonitorDriver&>(d);
+            p.push_back({"get_is_safe", [&] { (void)m.get_is_safe(); }});
             break;
         }
         case DeviceType::Camera: {
@@ -1763,6 +1771,7 @@ const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type
         {DeviceType::Rotator,
          {{"IsMoving", T::Bool}, {"MechanicalPosition", T::Double}, {"Position", T::Double}, {"TimeStamp", T::String}}},
         {DeviceType::FilterWheel, {{"Position", T::Int}, {"TimeStamp", T::String}}},
+        {DeviceType::SafetyMonitor, {{"IsSafe", T::Bool}, {"TimeStamp", T::String}}},
         {DeviceType::CoverCalibrator,
          {{"Brightness", T::Int},
           {"CalibratorState", T::Int},
@@ -2758,11 +2767,15 @@ Tier2Host tier2_host_astroasis_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-// The scripted upstream behind FakeHttpClient (no socket), shared by the tier-2 host and the snapshot rig.
+// The scripted upstream behind FakeHttpClient (no socket), shared by the tier-2 hosts and the snapshot rigs.
 struct RemoteUpstreamFake {
     alpacacore::test::FakeHttpClient http;
     alpacacore::test::AlpacaUpstreamScript script;
-    RemoteUpstreamFake() { script.install(http); }
+    explicit RemoteUpstreamFake(alpacacore::test::AlpacaUpstreamScript::Kind kind =
+                                    alpacacore::test::AlpacaUpstreamScript::Kind::ObservingConditions)
+        : script(kind) {
+        script.install(http);
+    }
 };
 
 // The proxied ObservingConditions over the scripted upstream. The hold is FakeHttpClient's per-call delay, a
@@ -2788,6 +2801,38 @@ Tier2Host tier2_host_remotealpaca_observingconditions() {
         config.port = 11111;
         Hosted hosted;
         hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_observingconditions(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
+
+// The proxied SafetyMonitor over the scripted upstream, as the observing conditions host. Its Connect makes seven
+// calls, not some sixty, so the per-call hold is 50 ms: the handshake stays open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_safetymonitor() {
+    Tier2Host h{"remotealpaca_safetymonitor",
+                "remotealpaca",
+                "safetymonitor",
+                "fake_http_client.h",
+                DeviceType::SafetyMonitor,
+                "remotealpaca_safetymonitor",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream =
+            std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(50));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_safetymonitor(
             0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
         hosted.fake = upstream;
         return hosted;
@@ -3401,7 +3446,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR)
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
@@ -4684,7 +4729,8 @@ const std::vector<std::string>& name_brands_of(const std::string& vendor) {
         {"onstep", {"OnStep", "On-Step"}},
         {"playerone", {"Player One"}},
         {"qhy", {"QHY"}},
-        // Disconnected, "Remote Alpaca ObservingConditions"; connected, "Remote Alpaca" and the upstream's Name.
+        // Disconnected, "Remote Alpaca ObservingConditions" or "Remote Alpaca SafetyMonitor"; connected, "Remote
+        // Alpaca" and the upstream's Name.
         {"remotealpaca", {"Remote Alpaca"}},
         {"skywatcher", {"Sky-Watcher"}},
         {"svbony", {"SVBONY"}},
@@ -5354,6 +5400,10 @@ struct SnapshotRig {
     std::function<void()> tick;
     // Getter names left out; the rig that fills it says why next to the assignment.
     std::vector<std::string> left_out;
+    // Getters that past the link-loss bound answer this value without throwing instead of NotConnected, each a rule
+    // of decision 0009 (rule 3: a SafetyMonitor's IsSafe reads false). The value must differ from the baseline's, so
+    // the answer is not the frame served on.
+    std::map<std::string, double> lost_answer;
     // Optional: the disconnect at teardown, for a backend whose disconnect waits on the task clock (the CGX
     // continuity checkpoint); empty means set_connected(false) on the test thread.
     std::function<void()> disconnect;
@@ -5908,6 +5958,37 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_observingconditions() {
     return rig_owner;
 }
 
+// As the observing conditions rig, over a SafetyMonitor upstream that reads safe.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_safetymonitor() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::SafetyMonitor);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_safetymonitor(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::SafetyMonitorDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    // Decision 0009 rule 3: a lost link never reads safe, and IsSafe does not throw (#1753).
+    rig.lost_answer = {{"IsSafe", 0.0}};
+    return rig_owner;
+}
+
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_safetymonitor_getters() {
+    return {{"IsSafe", [](AlpacaDriver& d) {
+                 return snap_text(static_cast<alpacacore::SafetyMonitorDriver&>(d).get_is_safe());
+             }}};
+}
+
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_observingconditions_getters() {
     using alpacacore::ObservingConditionsDriver;
     std::vector<SnapshotGetter> g;
@@ -6008,7 +6089,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif
@@ -6055,7 +6136,7 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
 
 [[maybe_unused]] void snapshot_past_bound_stops_serving(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
     REQUIRE(rig.driver != nullptr);
-    (void)snapshot_baseline(rig, getters);
+    const auto baseline = snapshot_baseline(rig, getters);
     if (rig.lose_link) {
         rig.lose_link();
     } else {
@@ -6066,8 +6147,18 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     if (rig.tick) rig.tick();
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.driver->get_device_state().empty());
-    for (const auto& g : getters) {
+    for (std::size_t i = 0; i < getters.size(); ++i) {
+        const auto& g = getters[i];
         if (std::find(rig.left_out.begin(), rig.left_out.end(), g.name) != rig.left_out.end()) continue;
+        if (const auto answer = rig.lost_answer.find(g.name); answer != rig.lost_answer.end()) {
+            INFO(g.name << " past the link-loss bound must answer " << answer->second << " without throwing");
+            double value = 0.0;
+            CHECK_NOTHROW(value = g.read(*rig.driver));
+            CHECK(value == answer->second);
+            REQUIRE(i < baseline.size());
+            CHECK(baseline[i] != answer->second);
+            continue;
+        }
         INFO(g.name << " past the link-loss bound must throw NotConnected");
         try {
             (void)g.read(*rig.driver);

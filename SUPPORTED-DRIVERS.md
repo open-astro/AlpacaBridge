@@ -572,7 +572,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions device of another Alpaca server through this one. It has fake evidence only (unit tests and a fake ConformU run against a scripted upstream, `AlpacaCore/conformu/Remote Alpaca/Fake/`), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions and SafetyMonitor devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
@@ -646,7 +646,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingCondi
 
 ## SafetyMonitor Drivers
 
-*No drivers currently available.*
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the SafetyMonitor device of another Alpaca server through this one. `IsSafe` reads `false` once the link is lost: at once when the other server refuses the connection, otherwise after `max(30 s, 3 x poll period)` with no answer. Before that it serves the last answer, which can be `true`, and once three polls in a row have failed it reports an error instead. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 [↑ Back to top](#alpacabridge-supported-drivers)
 

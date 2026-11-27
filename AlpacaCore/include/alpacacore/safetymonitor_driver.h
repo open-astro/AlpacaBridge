@@ -43,6 +43,11 @@ public:
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
             // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
         }
+        // Decision 0009 rule 3: a lost link's DeviceState is the empty list. The IsSafe read can be the one that finds
+        // the loss, and a SafetyMonitor's IsSafe reads false on a lost link rather than throwing, so check again.
+        if (!get_connected()) {
+            return {};
+        }
         if (!state.empty()) {
             state.push_back({"TimeStamp", device_state_timestamp()});
         }

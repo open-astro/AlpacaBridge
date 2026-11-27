@@ -10,11 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The remotealpaca ObservingConditions factory (decision 0023, issue #1753 slice 3). Each refusal is an InvalidValue
-// AlpacaException rather than a schema rule, so both config sources refuse it: an API configuredevice call gets the
-// text, and a persisted entry that breaks one is not registered (the WeeWX factory's shape). Every integer is range
-// checked before it narrows to int (decision 0007 rule 4). This file (unlike remotealpaca_schema.cpp) is compiled
-// only under ALPACACORE_ENABLE_REMOTEALPACA, so the vendor header here is fine.
+// The remotealpaca factories, ObservingConditions and SafetyMonitor (decision 0023, issue #1753 slices 3 and 4). Each
+// refusal is an InvalidValue AlpacaException rather than a schema rule, so both config sources refuse it: an API
+// configuredevice call gets the text, and a persisted entry that breaks one is not registered (the WeeWX factory's
+// shape). Every integer is range checked before it narrows to int (decision 0007 rule 4). This file (unlike
+// remotealpaca_schema.cpp) is compiled only under ALPACACORE_ENABLE_REMOTEALPACA, so the vendor header here is fine.
 //
 // The factory is a bind hook so it sees the server's listening addresses (BindContext::listen_addresses): an upstream
 // that resolves to one of them is refused here, at configure, and the driver keeps the source to refuse it again at
@@ -22,6 +22,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 
 #include <chrono>
@@ -40,14 +41,15 @@ namespace {
 
 namespace remote = vendor::remotealpaca;
 
-remote::RemoteObservingConditionsConfig read_config(const DeviceConfig& config) {
-    remote::RemoteObservingConditionsConfig out;
+// `what` names the device in the refusal ("observing conditions").
+remote::RemoteDeviceConfig read_config(const DeviceConfig& config, const std::string& what) {
+    remote::RemoteDeviceConfig out;
     out.host = config.get(kRemoteAlpacaHost);
     const std::int64_t port = config.get(kRemoteAlpacaPort);
     const std::int64_t upstream_number = config.get(kRemoteAlpacaDeviceNumber);
     const std::int64_t poll_seconds = config.get(kRemoteAlpacaPollSeconds);
     if (out.host.empty()) {
-        throw AlpacaException("Remote Alpaca observing conditions requires upstreamHost", AlpacaError::InvalidValue);
+        throw AlpacaException("Remote Alpaca " + what + " requires upstreamHost", AlpacaError::InvalidValue);
     }
     if (port < 1 || port > 65535) {
         throw AlpacaException("upstreamPort must be from 1 to 65535", AlpacaError::InvalidValue);
@@ -73,13 +75,13 @@ remote::ServerAddressSource server_addresses_of(const BindContext& context) {
     };
 }
 
-}  // namespace
-
-void register_remotealpaca_factory(DeviceCatalog& catalog) {
+// A bind factory for one device type: `make` builds the driver from the checked config and the address source.
+template <class Make>
+void add_factory(DeviceCatalog& catalog, DeviceType type, const std::string& what, Make make) {
     Factory factory;
-    factory.key = DeviceKey{"remotealpaca", DeviceType::ObservingConditions};
-    factory.bind = [](const DeviceConfig& config, int device_number, const BindContext& context) {
-        const remote::RemoteObservingConditionsConfig remote_config = read_config(config);
+    factory.key = DeviceKey{"remotealpaca", type};
+    factory.bind = [make, what](const DeviceConfig& config, int device_number, const BindContext& context) {
+        const remote::RemoteDeviceConfig remote_config = read_config(config, what);
         remote::ServerAddressSource self = server_addresses_of(context);
         BindResult result;
         if (self) {
@@ -88,10 +90,23 @@ void register_remotealpaca_factory(DeviceCatalog& catalog) {
                 return result;
             }
         }
-        result.driver = remote::create_remotealpaca_observingconditions(device_number, remote_config, std::move(self));
+        result.driver = make(device_number, remote_config, std::move(self));
         return result;
     };
     catalog.add(std::move(factory));
+}
+
+}  // namespace
+
+void register_remotealpaca_factory(DeviceCatalog& catalog) {
+    add_factory(catalog, DeviceType::ObservingConditions, "observing conditions",
+                [](int number, const remote::RemoteDeviceConfig& config, remote::ServerAddressSource self) {
+                    return remote::create_remotealpaca_observingconditions(number, config, std::move(self));
+                });
+    add_factory(catalog, DeviceType::SafetyMonitor, "safety monitor",
+                [](int number, const remote::RemoteDeviceConfig& config, remote::ServerAddressSource self) {
+                    return remote::create_remotealpaca_safetymonitor(number, config, std::move(self));
+                });
 }
 
 }  // namespace alpacacore::catalog
