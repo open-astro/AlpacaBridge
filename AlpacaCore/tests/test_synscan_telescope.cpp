@@ -36,7 +36,9 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
+#include "hc_motion_rig.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -1289,3 +1291,102 @@ TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws 
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
 }
+
+#ifndef _WIN32
+// FakeSynScanHandset in ConformU mode (#2692): the handset wire answered from FakeMountMotionModel, driven by a clock
+// the case advances. The cases talk to the responder directly, as test_ioptron_fake_motion_mode.cpp does.
+namespace {
+
+using std::chrono::seconds;
+
+using ModelledHandset = alpacacore::test::HcMotionRig<alpacacore::test::FakeSynScanHandset>;
+
+}  // namespace
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a GOTO reports slewing and the target only after its travel time",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    REQUIRE(rig.handset.motion() != nullptr);
+    rig.ask(std::string("T") + '\x02');
+    const double aim_ra = std::fmod(rig.handset.motion()->lst_hours() + 1.0, 24.0);
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("r" + ModelledHandset::pair_of(aim_ra * 15.0, -30.0)) == "#");
+
+    CHECK(rig.slewing());
+    rig.advance(seconds(5));
+    CHECK(rig.slewing());
+    const double mid = rig.dec_degrees();
+    CHECK(mid != Catch::Approx(dec_before).margin(0.5));
+    CHECK(mid != Catch::Approx(-30.0).margin(0.5));  // on its way, not there
+
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.dec_degrees() == Catch::Approx(-30.0).margin(1e-3));
+    CHECK(ModelledHandset::ra_gap_hours(rig.ra_hours(), aim_ra) == Catch::Approx(0.0).margin(1e-4));
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a Sync re-labels the reported position",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0)) == "#");  // 6 h, +40 degrees
+    CHECK(rig.dec_degrees() != Catch::Approx(dec_before).margin(1.0));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));
+    CHECK_FALSE(rig.slewing());  // a sync moves nothing
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: tracking holds RA and stopped tracking lets it drift east",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    CHECK(rig.ask("t") == std::string(1, '\x02') + "#");
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));  // tracking: the sky position holds
+
+    REQUIRE(rig.ask(std::string("T") + '\0') == "#");
+    CHECK(rig.ask("t") == std::string(1, '\0') + "#");
+    rig.advance(seconds(600));
+    // An hour of sidereal time is 1.00274 hours of RA east; 600 s is 600 * 360.98564736629 / 86400 degrees.
+    CHECK(rig.ra_hours() == Catch::Approx(6.0 + 600.0 * 360.98564736629 / 86400.0 / 15.0).margin(1e-3));
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a variable-rate move moves its axis and replaces tracking",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    // Dec at 600"/s (scaled by 4: 2400 = 0x0960), positive (code 6). The mount points west ('W', OTA east of the pier),
+    // where the Dec motor runs the other way (the driver sends code 7 for north there), so code 6 runs Dec south.
+    const std::string dec_north = std::string("P\x03\x11\x06\x09\x60\0\0", 8);
+    REQUIRE(rig.ask(dec_north) == "#");
+    rig.advance(seconds(10));
+    REQUIRE(rig.ask("p") == "W#");
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 - 600.0 * 10.0 / 3600.0).margin(1e-2));
+    rig.ask(std::string("P\x03\x11\x06\0\0\0\0", 8));
+    const double stopped = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
+
+    // An RA variable-rate move replaces tracking: the handset's mode reads 0 until a T write.
+    rig.ask(std::string("P\x03\x10\x07\0\x04\0\0", 8));
+    CHECK(rig.ask("t") == std::string(1, '\0') + "#");
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a fixed-rate move runs its axis at its sidereal multiple",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    constexpr double kSiderealDegPerSec = 360.98564736629 / 86400.0;
+    // Fixed rate 3 (8x sidereal) on the Dec motor, positive (code 36).
+    REQUIRE(rig.ask(std::string("P\x02\x11\x24\x03\0\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 + 8.0 * kSiderealDegPerSec * 10.0).margin(1e-3));
+    REQUIRE(rig.ask(std::string("P\x02\x11\x25\0\0\0\0", 8)) == "#");  // rate 0: the stop
+    const double stopped = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
+}
+#endif

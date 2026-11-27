@@ -26,7 +26,16 @@
 //
 // Counters and knobs are atomics: the server's handler thread writes them while the test thread reads.
 //
+// Two modes. The scripted default (the constructor with a landing and a start position) is what the driver cases
+// use. ConformU mode (the constructor with a FakeMountMotionModel::Config, #2692) answers from one
+// FakeMountMotionModel instead: a GOTO moves the position over its travel time, a Sync re-labels it, tracking
+// follows the sky, a variable-rate or fixed-rate P move moves its axis, and the site and clock reads and writes are
+// kept. The KNOWN PARITY GAPS below are the scripted default's, except where a line says otherwise.
+//
 // KNOWN PARITY GAPS (what the real handset does and this fake does not):
+// - ConformU mode only: an Alt-Az GOTO (b/B) is not modelled and gets no reply; a fixed-rate P move runs its axis
+//   at a table rate and, unlike the handset above rate 2, does not replace tracking; a horizon is not refused (the
+//   protocol has no refusal reply).
 // - One position pair answers both the equatorial (e/E) and the Alt-Az (z/Z) reads, and a landed Alt-Az GOTO (b/B)
 //   moves that same pair. The handset keeps two frames related by the site and the time.
 // - The position does not track the sky: it changes only on a landed GOTO, a miss_gotos landing or set_position().
@@ -48,16 +57,21 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "fake_mount_motion_model.h"
 #include "fake_mount_server.h"
+#include "nexstar_hc_wire.h"
 
 namespace alpacacore::test {
 
@@ -82,6 +96,27 @@ public:
     FakeSynScanHandset(util::TaskClock& clock, SynScanGotoLanding landing, std::string start_position)
         : clock_(clock), position_(std::move(start_position)) {
         land_on_goto.store(landing == SynScanGotoLanding::OnTarget);
+    }
+
+    /// ConformU mode (#2692): answers from a FakeMountMotionModel built from @p motion (see the file comment). The
+    /// knobs that script the position (land_on_goto, no_motion, goto_never_ends, miss_gotos, drift_counts,
+    /// set_position()) do not apply; the fault knobs (silent, reject_goto, gates, ...) do.
+    /// @param clock the TaskClock the driver under test reads
+    FakeSynScanHandset(util::TaskClock& clock, FakeMountMotionModel::Config motion)
+        : clock_(clock), motion_(std::make_unique<FakeMountMotionModel>(std::move(motion))) {}
+
+    /// The motion model of a ConformU-mode handset; null for the scripted default.
+    FakeMountMotionModel* motion() const { return motion_.get(); }
+
+    /// The model setup of the fake ConformU row: the made-up Sydney Opera House site (never a real observing site)
+    /// and a 4 degree/s GOTO, about the top fixed rate of an EQM-35 class mount. Park and home are the driver's own
+    /// GOTO targets here (the handset has no park command), so the model's are unused.
+    static FakeMountMotionModel::Config conformu_motion_config() {
+        FakeMountMotionModel::Config config;
+        config.latitude_degrees = -33.856784;
+        config.longitude_degrees = 151.215297;
+        config.slew_deg_per_s = 4.0;
+        return config;
     }
 
     FakeSynScanHandset(const FakeSynScanHandset&) = delete;
@@ -218,6 +253,7 @@ public:
     }
 
     bool goto_in_progress() const {
+        if (motion_) return motion_->slewing();
         if (!goto_seen.load() || no_motion.load()) return false;
         if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started_.load()));
@@ -279,6 +315,9 @@ private:
         }
         if (silent.load() || chunk.empty()) return "";
         record(chunk);
+        if (motion_) {
+            if (auto reply = answer_modelled(chunk)) return *reply;
+        }
         switch (chunk[0]) {
             case 'K':  // echo: "K" & chr(x) -> chr(x) & "#" (the connect-time link check)
                 return chunk.size() > 1 ? std::string(1, chunk[1]) + "#" : std::string();
@@ -322,7 +361,12 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     gotos_.push_back(chunk);
-                    if (land_on_goto.load() && !no_motion.load()) land(chunk);
+                    if (motion_) {
+                        if (chunk[0] == 'b' || chunk[0] == 'B') return "";  // Alt-Az GOTO: not modelled
+                        start_modelled_goto(chunk);
+                    } else if (land_on_goto.load() && !no_motion.load()) {
+                        land(chunk);
+                    }
                 }
                 goto_started_.store(clock_.now().time_since_epoch().count());
                 goto_seen.store(true);
@@ -346,6 +390,7 @@ private:
                     return "#";
                 }
                 goto_seen.store(false);
+                if (motion_) motion_->stop();
                 return "#";
             case 't':  // tracking mode: chr(mode) & "#"
                 if (reject_tracking_read.load()) return "";
@@ -359,6 +404,7 @@ private:
                 }
                 if (hold_tracking_write.exchange(false)) park_tracking_write();
                 if (chunk.size() > 1) tracking_mode.store(static_cast<unsigned char>(chunk[1]));
+                if (motion_ && chunk.size() > 1) motion_->set_tracking(chunk[1] != 0);
                 return "#";
             case 'P':  // passthrough: "P" & chr(len) & chr(dev) & chr(op) & ...
                 // A variable-rate move on the RA motor is the motor's own speed and replaces tracking on the handset,
@@ -387,7 +433,105 @@ private:
         }
     }
 
+    // ---- ConformU mode: the commands the motion model answers (#2692) ----
+
+    // A GOTO also resumes tracking on the handset if it was stopped (protocol v3.3, "GOTO Commands" note).
+    void start_modelled_goto(const std::string& chunk) {
+        double ra_degrees = 0.0;
+        double dec_degrees = 0.0;
+        if (!hc_wire::parse_aim(chunk, ra_degrees, dec_degrees)) return;
+        if (tracking_mode.load() == 0) tracking_mode.store(2);
+        motion_->set_tracking(true);
+        (void)motion_->goto_radec(ra_degrees / 15.0, dec_degrees);
+    }
+
+    // The variable-rate P move on the RA motor (dev 16) or Dec motor (dev 17), "P" 3 dev code hi lo 0 0. Code 6 is
+    // positive; on RA the westward code is 7 at a southern site and 6 north of the equator (synscan.instructions.md
+    // "Pulse guiding"), and the move REPLACES tracking, so the model's tracking goes off with it. On Dec the motor runs
+    // the other way when the mount points west (pointing state 'E' is the OTA west of the pier).
+    void variable_rate_move(const std::string& chunk) {
+        using Axis = FakeMountMotionModel::Axis;
+        const int dev = static_cast<unsigned char>(chunk[2]);
+        const int code = static_cast<unsigned char>(chunk[3]);
+        const double rate = ((static_cast<unsigned char>(chunk[4]) << 8) | static_cast<unsigned char>(chunk[5])) / 4.0 /
+                            3600.0;  // deg/s
+        const double positive = code == 6 ? rate : -rate;
+        if (dev == 16) {
+            const double west_sign = motion_->site_latitude_degrees() < 0.0 ? -1.0 : 1.0;
+            tracking_mode.store(0);
+            motion_->set_tracking(false);
+            motion_->move_axis(Axis::Ra, -west_sign * positive);  // positive motor = west on a northern site
+        } else if (dev == 17) {
+            const bool pier_flipped = motion_->pier_side() == 1;  // OTA west of the pier, pointing state 'E'
+            motion_->move_axis(Axis::Dec, pier_flipped ? positive : -positive);
+        }
+    }
+
+    void fixed_rate_move(const std::string& chunk) {
+        using Axis = FakeMountMotionModel::Axis;
+        const int dev = static_cast<unsigned char>(chunk[2]);
+        const int code = static_cast<unsigned char>(chunk[3]);
+        const int rate = std::min<int>(static_cast<unsigned char>(chunk[4]), 9);
+        const double deg_per_s =
+            hc_wire::kFixedRateSidereal[rate] * FakeMountMotionModel::kSiderealDegPerSec * (code == 36 ? 1.0 : -1.0);
+        if (dev == 16) {
+            motion_->move_axis(Axis::Ra, -deg_per_s);  // positive motor = west
+        } else if (dev == 17) {
+            motion_->move_axis(Axis::Dec, deg_per_s);
+        }
+    }
+
+    // nullopt: the command is answered by the shared switch below (the echo, the version, the model, the faults).
+    std::optional<std::string> answer_modelled(const std::string& chunk) {
+        switch (chunk[0]) {
+            case 'e':
+            case 'E': {
+                if (silent_position.load() && goto_seen.load()) return std::string();
+                const auto s = motion_->state();
+                return hc_wire::axis_pair(s.ra_hours * 15.0, s.dec_degrees, chunk[0] == 'e');
+            }
+            case 'z':
+            case 'Z':
+                if (silent_position.load() && goto_seen.load()) return std::string();
+                return hc_wire::axis_pair(motion_->azimuth_degrees(), motion_->altitude_degrees(), chunk[0] == 'z');
+            case 'p':  // 'W' pointing west = OTA east of the pier (hour angle >= 0), see the driver's pier mapping
+                return std::string(1, motion_->pier_side() == 0 ? 'W' : 'E') + "#";
+            case 's':
+            case 'S': {
+                hold_for(gate_s_ms, &gate_s_entered, nullptr);
+                double ra_degrees = 0.0;
+                double dec_degrees = 0.0;
+                if (hc_wire::parse_aim(chunk, ra_degrees, dec_degrees))
+                    motion_->set_position(ra_degrees / 15.0, dec_degrees);
+                return std::string("#");
+            }
+            case 'P':
+                if (chunk.size() >= 6 && chunk[1] == 3)
+                    variable_rate_move(chunk);
+                else if (chunk.size() >= 5 && chunk[1] == 2)
+                    fixed_rate_move(chunk);
+                return std::string("#");
+            case 'w':
+                if (no_location.load()) return std::string();
+                return hc_wire::site_bytes(*motion_) + "#";
+            case 'W':
+                hold_for(gate_w_ms, &gate_w_entered, nullptr);
+                hc_wire::apply_site(*motion_, chunk);
+                return std::string("#");
+            case 'h':
+                return hc_wire::time_bytes(*motion_, clock_offset_s_.load()) + "#";
+            case 'H':
+                hold_for(gate_h_ms, &gate_h_entered, nullptr);
+                hc_wire::apply_time(*motion_, chunk, clock_offset_s_);
+                return std::string("#");
+            default:
+                return std::nullopt;
+        }
+    }
+
     util::TaskClock& clock_;
+    std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only
+    std::atomic<std::int64_t> clock_offset_s_{0};   // handset clock less the model's, set by H
     std::atomic<Clock::rep> goto_started_{0};
     std::mutex mutex_;  // position_, gotos_
     std::string position_;
