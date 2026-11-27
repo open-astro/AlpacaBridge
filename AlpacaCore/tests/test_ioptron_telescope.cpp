@@ -4558,6 +4558,96 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
     driver->set_connected(false);
 }
 
+// Issue #2760: the 300 s cap stop and the MoveAxis dead-man stop are verified like AbortSlew's (the shared
+// util::run_verified_stop): FakeIoptronMount::ignore_stops(1) misses the first :Q#, and a second goes out within the
+// 3 s the check has. Steps the fake clock by the 250 ms verify poll until done() or `limit` of virtual time passes.
+namespace {
+
+bool advance_verify_until(FakeTaskClock& clock, const std::function<bool()>& done,
+                          std::chrono::seconds limit = std::chrono::seconds(8)) {
+    for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
+        if (done()) return true;
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(5));
+    }
+    return done();
+}
+
+}  // namespace
+
+TEST_CASE("iOptron motion bound - a dead-man stop the mount ignored once is sent again and verified",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.ignore_stops(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(mount.moving());
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(61));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return !mount.moving(); }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 2);
+    CHECK_FALSE(mount.moving());
+    CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - a 300 s cap stop the mount ignored once is sent again and verified",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.ignore_stops(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(mount.moving());
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return !mount.moving(); }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 2);
+    CHECK_FALSE(mount.moving());
+    CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - a dead-man stop that never verifies leaves the AbortSlew failure for Slewing",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.ignore_stops(10);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(61));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(
+        clock, [&] { return slewing_failure(*driver).find("still reports motion") != std::string::npos; }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 3);
+    CHECK(mount.moving());
+    CHECK(slewing_failure(*driver) == "AbortSlew: the mount still reports motion after 3 stops");
+    driver->set_connected(false);
+}
+
 // Ara trusts AtHome after a FindHome it sent only when FindHome is a real sensor search. On the HAE29C EQ (0036) it
 // is the :MSH# zero sensor search (#2420); every other iOptron model's :MH# slews to the stored home.
 TEST_CASE("iOptron Telescope Driver - findhomeissensorsearch is true only on the HAE29C",
