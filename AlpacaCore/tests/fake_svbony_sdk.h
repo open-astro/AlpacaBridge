@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "connect_hold_gate.h"
+#include "fake_timed_completion.h"
 
 namespace alpacacore::test {
 
@@ -57,6 +58,12 @@ namespace alpacacore::test {
 //   is a DriverException, never the CAMERA_CLOSED the native SDK returns.
 // - Timeout results are returned directly by the seam; this fake does not
 //   verify the native wrapper's SVB_ERROR_TIMEOUT translation.
+// - Without set_timing_clock() a capture's first read delivers the frame and
+//   pulse_guide() returns at once. With it (#2693) a read waits up to its
+//   wait_ms for the Exposure value to pass since start_video_capture and
+//   reports Timeout until then, and pulse_guide() blocks for its pulse as
+//   SVBPulseGuide does. The video stream after the first frame is not
+//   modelled: every later read of the capture delivers at once.
 class FakeSVBSDK final : public vendor::svbony::SVBSDK {
 public:
     // Test-only hook, null by default, before the fake mutex. Set before starting an operation and never
@@ -91,7 +98,13 @@ public:
             {Control::FrameSpeedMode, "Frame Speed", "Frame speed mode", 0, 2, 0, false, true},
             {Control::CurrentTemperature, "Temperature", "Temperature", -500, 500, 0, false, false},
         };
-        values_ = {{Control::Exposure, 1000}, {Control::Gain, 10}, {Control::Offset, 10}, {Control::FrameSpeedMode, 0}};
+        // CurrentTemperature is in 0.1 C, like the TargetTemperature of add_cooler_controls(); 25.0 C. The caps above
+        // list it, so the read answers, as SVBGetControlValue does for a control SVBGetControlCaps reports (#2693).
+        values_ = {{Control::Exposure, 1000},
+                   {Control::Gain, 10},
+                   {Control::Offset, 10},
+                   {Control::FrameSpeedMode, 0},
+                   {Control::CurrentTemperature, 250}};
     }
 
     std::vector<CameraInfo> enumerate_cameras() override {
@@ -240,6 +253,7 @@ public:
         maybe_fail_locked("start_video_capture");
         require_open_locked(camera_id);
         capture_ids_.insert(camera_id);
+        timing_.start(std::chrono::microseconds(values_[Control::Exposure]));
         if (hold_next_capture_) {
             hold_next_capture_ = false;
             block_video_data_ = true;
@@ -326,6 +340,15 @@ public:
             video_data_cv_.notify_all();
             return vendor::svbony::SVBVideoDataResult::Timeout;
         }
+        if (!timing_.wait_ready(lock, video_data_cv_, std::chrono::milliseconds(std::max(0, wait_ms)),
+                                [this, camera_id] { return !capture_ids_.contains(camera_id); })) {
+            // SVBGetVideoData's finite wait ended before the exposure did, or the capture stopped under it.
+            require_open_locked(camera_id);
+            record_locked("get_video_data_complete");
+            ++completed_video_data_reads_;
+            video_data_cv_.notify_all();
+            return vendor::svbony::SVBVideoDataResult::Timeout;
+        }
         require_open_locked(camera_id);  // detect accidental close-under-read
         const auto required = required_capacity_locked();
         if (capacity < 0 || static_cast<std::size_t>(capacity) < required || buffer == nullptr) {
@@ -343,12 +366,16 @@ public:
         video_data_cv_.notify_all();
         return vendor::svbony::SVBVideoDataResult::Frame;
     }
-    void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection, int) override {
+    void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection, int duration_ms) override {
         if (before_call) before_call("pulse_guide");
-        std::lock_guard lock(mutex_);
-        record_locked("pulse_guide");
-        maybe_fail_locked("pulse_guide");
-        require_open_locked(camera_id);
+        {
+            std::lock_guard lock(mutex_);
+            record_locked("pulse_guide");
+            maybe_fail_locked("pulse_guide");
+            require_open_locked(camera_id);
+        }
+        // Outside the mutex, like open_camera's delay: only the caller waits for the pulse.
+        timing_.block_for(std::chrono::milliseconds(duration_ms));
     }
     float get_sensor_pixel_size(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -413,6 +440,12 @@ public:
     void set_camera_present(bool present) {
         std::lock_guard lock(mutex_);
         camera_present_ = present;
+    }
+    /// Times exposures and guide pulses on `clock` (nullptr, the default: both at once; see KNOWN PARITY LIMITS).
+    /// Set before a driver connects (#2693).
+    void set_timing_clock(util::TaskClock* clock) {
+        std::lock_guard lock(mutex_);
+        timing_.set_clock(clock);
     }
     void set_auto(Control control, bool is_auto) {
         std::lock_guard lock(mutex_);
@@ -551,6 +584,7 @@ private:
     std::vector<ControlCaps> controls_;
     std::map<Control, long> values_;
     std::map<Control, bool> auto_values_;
+    FakeTimedCompletion timing_;  // the exposure and the guide pulse (#2693)
     ROI roi_{0, 0, 16, 8, 1};
     std::optional<ROI> returned_roi_;
     ImageType type_{ImageType::Raw16};
