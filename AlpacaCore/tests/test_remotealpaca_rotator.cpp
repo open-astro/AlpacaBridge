@@ -206,20 +206,22 @@ TEST_CASE("Remote Alpaca Rotator Driver - MoveAbsolute is forwarded and IsMoving
     CHECK(r.get_position() == 100.0);
     rig.poll();
     CHECK(r.get_is_moving());  // the upstream still moves
-    // A MoveAbsolute to where the frame has it (Position 100) has nowhere to go: it writes no IsMoving, so the move
-    // still running keeps reading true. TargetPosition is the upstream's new one.
-    r.move_absolute(100.0);
-    CHECK(r.get_is_moving());
-    CHECK(r.get_target_position() == 100.0);
     rig.upstream.finish_move();
     rig.poll();
     CHECK_FALSE(r.get_is_moving());
-    CHECK(r.get_position() == 100.0);
-    CHECK(r.get_mechanical_position() == 90.0);
-    // Nowhere to go with nothing running: IsMoving stays the polled false.
-    r.move_absolute(100.0);
+    CHECK(r.get_position() == 200.0);
+    CHECK(r.get_mechanical_position() == 190.0);
+    // A MoveAbsolute to the frame's Position still reads IsMoving true: that Position can be a poll period old
+    // (another client may have moved the rotator), so only the upstream's next answer says it is still.
+    r.move_absolute(200.0);
+    CHECK(r.get_is_moving());
+    rig.upstream.finish_move();
+    rig.poll();
     CHECK_FALSE(r.get_is_moving());
-    CHECK(rig.upstream.calls("moveabsolute") == 3);
+    // The same for a MoveMechanical to the frame's MechanicalPosition.
+    r.move_mechanical(190.0);
+    CHECK(r.get_is_moving());
+    CHECK(rig.upstream.calls("moveabsolute") == 2);
 }
 
 TEST_CASE("Remote Alpaca Rotator Driver - Move and MoveMechanical forward the angle and write the target through",
@@ -381,18 +383,13 @@ TEST_CASE("Remote Alpaca Rotator Driver - a Halt sent during a move reaches the 
     });
     std::thread mover([&] { rig.driver->move_absolute(200.0); });
     REQUIRE(move_body.wait_entered());
-    std::atomic<bool> halted{false};
-    std::thread halter([&] {
-        rig.driver->halt();
-        halted.store(true);
-    });
-    // Real time, bounded: the window in which an unordered Halt would reach the upstream while the move is held.
-    const auto window = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-    while (rig.upstream.calls("halt") == 0 && std::chrono::steady_clock::now() < window) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    // The Halt's caller finds the move's command running and waits for it: the hook marks the moment.
+    alpacacore::test::Latch halt_waits;
+    remote::set_command_waiting_hook_for_testing(*rig.driver, [&] { halt_waits.block(); });
+    std::thread halter([&] { rig.driver->halt(); });
+    CHECK(halt_waits.wait_entered());  // CHECK, not REQUIRE: the threads are joined below either way
     CHECK(rig.upstream.calls("halt") == 0);
-    CHECK_FALSE(halted.load());
+    halt_waits.release();
     move_body.release();
     mover.join();
     halter.join();

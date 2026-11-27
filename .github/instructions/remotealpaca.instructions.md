@@ -118,9 +118,10 @@ bound.
   rotator base's, from the same getters, its `TimeStamp` the frame's age (`device_state_age()`).
 - **Moves** (`Move`, `MoveAbsolute`, `MoveMechanical`): a NaN or infinite angle is `InvalidValue` before the
   connection check; a finite one goes to the upstream as given, which judges its range (its `InvalidValue` passes
-  through). Refused while the link is faulted. The body forwards the move, writes `IsMoving` true through when the move
-  has somewhere to go (a move with nowhere to go leaves the polled value: an earlier move may still run), then reads the
-  upstream's `TargetPosition` and writes it through. A read with no usable reply leaves `TargetPosition` to the next
+  through). Refused while the link is faulted. The body forwards the move and writes `IsMoving` true through:
+  `MoveAbsolute` and `MoveMechanical` always (the frame's angle can be a poll period old, so it cannot say the rotator
+  is already there), a relative `Move` unless its offset is 0 (that one leaves the polled value: an earlier move may
+  still run). Then it reads the upstream's `TargetPosition` and writes it through. A read with no usable reply leaves `TargetPosition` to the next
   poll and does not fail the move. `Position` stays the measured one until the next poll.
 - **Sync** is forwarded (the upstream keeps the offset; this driver stores none, so decision 0018 rule 4 has nothing to
   move) and writes `Position` through. The **Reverse** write is forwarded and written through. Both are refused while

@@ -372,3 +372,30 @@ TEST_CASE("Remote Alpaca rotator - refused-connection losses race connects, disc
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
 }
+
+// CanReverse answers while disconnected and while connected, so no read of it throws, whatever Disconnect or Connect
+// races it: the driver picks the answer under one state-lock hold. InvalidOperation is never CanReverse's answer; it
+// only replaces the guard's default set, so a NotConnected is unexpected here.
+TEST_CASE("Remote Alpaca rotator - CanReverse never throws while connects and disconnects race it",
+          "[remotealpaca][rotator][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Rotator};
+    upstream.install(http);
+    auto driver = make_rotator(http);
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::InvalidOperation};
+    std::atomic<int> false_reads{0};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &false_reads](AlpacaDriver& d) {
+        auto& r = static_cast<alpacacore::RotatorDriver&>(d);
+        for (int i = 0; i < 50; ++i) {
+            guard([&] {
+                if (!r.get_can_reverse()) false_reads.fetch_add(1);
+            });
+        }
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(false_reads.load() == 0);  // the upstream answers true, and so does a driver never connected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}

@@ -286,6 +286,9 @@ public:
     // answers.
     void set_command_done_hook(std::function<void()> hook) { proxy_.set_command_done_hook(std::move(hook)); }
 
+    // Set while no command runs; a caller that waits for an earlier command calls it first.
+    void set_command_waiting_hook(std::function<void()> hook) { proxy_.set_command_waiting_hook(std::move(hook)); }
+
     std::uint64_t command_generation() const { return proxy_.command_generation(); }
 
 private:
@@ -403,6 +406,12 @@ void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::functio
 void set_command_done_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_command_done_hook(std::move(hook));
+    }
+}
+
+void set_command_waiting_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_command_waiting_hook(std::move(hook));
     }
 }
 

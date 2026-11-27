@@ -67,6 +67,11 @@ void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::functio
 // can run a Disconnect and a Connect there (#2456). Set it while no command runs.
 void set_command_done_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
 
+// Runs `hook` in an AveragePeriod or Refresh caller that finds an earlier command still running, before it waits for
+// it (commands reach the upstream in caller order), so a test knows the caller is waiting. Set it while no command
+// runs.
+void set_command_waiting_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook);
+
 // The command slot's generation: it moves when a command body starts, so a test sees a newer command supersede one.
 std::uint64_t command_generation_for_testing(ObservingConditionsDriver& driver);
 
