@@ -84,7 +84,8 @@ struct DisconnectOnExit {
 
 // The default handset until `mute` is set, then one that takes every command and answers nothing: a reply timeout,
 // the link still up.
-[[maybe_unused]] alpacacore::test::FakeMountServer::Responder mutable_responder(std::shared_ptr<std::atomic<bool>> mute) {
+[[maybe_unused]] alpacacore::test::FakeMountServer::Responder mutable_responder(
+    std::shared_ptr<std::atomic<bool>> mute) {
     auto base = alpacacore::test::FakeMountServer::default_responder();
     return [base, mute](const std::string& chunk) { return mute->load() ? std::string() : base(chunk); };
 }
