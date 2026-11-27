@@ -419,6 +419,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     if(TARGET alpacacore_zwo)
         target_link_libraries(fake_conformu_server alpacacore_zwo)
         target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_ZWO)
+        # The libgpiod and ioctl() stubs the two ASIAIR switch hosts run on (#2697). They define C symbols, so the
+        # server compiles them once, as alpacacore_tests does.
+        target_sources(fake_conformu_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests/zwo_asiair_stubs.cpp)
     endif()
     if(TARGET alpacacore_celestron)
         target_link_libraries(fake_conformu_server alpacacore_celestron)
@@ -475,6 +478,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     if(TARGET alpacacore_remotealpaca)
         target_link_libraries(fake_conformu_server alpacacore_remotealpaca)
         target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_REMOTEALPACA)
+    endif()
+    if(TARGET alpacacore_weewx)
+        target_link_libraries(fake_conformu_server alpacacore_weewx)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_WEEWX)
     endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own

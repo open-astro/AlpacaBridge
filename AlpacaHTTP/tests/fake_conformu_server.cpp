@@ -266,7 +266,33 @@ const std::vector<ConformuHost> kHosts = {
      "FakePlayerOneSDK (a simulated Player One camera with a dew heater and fan, in process)", [] { return true; },
      driver_of(cu::make_playerone_switch)},
 #endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+    {"touptek", "switch", "fake_touptek_sdk.h", alpacacore::DeviceType::Switch, "touptek-fake",
+     "ToupTek camera thermal switch (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated cooled ToupTek camera's dew heater, fan and tail light, in process)",
+     [] { return true; }, driver_of(cu::make_touptek_thermal_switch)},
+    {"touptek", "filterwheel", "fake_touptek_sdk.h", alpacacore::DeviceType::FilterWheel, "touptek-fake",
+     "ToupTek AFW (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AFW filter wheel, in process)", [] { return true; },
+     driver_of(cu::make_touptek_filterwheel)},
+    {"touptek", "focuser", "fake_touptek_sdk.h", alpacacore::DeviceType::Focuser, "touptek-fake",
+     "ToupTek AAF (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AAF focuser, in process)", [] { return true; },
+     driver_of(cu::make_touptek_focuser)},
+#endif
 #ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "switch", "fake_zwo_sdk.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO Dew Heater (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
+     "FakeZWOSDK (the anti-dew heater of a simulated ASI camera, in process)", [] { return true; },
+     driver_of(cu::make_zwo_dew_heater_switch)},
+    {"zwo", "switch", "fake_zwo_asiair_gpiod.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO ASIAIR Pro (fake GPIO chip, test only)", "ALPACACORE_ENABLE_ZWO",
+     "the libgpiod stub chip of fake_zwo_asiair_gpiod.h (simulated ASIAIR Pro GPIO lines, in process)",
+     [] { return true; }, driver_of(cu::make_zwo_asiair_switch)},
+    {"zwo", "switch", "fake_zwo_asiair_plus_ioctl.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO ASIAIR Plus RK3568 (fake kernel module, test only)", "ALPACACORE_ENABLE_ZWO",
+     "the ioctl stub of fake_zwo_asiair_plus_ioctl.h (simulated pwm_gpio_compat module, in process)",
+     [] { return !cu::zwo_asiair_plus_device().sysfs_root().empty(); }, driver_of(cu::make_zwo_asiair_plus_switch)},
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
      "ZWO ASI camera (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
      "FakeZWOSDK (simulated ASI camera SDK, in process)", [] { return true; }, driver_of(cu::make_zwo_camera)},
@@ -311,6 +337,12 @@ const std::vector<ConformuHost> kHosts = {
      "ALPACACORE_ENABLE_REMOTEALPACA",
      "AlpacaUpstreamScript over FakeHttpClient (a scripted upstream Alpaca ObservingConditions device, in process)",
      [] { return true; }, driver_of(cu::make_remotealpaca_observingconditions)},
+#endif
+#ifdef FAKE_CONFORMU_WEEWX
+    {"weewx", "observingconditions", "fake_http_client.h", alpacacore::DeviceType::ObservingConditions, "weewx-fake",
+     "WeeWX Observing Conditions (fake feed, test only)", "ALPACACORE_ENABLE_WEEWX",
+     "FakeHttpClient (a scripted WeeWX JSON feed with seven sensors, in process)", [] { return true; },
+     driver_of(cu::make_weewx_observingconditions)},
 #endif
 #ifdef FAKE_CONFORMU_GPHOTO
     {"gphoto", "camera", "fake_gphoto_sdk.h", alpacacore::DeviceType::Camera, "gphoto-fake",

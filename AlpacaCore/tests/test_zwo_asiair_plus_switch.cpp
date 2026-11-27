@@ -32,11 +32,11 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
 #include "power_port_test_dir.h"
-#include "zwo_asiair_stubs.h"
 
-// The backend's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of zwo_asiair_stubs.h when
-// the device path is a StubDeviceFile; the default /dev/pwm-gpio-misc still reaches the real ioctl().
+// The backend's PWM_GPIO_SET_MODE, ENABLE and SET_LEVEL writes land in the ioctl stub of fake_zwo_asiair_plus_ioctl.h
+// when the device path is a StubDeviceFile; the default /dev/pwm-gpio-misc still reaches the real ioctl().
 namespace {
 
 using alpacacore::test::ioctl_stub;
@@ -642,7 +642,7 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - every ISwitchV3 member answers while 
 // The OpenAstro mainline image replaces ZWO's pwm_gpio.ko with the clean-room pwm_gpio_compat, which implements the
 // module's real command numbers. The backend picks the numbering at open() from the device's sysfs driver link; these
 // cases point it at a fake /sys/dev/char tree through the factory's sysfs overload, and the stub plays the module the
-// tree names (zwo_asiair_stubs.h). The legacy cases above run on the default factory and are unchanged.
+// tree names (fake_zwo_asiair_plus_ioctl.h). The legacy cases above run on the default factory and are unchanged.
 namespace {
 
 using alpacacore::test::compat_device;

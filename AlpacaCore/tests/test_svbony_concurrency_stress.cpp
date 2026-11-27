@@ -84,6 +84,9 @@ TEST_CASE("SVBONY camera - connected acquisition and lifecycle stress", "[svbony
         guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { camera.abort_exposure(); });
         guard([&] { static_cast<void>(camera.get_gain()); });
+        // #2735: the pulse slot's start, its bodies and the Disconnect's join race the storm.
+        guard([&] { camera.pulse_guide(0, 1); });
+        guard([&] { static_cast<void>(camera.get_is_pulse_guiding()); });
     });
 
     CHECK(alpacacore::test::settle_connected(*driver, false));
