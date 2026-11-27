@@ -13,11 +13,11 @@
 // The soft-PWM engine under both switch drivers has its own case at the end (issue #1757), on the fake backend.
 //
 // Connect/disconnect/operate concurrency stress for the two ZWO ASIAIR switch drivers (issue #1862): the ASIAIR
-// Pro (and Plus Pi CM4) over the libgpiod stub chip and the ASIAIR Plus RK3568 over the ioctl stub, both in
-// zwo_asiair_stubs.h. Each connect really succeeds before the storm, so the storm reaches the boolean writes, the
-// PWM worker threads and the racing disconnect, not only a failed open. The stub chip refuses a second request
-// while one is live and a write through a released request, so a double claim or a write after release fails a
-// case. Operations racing a disconnect are EXPECTED to throw NotConnected; what must never happen is a crash, a
+// Pro (and Plus Pi CM4) over the libgpiod stub chip (fake_zwo_asiair_gpiod.h) and the ASIAIR Plus RK3568 over the
+// ioctl stub (fake_zwo_asiair_plus_ioctl.h). Each connect really succeeds before the storm, so the storm reaches the
+// boolean writes, the PWM worker threads and the racing disconnect, not only a failed open. The stub chip refuses a
+// second request while one is live and a write through a released request, so a double claim or a write after release
+// fails a case. Operations racing a disconnect are EXPECTED to throw NotConnected; what must never happen is a crash, a
 // hang, an unreleased claim or a TSan report.
 
 #include <alpacacore/switch_driver.h>
@@ -37,8 +37,9 @@
 #include "concurrency_stress.h"
 #include "fake_gpio_line_backend.h"
 #include "fake_task_clock.h"
+#include "fake_zwo_asiair_gpiod.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
 #include "power_port_test_dir.h"
-#include "zwo_asiair_stubs.h"
 
 using alpacacore::AlpacaDriver;
 

@@ -28,6 +28,7 @@
 #include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_flatpanel_lite.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -930,4 +931,32 @@ TEST_CASE("Gemini flat panel protocol wrapper - EBADF on a command write is a lo
     wrapper.disconnect();
     CHECK(wrapper.link_alive());
     CHECK(wrapper.link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}
+
+// The Lite firmware of the fake (fake_gemini_flatpanel_lite.h, the Cover Lite's fake ConformU row): its own identity
+// and firmware, and ">S#" in the Lite layout "*S<light>11#", so the connect's state seed reads the light the fake
+// holds. The Pro layout would read light 0 at the digit after 'S' (parse_light_flag) whatever the light is.
+TEST_CASE("Gemini Flat Panel Driver - FakeGeminiFlatPanelLite answers as the Cover Lite",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanelLite panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_device_firmware() == std::optional<std::string>("206"));
+
+    driver->calibrator_on(100);
+    REQUIRE(panel.light_on());
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 100);
+
+    driver->calibrator_off();
+    REQUIRE_FALSE(panel.light_on());
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK(panel.commands().front() == ">H#");
 }

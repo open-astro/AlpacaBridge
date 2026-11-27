@@ -39,6 +39,11 @@
 #include "conformu_focuser_factories.h"  // ioptron_ifr(): the iFR focuser and rotator share one unit
 #include "fake_ioptron_ifr.h"
 #endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
+
+#include "fake_wandererastro_rotator.h"
+#endif
 
 namespace alpacacore::test::conformu {
 
@@ -70,6 +75,19 @@ inline std::unique_ptr<RotatorDriver> make_onstep_rotator(int device_number) {
 #ifdef FAKE_CONFORMU_IOPTRON
 inline std::unique_ptr<RotatorDriver> make_ifr_rotator(int device_number) {
     return vendor::ioptron::create_ifr_rotator(device_number, ioptron_ifr().slave_path());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+// The rotator turns at the INDI reference rate the driver extrapolates at (0.24 s per degree, slower than the bench
+// Mini V2's 0.22 s), so ConformU sees each move take its travel time and a Halt stop it part way.
+inline constexpr double kWandererRotatorMsPerDegree = 240.0;
+inline FakeWandererRotator& wandererastro_rotator() {
+    static FakeWandererRotator fake(kWandererRotatorMsPerDegree);
+    return fake;
+}
+inline std::unique_ptr<RotatorDriver> make_wandererastro_rotator(int device_number) {
+    return vendor::wandererastro::create_wandererastro_rotator(device_number, wandererastro_rotator().slave_path());
 }
 #endif
 

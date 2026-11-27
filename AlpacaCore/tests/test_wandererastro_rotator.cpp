@@ -35,6 +35,7 @@
 #include "connect_hold_gate.h"
 #include "driver_rig.h"
 #include "fake_pty_write.h"
+#include "fake_wandererastro_rotator.h"
 #include "pty_responder.h"
 #include "rotator_sync_offset_test_dir.h"
 
@@ -920,4 +921,68 @@ TEST_CASE("WandererAstro Rotator Driver - EBADF on a command write loses the lin
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5
+}
+
+// The ConformU host's timed fake (#2697), through the driver: the rotator is silent while it turns and reports its
+// angle only on arrival, so IsMoving stays true for the travel time and Position lands on the target. The driver is
+// not on the task clock, so the waits are real time: they wait for the fake's steady_clock travel.
+TEST_CASE("FakeWandererRotator - a timed move reports its angle only after the travel time",
+          "[wandererastro][rotator][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    alpacacore::test::FakeWandererRotator fake(240.0);  // 10 degrees: 2.4 s
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(std::abs(driver->get_position()) < 1e-9);
+
+    const auto start = std::chrono::steady_clock::now();
+    driver->move_absolute(10.0);
+    // An instant reply ends the move after the monitor's 600 ms quiet window; this one is still under way.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(driver->get_is_moving());
+    bool arrived = false;
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        if (!driver->get_is_moving()) {
+            arrived = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const auto took = std::chrono::steady_clock::now() - start;
+    REQUIRE(arrived);
+    CHECK(took >= std::chrono::milliseconds(2400));
+    CHECK(std::abs(driver->get_position() - 10.0) < 1e-6);
+    CHECK(fake.moves() == 1);
+    driver->set_connected(false);
+}
+
+// Halt sends "Stop": the timed fake stops where the motor stands and reports that angle at once, so the move ends
+// long before its travel time and Position is part way. Real-time waits, as above.
+TEST_CASE("FakeWandererRotator - Stop ends a timed move where it stands", "[wandererastro][rotator][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    alpacacore::test::FakeWandererRotator fake(240.0);  // 90 degrees: 21.6 s
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->move_absolute(90.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // about 5 degrees of travel
+    REQUIRE(driver->get_is_moving());
+    const auto halted = std::chrono::steady_clock::now();
+    driver->halt();
+    bool stopped = false;
+    while (std::chrono::steady_clock::now() - halted < std::chrono::seconds(5)) {
+        if (!driver->get_is_moving()) {
+            stopped = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(stopped);
+    CHECK(fake.count("Stop") == 1);
+    const double at = driver->get_position();
+    INFO("Position after the Stop: " << at);
+    CHECK(at > 2.0);
+    CHECK(at < 20.0);
+    driver->set_connected(false);
 }
