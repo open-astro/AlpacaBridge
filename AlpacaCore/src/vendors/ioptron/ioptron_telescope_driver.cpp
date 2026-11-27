@@ -1929,9 +1929,6 @@ public:
                                   AlpacaError::DriverException);
         }
         const bool parked = !faulted && parked_per_successful_read_locked();
-        // Issue #2760: a motion this driver owned is checked stopped; an idle mount has nothing to verify.
-        const bool motion_owned = slew_in_progress_ || axis_move_active_primary_ || axis_move_active_secondary_ ||
-                                  driver_motion_ != DriverMotion::None;
         // Issue #2000, ITelescopeV4 AbortSlew: an equatorial slew ends with Tracking on, and an aborted MoveAxis
         // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
         // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
@@ -1955,7 +1952,9 @@ public:
         if (parked) {
             throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
         }
-        if (motion_owned) request_stop_verify_locked();
+        // Issue #2760: every stop that went out is checked, whatever the flags say: an earlier AbortSlew or a status
+        // read that lied "stopped" has cleared them, and the reap above ended that check.
+        request_stop_verify_locked();
         if (restore_tracking.has_value()) {
             try {
                 if (*restore_tracking) {
