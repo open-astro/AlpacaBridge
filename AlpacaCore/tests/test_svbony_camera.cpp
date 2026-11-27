@@ -1067,9 +1067,9 @@ TEST_CASE("SVBONY Camera Driver - queued pulses go out once each in request orde
     auto camera = svbony_camera_with_timed_pulses(sdk, clock);
     std::atomic<bool> settled{false};
     PulseCaseCleanup cleanup{clock, {}, {&settled}};
-    camera->pulse_guide(0, 1000);                // North: in the SDK
+    camera->pulse_guide(0, 1000);  // North: in the SDK
     REQUIRE(clock.wait_for_waiters(1, 2000ms));
-    camera->pulse_guide(1, 300);                 // South, East and West queue behind it
+    camera->pulse_guide(1, 300);  // South, East and West queue behind it
     camera->pulse_guide(2, 200);
     camera->pulse_guide(3, 100);
     CHECK(sdk.call_count("pulse_guide") == 1);
@@ -1125,7 +1125,7 @@ TEST_CASE("SVBONY Camera Driver - a queued pulse that succeeds after a failed on
     std::atomic<bool> queued{false};
     sdk.before_call = [&](const std::string& call) {
         if (call != "pulse_guide" || queued.exchange(true)) return;
-        camera->pulse_guide(1, 10);     // queues behind this call
+        camera->pulse_guide(1, 10);    // queues behind this call
         sdk.fail_next("pulse_guide");  // and this call fails
     };
     camera->pulse_guide(0, 10);
@@ -1149,7 +1149,7 @@ TEST_CASE("SVBONY Camera Driver - a pulse queued behind a link loss raises the l
     std::atomic<bool> queued{false};
     sdk.before_call = [&](const std::string& call) {
         if (call != "pulse_guide" || queued.exchange(true)) return;
-        camera->pulse_guide(1, 10);           // queues behind this call (the drain thread holds no driver lock)
+        camera->pulse_guide(1, 10);            // queues behind this call (the drain thread holds no driver lock)
         sdk.fail_with_removal("pulse_guide");  // and this call reports the camera removed
     };
     camera->pulse_guide(0, 10);

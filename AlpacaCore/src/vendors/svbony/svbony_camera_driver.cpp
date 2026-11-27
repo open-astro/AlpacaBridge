@@ -241,8 +241,8 @@ public:
             // that passed its connection check before this disconnect raises NotConnected and runs no body. A
             // stop that fails is kept for ImageReady (session fail) and the disconnect goes on to close the camera.
             (void)stop_and_join_exposure();
-            // #2735: the same for the pulse drain. A queued pulse sends nothing; the one inside SVBPulseGuide, which has
-            // no cancel, is waited for (at most its own duration). A PulseGuide from here on raises NotConnected.
+            // #2735: the same for the pulse drain. A queued pulse sends nothing; the one inside SVBPulseGuide, which
+            // has no cancel, is waited for (at most its own duration). A PulseGuide from here on raises NotConnected.
             close_pulses();
             reopen.closed = true;
         }
