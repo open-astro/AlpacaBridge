@@ -12,14 +12,14 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope or Focuser device for
-// the remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the
-// driver's poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers
-// the client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser or Camera
+// device for the remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so
+// the driver's poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h)
+// covers the client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
 // Telescope, per Axis), keeps the upstream's Connected and AveragePeriod (a Rotator's moves, Sync and Reverse, a
-// FilterWheel's moves, a Switch's writes, and a Focuser's moves and TempComp) as a real server does, and counts calls
-// per member. A Telescope keeps its slews, park, home, MoveAxis, pulses, syncs and settings as a real mount does. An
-// unscripted member answers 0x400 (not implemented), as a real server does.
+// FilterWheel's moves, a Switch's writes, a Focuser's moves and TempComp, and a Camera's exposure, settings and image)
+// as a real server does, and counts calls per member. A Telescope keeps its slews, park, home, MoveAxis, pulses, syncs
+// and settings as a real mount does. An unscripted member answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
@@ -27,6 +27,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -45,7 +46,15 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, Camera };
+
+    // The Camera's sensor: 8 x 6 pixels, so an image is small and its x-major wire order shows.
+    static constexpr int kCameraWidth = 8;
+    static constexpr int kCameraHeight = 6;
+
+    // The value of the Camera's image at (x, y) of the frame read out: unique per pixel, and not symmetric in x and
+    // y, so a transposed decode reads wrong.
+    static int pixel(int x, int y) { return 100 * x + y + 1; }
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -68,6 +77,14 @@ public:
     // finish_pulse(). While parked a motion command, a sync and AbortSlew answer InvalidWhileParked (0x408).
     // Focuser: an absolute Focuser 4 upstream (Platform 7) named "Alpaca Simulator Focuser" at 25000 of MaxStep 50000,
     // not moving, StepSize 20, 5.0 degrees, TempComp available and off. A Move runs until finish_move() (or a Halt).
+    // Camera: a Camera 4 upstream (Platform 7) named "Alpaca Simulator Camera": an 8 x 6 monochrome sensor
+    // ("IMX571"), MaxBin 2 with no asymmetric binning (a BinX write sets BinY too), ExposureMin 0.001 s, ExposureMax
+    // 3600 s, Gain 10 in GainMin 0 to GainMax 100 (no Gains list), Offset 5 in 0 to 50, readout modes Normal and
+    // Fast, a cooler (CCDTemperature 20, CoolerPower 0, SetCCDTemperature -10, CoolerOn false), no HeatSinkTemperature,
+    // no FastReadout and no SubExposureDuration. ElectronsPerADU is 3 less a hundredth of the gain. An exposure runs
+    // until finish_exposure() (or StopExposure) ends it with an image, or AbortExposure ends it without one; the image
+    // is NumX x NumY of pixel(x, y), served as ImageBytes (UInt16 on the wire) to a request that accepts them, else as
+    // JSON. A setter or a StartExposure while exposing is InvalidOperation, a frame off the sensor InvalidValue.
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) : kind_(kind) {
         set("connecting", "false");
         if (kind == Kind::Telescope) {
@@ -139,6 +156,10 @@ public:
             set("names", R"(["Red", "Green", "Blue", "Clear"])");
             set("focusoffsets", "[100, 200, 300, 0]");
             set("position", "0");
+            return;
+        }
+        if (kind == Kind::Camera) {
+            set_camera_defaults();
             return;
         }
         if (kind == Kind::Rotator) {
@@ -295,6 +316,24 @@ public:
         return last_position_put_;
     }
 
+    // A Camera: ends the running exposure with an image (CameraState Idle, ImageReady true, LastExposure* set).
+    void finish_exposure() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (exposing_) finish_exposure_locked();
+    }
+
+    // A Camera: answer imagearray as JSON even to a request that accepts ImageBytes (an upstream without them).
+    void set_image_json(bool json) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        image_json_ = json;
+    }
+
+    // A Camera: the Duration and Light of the last StartExposure, as sent ("" before any).
+    std::string last_start() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_start_;
+    }
+
     static std::string number(double value) { return std::to_string(value); }
 
     // A Telescope: slews, Park and FindHome run until finish_motion() (or AbortSlew) while true; they land at once
@@ -340,6 +379,9 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++calls_[member];
+            if (request.method == "GET" && member == "imagearray" && camera_) {
+                return image_locked(request.accept == "application/imagebytes" && !image_json_, transaction);
+            }
             if (request.method == "PUT") {
                 reply = put_locked(member, params);
             } else if (member == "connected") {
@@ -354,7 +396,7 @@ public:
         body += "\"ClientTransactionID\":" + (transaction.empty() ? std::string("0") : transaction) +
                 ",\"ServerTransactionID\":1,\"ErrorNumber\":" + std::to_string(reply.error_number) +
                 ",\"ErrorMessage\":\"" + reply.message + "\"}";
-        return util::HttpResponse{200, body};
+        return util::HttpResponse{200, body, {}};
     }
 
 private:
@@ -374,6 +416,9 @@ private:
         if (scripted != put_errors_.end()) return scripted->second;
         if (telescope_) {
             if (auto reply = telescope_put_locked(member, params)) return *reply;
+        }
+        if (camera_ && member != "connect" && member != "disconnect" && member != "connected") {
+            return camera_put_locked(member, params);
         }
         if (member == "connect") {
             connected_ = true;
@@ -635,6 +680,201 @@ private:
         replies_[{"targetrightascension", ""}] = {number(ra), 0, {}};
         replies_[{"targetdeclination", ""}] = {number(dec), 0, {}};
     }
+    // --- The Camera ---
+
+    // In the constructor: set() takes the mutex.
+    void set_camera_defaults() {
+        camera_ = true;
+        set("interfaceversion", "4");
+        set("name", "\"Alpaca Simulator Camera\"");
+        set("description", "\"ASCOM Alpaca Simulator Camera\"");
+        set("cameraxsize", std::to_string(kCameraWidth));
+        set("cameraysize", std::to_string(kCameraHeight));
+        set_error("bayeroffsetx", 0x400, "BayerOffsetX is not implemented: a monochrome sensor");
+        set_error("bayeroffsety", 0x400, "BayerOffsetY is not implemented: a monochrome sensor");
+        set("canabortexposure", "true");
+        set("canasymmetricbin", "false");
+        set("canfastreadout", "false");
+        set("cangetcoolerpower", "true");
+        set("canpulseguide", "true");
+        set("cansetccdtemperature", "true");
+        set("canstopexposure", "true");
+        set("electronsperadu", number(2.9));
+        set("fullwellcapacity", number(50000.0));
+        set("exposuremin", "0.001");
+        set("exposuremax", "3600");
+        set("exposureresolution", "0.001");
+        set("gainmin", "0");
+        set("gainmax", "100");
+        set_error("gains", 0x400, "Gains is not implemented: the gain is a value from GainMin to GainMax");
+        set("hasshutter", "false");
+        set("maxadu", "65535");
+        set("maxbinx", "2");
+        set("maxbiny", "2");
+        set("offsetmin", "0");
+        set("offsetmax", "50");
+        set_error("offsets", 0x400, "Offsets is not implemented: the offset is a value from OffsetMin to OffsetMax");
+        set("pixelsizex", "3.76");
+        set("pixelsizey", "3.76");
+        set("readoutmodes", "[\"Normal\",\"Fast\"]");
+        set("sensorname", "\"IMX571\"");
+        set("sensortype", "0");
+        set("binx", "1");
+        set("biny", "1");
+        set("numx", std::to_string(kCameraWidth));
+        set("numy", std::to_string(kCameraHeight));
+        set("startx", "0");
+        set("starty", "0");
+        set("gain", "10");
+        set("offset", "5");
+        set("readoutmode", "0");
+        set_error("fastreadout", 0x400, "FastReadout is not implemented: CanFastReadout is false");
+        set("cooleron", "false");
+        set("setccdtemperature", "-10");
+        set_error("subexposureduration", 0x400, "SubExposureDuration is not implemented");
+        set("ccdtemperature", "20");
+        set("coolerpower", "0");
+        set_error("heatsinktemperature", 0x400, "HeatSinkTemperature is not implemented");
+        set("ispulseguiding", "false");
+        set("camerastate", "0");
+        set("imageready", "false");
+        set_error("percentcompleted", 0x40B, "PercentCompleted is only valid while exposing");
+        set_error("lastexposureduration", 0x40B, "No image has been taken");
+        set_error("lastexposurestarttime", 0x40B, "No image has been taken");
+    }
+
+    // A held integer member's value (the setter replies keep them as JSON text).
+    int int_locked(const std::string& member) const {
+        const auto it = replies_.find({member, ""});
+        return it == replies_.end() || it->second.value_json.empty() ? 0 : std::stoi(it->second.value_json);
+    }
+
+    Reply camera_put_locked(const std::string& member, const std::string& params) {
+        static const char* const kSettings[] = {
+            "binx", "biny",   "numx",        "numy",     "startx",           "starty",
+            "gain", "offset", "readoutmode", "cooleron", "setccdtemperature"};
+        if (member == "startexposure") {
+            if (exposing_) return {{}, 0x40B, "An exposure is already running"};
+            const std::string duration = decode(field(params, "Duration"));
+            if (std::stod(duration) > 3600.0) return {{}, 0x401, "Duration is above ExposureMax"};
+            const int bin_x = int_locked("binx");
+            const int bin_y = int_locked("biny");
+            const int width = kCameraWidth / bin_x;
+            const int height = kCameraHeight / bin_y;
+            if (int_locked("startx") + int_locked("numx") > width ||
+                int_locked("starty") + int_locked("numy") > height) {
+                return {{}, 0x401, "The frame is off the sensor"};
+            }
+            exposing_ = true;
+            exposure_duration_ = duration;
+            last_start_ = duration + " " + lower(field(params, "Light"));
+            image_.clear();
+            replies_[{"camerastate", ""}] = {"2", 0, {}};
+            replies_[{"imageready", ""}] = {"false", 0, {}};
+            replies_[{"percentcompleted", ""}] = {"0", 0, {}};
+            return {{}, 0, {}};
+        }
+        if (member == "abortexposure") {
+            end_exposure_locked();
+            return {{}, 0, {}};
+        }
+        if (member == "stopexposure") {
+            if (exposing_) finish_exposure_locked();
+            return {{}, 0, {}};
+        }
+        if (member == "pulseguide") {
+            replies_[{"ispulseguiding", ""}] = {"true", 0, {}};
+            return {{}, 0, {}};
+        }
+        for (const char* setting : kSettings) {
+            if (member != setting) continue;
+            if (exposing_) return {{}, 0x40B, "The camera is exposing"};
+            const std::size_t eq = params.find('=');
+            std::string value = decode(params.substr(eq + 1, params.find('&') - eq - 1));
+            if (member == "cooleron") value = lower(value);
+            if ((member == "binx" || member == "biny") && std::stoi(value) > 2) {
+                return {{}, 0x401, "Bin " + value + " is above MaxBin"};
+            }
+            replies_[{member, ""}] = {value, 0, {}};
+            // No asymmetric binning: one bin sets both.
+            if (member == "binx") replies_[{"biny", ""}] = {value, 0, {}};
+            if (member == "biny") replies_[{"binx", ""}] = {value, 0, {}};
+            if (member == "gain") replies_[{"electronsperadu", ""}] = {number(3.0 - std::stoi(value) * 0.01), 0, {}};
+            return {{}, 0, {}};
+        }
+        return {{}, 0x400, "Method " + member + " is not implemented"};
+    }
+
+    void end_exposure_locked() {
+        exposing_ = false;
+        replies_[{"camerastate", ""}] = {"0", 0, {}};
+        replies_[{"percentcompleted", ""}] = {{}, 0x40B, "PercentCompleted is only valid while exposing"};
+    }
+
+    void finish_exposure_locked() {
+        end_exposure_locked();
+        replies_[{"imageready", ""}] = {"true", 0, {}};
+        replies_[{"lastexposureduration", ""}] = {exposure_duration_, 0, {}};
+        replies_[{"lastexposurestarttime", ""}] = {"\"2026-11-26T12:00:00.5\"", 0, {}};
+        image_width_ = int_locked("numx");
+        image_height_ = int_locked("numy");
+        image_.assign(static_cast<std::size_t>(image_width_ * image_height_), 0);
+        for (int x = 0; x < image_width_; ++x) {
+            for (int y = 0; y < image_height_; ++y)
+                image_[static_cast<std::size_t>(x * image_height_ + y)] = pixel(x, y);
+        }
+    }
+
+    static void put_le32(std::string& out, std::uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8) out += static_cast<char>((value >> shift) & 0xFF);
+    }
+
+    // imagearray: the image held (x-major), or InvalidOperation before one; ImageBytes or JSON.
+    util::HttpResponse image_locked(bool image_bytes, const std::string& transaction) const {
+        const std::string message = "No image is ready";
+        if (image_bytes) {
+            std::string body;
+            const std::uint32_t error = image_.empty() ? 0x40B : 0;
+            put_le32(body, 1);
+            put_le32(body, error);
+            put_le32(body, static_cast<std::uint32_t>(transaction.empty() ? 0 : std::stoul(transaction)));
+            put_le32(body, 1);
+            put_le32(body, 44);
+            put_le32(body, 2);  // ImageElementType Int32
+            put_le32(body, 8);  // TransmissionElementType UInt16
+            put_le32(body, 2);
+            put_le32(body, static_cast<std::uint32_t>(error ? 0 : image_width_));
+            put_le32(body, static_cast<std::uint32_t>(error ? 0 : image_height_));
+            put_le32(body, 0);
+            if (error) {
+                body += message;
+            } else {
+                for (const int value : image_) {
+                    body += static_cast<char>(value & 0xFF);
+                    body += static_cast<char>((value >> 8) & 0xFF);
+                }
+            }
+            return util::HttpResponse{200, body, "application/imagebytes"};
+        }
+        std::string body = "{";
+        if (!image_.empty()) {
+            body += "\"Type\":2,\"Rank\":2,\"Value\":[";
+            for (int x = 0; x < image_width_; ++x) {
+                body += x == 0 ? "[" : ",[";
+                for (int y = 0; y < image_height_; ++y) {
+                    body +=
+                        (y == 0 ? "" : ",") + std::to_string(image_[static_cast<std::size_t>(x * image_height_ + y)]);
+                }
+                body += "]";
+            }
+            body += "],";
+        }
+        body += "\"ClientTransactionID\":" + (transaction.empty() ? std::string("0") : transaction) +
+                ",\"ServerTransactionID\":1,\"ErrorNumber\":" + std::to_string(image_.empty() ? 0x40B : 0) +
+                ",\"ErrorMessage\":\"" + (image_.empty() ? message : std::string()) + "\"}";
+        return util::HttpResponse{200, body, "application/json"};
+    }
+
     void set_rotator_locked(double position, double mechanical) {
         position_ = position;
         mechanical_ = mechanical;
@@ -702,6 +942,15 @@ private:
     std::vector<std::string> puts_;
     const Kind kind_;
     std::string focuser_target_;  // a Focuser's running move; empty while none runs
+    // A Camera's exposure, its last StartExposure and its image (x-major, NumX x NumY when it finished).
+    bool camera_ = false;
+    bool exposing_ = false;
+    bool image_json_ = false;
+    std::string exposure_duration_;
+    std::string last_start_;
+    std::vector<int> image_;
+    int image_width_ = 0;
+    int image_height_ = 0;
 };
 
 }  // namespace alpacacore::test

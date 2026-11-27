@@ -30,11 +30,18 @@
 //   4. One call at a time per client: calls are serialized on the client's own mutex.
 //   5. The reply's JSON is parsed inside the wrapper; no JSON type appears in this header
 //      (decision 0013 section 4).
+//   6. get_image_array() (the remotealpaca camera, issue #2703) is the one call that does not hold the client's mutex
+//      across its request: it takes its ClientTransactionID under the mutex and then runs beside the other calls. A
+//      full frame can take a minute to arrive; holding the mutex that long would hold the driver's poll off until
+//      its frame aged past the loss bound, a lost link from a download. It asks for ImageBytes, with its own body cap
+//      and timeout, and decodes the reply here.
 
+#include <alpacacore/camera_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -97,6 +104,18 @@ public:
     // AxisRates).
     std::vector<std::pair<double, double>> get_rate_list(std::string_view member, const RemoteParams& params = {});
 
+    // A string Value that is a UTC time in the ASCOM form (CCYY-MM-DDThh:mm:ss, optional fractional seconds and Z);
+    // any other string is a transport error.
+    std::chrono::system_clock::time_point get_utc_time(std::string_view member, const RemoteParams& params = {});
+
+    // GET imagearray with Accept: application/imagebytes (rule 6): the body capped at `max_body_bytes`, the call
+    // timed out at `timeout`. An ImageBytes reply is decoded into this server's row-major ImageArray (the wire is
+    // x-major); its ErrorNumber passes through as rule 2 says. A JSON reply (an upstream that does not serve
+    // ImageBytes, or answers an error in JSON) of at most util::kHttpMaxResponseBytes is read for its ErrorNumber; a
+    // JSON image is a transport error (a full frame as JSON text is far too large to parse here). Every other failure
+    // is a RemoteTransportError, as rule 3.
+    ImageArray get_image_array(std::size_t max_body_bytes, std::chrono::milliseconds timeout);
+
     // PUT `member` with a form body; a Value in the reply is ignored.
     void put(std::string_view member, const RemoteParams& params = {});
 
@@ -110,6 +129,10 @@ private:
     enum class Verb : std::uint8_t { Get, Put };
     struct Reply;
     Reply call(Verb verb, std::string_view member, const RemoteParams& params);
+    // The form body or query: `params`, then ClientID and the next ClientTransactionID. Under call_mutex_.
+    std::string encoded_locked(const RemoteParams& params);
+    // The reply's ErrorNumber (rule 2) and its JSON object (rule 3).
+    Reply reply_of(const util::HttpResponse& response, const std::string& name) const;
 
     std::shared_ptr<util::HttpClient> http_;
     UpstreamDevice upstream_;

@@ -23,10 +23,10 @@
 namespace alpacacore::test {
 
 /**
- * Thread-safe decorator over any util::HttpClient (decision 0015 rule 2; issue #1753): get and put_form forward
- * to the inner client under one mutex, the way a client with one shared connection would serialise its requests.
- * The [stress] runs put it over FakeHttpClient. The mutex is a leaf (the inner client never calls back into this
- * interface) and is held across a request, so never wrap a client whose request a test holds open.
+ * Thread-safe decorator over any util::HttpClient (decision 0015 rule 2; issue #1753): get, get_with and put_form
+ * forward to the inner client under one mutex, the way a client with one shared connection would serialise its
+ * requests. The [stress] runs put it over FakeHttpClient. The mutex is a leaf (the inner client never calls back into
+ * this interface) and is held across a request, so never wrap a client whose request a test holds open.
  */
 class LockedHttpClient final : public util::HttpClient {
 public:
@@ -35,6 +35,12 @@ public:
     util::HttpResponse get(const std::string& url, std::chrono::milliseconds timeout) override {
         std::lock_guard<std::mutex> lock(mutex_);
         return inner_->get(url, timeout);
+    }
+
+    util::HttpResponse get_with(const std::string& url, std::chrono::milliseconds timeout,
+                                const util::HttpGetOptions& options) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return inner_->get_with(url, timeout, options);
     }
 
     util::HttpResponse put_form(const std::string& url, const std::string& form_body,

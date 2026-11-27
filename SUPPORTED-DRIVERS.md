@@ -40,6 +40,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## Camera Drivers
 
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Camera device of another Alpaca server through this one. `CameraState`, `ImageReady`, the temperatures and `CoolerPower` are the values of the last poll of the other server; `StartExposure` reads `CameraState` Exposing at once, and the image is downloaded from the other server as ImageBytes when a client reads `ImageArray` (an other server that serves `ImageArray` only as JSON is not supported). `AbortExposure` and `StopExposure` are sent even while the polls fail. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
+
 ### Altair
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -576,7 +578,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Focuser device
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope and Focuser devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser and Camera devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 

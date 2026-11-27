@@ -164,6 +164,37 @@ TEST_CASE("HttpClient - a body at the 1 MiB cap is read and one past it is refus
     }
 }
 
+// get_with() (the remotealpaca camera's ImageBytes download, issue #2703): its Accept header goes out, its own body cap
+// replaces the 1 MiB one in both directions, and the reply's Content-Type comes back.
+TEST_CASE("HttpClient - get_with sends its Accept header, takes its own body cap and returns the Content-Type",
+          "[util][http-client]") {
+    using alpacacore::util::HttpGetOptions;
+    for (const bool declare_length : {true, false}) {
+        CAPTURE(declare_length);
+        LoopbackHttpServer server;
+        server.set_declare_length(declare_length);
+        server.set_content_type("application/imagebytes");
+        const std::size_t large = kHttpMaxResponseBytes * 3;
+        server.set_body(std::string(large, 'x'));
+        const HttpResponse response =
+            client()->get_with(server.url(), kTimeout, HttpGetOptions{"application/imagebytes", large});
+        CHECK(response.status == 200);
+        CHECK(response.body.size() == large);
+        CHECK(response.content_type == "application/imagebytes");
+        CHECK(server.last_request().find("Accept: application/imagebytes\r\n") != std::string::npos);
+        // One byte past its cap is refused, and a smaller cap than the default holds too.
+        (void)driver_error_of([&] { (void)client()->get_with(server.url(), kTimeout, HttpGetOptions{"", large - 1}); });
+        server.set_body(std::string(100, 'x'));
+        (void)driver_error_of([&] { (void)client()->get_with(server.url(), kTimeout, HttpGetOptions{"", 99}); });
+        // get() keeps the default cap and sends no Accept of its own choosing.
+        server.set_body(std::string(kHttpMaxResponseBytes + 1, 'x'));
+        (void)driver_error_of([&] { (void)client()->get(server.url(), kTimeout); });
+        server.set_body("{}");
+        CHECK(client()->get(server.url(), kTimeout).content_type == "application/imagebytes");
+        CHECK(server.last_request().find("Accept: application/imagebytes") == std::string::npos);
+    }
+}
+
 TEST_CASE("HttpClient - a redirect to http is followed", "[util][http-client]") {
     LoopbackHttpServer target;
     target.set_body("moved here");

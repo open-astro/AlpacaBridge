@@ -17,7 +17,8 @@
 // which answers each request from its method, URL and form body. Thread-safe, because a
 // driver calls it from its connect thread and its poll thread. It never blocks unless a test sets a delay, so a
 // driver that joins its threads always gets them back (decision 0015 rule 5). The fake does not apply the libcurl
-// bounds: those are tested against a loopback server in test_http_client.cpp.
+// bounds: those are tested against a loopback server in test_http_client.cpp; a get_with() call's Accept header and
+// body cap are recorded in its Request for a test to read.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
@@ -25,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -45,18 +47,26 @@ public:
         std::string url;
         std::string form_body;
         std::chrono::milliseconds timeout{0};
+        // A get_with() call's options; get() and put_form() record the defaults.
+        std::string accept;
+        std::size_t max_body_bytes = util::kHttpMaxResponseBytes;
     };
 
     FakeHttpClient() = default;
     explicit FakeHttpClient(std::function<std::string()> body_source) : body_source_(std::move(body_source)) {}
 
     util::HttpResponse get(const std::string& url, std::chrono::milliseconds timeout) override {
-        return answer({"GET", url, {}, timeout});
+        return answer({"GET", url, {}, timeout, {}, util::kHttpMaxResponseBytes});
+    }
+
+    util::HttpResponse get_with(const std::string& url, std::chrono::milliseconds timeout,
+                                const util::HttpGetOptions& options) override {
+        return answer({"GET", url, {}, timeout, options.accept, options.max_body_bytes});
     }
 
     util::HttpResponse put_form(const std::string& url, const std::string& form_body,
                                 std::chrono::milliseconds timeout) override {
-        return answer({"PUT", url, form_body, timeout});
+        return answer({"PUT", url, form_body, timeout, {}, util::kHttpMaxResponseBytes});
     }
 
     // A non-owning handle for a factory that takes a shared_ptr: the fake must outlive every user.
@@ -134,7 +144,7 @@ private:
             }
         }
         if (responder) return responder(seen);
-        return util::HttpResponse{status_.load(), source ? source() : std::string{}};
+        return util::HttpResponse{status_.load(), source ? source() : std::string{}, {}};
     }
 
     struct InFlight {

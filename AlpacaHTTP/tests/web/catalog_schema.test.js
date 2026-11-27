@@ -97,7 +97,7 @@ test('catalogLoader surfaces a failed load and fetches again on the next call', 
 // What updateVendorOptions offered per device type at upstream main bcb05e4975,
 // with the Gemini switch kept (see the next case).
 const OFFERED = {
-    camera: ['altair', 'gphoto', 'iguider', 'ioptron', 'playerone', 'qhy', 'svbony', 'touptek', 'zwo'],
+    camera: ['altair', 'gphoto', 'iguider', 'ioptron', 'playerone', 'qhy', 'remotealpaca', 'svbony', 'touptek', 'zwo'],
     covercalibrator: ['gemini', 'wandererastro'],
     dome: [],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'remotealpaca', 'touptek', 'wandererastro', 'zwo'],

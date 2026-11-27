@@ -19,8 +19,8 @@
 // decision 0015.
 //
 // Every call is bounded the way decision 0007 asks of an outbound client: the response body is capped
-// at kHttpMaxResponseBytes, only http and https are allowed on the request and on every redirect, and
-// each call has its own timeout.
+// (at kHttpMaxResponseBytes, unless a get_with() call sets its own cap), only http and https are allowed
+// on the request and on every redirect, and each call has its own timeout.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
@@ -37,8 +37,17 @@ namespace alpacacore::util {
 inline constexpr std::size_t kHttpMaxResponseBytes = std::size_t{1024} * 1024;
 
 struct HttpResponse {
-    long status = 0;   // the final HTTP status, after any redirect
-    std::string body;  // at most kHttpMaxResponseBytes
+    long status = 0;           // the final HTTP status, after any redirect
+    std::string body;          // at most the call's body cap (kHttpMaxResponseBytes unless get_with() sets one)
+    std::string content_type;  // the reply's Content-Type header, empty when it sent none
+};
+
+// What get_with() changes for one GET: an Accept header (empty sends the client's default) and the body cap, which
+// replaces kHttpMaxResponseBytes for that call. The caller sizes the cap for the largest reply it expects (the
+// remotealpaca camera's full-frame ImageBytes reply, issue #2703); every other bound stays as get() has it.
+struct HttpGetOptions {
+    std::string accept;
+    std::size_t max_body_bytes = kHttpMaxResponseBytes;
 };
 
 // Nothing listens at the host and port: the connect was refused (ECONNREFUSED). A DriverException like any other
@@ -59,6 +68,10 @@ public:
     // refused connection throws HttpConnectRefused, the same code. An HTTP error status is not thrown; the
     // caller reads HttpResponse::status.
     virtual HttpResponse get(const std::string& url, std::chrono::milliseconds timeout) = 0;
+
+    // get() with `options`: the Accept header it sends and its own body cap. Same errors as get().
+    virtual HttpResponse get_with(const std::string& url, std::chrono::milliseconds timeout,
+                                  const HttpGetOptions& options) = 0;
 
     // PUT `form_body` (application/x-www-form-urlencoded, already encoded) to `url`. Same bounds and
     // errors as get(), but a redirect is not followed: a PUT is a command, so the 3xx comes back as the
