@@ -120,7 +120,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
-| Remote Alpaca (`remotealpaca`) | ObservingConditions, SafetyMonitor and Rotator of an upstream Alpaca server, served as proxied devices | Upstream Alpaca client over `util::HttpClient` | In development (fake evidence only) |
+| Remote Alpaca (`remotealpaca`) | ObservingConditions, SafetyMonitor, Rotator and FilterWheel of an upstream Alpaca server, served as proxied devices | Upstream Alpaca client over `util::HttpClient` | In development (fake evidence only) |
 | Bisque | Telescope | Script/protocol | In development |
 | gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (bundled libgphoto2 built from source, system libraw) | Production |
 

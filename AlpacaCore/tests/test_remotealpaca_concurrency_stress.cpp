@@ -10,17 +10,19 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor and Rotator
-// proxied devices (issues #101, #1753, #2708). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient
-// and the test-only LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll and the command bodies
-// run during the storm. The last case of each device races refused-connection losses against the lifecycle and the
-// reads.
+// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator and
+// FilterWheel proxied devices (issues #101, #1753, #2706, #2708). The upstream is the scripted AlpacaUpstreamScript
+// behind FakeHttpClient and the test-only LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll
+// and the command bodies run during the storm. The last case of each device races refused-connection losses against the
+// lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/util/http_client.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
@@ -102,6 +104,26 @@ void operate_rotator(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) 
     guard([&] { r.sync(100.0); });
     guard([&] { r.set_reverse(false); });
     guard([&] { r.halt(); });
+}
+
+std::unique_ptr<alpacacore::FilterWheelDriver> make_filterwheel(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_filterwheel(0, stress_config(),
+                                                   std::make_shared<alpacacore::test::LockedHttpClient>(http.client()),
+                                                   {}, alpacacore::util::default_task_clock());
+}
+
+// Every member the FilterWheel serves and its Position write, each in its own guard. The names write has one entry
+// per slot of the scripted wheel, so it is accepted whether the slot count is known or not.
+void operate_filterwheel(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& f = static_cast<alpacacore::FilterWheelDriver&>(d);
+    guard([&] { static_cast<void>(f.get_position()); });
+    guard([&] { static_cast<void>(f.get_names()); });
+    guard([&] { static_cast<void>(f.get_focus_offsets()); });
+    guard([&] { static_cast<void>(f.get_device_state()); });
+    guard([&] { static_cast<void>(f.get_name()); });
+    guard([&] { static_cast<void>(f.get_link_fault()); });
+    guard([&] { f.set_position(1); });
+    guard([&] { f.set_names({"L", "R", "G", "B"}); });
 }
 
 // Every member the driver serves, each in its own guard so one throw skips no later call.
@@ -394,6 +416,85 @@ TEST_CASE("Remote Alpaca rotator - CanReverse never throws while connects and di
     });
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(false_reads.load() == 0);  // the upstream answers true, and so does a driver never connected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca filter wheel - concurrent connect/disconnect/operate stress",
+          "[remotealpaca][filterwheel][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::FilterWheel};
+    upstream.install(http);
+    auto driver = make_filterwheel(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_filterwheel(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.last_position_put() == "1");  // the writes ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca filter wheel - destruction races an in-flight connect",
+          "[remotealpaca][filterwheel][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::FilterWheel};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_filterwheel(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca filter wheel - racing disconnect is never dropped", "[remotealpaca][filterwheel][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::FilterWheel};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_filterwheel(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 40 is refused (a Connect makes some nine, so most land), so the poll and the
+// Position writes lose the link at once while lifecycle threads connect and disconnect it and readers race the
+// getters. TSan checks the loss path's writes (connected_, the kept reason, the dropped frame) and the Connect's
+// slot store against the getters, the names write, the Position bodies and their write-throughs, and set_connected().
+TEST_CASE("Remote Alpaca filter wheel - refused-connection losses race connects, disconnects, writes and reads",
+          "[remotealpaca][filterwheel][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::FilterWheel};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 40 == 39) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_filterwheel(http);
+
+    // A refused write is NotConnected (the loss is its answer); InvalidOperation as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_filterwheel(guard, d); });
+
+    // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());     // the Disconnect ended any kept reason
+    CHECK(upstream.last_position_put() == "1");  // writes ran on a connected driver, not only NotConnected
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);

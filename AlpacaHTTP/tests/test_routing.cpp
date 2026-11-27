@@ -4066,6 +4066,24 @@ int main() {
         EXPECT(cfg.value("pollPeriodSeconds", -1) == 17);
         remove_device(router, "remotealpaca", "rotator", 9658);
     }
+    {
+        // case: remotealpaca filterwheel config round-trips every field (#1753)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "filterwheel"},
+                                           {"deviceNumber", 9640},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32327},
+                                           {"upstreamDeviceNumber", 4},
+                                           {"pollPeriodSeconds", 17}},
+                                          "FilterWheel", 9640);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32327);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 4);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 17);
+        remove_device(router, "remotealpaca", "filterwheel", 9640);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -9399,7 +9417,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 49);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 50);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -11511,6 +11529,20 @@ int main() {
         EXPECT(!refused.ok);
         EXPECT(refused.message.find("is this server") != std::string::npos);
         EXPECT(listed_entry(router, "Rotator", 9659).is_null());
+    }
+    {
+        // case: configuredevice refuses a remotealpaca filterwheel upstream that is this server (#1753)
+        // Decision 0023 rule 4, as for the other proxied devices above.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "filterwheel"},
+                                     {"deviceNumber", 9641},
+                                     {"upstreamHost", "localhost"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "FilterWheel");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "FilterWheel", 9641).is_null());
     }
 #endif
 

@@ -107,6 +107,8 @@ TEST_CASE("Remote Alpaca client - Value is read as its own type", "[remotealpaca
     server.set_value("supportedactions", R"(["A", "B"])");
     server.set_value("averageperiod", "1.5");
     server.set_value("name", "null");
+    server.set_value("focusoffsets", "[0, -25, 2147483647]");
+    server.set_value("names", R"(["L", "R"])");
     RemoteAlpacaClient client(curl_client(), upstream_at(server.port()), 1);
 
     CHECK(client.get_bool("connected"));
@@ -116,12 +118,15 @@ TEST_CASE("Remote Alpaca client - Value is read as its own type", "[remotealpaca
           "C\n");
     CHECK(client.get_string_list("supportedactions") == std::vector<std::string>{"A", "B"});
     CHECK(client.get_double("averageperiod") == 1.5);
+    CHECK(client.get_int_list("focusoffsets") == std::vector<int>{0, -25, 2147483647});
 
     // A Value of the wrong type is no usable reply.
     CHECK(thrown_by([&] { client.get_int("averageperiod"); }).first);
     CHECK(thrown_by([&] { client.get_bool("interfaceversion"); }).first);
     CHECK(thrown_by([&] { client.get_string("name"); }).first);
     CHECK(thrown_by([&] { client.get_string_list("description"); }).first);
+    CHECK(thrown_by([&] { client.get_int_list("names"); }).first);
+    CHECK(thrown_by([&] { client.get_int_list("averageperiod"); }).first);
 }
 
 TEST_CASE("Remote Alpaca client - a non-zero ErrorNumber passes through unchanged with the upstream host",

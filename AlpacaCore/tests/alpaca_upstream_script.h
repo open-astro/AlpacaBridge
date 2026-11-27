@@ -12,12 +12,12 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor or Rotator device for the remotealpaca driver tests (issue
-// #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake task clock
-// with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP; this one
-// answers per member and per SensorName, keeps the upstream's Connected and AveragePeriod (and a Rotator's moves, Sync
-// and Reverse) as a real server does, and counts calls per member.
-// An unscripted member answers 0x400 (not implemented), as a real server does.
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator or FilterWheel device for the remotealpaca driver
+// tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake
+// task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP;
+// this one answers per member and per SensorName, keeps the upstream's Connected and AveragePeriod (a Rotator's moves,
+// Sync and Reverse, and a FilterWheel's moves) as a real server does, and counts calls per member. An unscripted member
+// answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
@@ -42,7 +42,7 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -51,8 +51,20 @@ public:
     // MechanicalPosition 90 (a Sync offset of 10), TargetPosition 100, not moving, StepSize 0.5, CanReverse true,
     // Reverse false. A move runs until finish_move() (or a Halt) ends it, so a test sees IsMoving true on the upstream
     // for as long as it needs.
+    // FilterWheel: a FilterWheel 3 upstream (Platform 7) named "Alpaca Simulator Filter Wheel" with four slots, Red,
+    // Green, Blue and Clear, offsets 100, 200, 300 and 0, at slot 0. A Position write starts a move that reads -1 until
+    // finish_wheel_move() ends it at the written slot, so a test sees the upstream moving for as long as it needs.
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
         set("connecting", "false");
+        if (kind == Kind::FilterWheel) {
+            set("interfaceversion", "3");
+            set("name", "\"Alpaca Simulator Filter Wheel\"");
+            set("description", "\"ASCOM Alpaca Simulator FilterWheel\"");
+            set("names", R"(["Red", "Green", "Blue", "Clear"])");
+            set("focusoffsets", "[100, 200, 300, 0]");
+            set("position", "0");
+            return;
+        }
         if (kind == Kind::Rotator) {
             set("interfaceversion", "4");
             set("name", "\"Alpaca Simulator Rotator\"");
@@ -153,6 +165,19 @@ public:
         return last_move_;
     }
 
+    // A FilterWheel: ends the running move at its slot (Position is the written slot, no longer -1).
+    void finish_wheel_move() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!wheel_target_.empty()) replies_[{"position", ""}] = {wheel_target_, 0, {}};
+        wheel_target_.clear();
+    }
+
+    // A FilterWheel: the Position of the last Position PUT, as sent ("" before any).
+    std::string last_position_put() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_position_put_;
+    }
+
     static std::string number(double value) { return std::to_string(value); }
 
     util::HttpResponse answer(const FakeHttpClient::Request& request) {
@@ -221,6 +246,10 @@ private:
         } else if (member == "sync") {
             // The offset moves; MechanicalPosition stays.
             set_rotator_locked(wrap(std::stod(decode(field(params, "Position")))), mechanical_);
+        } else if (member == "position") {
+            // The wheel turns until finish_wheel_move(), reading -1 meanwhile (IFilterWheelV3).
+            wheel_target_ = last_position_put_ = decode(field(params, "Position"));
+            replies_[{"position", ""}] = {"-1", 0, {}};
         } else if (member == "reverse") {
             replies_[{"reverse", ""}] = {lower(field(params, "Reverse")), 0, {}};
         } else if (member != "refresh") {
@@ -282,6 +311,8 @@ private:
     double mechanical_ = 0.0;
     std::optional<double> rotator_target_;
     std::string last_move_;
+    std::string wheel_target_;  // a FilterWheel's running move; empty while none runs
+    std::string last_position_put_;
 };
 
 }  // namespace alpacacore::test

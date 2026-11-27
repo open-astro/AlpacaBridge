@@ -1832,6 +1832,30 @@
                         <small>How often this server reads the other server, 1 to 60 seconds. IsMoving, Position and MechanicalPosition are the values of the last read; a move reads IsMoving true at once. Halt is sent even while the reads fail.</small>
                     </div>
                   </div>
+                  <div id="remotealpaca-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
+                    <h3>Remote Alpaca Filter Wheel</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-filterwheel-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-filterwheel-host" name="remoteAlpacaFilterWheelHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-filterwheel-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-filterwheel-port" name="remoteAlpacaFilterWheelPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-filterwheel-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-filterwheel-device-number" name="remoteAlpacaFilterWheelDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the FilterWheel device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-filterwheel-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-filterwheel-poll-period" name="remoteAlpacaFilterWheelPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds. Position is the value of the last read, -1 while the wheel turns; a Position write reads -1 at once, until the next read shows where the wheel landed. The filter names and focus offsets are the other server's, read at each Connect.</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),

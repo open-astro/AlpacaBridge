@@ -315,6 +315,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## FilterWheel Drivers
 
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel device of another Alpaca server through this one. `Position` is the value of the last poll of the other server, -1 while its wheel turns, and a `Position` write reads -1 at once; the filter names and focus offsets are the other server's, read at each Connect. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
+
 ### iOptron
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -572,7 +574,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor and Rotator devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator and FilterWheel devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
