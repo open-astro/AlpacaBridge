@@ -1714,11 +1714,20 @@ TEST_CASE("SkyWatcher async - a pulse superseded in its release's stop-wait keep
     clock.wait_for_woken_settled(kRendezvous);
 
     const auto read = [&] { return channel == 1 ? driver->get_right_ascension() * 15.0 : driver->get_declination(); };
+    // RA follows the host's sidereal time. Set the clock so it reads 359.5 deg here and crosses 0h during the measured
+    // second, as it did in main CI on 9678fbee1: the case then pins the wrap on every run, not a few minutes a day.
+    const ProbeGuard probe_guard(false);
+    const double ra_deg = driver->get_right_ascension() * 15.0;
+    const double shift_deg = std::fmod(359.5 - ra_deg + 360.0, 360.0);
+    driver->set_utc_date(std::chrono::system_clock::now() +
+                         std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                             std::chrono::duration<double>(shift_deg / 360.98564736629 * 86400.0)));
     const double axis_before = mount.axis_degrees(channel);
     const double before = read();
     elapse(clock, std::chrono::milliseconds(1000));
     const double axis_moved = mount.axis_degrees(channel) - axis_before;
-    const double reported_moved = read() - before;
+    // RA wraps at 24 h: the move is the difference taken into -180..180 deg.
+    const double reported_moved = std::remainder(read() - before, 360.0);
     CAPTURE(axis_moved, reported_moved);
     REQUIRE(std::abs(axis_moved) > 0.5);  // the MoveAxis slews at 1 deg/s
     // The model follows the axis (RA reads the sky, so its sign is the hemisphere's).
