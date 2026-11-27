@@ -28,7 +28,7 @@ namespace alpacacore::util {
 // build_frame_image returns the ImageArray. Every camera driver builds its image here, so the
 // byte order, the stride, the crop and the size checks are written once.
 
-enum class FrameFormat {
+enum class FrameFormat : std::uint8_t {
     Mono8,   // one byte per pixel
     Mono16,  // two bytes per pixel, little-endian (low byte first)
     Bgr24,   // three bytes per pixel, B,G,R: the output planes are R,G,B
@@ -36,7 +36,7 @@ enum class FrameFormat {
 };
 
 // What a window pixel with no source pixel behind it receives.
-enum class FrameEdgeRule {
+enum class FrameEdgeRule : std::uint8_t {
     ZeroFill,      // 0
     ReplicateOne,  // the nearest source pixel, for at most one missing row and one missing column; more is refused
 };
