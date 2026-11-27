@@ -138,7 +138,7 @@ author must do. Read the docstring before changing a gate.
   `check_text()` refuses it in a commit, so a committed telescope report comes from the nightly or a dispatched run. On a PR the `runs` job keeps only the rows the PR's
   files reach: a shared file the `paths:` list names (the core, the HTTP layer, the server, the run list, the
   workflow) runs every row, a vendor's sources, fakes (`fake_<vendor>_*.h`) or reports run that vendor's rows, and a
-  file the list does not name (a changelog fragment, docs, a test case) selects nothing; the nightly run runs them all. The
+  file the list does not name (a changelog fragment, docs, a test case) selects nothing, and so does a C/C++ file whose change is only comments or blank lines (`comment_only_change` in `scripts/check_contract_sweep.py`); the nightly run runs them all. The
   server links each vendor that is built and compiles that vendor's hosts under `FAKE_CONFORMU_<VENDOR>`. The run list has one record per `kFakeConnectableRoster` row (`run`,
   or `pending` with a slice and the reason it does not run) and a `no-fake` record per driver with no fake;
   docs-drift check 30 holds it to the roster both ways, so a PR that adds a roster row adds its record. A row runs

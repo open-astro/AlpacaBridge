@@ -191,7 +191,8 @@ jobs:
         # Sky-Watcher UDP row keeps conformu-fake-skywatcher). On a pull request a row runs when the PR changes a
         # shared file (a file the paths filter above lists that is not one vendor's: the core, the HTTP layer, the
         # server, the run list, this workflow) or that row's own vendor sources, fakes or reports. A file the paths
-        # filter does not list (a changelog fragment, docs, a test case) selects nothing. The nightly and dispatched
+        # filter does not list (a changelog fragment, docs, a test case), or a C/C++ file whose change is only
+        # comments (scripts/check_contract_sweep.py comment_only_change), selects nothing. The nightly and dispatched
         # runs run every row. Each telescope row is ~21 minutes, so a focuser-only PR does not pay for the mounts.
         run: |
           set -euo pipefail
@@ -199,6 +200,10 @@ jobs:
           import json
           import os
           import re
+          import subprocess
+          import sys
+          sys.path.insert(0, "scripts")
+          from check_contract_sweep import comment_only_change
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
           # Vendors whose build requires libgpiod >= 2.0, which the runner's apt does not ship (iOptron's is optional).
           NEEDS_GPIOD = {"zwo"}
@@ -236,6 +241,15 @@ jobs:
           if os.path.exists(changed_path):
               with open(changed_path, encoding="utf-8") as f:
                   changed = [p.strip() for p in f if p.strip()]
+
+          def show(rev, path):
+              r = subprocess.run(["git", "show", "%s:%s" % (rev, path)], capture_output=True, text=True, check=False)
+              return r.stdout if r.returncode == 0 else None
+
+          if changed is not None:
+              # A C/C++ file whose change is only comments (a reworded note in contract_sweep.h) selects nothing.
+              changed = [p for p in changed if not (p.endswith((".h", ".hpp", ".c", ".cc", ".cpp"))
+                                                    and comment_only_change(show("HEAD^1", p), show("HEAD", p)))]
 
           def path_filter():
               # The on.pull_request.paths globs of this workflow, as regular expressions (** spans directories).
