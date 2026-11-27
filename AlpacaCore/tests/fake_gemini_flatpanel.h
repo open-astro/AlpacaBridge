@@ -12,13 +12,23 @@
 
 #pragma once
 
-// Hardware-free Gemini "Pro" (Motorized Flat Panel V3) firmware behind a
-// pseudo-terminal. The driver opens the pty slave exactly like a USB-serial
-// port; this fake answers on the master with the replies captured from the
-// real panel (firmware 107, 2026-08-25): ">H#" -> "*HGeminiFlatPanelPro#",
-// ">S#" -> "*S0M<light>L<cover>C0D76C405O#", ">O#" -> "*O405#", ">C#" ->
-// "*C70#". Per-command reply delays let a test hold the port the way a
-// slow light command or a 10 s cover move does on hardware, which is what
+// Hardware-free Gemini flat panel firmware behind a pseudo-terminal. The
+// driver opens the pty slave exactly like a USB-serial port; this fake
+// answers on the master as one of the three panel firmwares
+// (gemini.instructions.md), Pro by default:
+// - Pro (Motorized Flat Panel V3), the replies captured from the real panel
+//   (firmware 107, 2026-08-25): ">H#" -> "*HGeminiFlatPanelPro#", ">S#" ->
+//   "*S0M<light>L<cover>C0D76C405O#", ">O#" -> "*O405#", ">C#" -> "*C70#".
+// - Rev2 (Astro Automatic FlatPanel v2, firmware 408): ">H#" ->
+//   "*HGeminiFlatPanel#", ">S#" -> "*S19<motor><light><cover>#", ">O#" ->
+//   "*OOpened#", ">C#" -> "*CClosed#" (INDI's Rev2 adapter; the driver's exact
+//   acks passed ConformU on the real panel).
+// - Lite (Astro Flat Panel Cover Lite, firmware 206, light only): ">H#" ->
+//   "*HGeminiFlatPanelLite#", ">S#" -> "*S<light>11#" (captured from the
+//   vendor app); it has no cover motor, so ">O#" and ">C#" are unknown
+//   commands ("*?#") and move nothing.
+// Per-command reply delays let a test hold the port the way a slow light
+// command or a cover move (10 s on the Pro) does on hardware, which is what
 // the driver's fast-path / background-path selection keys on.
 
 #include <poll.h>
@@ -38,9 +48,13 @@
 
 namespace alpacacore::test {
 
+/// The panel firmware a FakeGeminiFlatPanel answers as (see the header comment).
+enum class GeminiPanelFirmware { Lite, Rev2, Pro };
+
 class FakeGeminiFlatPanel {
 public:
-    FakeGeminiFlatPanel() : pty_("FakeGeminiFlatPanel") {
+    explicit FakeGeminiFlatPanel(GeminiPanelFirmware firmware = GeminiPanelFirmware::Pro)
+        : firmware_(firmware), pty_("FakeGeminiFlatPanel") {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387).
@@ -177,14 +191,25 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
         }
+        const bool has_cover = firmware_ != GeminiPanelFirmware::Lite;
+        const char light = light_on_.load() ? '1' : '0';
         std::string reply;
         if (cmd == ">H#") {
-            reply = "*HGeminiFlatPanelPro#";
+            reply = firmware_ == GeminiPanelFirmware::Lite   ? "*HGeminiFlatPanelLite#"
+                    : firmware_ == GeminiPanelFirmware::Rev2 ? "*HGeminiFlatPanel#"
+                                                             : "*HGeminiFlatPanelPro#";
         } else if (cmd == ">V#") {
-            reply = "*V107#";
+            reply = firmware_ == GeminiPanelFirmware::Lite   ? "*V206#"
+                    : firmware_ == GeminiPanelFirmware::Rev2 ? "*V408#"
+                                                             : "*V107#";
         } else if (cmd == ">S#") {
-            reply = std::string("*S0M") + (light_on_.load() ? '1' : '0') + "L" + std::to_string(cover_.load()) +
-                    "C0D76C405O#";
+            if (firmware_ == GeminiPanelFirmware::Lite) {
+                reply = std::string("*S") + light + "11#";
+            } else if (firmware_ == GeminiPanelFirmware::Rev2) {
+                reply = std::string("*S190") + light + std::to_string(cover_.load()) + "#";
+            } else {
+                reply = std::string("*S0M") + light + "L" + std::to_string(cover_.load()) + "C0D76C405O#";
+            }
         } else if (cmd == ">J#") {
             reply = "*J" + std::to_string(brightness_.load()) + "#";
         } else if (cmd == ">L#") {
@@ -196,10 +221,10 @@ private:
         } else if (cmd.rfind(">B", 0) == 0) {
             brightness_.store(std::atoi(cmd.c_str() + 2));
             reply = "*B" + std::to_string(brightness_.load()) + "#";
-        } else if (cmd == ">O#") {
-            reply = "*O405#";
-        } else if (cmd == ">C#") {
-            reply = "*C70#";
+        } else if (cmd == ">O#" && has_cover) {
+            reply = firmware_ == GeminiPanelFirmware::Rev2 ? "*OOpened#" : "*O405#";
+        } else if (cmd == ">C#" && has_cover) {
+            reply = firmware_ == GeminiPanelFirmware::Rev2 ? "*CClosed#" : "*C70#";
         } else {
             reply = "*?#";
         }
@@ -218,9 +243,9 @@ private:
         }
         // The cover reaches its end stop when the ack goes out (as on hardware,
         // where the ack arrives only once travel has finished).
-        if (cmd == ">O#") {
+        if (cmd == ">O#" && has_cover) {
             cover_.store(2);
-        } else if (cmd == ">C#") {
+        } else if (cmd == ">C#" && has_cover) {
             cover_.store(1);
         }
         {
@@ -234,6 +259,7 @@ private:
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
+    const GeminiPanelFirmware firmware_;
     PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};

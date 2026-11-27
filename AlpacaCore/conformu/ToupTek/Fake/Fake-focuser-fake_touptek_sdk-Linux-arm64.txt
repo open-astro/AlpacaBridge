@@ -1,0 +1,88 @@
+FAKE REPORT: ConformU against FakeToupTekSDK (a simulated ToupTek AAF focuser, in process), not hardware. Not hardware validation.
+18:41:51.903 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 14:09:42          
+18:41:51.903                                              
+18:41:51.903 Operating system is Armbian 26.8.3 trixie, Processor is ARM 64bit, Application is 64bit.          
+18:41:51.903                                              
+18:41:51.903 Alpaca device:  (127.0.0.1:23971 Focuser/0)          
+18:41:51.903                                              
+18:41:51.904 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 23971, Alpaca device number: 0
+18:41:51.913 CreateDevice                        INFO     Alpaca device created OK
+18:41:51.913 CreateDevice                        INFO     Successfully created driver
+18:41:53.010 CreateDevice                        OK       Found a valid interface version: 4
+18:41:53.010 CreateDevice                        OK       Driver instance created successfully
+18:41:53.010                                              
+18:41:53.010 Connect to device                            
+18:41:53.102 Connected                           OK       Connected to device successfully using Connected = True
+18:41:53.656 Connected                           OK       Disconnected from device successfully using Connected = False
+18:41:53.664 Connect                             OK       Connected to device successfully using Connect()
+18:41:53.664                                              
+18:41:53.665 Common Driver Methods                        
+18:41:53.665 InterfaceVersion                    OK       4
+18:41:53.666 Connected                           OK       True
+18:41:53.670 Description                         OK       ToupTek AAF Focuser Driver
+18:41:53.671 DriverInfo                          OK       AlpacaCore ToupTek AAF Focuser Driver
+18:41:53.678 DriverVersion                       OK       5.0.2
+18:41:53.679 Name                                OK       ToupTek AAF
+18:41:53.679                                              
+18:41:53.683 SupportedActions                    OK       Found action: SetZero
+18:41:53.694                                              
+18:41:53.694 Action                              INFO     Conform cannot test the Action method
+18:41:53.694                                              
+18:41:53.701 DeviceState                         OK       Received 4 operational state properties.
+18:41:53.701 DeviceState                         OK         IsMoving = False
+18:41:53.701 DeviceState                         OK         Position = 0
+18:41:53.701 DeviceState                         OK         Temperature = 0
+18:41:53.701 DeviceState                         OK         TimeStamp = 11/27/2026 6:41:53 PM
+18:41:53.705 DeviceState                         OK       Found all expected operational properties
+18:41:53.705                                              
+18:41:53.705 Properties                                   
+18:41:53.706 Absolute                            OK       True
+18:41:53.707 IsMoving                            OK       False
+18:41:53.709 MaxStep                             OK       100000
+18:41:53.710 MaxIncrement                        OK       100000
+18:41:53.714 Position                            OK       0
+18:41:53.727 StepSize                            OK       Optional member returned a NotImplementedException error.
+18:41:53.731 TempCompAvailable                   OK       False
+18:41:53.732 TempComp Read                       OK       False
+18:41:53.733 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+18:41:53.740 Temperature                         OK       0
+18:41:53.740                                              
+18:41:53.740 Methods                                      
+18:41:53.747 Halt                                OK       Focuser halted OK
+18:41:55.275 Move - TempComp False               OK       Absolute move OK
+18:41:56.794                                              
+18:41:56.794 Disconnect from device                       
+18:41:57.299 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+18:41:57.299                                              
+18:41:57.299 Conformance test has finished                
+18:41:57.299                                              
+18:41:57.299 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+18:41:57.299                                     
+18:41:57.299 Timing Summary                               See Help for further information.
+18:41:57.299 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+18:41:57.299 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+18:41:57.299 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+18:41:57.299 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+18:41:57.299                                              
+18:41:57.299 Connect                                      At 18:41:53.657 Connect                  0.001 seconds. ✓ (STANDARD)
+18:41:57.299 InterfaceVersion                             At 18:41:53.665 InterfaceVersion         0.000 seconds. ✓ (FAST)
+18:41:57.299 Connected                                    At 18:41:53.666 Connected                0.001 seconds. ✓ (FAST)
+18:41:57.299 Description                                  At 18:41:53.670 Description              0.003 seconds. ✓ (FAST)
+18:41:57.299 DriverInfo                                   At 18:41:53.671 DriverInfo               0.001 seconds. ✓ (FAST)
+18:41:57.299 DriverVersion                                At 18:41:53.678 DriverVersion            0.006 seconds. ✓ (FAST)
+18:41:57.299 Name                                         At 18:41:53.679 Name                     0.001 seconds. ✓ (FAST)
+18:41:57.299 SupportedActions                             At 18:41:53.683 SupportedActions         0.003 seconds. ✓ (FAST)
+18:41:57.299 DeviceState                                  At 18:41:53.700 DeviceState              0.006 seconds. ✓ (FAST)
+18:41:57.299 Absolute                                     At 18:41:53.706 Absolute                 0.001 seconds. ✓ (FAST)
+18:41:57.299 IsMoving                                     At 18:41:53.707 IsMoving                 0.001 seconds. ✓ (FAST)
+18:41:57.299 MaxStep                                      At 18:41:53.709 MaxStep                  0.002 seconds. ✓ (FAST)
+18:41:57.299 MaxIncrement                                 At 18:41:53.710 MaxIncrement             0.001 seconds. ✓ (FAST)
+18:41:57.299 Position                                     At 18:41:53.714 Position                 0.004 seconds. ✓ (FAST)
+18:41:57.299 TempCompAvailable                            At 18:41:53.730 TempCompAvailable        0.001 seconds. ✓ (FAST)
+18:41:57.299 TempComp Read                                At 18:41:53.732 TempComp Read            0.001 seconds. ✓ (FAST)
+18:41:57.299 Temperature                                  At 18:41:53.740 Temperature              0.006 seconds. ✓ (FAST)
+18:41:57.299 Halt                                         At 18:41:53.746 Halt                     0.007 seconds. ✓ (STANDARD)
+18:41:57.299 Move to 10000                                At 18:41:53.768 Move to 10000            0.019 seconds. ✓ (STANDARD)
+18:41:57.299 Disconnect                                   At 18:41:56.796 Disconnect               0.001 seconds. ✓ (STANDARD)
+18:41:57.299                                              
+18:41:57.299 Congratulations, all members returned within their target response times!!          

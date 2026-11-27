@@ -1,0 +1,3 @@
+### Fixed
+
+- **SVBONY IsPulseGuiding answers NotConnected while disconnected or lost**, SVBONY camera driver, issue #2792, decision 0009 rule 3. It returned `false` while disconnected, and on a lost link with no pulse failure kept. It now checks the connection first: disconnected it raises `NotConnected`, and on a lost link `NotConnected` with the loss reason, also over a pulse failure kept from before the loss. A pulse that itself lost the link raises the same text as before. This also fixes a test flake that bounced PRs from the merge queue: right after a pulse lost the link, IsPulseGuiding could read `true` for a moment, before the pulse's failure was written. Fake SDK evidence only; no SVBONY camera on the rig.

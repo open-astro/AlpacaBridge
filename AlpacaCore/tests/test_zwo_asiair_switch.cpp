@@ -15,17 +15,20 @@
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <string>
+#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
+#include "fake_zwo_asiair_gpiod.h"
 #include "power_port_test_dir.h"
-#include "zwo_asiair_stubs.h"
 
-// The libgpiod calls reach the in-memory chip of zwo_asiair_stubs.h (issues #772, #300) when a case names
+// The libgpiod calls reach the in-memory chip of fake_zwo_asiair_gpiod.h (issues #772, #300) when a case names
 // kStubChip; the default /dev/gpiochip0 still reaches the real library.
 namespace {
 
@@ -314,6 +317,35 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - a Disconnect before any Connect keeps 
     driver->set_connected(true);
     driver->set_connected(false);
     CHECK(stub_level_at_release(12) == 0);
+}
+
+// The stub chip's request hold (#2697), which the contract sweep's tier-2 host uses to keep a connect in flight.
+// Falsified by: zwo_asiair_stubs.cpp gpiod_chip_request_lines() not calling connect_hold().
+TEST_CASE("FakeZwoAsiairGpiod stub chip - a request hold keeps the connect open until it ends",
+          "[zwo][switch][asiair][unit]") {
+    // The hold is process-wide: clear it however the case ends, so it never reaches a later case.
+    struct HoldReset {
+        ~HoldReset() { alpacacore::test::stub_set_request_hold(std::chrono::milliseconds(0)); }
+    } reset;
+    stub_reset_levels(1);
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, alpacacore::test::stub_asiair_pro_config());
+    alpacacore::test::stub_set_request_hold(std::chrono::milliseconds(300));
+    alpacacore::test::ConnectHoldGate gate;
+    driver->connect();
+    // The connect is inside the stub's hold (connect_hold_gate.h), not just not started yet.
+    REQUIRE(gate.wait_entered(std::chrono::seconds(10)));
+    CHECK(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(stub_claimed());
+    gate.release();
+    const auto t0 = std::chrono::steady_clock::now();
+    while (driver->get_connecting() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(driver->get_connected());
+    CHECK(stub_claimed());
+    driver->set_connected(false);
+    CHECK_FALSE(stub_claimed());
 }
 
 // Issue #1862: every ISwitchV3 member while connected, each value checked against the stub chip. Port 2 boots

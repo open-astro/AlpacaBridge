@@ -269,6 +269,72 @@ TEST_CASE("Player One thermal camera listing - probes cooled cameras and closes 
     CHECK(sdk.open_count() == 1);
 }
 
+// FakePlayerOneSDK thermal controls (#2697): POA_HEATER_POWER and POA_FAN_POWER keep what was written, per camera, so
+// a client reads back its own write (the fake ConformU switch row needs it). Falsified by: the fake's
+// set_heater_power_percent or set_fan_power_percent dropping the value, or thermal_locked() returning the default
+// camera's values for a listed camera.
+TEST_CASE("FakePlayerOneSDK - the heater and fan keep the value written, per camera",
+          "[playerone][switch][unit][fakesdk][fake]") {
+    FakePlayerOneSDK sdk;
+    sdk.set_thermal_controls(true, true);
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    sdk.open_camera(17);
+    sdk.open_camera(18);
+    CHECK(sdk.get_heater_power_percent(17) == 0);
+    CHECK(sdk.get_fan_power_percent(17) == 0);
+
+    sdk.set_heater_power_percent(17, 40);
+    sdk.set_fan_power_percent(17, 70);
+    sdk.set_heater_power_percent(18, 5);
+    CHECK(sdk.get_heater_power_percent(17) == 40);
+    CHECK(sdk.get_fan_power_percent(17) == 70);
+    CHECK(sdk.get_heater_power_percent(18) == 5);
+    CHECK(sdk.get_fan_power_percent(18) == 0);
+    sdk.close_camera(18);
+    sdk.close_camera(17);
+}
+
+// The fake refuses what POASetConfig refuses (decision 0015 rule 4): a value outside the control's range
+// (POA_ERROR_OUT_OF_LIMIT, InvalidValue), a read-only control (POA_ERROR_CONF_CANNOT_WRITE, NotImplemented) and a
+// control the camera does not have (POA_ERROR_INVALID_CONFIG, InvalidValue). A refused write keeps the old value.
+// Falsified by: deleting the range check, the writable check or either require_control() call in
+// fake_playerone_sdk.h.
+TEST_CASE("FakePlayerOneSDK - the heater and fan refuse what POASetConfig refuses",
+          "[playerone][switch][unit][fakesdk][fake]") {
+    FakePlayerOneSDK sdk;
+    FakePlayerOneSDK::CameraInfo info;
+    info.camera_id = 18;
+    info.name = "Uranus-C Pro";
+    info.serial_number = "POA-18";
+    info.has_cooler = true;
+    FakePlayerOneSDK::ConfigCaps caps;
+    caps.has_heater_power = true;
+    caps.heater_power_writable = true;
+    caps.heater_power_max = 100;
+    caps.has_fan_power = true;
+    caps.fan_power_writable = false;  // read-only
+    caps.fan_power_min = 1;
+    caps.fan_power_max = 100;
+    caps.fan_power_default = 50;
+    sdk.add_listed_camera(info, caps);
+    sdk.open_camera(17);  // the default camera has neither control
+    sdk.open_camera(18);
+
+    sdk.set_heater_power_percent(18, 30);
+    require_alpaca_error([&] { sdk.set_heater_power_percent(18, 101); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { sdk.set_heater_power_percent(18, -1); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(sdk.get_heater_power_percent(18) == 30);
+    require_alpaca_error([&] { sdk.set_fan_power_percent(18, 60); }, alpacacore::AlpacaError::NotImplemented);
+    CHECK(sdk.get_fan_power_percent(18) == 50);
+
+    require_alpaca_error([&] { (void)sdk.get_heater_power_percent(17); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)sdk.get_fan_power_percent(17); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { sdk.set_heater_power_percent(17, 10); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { sdk.set_fan_power_percent(17, 10); }, alpacacore::AlpacaError::InvalidValue);
+    sdk.close_camera(18);
+    sdk.close_camera(17);
+}
+
 // ---- open-astro#294: one status burst per DeviceState, static members free ----
 
 namespace {

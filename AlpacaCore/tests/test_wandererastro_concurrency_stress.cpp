@@ -22,7 +22,7 @@
 //
 // The rotator is the exception: it speaks request/response ("1500001" ->
 // five 'A'-terminated fields), not an unprompted stream, so the streamer
-// fake cannot drive its handshake. It runs against pty_wanderer_rotator.h,
+// fake cannot drive its handshake. It runs against fake_wandererastro_rotator.h,
 // a request/response pty fake that answers the handshake and every move.
 //
 // Each of the four drivers also has a "racing disconnect is never dropped"
@@ -49,11 +49,11 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_serial_streamer.h"
-#include "pty_wanderer_rotator.h"
+#include "fake_wandererastro_rotator.h"
 
 using alpacacore::AlpacaDriver;
 using alpacacore::test::FakeSerialStreamer;
-using alpacacore::test::PtyWandererRotator;
+using alpacacore::test::FakeWandererRotator;
 
 namespace {
 
@@ -301,7 +301,7 @@ TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress"
     OffsetStoreRedirect redirect;
 
     {
-        PtyWandererRotator fake;
+        FakeWandererRotator fake;
         auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
 
         // Proves the fake really connects, so this can't silently degrade into a fail-fast test.
@@ -330,8 +330,8 @@ TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress"
 
 TEST_CASE("WandererAstro rotator - destruction races an in-flight connect", "[wandererastro][rotator][stress]") {
     alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
-        []() { return std::make_unique<PtyWandererRotator>(); },
-        [](PtyWandererRotator& rotator) {
+        []() { return std::make_unique<FakeWandererRotator>(); },
+        [](FakeWandererRotator& rotator) {
             return alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
         });
 }
@@ -366,7 +366,7 @@ TEST_CASE("WandererAstro box switch - racing disconnect is never dropped", "[wan
 }
 
 TEST_CASE("WandererAstro rotator - racing disconnect is never dropped", "[wandererastro][rotator][stress]") {
-    PtyWandererRotator fake;
+    FakeWandererRotator fake;
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
     CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
