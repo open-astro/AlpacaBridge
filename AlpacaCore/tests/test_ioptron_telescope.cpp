@@ -3734,14 +3734,13 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
     CHECK_FALSE(driver->get_connected());
 }
 
-// open-astro#1223: the 750 ms retry delay after a failed site command is a cancellable wait on the driver's
-// clock too. A disconnect that lands inside it joins at once; an uncancellable sleep would park the join
-// forever on a FakeTaskClock nobody advances. Over TCP a failed site command is a hangup, a lost link at once
-// (decision 0009 rule 2a, #2718), and a set command's missing ack is no failure, so the body never reaches the retry
-// delay: that premise cannot exist over TCP any more. The case pins the lost-link outcome instead: the first :SLA
-// fails, the link is lost, and a disconnect over it joins at once without the clock moving.
-TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry delay does not wait it out",
-          "[ioptron][telescope][unit][fake][taskclock]") {
+// Over TCP a site command on a reset connection is a hangup, a lost link at once (decision 0009 rule 2a, #2718): the
+// first :SLA fails, Connected reads false, and a disconnect over the lost link joins at once without the clock moving.
+// The open-astro#1223 premise, a disconnect inside the 750 ms retry delay after a failed site command, cannot be built
+// over TCP any more and needs a follow-up send-failure test seam.
+TEST_CASE(
+    "iOptron Telescope Driver - a site command on a reset connection loses the link and a disconnect joins at once",
+    "[ioptron][telescope][unit][fake][taskclock]") {
     alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     alpacacore::test::FakeTaskClock clock;

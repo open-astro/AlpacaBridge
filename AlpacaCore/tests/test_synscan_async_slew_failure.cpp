@@ -1581,9 +1581,11 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
 // a failed send over TCP is a hangup, a lost link at once (decision 0009 rule 2a, #2718): the getters then answer
 // NotConnected, so a case checks what reached the handset, get_connected() and that NotConnected.
 
-// #2263: a replacement no longer cuts the older pulse short; it supersedes it only once its own rate command has
-// landed. The link is reset before the replacement, so its rate command fails: the older RA pulse was not
-// superseded and gets no stop, its window is put back (IsPulseGuiding true) and its own end still stops the axis.
+// #2263: a replacement supersedes the older pulse only once its own rate command has landed. Here the handset hangs
+// up on a status read before the replacement, a lost link at once over TCP (decision 0009 rule 2a, #2718): the
+// replacement answers NotConnected, no stop of the older pulse reaches the handset, and the getters answer
+// NotConnected. The #2263 premise, a rate command that fails on a link that stays up, needs a follow-up send-failure
+// test seam.
 TEST_CASE("SynScan hold window - a replacement pulse over a lost link answers NotConnected and stops nothing",
           "[synscan][telescope][hold-window][pulseguiding][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1614,9 +1616,10 @@ TEST_CASE("SynScan hold window - a replacement pulse over a lost link answers No
     driver->set_connected(false);
 }
 
-// #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Its send fails here
-// (the link is reset just before it), so the Dec pulse got no stop and still owns its window; the MoveAxis left the
-// axis reported as possibly moving, as a failed MoveAxis send always has.
+// #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Here the handset hangs
+// up on a status read before it, a lost link at once over TCP (decision 0009 rule 2a, #2718): the MoveAxis answers
+// NotConnected, no stop of the Dec pulse reaches the handset, and IsPulseGuiding answers NotConnected. The #2263
+// premise, a MoveAxis send that fails on a link that stays up, needs a follow-up send-failure test seam.
 TEST_CASE("SynScan hold window - a MoveAxis over a lost link answers NotConnected and stops no pulse",
           "[synscan][telescope][hold-window][pulseguiding][moveaxis][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1699,11 +1702,11 @@ TEST_CASE("SynScan hold window - a refused Park leaves a running pulse alone (#2
     driver->set_connected(false);
 }
 
-// AbortSlew whose stops fail leaves the slew state as it was (the mount may still be moving), but the pulse it cut
-// short is over: its window is cleared, and the restore its RA stop owes stays (Tracking false). The handset hangs up
-// on the cancel-GOTO, after the cut-short pulse's blind stop has landed, so the axis stops that follow fail. A reply
-// timeout on the cancel does not fail AbortSlew, so the hangup is the only failure here, and over TCP it is a lost
-// link at once (decision 0009 rule 2a, #2718): the getters answer NotConnected, not the cleared window.
+// The handset hangs up on the cancel-GOTO, after the cut-short pulse's blind stop has landed, so the axis stops that
+// follow fail. A reply timeout on the cancel does not fail AbortSlew, so the hangup is the only failure here, and over
+// TCP it is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew throws, Connected reads false, and
+// IsPulseGuiding and Tracking answer NotConnected. The cleared window and the owed restore (Tracking false) of an
+// AbortSlew whose stops fail on a link that stays up need a follow-up send-failure test seam.
 TEST_CASE("SynScan hold window - an AbortSlew whose stop meets a lost link answers NotConnected",
           "[synscan][telescope][hold-window][pulseguiding][abort]") {
     alpacacore::test::FakeTaskClock clock;
@@ -2546,7 +2549,6 @@ TEST_CASE("SynScan MoveAxis - a stop whose tracking restore failed is not bounde
     CHECK(rig.warns.load() == 0);
 }
 
-// The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis, so it stays watched.
 // The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis. Over TCP the failed write is a
 // lost link at once (decision 0009 rule 2a, #2718), so the call throws NotConnected, the link is gone and the cap's
 // own stop is never attempted over it (the bound that outlives a failed stop is the one in "a bound stop that fails
