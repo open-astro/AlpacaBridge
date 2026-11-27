@@ -34,15 +34,15 @@ namespace alpacacore::vendor::gemini {
 namespace {
 
 // State poll (open-astro#1229, decision 0010), start to start. One poll is
-// three request/response exchanges at 9600 baud, so the period leaves the wire
+// four request/response exchanges at 9600 baud, so the period leaves the wire
 // mostly free for Move/Halt. The freshness bound is two periods; a stale frame
 // is still served. The cadence, the #237 fault latch (kFaultThreshold failed
 // polls in a row) and the link-loss rule live in util::PolledState.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
 constexpr int kConnectProbeTimeoutS = 1;  // per-exchange timeout of the connect-time first poll (#2064)
 constexpr int kFaultThreshold = 3;
-// A failed temperature read can cost the whole serial timeout while holding the
-// wrapper, which Move and Halt would queue behind; ask again after this.
+// A failed temperature or TempComp read can cost the whole serial timeout while holding the
+// wrapper, which Move and Halt would queue behind; ask that read again after this.
 constexpr auto kTemperatureRetry = std::chrono::seconds(30);
 
 }  // namespace
@@ -221,6 +221,7 @@ public:
             // reason reaches the client in this error.
             state_.reset();
             temperature_retry_at_.reset();
+            temp_comp_retry_at_.reset();
             poll_cancelled_.store(false);
             // A port that goes silent after the handshake costs one short timeout per exchange, not the
             // full serial timeout: Connect stays inside the 5 s Connecting budget and a Disconnect waits
@@ -334,15 +335,20 @@ public:
     }
 
     bool get_temp_comp() const override {
-        // A failed read raises (the wrapper throws DriverException on a reply it cannot parse, NotConnected
-        // on a lost link); reporting "off" would answer a property the driver could not read (issue #1478).
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
+        // Served from the polled frame (#2695, decision 0016). A poll whose :24# read failed has no value, and
+        // reporting "off" would answer a property the driver could not read (issue #1478): it raises.
+        const auto frame = served_frame();
+        if (!frame.temp_comp.has_value()) {
+            throw AlpacaException("Focuser temperature compensation not available", AlpacaError::DriverException);
+        }
+        return *frame.temp_comp;
     }
 
     void set_temp_comp(bool temp_comp) override {
         ensure_connected();
         protocol_.set_temp_comp_enabled(temp_comp);
+        // Write-through, like Move: the next read returns the new value, not the one before the write.
+        state_.write([temp_comp](StateFrame& frame) { frame.temp_comp = temp_comp; });
     }
 
     double get_temperature() const override {
@@ -377,11 +383,12 @@ public:
     }
 
 private:
-    // What one poll measured; position, motion and temperature only.
+    // What one poll measured; position, motion, temperature and temperature compensation.
     struct StateFrame {
         int position = 0;
         bool moving = false;
         std::optional<double> temperature;  // empty: the probe did not answer
+        std::optional<bool> temp_comp;      // empty: the :24# read did not parse
     };
 
     // The single fault text (decision 0009, point 5): the reason a pulled
@@ -406,10 +413,10 @@ private:
         return state_.served().value;
     }
 
-    // One poll: three exchanges on the poll thread with no driver lock held
-    // (the protocol wrapper serialises them). The temperature is optional: a
+    // One poll: four exchanges on the poll thread with no driver lock held
+    // (the protocol wrapper serialises them). The temperature and TempComp are optional: a
     // failed read leaves it empty (the getter reports it) without costing
-    // Position and IsMoving, and is not retried for kTemperatureRetry.
+    // Position and IsMoving, and is not retried for kTemperatureRetry. A failed :24# is not a link fault.
     StateFrame probe() {
         try {
             StateFrame frame = measure();
@@ -451,6 +458,18 @@ private:
         } else if (const auto last = state_.read(); last && last->value.temperature) {
             frame.temperature = last->value.temperature;  // keep the last good value meanwhile
         }
+        if (poll_cancelled_.load()) return frame;
+        if (!temp_comp_retry_at_ || now >= *temp_comp_retry_at_) {
+            try {
+                frame.temp_comp = protocol_.get_temp_comp_enabled();
+                temp_comp_retry_at_.reset();
+            } catch (const std::exception&) {
+                temp_comp_retry_at_ = now + kTemperatureRetry;
+                ALPACA_LOG_DEBUG("Gemini", "Focuser TempComp read failed; retrying in 30 s");
+            }
+        } else if (const auto last = state_.read(); last && last->value.temp_comp) {
+            frame.temp_comp = last->value.temp_comp;  // keep the last value (a write-through) meanwhile
+        }
         return frame;
     }
 
@@ -481,6 +500,7 @@ private:
     GeminiProtocolWrapper protocol_;
     // Poll thread, and connect before it starts; never concurrent.
     std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
+    std::optional<util::TaskClock::clock::time_point> temp_comp_retry_at_;
     util::OperationGeneration state_poll_generation_;
     // Position, motion and temperature served to the getters (open-astro#1229).
     // Declared after clock_ and protocol_: it is destroyed first and joins its
