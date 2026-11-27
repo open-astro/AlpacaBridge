@@ -529,7 +529,9 @@ public:
     // read or written (util::UtcOffset). The frame goes with every Connect and Disconnect, and the offset with it.
     TimePoint get_utc_date() const override {
         return proxy_.with_connected([this](const Proxy::State& state) {
-            return *state.served().value.utc_date.get().current(proxy_.clock().now());
+            const auto utc = state.served().value.utc_date.get().current(proxy_.clock().now());
+            if (!utc) throw AlpacaException("Upstream UTCDate has no value", AlpacaError::DriverException);
+            return *utc;
         });
     }
 
@@ -1046,10 +1048,6 @@ private:
         return proxy_.with_state([this, axis](Proxy::State&) { return axis_moving_[static_cast<std::size_t>(axis)]; });
     }
 
-    // The verified stop of one axis. The stop is MoveAxis(axis, 0) in the command slot; the reads are live GETs in
-    // the cap's own thread (the poll's frame may be a poll period old, and the guard needs reads made after its
-    // stop). Slewing is the whole mount's, so it reads as stopped while the other axis runs this server's MoveAxis,
-    // and the other axis's coordinate is pinned then.
     // Whether this server's MoveAxis runs on an axis other than `axis` (any of the three).
     bool other_axis_moving(int axis) {
         return proxy_.with_state([this, axis](Proxy::State&) {
@@ -1059,6 +1057,11 @@ private:
             return false;
         });
     }
+
+    // The verified stop of one axis. The stop is MoveAxis(axis, 0) in the command slot; the reads are live GETs in
+    // the cap's own thread (the poll's frame may be a poll period old, and the guard needs reads made after its
+    // stop). Slewing is the whole mount's, so it reads as stopped while another axis runs this server's MoveAxis,
+    // and the coordinate of each such axis is pinned then.
 
     util::StopVerifyHooks cap_hooks(int axis, util::OperationContext& cap) {
         util::StopVerifyHooks hooks;

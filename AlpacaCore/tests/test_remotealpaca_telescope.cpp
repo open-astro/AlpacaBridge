@@ -1011,6 +1011,35 @@ TEST_CASE("Remote Alpaca Telescope MoveAxis - an axis-0 cap verifies while this 
           std::string::npos);
 }
 
+// An axis-2 cap while this server's MoveAxis runs on axis 0 or 1: the mount's Slewing stays true and that axis's
+// coordinate keeps moving, so the cap verifies only when it reads Slewing as stopped and pins that coordinate (axis 0
+// RA, axis 1 Dec). It then verifies on its one stop.
+TEST_CASE(
+    "Remote Alpaca Telescope MoveAxis - an axis-2 cap verifies while this server's axis-0 or axis-1 MoveAxis runs",
+    "[remotealpaca][telescope][goto-safety]") {
+    for (const int other : {0, 1}) {
+        INFO("axis " << other << " runs");
+        Rig rig;
+        rig.upstream.set_for("canmoveaxis", "2", "true");
+        rig.upstream.set_for("axisrates", "2", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+        rig.upstream.move_positions(true);
+        rig.connect();
+        auto& t = *rig.driver;
+        REQUIRE(t.get_can_move_axis(2));
+        t.move_axis(2, 1.0);
+        for (int s = 0; s < 30; ++s) rig.poll();
+        t.move_axis(other, 1.0);
+        for (int s = 0; s < 30; ++s) rig.poll();
+        CHECK(stop_steps_until_raised(rig, 40) >= 0);
+        CHECK_FALSE(rig.upstream.axis_moving(2));
+        CHECK(rig.upstream.axis_moving(other));
+        const auto puts = rig.upstream.puts();
+        CHECK(std::count(puts.begin(), puts.end(), "moveaxis 2 0") == 1);  // verified on the first stop
+        CHECK(alpaca_error_message([&] { (void)t.get_slewing(); }, AlpacaError::DriverException)
+                  .find("axis was stopped") != std::string::npos);
+    }
+}
+
 TEST_CASE(
     "Remote Alpaca Telescope MoveAxis - a cap stop the upstream ignores is sent three times and Slewing raises it",
     "[remotealpaca][telescope][goto-safety]") {
