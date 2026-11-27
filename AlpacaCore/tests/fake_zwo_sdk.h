@@ -45,6 +45,7 @@ namespace alpacacore::test {
 // download never blocks the table. The attached units are camera.camera_id with `serial`, or the id -> serial map of
 // set_units() and replug(); every unit answers with the one `camera` state. KNOWN PARITY GAPS: a TargetTemperature
 // write outside the control's range is refused, where the SDK clamps it and returns success (ASICamera2.h:443).
+// get_camera_info_by_id() answers only an open camera, where ZWOSDKWrapper's works on a closed one (#738).
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
