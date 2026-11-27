@@ -35,65 +35,11 @@ Keep wall-clock waits and shorten the test timeouts: that trades a slow suite fo
 
 ## Consequences
 
-The Adoption table below is the current roster; this paragraph is the history of the moves. Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync body waits through it; the ToupTek camera and filter wheel drivers followed (#1268): the camera's pulse-guide and thermal-poll waits, exposure deadline and thermal cache ages, and the wheel's homing poll sleep read the clock; the Player One camera driver followed (#1279): its pulse-guide timer, exposure deadline and image-readiness poll read the clock; the QHY camera driver followed (#1386): its exposure watchdog, pulse-guide timer, settle sleep, worker waits and 2 s reap loops read the clock, and the QHY filter wheel's own settle-clock function became the same `TaskClock`; the Bisque telescope (#1162), the SVBONY and gphoto cameras (#1282) and the ZWO camera (#1328) followed; the Astroasis focuser, the Gemini focuser and flat panel, the QHY Q-Focuser and the Celestron focus motor (#1320) were on the clock from their first slot; the WandererAstro cover, filter wheel and box read it for link-health timing (#730), and the Gemini PDH switch for its link-fault stamp (#1987); the OnStep telescope moved with its first slot, the MoveAxis re-send (#1378): its status and position cache ages, slew grace, pulse-guide end, synchronous-slew poll and settle sleeps, re-send due times and the elapsed time since a UTCDate write read the clock; the Celestron CGX telescope's continuity deadline and settle sleeps moved in #1404, and its UTC anchor elapsed time and host-discipline re-check followed in #1983; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
-
-## Adoption
-
-The roster of drivers on the clock. It covers driver files; a protocol wrapper's I/O timeouts are not driver waits (rule 6). `scripts/check_docs_drift.py` check 23 fails when a driver names `TaskClock` without a row, or a row disagrees with its source.
-
-Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
-Symbol: `TaskClock`
-
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #751, #917 | UTC anchors stay off the clock ([decision 0001](0001-skywatcher-pointing-clock.md)); position model clock in #1405 |
-| Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #923 | |
-| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1403 | |
-| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1223, #1723 | the fault latch stamp (the decision 0009 staleness bound) and its probe interval |
-| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1162 | |
-| Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1409, #1983 | continuity deadline and sleeps (#1404); UTC anchor elapsed time and host-discipline re-check (#1983); the GOTO correction lead, an elapsed time added to the UTC a correction aims at (rule 3); the UTC value stays on `system_clock` |
-| ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1268 | |
-| ToupTek filter wheel | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted | #1268 | |
-| Player One camera | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1279 | |
-| QHY camera | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | adopted | #1386 | |
-| QHY filter wheel | `AlpacaCore/src/vendors/qhy/qhy_filterwheel_driver.cpp` | adopted | #1386 | |
-| QHY Q-Focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | on the clock from its first slot |
-| SVBONY camera | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | adopted | #1282 | |
-| gphoto camera | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | adopted | #1282 | |
-| ZWO camera | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted | #1328 | |
-| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | on the clock from its first slot |
-| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | on the clock from its first slot |
-| Gemini flat panel | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
-| Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | on the clock from its first slot |
-| iOptron iGuider camera | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | on the clock from its first slot; exposure, stall and first-frame deadlines |
-| WandererAstro switch box | `AlpacaCore/src/vendors/wandererastro/wandererastro_box_switch_driver.cpp` | adopted | #730 | link-health timing |
-| WandererAstro cover | `AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp` | adopted | #730 | link-health timing |
-| WandererAstro filter wheel | `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp` | adopted | #730 | link-health timing |
-| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | moved with its first slot (the MoveAxis re-send) |
-| OnStep focuser | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
-| OnStep rotator | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
-| OnStep switch | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | on the clock from its first slot (the `PolledState` poll): its period, frame age and fault stamp |
-| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | telemetry, GOTO, pulse and control deadlines; UTC/LST and protocol timeouts stay off the clock |
-| iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted | #1590 | status cache age |
-| iOptron iEFW filter wheel | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted | #1723 | status cache age and its fault stamp (the decision 0009 staleness bound) |
-| iOptron iFR focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_focuser_driver.cpp` | adopted | #2002 | status cache age, its fault stamp (the decision 0009 staleness bound) and the move hold |
-| iOptron iFR rotator | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | status cache age, its fault stamp (the decision 0009 staleness bound) and the move hold |
-| ZWO EAF focuser | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted | #1666 | status cache age and its fault stamp (the decision 0009 staleness bound) |
-| ZWO dew heater switch | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted | #1667 | heater read cache age and its fault stamp (the decision 0009 staleness bound) |
-| ZWO EFW filter wheel | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted | #1668 | Position cache age and its fault stamp (the decision 0009 staleness bound) |
-| ZWO CAA rotator | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted | #1668 | status cache age and its fault stamp (the decision 0009 staleness bound) |
-| WeeWX observing conditions | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085, #1984 | feed poll interval wait (#2085) and its fault stamp (the decision 0009 staleness bound, #1984) |
-| remotealpaca observing conditions | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | upstream poll period wait, the wait for the upstream's Connecting, the fault stamp (the decision 0009 staleness bound) and the snapshot age; the Connecting wait and the poll's clock are held by the vendor's shared `UpstreamProxy` |
-| remotealpaca safety monitor | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp` | adopted | #1753 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`) |
-| remotealpaca rotator | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp` | adopted | #1753, #2708 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `DeviceState`'s `TimeStamp` is the frame's age on the task clock |
-| remotealpaca filter wheel | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp` | adopted | #1753, #2706 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`) |
-| remotealpaca switch | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp` | adopted | #1753, #2709 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `DeviceState`'s `TimeStamp` is the frame's age on the task clock |
-| remotealpaca telescope | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp` | adopted | #1753, #2710 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `DeviceState`'s `TimeStamp`, `UTCDate` and `SiderealTime` advance by the frame's age on the task clock; the per-axis MoveAxis cap waits its 60 s window and its verified stop's 250 ms polls on it |
-| Player One thermal switch | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted | #2088 | status cache age and its fault stamp |
-| Gemini PDH switch | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted | #1987 | fault stamp (the decision 0009 staleness bound) |
+The [Adoption table](../adoption/0005-task-clock.md) is the current roster; this paragraph is the history of the moves. Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync body waits through it; the ToupTek camera and filter wheel drivers followed (#1268): the camera's pulse-guide and thermal-poll waits, exposure deadline and thermal cache ages, and the wheel's homing poll sleep read the clock; the Player One camera driver followed (#1279): its pulse-guide timer, exposure deadline and image-readiness poll read the clock; the QHY camera driver followed (#1386): its exposure watchdog, pulse-guide timer, settle sleep, worker waits and 2 s reap loops read the clock, and the QHY filter wheel's own settle-clock function became the same `TaskClock`; the Bisque telescope (#1162), the SVBONY and gphoto cameras (#1282) and the ZWO camera (#1328) followed; the Astroasis focuser, the Gemini focuser and flat panel, the QHY Q-Focuser and the Celestron focus motor (#1320) were on the clock from their first slot; the WandererAstro cover, filter wheel and box read it for link-health timing (#730), and the Gemini PDH switch for its link-fault stamp (#1987); the OnStep telescope moved with its first slot, the MoveAxis re-send (#1378): its status and position cache ages, slew grace, pulse-guide end, synchronous-slew poll and settle sleeps, re-send due times and the elapsed time since a UTCDate write read the clock; the Celestron CGX telescope's continuity deadline and settle sleeps moved in #1404, and its UTC anchor elapsed time and host-discipline re-check followed in #1983; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
 
 ## Links
 
+- Adoption roster: [docs/adoption/0005-task-clock.md](../adoption/0005-task-clock.md).
 - Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584); issues [#535](https://github.com/open-astro/AlpacaBridge/issues/535), [#547](https://github.com/open-astro/AlpacaBridge/issues/547), [#608](https://github.com/open-astro/AlpacaBridge/issues/608), [#1463](https://github.com/open-astro/AlpacaBridge/issues/1463).
 - Waits this replaced (`task_wait_for`, now removed) in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
 - Related: [decision 0001](0001-skywatcher-pointing-clock.md) (pointing time); module overview in [architecture](../architecture.md#modules).

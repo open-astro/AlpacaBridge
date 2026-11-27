@@ -79,7 +79,7 @@ jobs:
           path: .lycheecache
           key: lychee-links-${{ github.run_id }}
 
-  # A `partial` or `planned` Adoption row of a decision record names the issue
+  # A `partial` or `planned` Adoption row (docs/adoption/) names the issue
   # that finishes it; when that issue is closed the row is a dead reference of
   # another kind, and nothing tracks the work. Not a pull_request check: a PR
   # must not fail because someone closed an issue.

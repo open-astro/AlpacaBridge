@@ -38,7 +38,7 @@ DeviceCatalog::describe() instead of parsing the *_catalog.cpp files):
   5. test_contract_sweep.cpp must be in the unconditional TEST_SOURCES list and
      must expand CONTRACT_SWEEP_ENTRIES.
   6. Snapshot adopters (decision 0010 rule 6): the Source column of every `adopted` row in the Adoption table of
-     docs/decisions/0010-snapshot-served-state.md and the `source` of every kSnapshotAdopterRoster row in
+     docs/adoption/0010-snapshot-served-state.md and the `source` of every kSnapshotAdopterRoster row in
      contract_sweep.h are the same set (SNAPSHOT ADOPTER UNSWEPT / SNAPSHOT ROSTER ROW NOT ADOPTED), and the roster
      ids and the X(<id>, ...) hooks of the CS3_* macros in test_contract_sweep.cpp are the same set
      (SNAPSHOT HOOK MISSING / SNAPSHOT HOOK NOT IN ROSTER). An empty table, roster or hook list fails.
@@ -61,7 +61,7 @@ REGISTRY = "AlpacaCore/tests/contract_sweep.h"
 SWEEP_TEST = "AlpacaCore/tests/test_contract_sweep.cpp"
 TESTS_CMAKE = "AlpacaCore/tests/CMakeLists.txt"
 THIS_SCRIPT = "scripts/check_contract_sweep.py"
-SNAPSHOT_ADR = "docs/decisions/0010-snapshot-served-state.md"
+SNAPSHOT_ADR = "docs/adoption/0010-snapshot-served-state.md"
 
 ROUTER_FUNCTION = "Router::register_device_from_config("
 

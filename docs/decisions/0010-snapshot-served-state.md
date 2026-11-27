@@ -89,7 +89,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## How to reverse
 
-Each adopter in the Adoption table moved in its own PR; reverting that PR restores its field reads. Once no adopter is left, delete the header and its test.
+Each adopter in the [Adoption table](../adoption/0010-snapshot-served-state.md) moved in its own PR; reverting that PR restores its field reads. Once no adopter is left, delete the header and its test.
 
 `util::PolledState` (rule 7) reverses by reverting the PR that added it: the header, its test, the Astroasis and QHY adoptions and the amendments to this record and to [decision 0016](0016-getters-never-wait-on-device-io.md) go together, and the two focusers return to their hand-written poll glue. Each later adopter reverts its own PR.
 
@@ -99,39 +99,9 @@ Each adopter in the Adoption table moved in its own PR; reverting that PR restor
 - A client that writes at least once per poll period keeps every poll's frame dropped, so the frame ages and reads stale; that is intended, because the device was not measured.
 - A write before the first publish is lost (point 3); drivers that need it set it through the device or hold it outside the snapshot.
 
-## Adoption
-
-The roster of drivers that serve polled telemetry from a snapshot. The Symbol column names what the driver's source uses for it: `PolledState` once the driver composes `util::PolledState` (rule 7), `StateSnapshot` where it holds the snapshot itself. Sky-Watcher and ZWO stay on `StateSnapshot` (evaluation on #2490): the Sky-Watcher fault latch, 30 s loss verdict and recovery epoch live in its protocol wrapper and count every exchange, so the module's poll-fed latch would be a second latch; the ZWO telescope publishes in stages, judges loss from the last mandatory RA/Dec sample, and pauses the poll for guide pulses with the loss clock running from the pulse end. The sections above record the Sky-Watcher, Celestron, Bisque, OnStep, Celestron CGX and iOptron telescope choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
-
-Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
-Symbol: `StateSnapshot`
-
-| Driver | Symbol | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- | --- |
-| Sky-Watcher telescope | `StateSnapshot` | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1011 | 100 ms; Sky-Watcher adoption above |
-| Celestron telescope | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337, #2493 | 1 s; Celestron telescope adoption above |
-| Bisque telescope | `PolledState` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367, #2494 | 1 s; Bisque telescope adoption above |
-| SynScan telescope | `PolledState` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247, #1761 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
-| Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229, #1643 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
-| QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
-| Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
-| Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
-| Celestron CGX telescope | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1940 | 250 ms; Celestron CGX telescope adoption above |
-| OnStep telescope | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1783, #2241, #2495 | 1 s; rate-offset position model (#2241); pulse-end one-shot measurement slot (rule 7); OnStep telescope adoption above |
-| OnStep focuser | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | 500 ms; [OnStep instructions](../../.github/instructions/onstep.instructions.md) |
-| OnStep rotator | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | 500 ms; `DeviceState` stamped with the frame's age through the rotator base's `device_state_age()`; [OnStep instructions](../../.github/instructions/onstep.instructions.md) |
-| OnStep switch | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | 1 s; `DeviceState` stamped with the frame's age through the switch base's `device_state_age()`; [OnStep instructions](../../.github/instructions/onstep.instructions.md) |
-| iOptron telescope | `PolledState` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #2491 | 250 ms; `max_age` 1 s; iOptron telescope adoption above |
-| ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
-| remotealpaca (proxied devices) | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp` | adopted | #1753, #2496 | 2 s by default (1 to 60 s); `max_age` two periods, `loss_bound` `max(util::kLinkStalenessBound, 3 x period)`; getters served from the upstream poll ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); `Refresh` publishes its frame through the module; the module and its loss bound are held by the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); [remotealpaca instructions](../../.github/instructions/remotealpaca.instructions.md) |
-| remotealpaca safety monitor | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp` | adopted | #1753 | as the proxied-devices row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `IsSafe` served from the frame, stale served, `false` while the link is lost ([decision 0009](0009-link-loss-and-relink-policy.md) rule 3) |
-| remotealpaca rotator | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp` | adopted | #1753, #2708 | as the proxied-devices row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `IsMoving`, `Position`, `MechanicalPosition`, `TargetPosition` and `Reverse` served from the frame, stale served; the moves, `Sync`, `Halt` and the `Reverse` write write through (rule 2); `DeviceState` stamped with the frame's age through the rotator base's `device_state_age()` |
-| remotealpaca filter wheel | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp` | adopted | #1753, #2706 | as the proxied-devices row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `Position` served from the frame (the upstream's -1 while its wheel moves), stale served; the Position write writes -1 through (rule 2), until the next poll reports the landed slot; `Names` and `FocusOffsets` read at Connect; `DeviceState`'s `TimeStamp` is the request time (the filter wheel base has no `device_state_age()`) |
-| remotealpaca switch | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp` | adopted | #1753, #2709 | as the proxied-devices row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `GetSwitch` and `GetSwitchValue` of every switch, and `StateChangeComplete` of each switch whose `CanAsync` the Connect read true, served from the frame, stale served; the writes write through (rule 2); `DeviceState` stamped with the frame's age through the switch base's `device_state_age()` |
-| remotealpaca telescope | `PolledState` | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp` | adopted | #1753, #2710 | as the proxied-devices row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); twelve GETs per poll (the twelve ITelescopeV4 `DeviceState` members), served stale; `UTCDate` and `SiderealTime` advanced by the frame's age; the commands write through only what they set (`Slewing` true for a slew, Park, FindHome, flip or MoveAxis, `IsPulseGuiding`, `Tracking`, `AtPark` false for Unpark, the synced position), and only a poll writes `Slewing` false; the capabilities, rates, site, optics and targets are read at Connect and written through by this server's writes, the targets read back after a coordinate slew or sync; `DeviceState` stamped with the frame's age through the telescope base's `device_state_age()` |
-
 ## Links
 
+- Adoption roster: [docs/adoption/0010-snapshot-served-state.md](../adoption/0010-snapshot-served-state.md).
 - [Task clock](0005-task-clock.md)
 - [Link-loss and relink policy](0009-link-loss-and-relink-policy.md)
 - `AlpacaCore/include/alpacacore/util/state_snapshot.h`, `AlpacaCore/tests/test_state_snapshot.cpp`, `AlpacaCore/tests/test_skywatcher_snapshot.cpp`

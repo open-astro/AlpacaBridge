@@ -202,8 +202,8 @@ Checks:
      `Status:` line on line 3 (a superseded record names a record that
      exists; a retired one names its issue or PR), the sections Context,
      Decision, Rules, Alternatives rejected, Consequences and Links in that
-     order (Adoption and How to reverse may sit between them; a superseded
-     record needs no Rules and a retired one drops Rules and Adoption; How to
+     order (How to reverse may sit between them; a superseded
+     record needs no Rules and a retired one drops Rules; How to
      reverse is required from record 0020 on and in any record that supersedes
      another), numbered Rules lines that end
      `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
@@ -213,7 +213,9 @@ Checks:
      index that lists every record once, in order, with `(retired)` on exactly
      the retired ones. The decision-record gate reads these sections, so a
      record it cannot parse would pass every pull request.
- 23. Every `## Adoption` table agrees with the code, both ways: every file
+ 23. Every `## Adoption` table, one roster per record in docs/adoption/
+     under the record's own name (never inside the record, so a roster change
+     needs no `ADR authorized` comment), agrees with the code, both ways: every file
      the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
      line, every scanned file) has a row; a Symbol column overrides the symbol
      per row and a blank cell falls back to the `Symbol:` line; comments are blanked before matching; an adopted or partial row's
@@ -2684,7 +2686,11 @@ DECISION_STATUS_RE = re.compile(r"^Status: (proposed|accepted|superseded by (\d{
 DECISION_SECTIONS = ("Context", "Decision", "Rules", "Alternatives rejected", "Consequences", "Links")
 # Sections a record may add between the required ones; anything else is a typo
 # or a new convention that README.md has to describe first.
-DECISION_OPTIONAL_SECTIONS = ("Adoption", "How to reverse")
+DECISION_OPTIONAL_SECTIONS = ("How to reverse",)
+# Adoption rosters live beside the records, one file per record under the same
+# name, so a roster change needs no `ADR authorized` comment (the gate covers
+# docs/decisions/ only).
+ADOPTION_DIR = "docs/adoption"
 DECISION_RULE_RE = re.compile(
     r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+?)\."
     r"(?P<allowed> <!-- allowed -->)?$")
@@ -2782,12 +2788,15 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
         titles = [t for t, _ in sections]
         unknown = [t for t in titles if t not in DECISION_SECTIONS + DECISION_OPTIONAL_SECTIONS]
         for t in unknown:
+            if t == "Adoption":
+                findings.append("%s: `## Adoption` moved out of the records; put the roster in %s/%s"
+                                % (where, ADOPTION_DIR, name))
+                continue
             findings.append("%s: unknown section `## %s` (README.md lists the allowed ones)" % (where, t))
         has_reverse[m.group(1)] = "How to reverse" in titles
         if is_retired:
-            for t in ("Rules", "Adoption"):
-                if t in titles:
-                    findings.append("%s: a retired record drops its `## %s` section" % (where, t))
+            if "Rules" in titles:
+                findings.append("%s: a retired record drops its `## Rules` section" % where)
         elif int(m.group(1)) >= reverse_required_from and "How to reverse" not in titles:
             findings.append("%s: a record from %04d on needs a `## How to reverse` section"
                             % (where, reverse_required_from))
@@ -2964,6 +2973,28 @@ def _adoption_findings(where, body, files):
     return findings
 
 
+def _adoption_file_findings(names, records):
+    """names: file names under docs/adoption/; records: {decision record file name: text}.
+    Each roster belongs to the record of the same name, and a retired record has none."""
+    findings = []
+    for name in sorted(names):
+        where = "%s/%s" % (ADOPTION_DIR, name)
+        if name not in records:
+            findings.append("%s: no decision record %s/%s of the same name" % (where, DECISION_DIR, name))
+        elif any(l.startswith("Status: retired") for l in records[name].splitlines()[2:3]):
+            findings.append("%s: decision record %s is retired; delete its roster" % (where, name))
+    return findings
+
+
+def _adoption_bodies(root):
+    """[(where, `## Adoption` body)] for every roster file under docs/adoption/."""
+    out = []
+    for path in sorted((Path(root) / ADOPTION_DIR).glob("0*.md")):
+        body = dict(_decision_sections(path.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+        out.append(("%s/%s" % (ADOPTION_DIR, path.name), body))
+    return out
+
+
 def check_decision_adoption(root=ROOT):
     root = Path(root)
     tracked, _ = _tracked_paths(root)
@@ -2974,21 +3005,23 @@ def check_decision_adoption(root=ROOT):
             full = root / path
             if full.is_file():
                 files[path] = full.read_text(encoding="utf-8", errors="replace")
-    findings = []
+    records = {p.name: p.read_text(encoding="utf-8", errors="replace")
+               for p in (root / DECISION_DIR).glob("0*.md")}
+    findings = _adoption_file_findings([p.name for p in (root / ADOPTION_DIR).glob("0*.md")], records)
     adopting = 0
-    for record in sorted((root / DECISION_DIR).glob("0*.md")):
-        body = dict(_decision_sections(record.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+    for where, body in _adoption_bodies(root):
         if body is None:
+            findings.append("%s: no `## Adoption` section" % where)
             continue
         adopting += 1
-        findings.extend(_adoption_findings("%s/%s" % (DECISION_DIR, record.name), body, files))
+        findings.extend(_adoption_findings(where, body, files))
     if adopting < MIN_ADOPTION_RECORDS:
-        findings.append("only %d decision record(s) carry an Adoption section (floor %d): a section was renamed "
-                        "or the parser regressed" % (adopting, MIN_ADOPTION_RECORDS))
+        findings.append("only %d roster(s) under %s carry an Adoption section (floor %d): a section was renamed "
+                        "or the parser regressed" % (adopting, ADOPTION_DIR, MIN_ADOPTION_RECORDS))
     return findings
 
 
-# Records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
+# Rosters for records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
 MIN_ADOPTION_RECORDS = 6
 
 
@@ -3040,10 +3073,9 @@ def check_adoption_issues(root=ROOT):
     not in CHECKS: a pull request must not fail because someone closed an issue. link-check.yml runs it weekly."""
     root = Path(root)
     rows = []
-    for record in sorted((root / DECISION_DIR).glob("0*.md")):
-        body = dict(_decision_sections(record.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+    for where, body in _adoption_bodies(root):
         if body is not None:
-            rows.extend(_adoption_unfinished_rows("%s/%s" % (DECISION_DIR, record.name), body))
+            rows.extend(_adoption_unfinished_rows(where, body))
     states = {}
     for number in sorted({n for row in rows for n in row[3]}):
         result = subprocess.run(["gh", "issue", "view", str(number), "--repo", ADOPTION_ISSUES_REPO,
@@ -4789,6 +4821,18 @@ def self_test():
     f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing, with one exception."))
     check("decision records: the word `exception` in a rule is reported (#2080)",
           any("rule 1 says `exception`" in x for x in f))
+
+    f = records(first=good_record.replace("## Alternatives", "## Adoption\n\nScan: `src/*.cpp`\n\n## Alternatives"))
+    check("decision records: an Adoption section left in a record is reported (it lives in docs/adoption/)",
+          any("`## Adoption`" in x and "docs/adoption/0001-example.md" in x for x in f))
+    pair_records = {"0001-example.md": good_record, "0002-second.md": retired_record}
+    check("adoption files: a roster whose record exists and is not retired is clean",
+          _adoption_file_findings(["0001-example.md"], pair_records) == [])
+    f = _adoption_file_findings(["0003-gone.md"], pair_records)
+    check("adoption files: a roster with no record of the same name is reported",
+          any("0003-gone.md" in x and "no decision record" in x for x in f))
+    f = _adoption_file_findings(["0002-second.md"], pair_records)
+    check("adoption files: a roster of a retired record is reported", any("retired" in x for x in f))
 
     pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
               "\n      - name: Next\n          ver=9.9.9\n")

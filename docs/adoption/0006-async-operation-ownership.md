@@ -1,0 +1,43 @@
+# Async operation ownership: adoption
+
+The roster of [decision 0006](../decisions/0006-async-operation-ownership.md). It is kept out of the record so a PR that
+adds or changes a row needs no `ADR authorized` comment; `scripts/check_docs_drift.py` check 23
+compares it with the code.
+
+## Adoption
+
+The roster of drivers whose background bodies run in slots. `scripts/check_docs_drift.py` check 23 holds it to the code.
+
+Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
+Symbol: `AsyncOperation`
+
+| Driver | Symbol | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Sky-Watcher telescope | | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #931, #2651 | slices K2, K3, K3b; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
+| Celestron telescope | | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1406, #2263, #2651 | claim protocol; send gate; `util::MotionOwner`; MoveAxis cap per axis (`util::run_motion_deadline`, #2651), started under `initiator_mutex_` |
+| SynScan telescope | | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1407, #2651 | claim protocol; bodies release `mutex_` per exchange; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
+| iOptron telescope | | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1246, #2263, #2716, #2651 | `util::MotionOwner` claim; a newer async slew supersedes the body, never joins it; the body checks its claim under the operation lock it holds for the whole dispatch, so a newer initiator waits for that dispatch; only AbortSlew, disconnect and the destructor cancel and join; MoveAxis cap per axis (`util::run_motion_deadline`, #2651) |
+| Bisque telescope | | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367, #2651 | MoveAxis cap per axis (`util::run_motion_deadline`, #2651); its start lock keeps an older call's start from replacing a newer move's cap |
+| Celestron CGX telescope | | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #2263 | `util::MotionOwner`: a Park or FindHome supersedes any slew, Park or FindHome, a slew only one that holds the pointing reference |
+| Gemini flat panel | | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
+| Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
+| QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | poll body |
+| QHY CFW3 filter wheel | | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted | #1510 | goto arrival-wait body |
+| QHY camera | | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | partial | #2721 | temperature, telemetry, cooler-off and pulse-guide slots; disconnect cancels the temperature, telemetry and cooler-off slots and waits at most 2 s for them; `ControlQHYCCDTemp`, `SetQHYCCDParam(MANULPWM)` and `ControlQHYCCDGuide` have no timeout, so the destructor waits for one whole call; the exposure runs in a `util::CaptureSession` ([decision 0020](0020-capture-session.md)), joined with no time bound by disconnect and the destructor (one poll step during the exposure, the readout after it), and no `detach()` is left |
+| Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
+| Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
+| OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378, #1783, #2522, #2651 | MoveAxis re-send body; MoveAxis cap per axis (`util::run_motion_deadline`, #2651; its start lock keeps an older call's start from replacing a newer move's cap); status poll slot (`status_poll_`); pulse-end slot (`pulse_measurement_`); Park/FindHome tail (`park_home_`); `util::MotionOwner`: the controller runs every GOTO, park and home, so their claim is held from the command until a status shows the motion ended |
+| OnStep focuser | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp` | adopted | #2223 | poll body; `Move` is one exchange answered at once, sent on the caller's thread |
+| OnStep rotator | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp` | adopted | #2221 | poll body; a move is one `:rT#` check and one `:rS` exchange answered at once, sent on the caller's thread |
+| OnStep switch | `PolledState` | `AlpacaCore/src/vendors/onstep/onstep_switch_driver.cpp` | adopted | #2222 | poll body; a write is one `:SXX` exchange answered at once, sent on the caller's thread |
+| iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
+| Player One camera | | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pulse-guide off-timer body; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
+| ToupTek camera | | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1418 | thermal poll and pulse-guide timer slots; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)); Altair rides this driver |
+| ZWO camera | | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted | #1667 | pulse-guide turn-off timer body; a new pulse supersedes it and the new body takes over the pending turn-offs; Disconnect, Connect and the destructor cancel and join it, a link loss cancels it; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
+| ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1918 | telemetry poll slot; GOTO, per-axis pulse-queue and disconnect-teardown slots; claim protocol; send gate |
+| WeeWX observing conditions | | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085 | feed poll body |
+| remotealpaca observing conditions | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | upstream poll body; the Refresh and AveragePeriod write bodies in a command slot; both slots are held by the vendor's shared `UpstreamProxy` |
+| remotealpaca rotator | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753, #2708 | upstream poll body; the Move, MoveAbsolute, MoveMechanical, Sync, Halt and Reverse write bodies in the command slot, serialized in caller order by the proxy's command order mutex, so a Halt reaches the upstream after an earlier move and a superseded body writes nothing (rule 6); both slots are held by the vendor's shared `UpstreamProxy` |
+| remotealpaca filter wheel | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753, #2706 | upstream poll body; the Position write body in the command slot, serialized in caller order by the proxy's command order mutex, so two writes reach the upstream in the order they were sent and a superseded body writes nothing (rule 6); both slots are held by the vendor's shared `UpstreamProxy` |
+| remotealpaca switch | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753, #2709 | upstream poll body; the SetSwitch, SetSwitchValue, SetAsync, SetAsyncValue and SetSwitchName bodies in the command slot, in caller order (the shared command order), a superseded body writing nothing through (rule 6); both slots are held by the vendor's shared `UpstreamProxy` |
+| remotealpaca telescope | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753, #2710 | upstream poll body; every command body (the slews, Park, FindHome, MoveAxis, PulseGuide, the syncs, the writes, AbortSlew, DestinationSideOfPier) in the command slot, serialized in caller order by the proxy's command order mutex, so an AbortSlew reaches the upstream after an earlier slew and a superseded body writes nothing (rule 6); one MoveAxis cap slot per axis, superseded by a renewal, cancelled by a stop or AbortSlew, joined by Connect and Disconnect; its stop runs as a command, so it keeps the caller order too |

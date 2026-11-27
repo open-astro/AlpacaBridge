@@ -2,8 +2,8 @@
 
 One `NNNN-<slug>.md` record per choice that passes all three tests below,
 with a Status line under the title, then Context, Decision, Rules,
-Alternatives rejected, Consequences and Links. Two optional sections may sit
-between them: Adoption and How to reverse. `scripts/check_docs_drift.py`
+Alternatives rejected, Consequences and Links. One optional section may sit
+between them: How to reverse. `scripts/check_docs_drift.py`
 check 22 holds every record to this shape. The how-to of a rule stays at its
 implementation or instruction owner; the record keeps the reasoning and the
 short, checkable form below.
@@ -49,8 +49,12 @@ any record that supersedes another: the record passed the hard-to-reverse
 test, so this section is the part a future maintainer needs most. Earlier
 records add it when next touched.
 
-**Adoption.** A record that drivers adopt one at a time keeps its roster here,
-not in prose. `scripts/check_docs_drift.py` check 23 compares it with the code:
+**Adoption.** A record that drivers adopt one at a time keeps its roster in
+`docs/adoption/`, in a file with the record's own name, under a `## Adoption`
+heading, and links it from its Links section. The roster sits outside this
+directory so that adding or changing a row needs no `ADR authorized` comment;
+a record may not carry a `## Adoption` section. `scripts/check_docs_drift.py`
+check 23 compares each roster with the code:
 
 ```
 Scan: `<glob of files to scan>`
@@ -101,7 +105,7 @@ Status is one of:
 - `superseded by NNNN`: kept for history; the named record is the rule.
 - `retired (#NNNN)`: kept for history; the choice stopped being true with no
   successor (the module or hardware is gone). The issue or PR that retired it
-  is named on the Status line; the Rules and Adoption sections are removed and
+  is named on the Status line; the Rules section and the roster in `docs/adoption/` are removed and
   the rest is frozen; the index line below carries a `(retired)` suffix.
 
 A `proposed` record that is rejected is deleted, not kept. A record is
