@@ -3241,6 +3241,31 @@ TEST_CASE("FakeCelestronHandset ConformU mode: an AUX guide pulse moves its axis
     CHECK(rig.dec_degrees() == Catch::Approx(after_pulse).margin(1e-6));
 }
 
+TEST_CASE("FakeCelestronHandset ConformU mode: a variable-rate and a fixed-rate move run their axis",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x03');
+    constexpr double kSiderealDegPerSec = 360.98564736629 / 86400.0;
+    // Variable rate on Dec at 600"/s (scaled by 4: 2400 = 0x0960), positive (code 6).
+    REQUIRE(rig.ask(std::string("P\x03\x11\x06\x09\x60\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 + 600.0 * 10.0 / 3600.0).margin(1e-2));
+    REQUIRE(rig.ask(std::string("P\x03\x11\x06\0\0\0\0", 8)) == "#");  // rate 0: the stop
+    const double after_variable = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_variable).margin(1e-6));
+
+    // Fixed rate 3 (8x sidereal) on Dec, negative (code 37).
+    REQUIRE(rig.ask(std::string("P\x02\x11\x25\x03\0\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_variable - 8.0 * kSiderealDegPerSec * 10.0).margin(1e-3));
+    REQUIRE(rig.ask(std::string("P\x02\x11\x24\0\0\0\0", 8)) == "#");
+    const double after_fixed = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_fixed).margin(1e-6));
+}
+
 // ConformU "Parked:Tracking = true didn't raise an error when Parked as required" (fake ConformU run of #2692, the
 // NexStar row): the driver over the ConformU-mode handset, the way fake_conformu_server builds it, with the task clock
 // and the model's clock stepped by the case (decision 0005 rule 2). Red on purpose: set_tracking() in

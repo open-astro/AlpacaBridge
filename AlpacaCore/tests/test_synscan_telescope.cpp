@@ -1368,4 +1368,20 @@ TEST_CASE("FakeSynScanHandset ConformU mode: a variable-rate move moves its axis
     rig.ask(std::string("P\x03\x10\x07\0\x04\0\0", 8));
     CHECK(rig.ask("t") == std::string(1, '\0') + "#");
 }
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a fixed-rate move runs its axis at its sidereal multiple",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    constexpr double kSiderealDegPerSec = 360.98564736629 / 86400.0;
+    // Fixed rate 3 (8x sidereal) on the Dec motor, positive (code 36).
+    REQUIRE(rig.ask(std::string("P\x02\x11\x24\x03\0\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 + 8.0 * kSiderealDegPerSec * 10.0).margin(1e-3));
+    REQUIRE(rig.ask(std::string("P\x02\x11\x25\0\0\0\0", 8)) == "#");  // rate 0: the stop
+    const double stopped = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
+}
 #endif
