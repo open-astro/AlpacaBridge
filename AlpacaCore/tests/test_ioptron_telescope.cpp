@@ -4492,7 +4492,8 @@ TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at
     driver->set_connected(false);
 }
 
-// Issue #2760: the landing gate's own 300 s stop (reached by a client's Slewing read, not the watchdog) is verified too.
+// Issue #2760: the landing gate's own 300 s stop (reached by a client's Slewing read, not the watchdog) is verified
+// too.
 TEST_CASE("iOptron async landing gate - a 300 s bound stop the mount ignored once is sent again",
           "[ioptron][telescope][unit][fake][goto-safety]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/300.0);
