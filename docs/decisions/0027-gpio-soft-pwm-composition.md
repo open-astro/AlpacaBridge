@@ -48,24 +48,13 @@ The rules a change is checked against. Each names where it applies and what chec
 - SET_MODE and ENABLE on the RK3568 go once per line since the open, where the old boolean path sent them with every write.
 - Until the iMate and StellaVita move over, their two wrappers still carry their own copy of the engine, and the soft-PWM rule in the ASCOM contract instructions says so.
 
-## Adoption
-
-Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
-Symbol: `OwnedSoftPwmPorts`
-
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| ZWO ASIAIR Pro and Plus CM4 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted | #1757 | over `util::GpiodLineBackend` |
-| ZWO ASIAIR Plus RK3568 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted | #1757 | over `PwmGpioMiscBackend` |
-| iOptron iMate PowerBox switch | — | planned | #2722 | the follow-up deletes `ioptron_powerbox_wrapper.cpp` |
-| ToupTek StellaVita switch | — | planned | #2722 | the follow-up deletes `touptek_powerbox_wrapper.cpp` |
-
 ## How to reverse
 
 Reverting the ASIAIR Pro or the Plus restores its wrapper and driver from the commit before this record, and the other board is unaffected. The engine and the backends can stay as unused code or go in the same revert. This record then goes `superseded`, and the soft-PWM rule in the ASCOM contract instructions returns to its earlier text. Clients see no difference either way: port tables, frequencies, boot-level preserve and the no-power-cycle disconnect are the same before and after.
 
 ## Links
 
+- Adoption roster: [docs/adoption/0027-gpio-soft-pwm-composition.md](../adoption/0027-gpio-soft-pwm-composition.md).
 - Issue [#1757](https://github.com/open-astro/AlpacaBridge/issues/1757): the shared GPIO power-switch helper.
 - [Power port power-on state](0021-power-port-power-on-state.md), [Task clock](0005-task-clock.md), [SDK seams](0015-sdk-seams.md), [Getters never wait on device I/O](0016-getters-never-wait-on-device-io.md), [Designs to avoid](0013-designs-to-avoid.md).
 - Rules for the drivers: the GPIO section of [the ASCOM contract instructions](../../.github/instructions/ascom-contract.instructions.md#gpio-power-switch--soft-pwm-drivers-general-rules).

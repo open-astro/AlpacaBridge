@@ -114,7 +114,7 @@ author must do. Read the docstring before changing a gate.
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
   heading needs its README brand item, the recounted brand word and a
   `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; give a new decision record the
-  sections and Rules lines `docs/decisions/README.md` describes, and add an Adoption row when a
+  sections and Rules lines `docs/decisions/README.md` describes, and add an Adoption row (in `docs/adoption/`, not the record) when a
   driver starts naming a module's symbol (`TaskClock`, `AsyncOperation`, `StateSnapshot`,
   `kLinkStalenessBound`, `UtcOffset`, a `Locked*` decorator) (checks 22 and 23); keep `SUPPORTED-DRIVERS.md`'s
   `## Updated` date no older than the README badge date; give each workflow cache a key prefix no

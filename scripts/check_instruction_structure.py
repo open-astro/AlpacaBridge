@@ -123,6 +123,7 @@ def check(root=ROOT):
     documents += [root / name for name in ROOT_DOCUMENT_LINK_FLOORS]
     documents += list((root / 'docs/failures').glob('*.md'))
     documents += list((root / 'docs/decisions').glob('*.md'))
+    documents += list((root / 'docs/adoption').glob('*.md'))
     skill_documents = [path for path in (root / '.claude/skills').rglob('*.md') if path.is_file()]
     require(len(skill_documents) >= MIN_SKILL_DOCUMENTS,
             'only %d Markdown document(s) found under .claude/skills/ (floor %d): the directory '
@@ -246,6 +247,14 @@ def self_test():
         broken.unlink()
         assert any('docs/decisions/zz-broken-link.md' in f and 'missing-target.md' in f
                    for f in new_findings), 'Broken link is not reported with its repo-relative path'
+        # The Adoption rosters moved out of docs/decisions/ keep their links checked (#2777).
+        roster = root / 'docs/adoption/zz-broken-link.md'
+        roster.parent.mkdir(exist_ok=True)
+        roster.write_text('[gone](0023-outbound-clients-in-vendor-wrappers.md)\n')
+        new_findings = set(check(root)) - baseline
+        roster.unlink()
+        assert any('docs/adoption/zz-broken-link.md' in f for f in new_findings), \
+            'A broken link in a docs/adoption/ roster escaped the link check'
         # The root glossary and the architecture overview carry links too, and
         # neither sits in a scanned directory: each must be read by name.
         for name in ('CONTEXT.md', 'docs/architecture.md'):

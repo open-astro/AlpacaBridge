@@ -375,8 +375,8 @@ jobs:
               docs/decisions/ (the base branch's copy) and cite the record
               file and rule number. A rule with "Checked by: review" is yours
               to check; when it says "review (<what to look for>)", look for
-              exactly that evidence. An Adoption row that a change makes wrong
-              is a defect too. A PR that changes a record is checked against
+              exactly that evidence. An Adoption row (docs/adoption/, the
+              PR's copy) that a change makes wrong is a defect too. A PR that changes a record is checked against
               the base copy; the change to the rule itself needs a reason in
               the PR description, not a defect.
             - A new decision record (a file the PR adds under docs/decisions/)

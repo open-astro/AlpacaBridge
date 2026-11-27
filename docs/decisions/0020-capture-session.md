@@ -14,7 +14,7 @@ A failed exposure keeps its message: `ImageReady` and `ImageArray` raise it as `
 
 ## Rules
 
-1. A camera's exposure runs in a `util::CaptureSession`; the driver holds no exposure `std::thread`. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: the Adoption table below (check 23) and review (a camera driver that spawns its own exposure thread).
+1. A camera's exposure runs in a `util::CaptureSession`; the driver holds no exposure `std::thread`. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: the [Adoption table](../adoption/0020-capture-session.md) (check 23) and review (a camera driver that spawns its own exposure thread).
 2. One body runs per camera. `start()` refuses while an exposure is in progress; it waits at most 2 s for an old body, a cancel, or an abort's or a disconnect's join, then refuses with `InvalidOperation`. Two starts that wait together start one body, and a join never cancels a body that a later start began. Scope: `AlpacaCore/include/alpacacore/util/capture_session.h`. Checked by: `AlpacaCore/tests/test_capture_session.cpp` ("start refuses after kStartTimeout when the old body stays in the SDK", "two starts over a body still in the SDK start one body and getters never wait", "a start during an abort's join waits for it and its body is not cancelled").
 3. A failed exposure keeps its message. `ImageReady` and `ImageArray` raise it as `DriverException`; `CameraState` is Idle; the next `StartExposure` or a reconnect clears it. Scope: `AlpacaCore/include/alpacacore/util/capture_session.h`, `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: `AlpacaCore/tests/test_capture_session.cpp` ("a body that throws fails the exposure until the next start"), `AlpacaCore/tests/test_playerone_camera.cpp` ("Reconnect clears a kept exposure failure and the last exposure").
 4. Every wait of the body goes through the task clock in `CaptureControl::wait_for`, or in `CaptureControl::wait_for_signal` for a camera whose SDK raises a frame event, and is bounded by the watchdog deadline. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: `AlpacaCore/tests/test_capture_session.cpp` ("the watchdog ends a body that waits on the clock", "wait_for_signal returns at the signal, keeps an early one and an abort wakes it"), `AlpacaCore/tests/test_playerone_camera.cpp` ("readiness poll gives up at the deadline on the task clock").
@@ -23,23 +23,6 @@ A failed exposure keeps its message: `ImageReady` and `ImageArray` raise it as `
 7. A camera that reports the actual exposure length adds it in its own slice. Scope: `AlpacaCore/include/alpacacore/util/capture_session.h`. Checked by: review (the slice that adds the parameter).
 8. `disconnect_and_join()` closes the session. `start()` on a closed session raises `NotConnected` without publishing a state or running a body, a start that is waiting at that moment included. The driver calls `open()` on connect, and again when a disconnect leaves the camera connected; `open()` refuses while a disconnect is still running. Scope: `AlpacaCore/include/alpacacore/util/capture_session.h`, `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: `AlpacaCore/tests/test_capture_session.cpp` ("disconnect_and_join closes the session: start raises NotConnected until open", "a start waiting when disconnect_and_join begins is refused and never runs after the clear"), `AlpacaCore/tests/test_playerone_camera.cpp` ("a disconnect that leaves the camera connected leaves the session open").
 9. A start is reserved under the driver `mutex_` and held until Exposing is published or the start is refused; settings are locked for that time. `disconnect_and_join()` drops a held reservation and the start holding it raises `NotConnected`; `abort()` leaves it, and the session records that abort and applies it once Exposing is published. Scope: `AlpacaCore/include/alpacacore/util/capture_session.h`. Checked by: the reservation cases in `AlpacaCore/tests/test_capture_session.cpp`. <!-- allowed -->
-
-## Adoption
-
-The roster of camera drivers whose exposure runs in a session. `scripts/check_docs_drift.py` check 23 holds it to the code.
-
-Scan: `AlpacaCore/src/vendors/*/*camera_driver.cpp`
-Symbol: `CaptureSession`
-
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Player One camera | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pilot; no `detach()` left |
-| ZWO camera | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted | #1981, #2721 | the exposure runs in a session; rule 5: `ASIGetDataAfterExp` takes no timeout but copies a frame the SDK already holds (rig, SDK 1.41: 8 to 10 ms for an 18 MB ASI533MC Pro frame on USB 3, 2 ms for an ASI120MM Mini frame on USB 2, #2721), so it is the one `get_image_data` call the rule allows |
-| ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | partial | #2130 | the exposure runs in a session; rule 4: the body waits in `CaptureControl::wait_for_signal` until the SDK frame event, then makes one `Toupcam_PullImageV4` call; adopted after a run on a real camera is reported; Altair rides this driver |
-| SVBONY camera | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | adopted | #1980 | rule 4: each bounded 500 ms `SVBGetVideoData` read is the poll step, and every pass goes through `CaptureControl::wait_for`, so the watchdog deadline ends the loop without a getter (ToupTek waits for its frame event instead) |
-| gphoto camera | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | partial | #1982 | the exposure runs in a session and adds the actual exposure length (rule 7); rule 4: the native capture parks in `gp_camera_capture` (no cancel) and the bulb pumps wait inside bounded SDK calls, not `CaptureControl::wait_for` |
-| QHY camera | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | partial | #2721 | the exposure runs in a session; no `detach()` left; rule 5: the body polls `GetQHYCCDExposureRemaining` through `CaptureControl::wait_for` and calls `GetQHYCCDSingleFrame` only once the exposure is over, so an abort or a disconnect during the exposure waits one poll step; `GetQHYCCDSingleFrame` has no timeout, so in the readout, when `cancel_exposure` does not interrupt it, they wait for that readout (unmeasured); adopted after a ConformU run on a real QHY camera is reported |
-| iOptron iGuider camera | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | planned | #2720 | streaming UVC camera: an exposure is the first settled frame of the stream worker's `AsyncOperation` slot ([decision 0006](0006-async-operation-ownership.md)), not a session body; the deadline is on the task clock but not through `CaptureControl` (rules 1 and 4) |
 
 ## Alternatives rejected
 
@@ -61,6 +44,7 @@ Each camera adopts in its own PR; reverting that PR restores the camera's thread
 
 ## Links
 
+- Adoption roster: [docs/adoption/0020-capture-session.md](../adoption/0020-capture-session.md).
 - Issues [#1605](https://github.com/open-astro/AlpacaBridge/issues/1605) (Player One pilot).
 - [Decision 0005](0005-task-clock.md), [decision 0006](0006-async-operation-ownership.md), [decision 0013](0013-designs-to-avoid.md), [decision 0016](0016-getters-never-wait-on-device-io.md).
 - Rules: [driver lifecycle instructions](../../.github/instructions/driver-lifecycle.instructions.md), [ASCOM contract instructions](../../.github/instructions/ascom-contract.instructions.md).

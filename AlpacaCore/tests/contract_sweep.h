@@ -1224,7 +1224,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
 
 // ---------------------------------------------------------------------------
 // Snapshot-adopter roster (decision 0010, rule 6): the drivers whose Adoption row in
-// docs/decisions/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
+// docs/adoption/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
 // guard. scripts/check_contract_sweep.py (rule 6) fails when an `adopted` row has no entry here, when an entry
 // is not `adopted`, or when an entry has no CONTRACT_SWEEP_SNAPSHOT_ADOPTERS hook in test_contract_sweep.cpp (and
 // the reverse). `source` is the

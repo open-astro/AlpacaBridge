@@ -39,28 +39,6 @@ The rules a change is checked against. Each names where it applies and what chec
 9. A raw `read`/`write` on a serial link's fd appears only in the shared read and write helpers and in the two named `poll()`-bounded loops (Sky-Watcher and the Celestron CGX, each exercised through its pty fake). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/vendor/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: `scripts/check_serial_port_ownership.py` (CI `static-checks` job), review.
 10. The shared open helper takes `TIOCEXCL` on every open; a refusal logs a warning and the open continues on a best-effort link, and fails the open on a link that opts in to a required lock (the Celestron CGX). Scope: `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review (an open that skips `TIOCEXCL`, or a refused `TIOCEXCL` that fails a link not opted in).
 
-## Adoption
-
-`scripts/check_docs_drift.py` check 23 holds this roster to the code: an `adopted` row fails when none of its sources names `SerialLink`, and a scanned wrapper that names it without a row fails too. [#1448](https://github.com/open-astro/AlpacaBridge/issues/1448) ported the `stable/5.0` wrappers to `main` and converted the `main`-only Celestron CGX wrapper. The SynScan handset probe has its own row because it sits outside the scan.
-
-Scan: `AlpacaCore/src/vendors/*/*_protocol_wrapper.cpp`
-Symbol: `SerialLink`
-
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Celestron NexStar | `AlpacaCore/src/vendors/celestron/celestron_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| Celestron CGX mount, AUX focuser | `AlpacaCore/src/vendors/celestron/celestron_cgx_protocol_wrapper.cpp` | adopted | #1448 | `main` only; one owner name per device; `SerialExclusive::Required`; keeps its link across a logical disconnect ([decision 0011](0011-cgx-logical-reference-continuity.md) rule 1) |
-| Gemini focuser, flat panel, PDH | `AlpacaCore/src/vendors/gemini/gemini_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/gemini/gemini_flatpanel_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/gemini/gemini_pdh_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| iOptron mount, iEAF, iEFW | `AlpacaCore/src/vendors/ioptron/ioptron_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_iefw_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435; replaces the #995 exclusive hold |
-| iOptron iFR focuser-rotator | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_protocol_wrapper.cpp` | adopted | #2002 | one `SerialLink` per unit, shared by the focuser and the rotator through `IfrLink::acquire()` under one owner name (`iOptron iFR`); the second device joins the open session instead of claiming the port again |
-| OnStep | `AlpacaCore/src/vendors/onstep/onstep_protocol_wrapper.cpp` | adopted | #1448, #2223, #2221, #2222 | Ported from #1435; keeps `main`'s 0009 link loss (#1241, #1289); one `SerialLink` per controller, shared by the telescope, the focusers, the rotator (#2221) and the switch (#2222) through `OnStepProtocolWrapper::acquire()` under one owner name (`OnStep`, #2223); a later device joins the open link instead of claiming the port again |
-| QHY CFW3, Q-Focuser | `AlpacaCore/src/vendors/qhy/qhy_cfw3_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/qhy/qhy_qfocuser_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| Sky-Watcher | `AlpacaCore/src/vendors/skywatcher/skywatcher_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435; keeps `main`'s 0009 link loss (#981) |
-| SynScan | `AlpacaCore/src/vendors/synscan/synscan_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| SynScan handset probe | `AlpacaCore/include/alpacacore/util/synscan_handset_probe.h` | adopted | #1448 | Ported from #1435; outside the scan, so listed on its own |
-| WandererAstro cover, box, filter wheel, rotator | `AlpacaCore/src/vendors/wandererastro/wandererastro_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| ZWO mount | `AlpacaCore/src/vendors/zwo/zwo_mount_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-
 ## Alternatives rejected
 
 - **The per-wrapper registry calls** (`try_mark_serial_port_open`, `mark_serial_port_open`). Only some wrappers made them, `mark_serial_port_open` never refused, and a check followed by a separate open left a window another probe could use. That gap is how the PDH fault arose. An RAII claim taken inside the one open path closes it.
@@ -77,6 +55,7 @@ Symbol: `SerialLink`
 
 ## Links
 
+- Adoption roster: [docs/adoption/0017-serial-port-ownership.md](../adoption/0017-serial-port-ownership.md).
 - Issues [#1202](https://github.com/open-astro/AlpacaBridge/issues/1202) (the failures), [#1440](https://github.com/open-astro/AlpacaBridge/issues/1440) (this record, and the two questions it settled), [#1448](https://github.com/open-astro/AlpacaBridge/issues/1448) (the port to `main`), [#1439](https://github.com/open-astro/AlpacaBridge/issues/1439) (the line-settings lock); PR [#1435](https://github.com/open-astro/AlpacaBridge/pull/1435).
 - Rules: [serial and auto-detect instructions](../../.github/instructions/serial-autodetect.instructions.md).
 - Related: [decision 0009](0009-link-loss-and-relink-policy.md) (link loss and relink), [decision 0011](0011-cgx-logical-reference-continuity.md) (CGX logical-disconnect continuity), [decision 0013](0013-designs-to-avoid.md) section 7 (no production `ByteChannel`).
