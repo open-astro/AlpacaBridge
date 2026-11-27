@@ -18,6 +18,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/safetymonitor_driver.h>
@@ -25,6 +26,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
@@ -192,6 +194,32 @@ void operate_telescope(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { t.park(); });
     guard([&] { t.unpark(); });
     guard([&] { t.abort_slew(); });
+}
+
+std::unique_ptr<alpacacore::FocuserDriver> make_focuser(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_focuser(0, stress_config(),
+                                               std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {},
+                                               alpacacore::util::default_task_clock());
+}
+
+// Every member the Focuser serves and its three commands, each in its own guard.
+void operate_focuser(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& f = static_cast<alpacacore::FocuserDriver&>(d);
+    guard([&] { static_cast<void>(f.get_is_moving()); });
+    guard([&] { static_cast<void>(f.get_position()); });
+    guard([&] { static_cast<void>(f.get_temperature()); });
+    guard([&] { static_cast<void>(f.get_temp_comp()); });
+    guard([&] { static_cast<void>(f.get_absolute()); });
+    guard([&] { static_cast<void>(f.get_max_step()); });
+    guard([&] { static_cast<void>(f.get_max_increment()); });
+    guard([&] { static_cast<void>(f.get_step_size()); });
+    guard([&] { static_cast<void>(f.get_temp_comp_available()); });
+    guard([&] { static_cast<void>(f.get_device_state()); });
+    guard([&] { static_cast<void>(f.get_name()); });
+    guard([&] { static_cast<void>(f.get_link_fault()); });
+    guard([&] { f.move(30000); });
+    guard([&] { f.set_temp_comp(false); });
+    guard([&] { f.halt(); });
 }
 
 // Every member the driver serves, each in its own guard so one throw skips no later call.
@@ -724,6 +752,83 @@ TEST_CASE("Remote Alpaca telescope - refused-connection losses race connects, di
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
     CHECK(upstream.calls("abortslew") > 0);   // commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca focuser - concurrent connect/disconnect/operate stress", "[remotealpaca][focuser][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Focuser};
+    upstream.install(http);
+    auto driver = make_focuser(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.calls("move") > 0);  // the commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca focuser - destruction races an in-flight connect", "[remotealpaca][focuser][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Focuser};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_focuser(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca focuser - racing disconnect is never dropped", "[remotealpaca][focuser][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Focuser};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_focuser(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 40 is refused (a Connect makes some sixteen, so most land), so the poll and
+// the commands lose the link at once while lifecycle threads connect and disconnect it and readers race the getters.
+// TSan checks the loss path's writes (connected_, the kept reason, the dropped frame) against the getters, the Move,
+// Halt and TempComp bodies and their write-throughs, and set_connected().
+TEST_CASE("Remote Alpaca focuser - refused-connection losses race connects, disconnects, commands and reads",
+          "[remotealpaca][focuser][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Focuser};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 40 == 39) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_focuser(http);
+
+    // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); });
+
+    // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
+    CHECK(upstream.calls("halt") > 0);        // commands ran on a connected driver, not only NotConnected
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);

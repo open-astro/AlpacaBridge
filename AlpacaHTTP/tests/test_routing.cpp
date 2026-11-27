@@ -4120,6 +4120,24 @@ int main() {
         EXPECT(cfg.value("pollPeriodSeconds", -1) == 13);
         remove_device(router, "remotealpaca", "telescope", 9660);
     }
+    {
+        // case: remotealpaca focuser config round-trips every field (#1753)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9634},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32326},
+                                           {"upstreamDeviceNumber", 2},
+                                           {"pollPeriodSeconds", 13}},
+                                          "Focuser", 9634);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32326);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 2);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 13);
+        remove_device(router, "remotealpaca", "focuser", 9634);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -9453,7 +9471,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 52);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 53);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -11607,6 +11625,20 @@ int main() {
         EXPECT(!refused.ok);
         EXPECT(refused.message.find("is this server") != std::string::npos);
         EXPECT(listed_entry(router, "Telescope", 9661).is_null());
+    }
+    {
+        // case: configuredevice refuses a remotealpaca focuser upstream that is this server (#1753)
+        // Decision 0023 rule 4, as for the other proxied devices above.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "focuser"},
+                                     {"deviceNumber", 9635},
+                                     {"upstreamHost", "localhost"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "Focuser");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "Focuser", 9635).is_null());
     }
 #endif
 

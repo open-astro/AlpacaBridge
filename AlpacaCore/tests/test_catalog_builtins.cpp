@@ -4318,9 +4318,9 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// remotealpaca ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch and Telescope (decision 0023, issue
-// #1753): schema in every build, factory only when built. Each factory is a bind hook: it refuses an upstream that is
-// this server from the listening addresses AlpacaHTTP passes.
+// remotealpaca ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope and Focuser (decision 0023,
+// issue #1753): schema in every build, factory only when built. Each factory is a bind hook: it refuses an upstream
+// that is this server from the listening addresses AlpacaHTTP passes.
 
 namespace {
 
@@ -4330,6 +4330,7 @@ const DeviceKey kRemoteAlpacaRotatorKey{"remotealpaca", DeviceType::Rotator};
 const DeviceKey kRemoteAlpacaFilterWheelKey{"remotealpaca", DeviceType::FilterWheel};
 const DeviceKey kRemoteAlpacaSwitchKey{"remotealpaca", DeviceType::Switch};
 const DeviceKey kRemoteAlpacaTelescopeKey{"remotealpaca", DeviceType::Telescope};
+const DeviceKey kRemoteAlpacaFocuserKey{"remotealpaca", DeviceType::Focuser};
 
 DeviceConfig remote_config(const std::string& host, std::int64_t port) {
     DeviceConfig config;
@@ -4525,6 +4526,36 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the remotealpaca
     CHECK_FALSE(sanitized.has("deviceNumber"));
 }
 
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the remotealpaca focuser in every build",
+          "[catalog][remotealpaca][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kRemoteAlpacaFocuserKey);
+    REQUIRE(v != nullptr);
+    CHECK(v->display_name == "Remote Alpaca Focuser");
+    CHECK(v->vendor_label == "Remote Alpaca");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_REMOTEALPACA");
+    CHECK_FALSE(v->available);
+    // The same four fields as the other proxied devices: every one takes one upstream.
+    REQUIRE(v->fields.size() == 4);
+    CHECK(std::string_view(v->fields[0].key) == "upstreamHost");
+    CHECK(v->fields[0].role == Role::Host);
+    CHECK(std::string_view(v->fields[1].key) == "upstreamPort");
+    CHECK(std::string_view(v->fields[2].key) == "upstreamDeviceNumber");
+    CHECK(std::string_view(v->fields[3].key) == "pollPeriodSeconds");
+    DeviceConfig all = remote_config("omnisim.local", 32323);
+    all.set("upstreamDeviceNumber", std::int64_t{1});
+    all.set("pollPeriodSeconds", std::int64_t{5});
+    all.set("deviceNumber", std::int64_t{4});  // the router's own key, never the upstream's
+    const DeviceConfig sanitized = catalog.sanitize(kRemoteAlpacaFocuserKey, all);
+    CHECK(sanitized.has("upstreamHost"));
+    CHECK(sanitized.has("upstreamPort"));
+    CHECK(sanitized.has("upstreamDeviceNumber"));
+    CHECK(sanitized.has("pollPeriodSeconds"));
+    CHECK_FALSE(sanitized.has("deviceNumber"));
+}
+
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 TEST_CASE("Builtin catalog - the remotealpaca factory refuses each field out of range with InvalidValue",
           "[catalog][remotealpaca][unit]") {
@@ -4709,6 +4740,34 @@ TEST_CASE("Builtin catalog - the remotealpaca telescope factory refuses bad fiel
     CHECK(refused.rejection->find("is this server") != std::string::npos);
     CHECK(refused.driver == nullptr);
     CHECK(catalog.bind(kRemoteAlpacaTelescopeKey, remote_config("127.0.0.1", 6801), 0, listening_on_6800()).driver !=
+          nullptr);
+}
+
+TEST_CASE("Builtin catalog - the remotealpaca focuser factory refuses bad fields and this server",
+          "[catalog][remotealpaca][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const BindContext context{Source::Api, {}};
+    const auto refusal = [&](const DeviceConfig& config) {
+        return alpacacore::test::alpaca_error_message(
+            [&] { (void)catalog.bind(kRemoteAlpacaFocuserKey, config, 0, context); }, AlpacaError::InvalidValue);
+    };
+    CHECK(refusal(DeviceConfig{}) == "Remote Alpaca focuser requires upstreamHost");
+    CHECK(refusal(remote_config("127.0.0.1", 0)) == "upstreamPort must be from 1 to 65535");
+    DeviceConfig poll = remote_config("127.0.0.1", 32323);
+    poll.set("pollPeriodSeconds", std::int64_t{0});
+    CHECK(refusal(poll) == "pollPeriodSeconds must be from 1 to 60");
+    // In range: a Focuser, built touching no network.
+    const BindResult built = catalog.bind(kRemoteAlpacaFocuserKey, remote_config("127.0.0.1", 32323), 5, context);
+    REQUIRE(built.driver != nullptr);
+    CHECK(built.driver->get_device_type() == DeviceType::Focuser);
+    CHECK_FALSE(built.driver->get_connected());
+    // Decision 0023 rule 4 at configure, as for the other proxied devices.
+    const BindResult refused =
+        catalog.bind(kRemoteAlpacaFocuserKey, remote_config("localhost", 6800), 0, listening_on_6800());
+    REQUIRE(refused.rejection.has_value());
+    CHECK(refused.rejection->find("is this server") != std::string::npos);
+    CHECK(refused.driver == nullptr);
+    CHECK(catalog.bind(kRemoteAlpacaFocuserKey, remote_config("127.0.0.1", 6801), 0, listening_on_6800()).driver !=
           nullptr);
 }
 #endif
