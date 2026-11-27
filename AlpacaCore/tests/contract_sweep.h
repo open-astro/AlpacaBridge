@@ -1218,7 +1218,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "focuser", "fake_http_client.h"},              // the same, as a Focuser
     {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
     {"gemini", "focuser", "fake_gemini_focuser.h"},
-    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},       // the Pro firmware: gemini_covercalibrator_pro
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_rev2.h"},  // the same fake as Rev2: gemini_covercalibrator_v2
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_lite.h"},  // the same fake as Lite: gemini_covercalibrator
     {"gemini", "switch", "fake_gemini_pdh.h"},
     {"qhy", "camera", "fake_qhy_sdk.h"},
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3

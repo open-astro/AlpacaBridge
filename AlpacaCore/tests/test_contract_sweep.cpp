@@ -129,6 +129,8 @@
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
 
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_flatpanel_lite.h"
+#include "fake_gemini_flatpanel_rev2.h"
 #include "fake_gemini_focuser.h"
 #include "fake_gemini_pdh.h"
 #endif
@@ -3069,8 +3071,8 @@ Tier2Host tier2_host_gemini_focuser() {
     return h;
 }
 
-// fake_gemini_flatpanel.h models the Pro firmware only, so this row hosts the gemini_covercalibrator_pro
-// registry entry; Cover Lite and v2 have no connected coverage (source: the fake header).
+// fake_gemini_flatpanel.h answers as the Pro firmware by default, so this row hosts the gemini_covercalibrator_pro
+// registry entry; the Rev2 and Lite rows below host the other two over the same fake.
 Tier2Host tier2_host_gemini_covercalibrator() {
     Tier2Host h{"gemini_covercalibrator",
                 "gemini",
@@ -3094,6 +3096,61 @@ Tier2Host tier2_host_gemini_covercalibrator() {
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, kAbsentPort, 9600);
+        return hosted;
+    };
+    return h;
+}
+
+// The Rev2 and Lite firmwares connect like the Pro (the same Impl::connect), so the ">H#" hold holds them too.
+Tier2Host tier2_host_gemini_covercalibrator_v2() {
+    Tier2Host h{"gemini_covercalibrator_v2",
+                "gemini",
+                "covercalibrator",
+                "fake_gemini_flatpanel_rev2.h",
+                DeviceType::CoverCalibrator,
+                "gemini_covercalibrator_v2",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto panel = std::make_shared<alpacacore::test::FakeGeminiFlatPanelRev2>();
+        if (hold) panel->set_reply_delay(">H#", kFlatPanelHold);
+        return host_over(panel,
+                         [](const alpacacore::test::FakeGeminiFlatPanelRev2& f) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, f.slave_path(), 9600);
+                         });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, kAbsentPort, 9600);
+        return hosted;
+    };
+    return h;
+}
+
+Tier2Host tier2_host_gemini_covercalibrator_lite() {
+    Tier2Host h{"gemini_covercalibrator_lite",
+                "gemini",
+                "covercalibrator",
+                "fake_gemini_flatpanel_lite.h",
+                DeviceType::CoverCalibrator,
+                "gemini_covercalibrator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto panel = std::make_shared<alpacacore::test::FakeGeminiFlatPanelLite>();
+        if (hold) panel->set_reply_delay(">H#", kFlatPanelHold);
+        return host_over(panel,
+                         [](const alpacacore::test::FakeGeminiFlatPanelLite& f) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::gemini::create_gemini_flatpanel(0, f.slave_path(), 9600);
+                         });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, kAbsentPort, 9600);
         return hosted;
     };
     return h;
@@ -3633,7 +3690,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_IOPTRON(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#define CS2_GEMINI(X) X(gemini_focuser, NPR) X(gemini_covercalibrator, PRB) X(gemini_switch, PRB)
+#define CS2_GEMINI(X) X(gemini_focuser, NPR) X(gemini_covercalibrator, PRB) X(gemini_covercalibrator_v2, PRB) X(gemini_covercalibrator_lite, PRB) X(gemini_switch, PRB)
 #else
 #define CS2_GEMINI(X)
 #endif

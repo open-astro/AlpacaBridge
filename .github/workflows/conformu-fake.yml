@@ -9,7 +9,7 @@
 # `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
-# Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
+# Cover Lite, v2 and Pro flat panels, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
 # switches, the ZWO, ToupTek, Altair, QHY, Player One and SVBONY cameras and the
 # remotealpaca ObservingConditions since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
@@ -94,6 +94,8 @@ on:
       - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
       - "AlpacaCore/tests/fake_gemini_flatpanel.h"
+      - "AlpacaCore/tests/fake_gemini_flatpanel_lite.h"
+      - "AlpacaCore/tests/fake_gemini_flatpanel_rev2.h"
       - "AlpacaCore/tests/fake_serial_streamer.h"
       - "AlpacaCore/tests/conformu_switch_factories.h"
       - "AlpacaCore/tests/fake_ioptron_gpio.h"

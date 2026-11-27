@@ -27,6 +27,8 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_flatpanel_lite.h"
+#include "fake_gemini_flatpanel_rev2.h"
 #endif
 #ifdef FAKE_CONFORMU_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -37,7 +39,7 @@
 namespace alpacacore::test::conformu {
 
 #ifdef FAKE_CONFORMU_GEMINI
-// The Motorized Flat Panel V3 (Pro) firmware, the one fake_gemini_flatpanel.h models. The real panel acks an open or
+// The Motorized Flat Panel V3 (Pro) firmware, fake_gemini_flatpanel.h's default. The real panel acks an open or
 // close only once the cover has travelled (about 10 s), so the cover takes that long here too; without it the move is
 // over before ConformU can see it, and it judges the cover synchronous.
 inline constexpr std::chrono::milliseconds kGeminiCoverTravel{10000};
@@ -53,6 +55,30 @@ inline FakeGeminiFlatPanel& gemini_flatpanel() {
 }
 inline std::unique_ptr<CoverCalibratorDriver> make_gemini_flatpanel_pro(int device_number) {
     return vendor::gemini::create_gemini_flatpanel_pro(device_number, gemini_flatpanel().slave_path());
+}
+// The Astro Automatic FlatPanel v2 (Rev2) firmware. Its cover acks an open or close at the end of travel too, which
+// ConformU timed at 12.6 s on the real panel (AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/).
+inline constexpr std::chrono::milliseconds kGeminiRev2CoverTravel{12000};
+inline FakeGeminiFlatPanelRev2& gemini_flatpanel_rev2() {
+    static FakeGeminiFlatPanelRev2 fake;
+    static const bool configured = [] {
+        fake.set_reply_delay(">O#", kGeminiRev2CoverTravel);
+        fake.set_reply_delay(">C#", kGeminiRev2CoverTravel);
+        return true;
+    }();
+    (void)configured;
+    return fake;
+}
+inline std::unique_ptr<CoverCalibratorDriver> make_gemini_flatpanel_v2(int device_number) {
+    return vendor::gemini::create_gemini_flatpanel_v2(device_number, gemini_flatpanel_rev2().slave_path());
+}
+// The Astro Flat Panel Cover Lite firmware: light only, so there is no cover travel to model.
+inline FakeGeminiFlatPanelLite& gemini_flatpanel_lite() {
+    static FakeGeminiFlatPanelLite fake;
+    return fake;
+}
+inline std::unique_ptr<CoverCalibratorDriver> make_gemini_flatpanel_lite(int device_number) {
+    return vendor::gemini::create_gemini_flatpanel(device_number, gemini_flatpanel_lite().slave_path());
 }
 #endif
 

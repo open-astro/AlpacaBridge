@@ -223,6 +223,14 @@ const std::vector<ConformuHost> kHosts = {
      "Gemini Flat Panel Pro (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
      "FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal)",
      [] { return !cu::gemini_flatpanel().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_pro)},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_rev2.h", alpacacore::DeviceType::CoverCalibrator,
+     "gemini-fake", "Gemini Automatic FlatPanel v2 (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiFlatPanelRev2 (simulated Astro Automatic FlatPanel v2 firmware over a pseudo-terminal)",
+     [] { return !cu::gemini_flatpanel_rev2().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_v2)},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_lite.h", alpacacore::DeviceType::CoverCalibrator,
+     "gemini-fake", "Gemini Flat Panel Cover Lite (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiFlatPanelLite (simulated Astro Flat Panel Cover Lite firmware over a pseudo-terminal)",
+     [] { return !cu::gemini_flatpanel_lite().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_lite)},
 #endif
 #ifdef FAKE_CONFORMU_WANDERERASTRO
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h", alpacacore::DeviceType::CoverCalibrator,
