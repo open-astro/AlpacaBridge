@@ -87,8 +87,56 @@ permissions:
   contents: read
 
 jobs:
+  build-reach:
+    # Whether a pull request's changed files can reach the build and test jobs
+    # (scripts/ci_build_reach.py, issue #2780). Only a pull request can say
+    # false; the merge queue and pushes always build. The build-test,
+    # build-vendors-shard, build-vendors and sanitizers jobs skip only on an
+    # explicit `false`: they run after this job fails (`!cancelled()` and
+    # `!= 'false'`), because a skipped job satisfies a required check.
+    name: Build reach (changed files)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.reach.outputs.build }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2  # the PR merge commit and its base parent, for the changed files
+
+      - name: Decide
+        id: reach
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          python3 -I scripts/ci_build_reach.py --self-test
+          python3 -I scripts/ci_build_reach.py "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+
+  build-not-needed:
+    # The review bot's CI wait accepts the skipped build jobs only when this
+    # job passed on the same head (claude-review.yml).
+    name: Build not needed (no file reaches the build)
+    needs: build-reach
+    if: needs.build-reach.outputs.build == 'false'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Record the skip
+        run: echo "No changed file reaches the build and test jobs (scripts/ci_build_reach.py); they are skipped."
+
   build-test:
     name: Build + test (arm64)
+    needs: build-reach
+    if: ${{ !cancelled() && needs.build-reach.outputs.build != 'false' }}
     runs-on: ubuntu-24.04-arm
     # Debian 13 (trixie), the distribution AlpacaBridge ships for: the core
     # suite builds with trixie's gcc 14, glibc and Catch2, as on a user's SBC,
@@ -208,6 +256,8 @@ jobs:
     # uploads its raw gcovr JSON; build-vendors below merges the three into
     # the report. The report is informational: no --fail-under threshold.
     name: Build + test (all vendors, arm64, shard ${{ matrix.shard }}/3)
+    needs: build-reach
+    if: ${{ !cancelled() && needs.build-reach.outputs.build != 'false' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
@@ -420,8 +470,8 @@ jobs:
     # (to fail here), where a plain needs: would skip it, and a skipped job
     # satisfies a required check. A run cancelled by a newer push skips it.
     name: Build + test (all vendors, arm64)
-    needs: build-vendors-shard
-    if: ${{ !cancelled() }}
+    needs: [build-reach, build-vendors-shard]
+    if: ${{ !cancelled() && needs.build-reach.outputs.build != 'false' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
@@ -522,6 +572,8 @@ jobs:
 
   sanitizers:
     name: Sanitizers (ASan + UBSan, arm64)
+    needs: build-reach
+    if: ${{ !cancelled() && needs.build-reach.outputs.build != 'false' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
     steps:
@@ -1155,6 +1207,12 @@ jobs:
         run: |
           python3 scripts/check_adr_authorization.py --self-test
           python3 scripts/check_adr_scope.py --self-test
+
+      - name: Docs drift - Self-test the build-reach classifier
+        if: ${{ !cancelled() }}
+        # build-reach runs it too, but only on a pull request; a broken copy
+        # must fail here in the merge queue as well.
+        run: python3 -I scripts/ci_build_reach.py --self-test
 
       - name: Docs drift - Run the scripts/tests unit tests
         if: ${{ !cancelled() }}

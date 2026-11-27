@@ -73,10 +73,22 @@ jobs:
             runs="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=latest" \
               | jq -s '[.[].check_runs[] | select(.app.slug == "github-actions")]')" || runs='[]'
             waiting=(); missing=(); failed=()
+            # ci.yml skips the build jobs on a PR whose files cannot reach them
+            # (build-reach, issue #2780) and then passes this job on the same
+            # head; only then does a skipped build job count as green.
+            not_needed="$(jq -r '[.[] | select(.name == "Build not needed (no file reaches the build)")] | max_by(.started_at) | if . == null then "missing" else .conclusion // "pending" end' \
+              <<<"${runs}")"
             for name in "${required[@]}"; do
               state="$(jq -r --arg n "${name}" \
                 '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" elif .status != "completed" then "pending" else .conclusion end' \
                 <<<"${runs}")"
+              if [ "${state}" = "skipped" ]; then
+                # The skip lands before "Build not needed" finishes, so wait for it.
+                case "${not_needed}" in
+                  success) state=success ;;
+                  pending|missing) state=pending ;;
+                esac
+              fi
               case "${state}" in
                 success) ;;
                 pending) waiting+=("${name}") ;;
@@ -85,7 +97,7 @@ jobs:
               esac
             done
             if [ "${#failed[@]}" -gt 0 ]; then
-              printf '::error::CI is red on %s, so the review is skipped. The review needs every waited-for job to run green; a job that is skipped, neutral or anything but success counts as red (a needs: or if: that skips one must not let the review run on a red head). Fix CI and push again: %s\n' \
+              printf '::error::CI is red on %s, so the review is skipped. The review needs every waited-for job to run green; a job that is skipped, neutral or anything but success counts as red (a needs: or if: that skips one must not let the review run on a red head), except a build job ci.yml skipped while "Build not needed" passed. Fix CI and push again: %s\n' \
                 "${HEAD_SHA}" "$(IFS=';'; echo "${failed[*]}")"
               exit 1
             fi
