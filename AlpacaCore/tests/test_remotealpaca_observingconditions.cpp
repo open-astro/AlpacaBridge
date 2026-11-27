@@ -27,7 +27,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -494,17 +493,8 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - Refresh is forwarded and m
 }
 
 // Commands reach the upstream in caller order (UpstreamProxy's command order mutex): a second command waits for the
-// body of the first, so it never runs beside it. Real time, bounded: `quiet_for` waits out the window in which an
-// unordered second command would reach the upstream while the first body is held.
+// body of the first, so it never runs beside it. The waiting hook marks the moment the second caller waits.
 namespace {
-bool quiet_for(const std::function<bool()>& sent) {
-    const auto window = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-    while (!sent() && std::chrono::steady_clock::now() < window) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return !sent();
-}
-
 // PUTs of `member` the upstream has seen.
 int puts_of(const alpacacore::test::FakeHttpClient& http, const std::string& member) {
     int n = 0;
@@ -530,8 +520,12 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a second AveragePeriod wri
     });
     std::thread first([&] { rig.driver->set_average_period(5.0); });
     REQUIRE(first_body.wait_entered());
+    alpacacore::test::Latch second_waits;
+    remote::set_command_waiting_hook_for_testing(*rig.driver, [&] { second_waits.block(); });
     std::thread second([&] { rig.driver->set_average_period(0.0); });
-    CHECK(quiet_for([&] { return puts_of(rig.http, "/averageperiod") > 1; }));
+    CHECK(second_waits.wait_entered());  // CHECK, not REQUIRE: the threads are joined below either way
+    CHECK(puts_of(rig.http, "/averageperiod") == 1);
+    second_waits.release();
     first_body.release();
     first.join();
     second.join();
@@ -552,8 +546,12 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a second Refresh waits for
     });
     std::thread first([&] { rig.driver->refresh(); });
     REQUIRE(first_body.wait_entered());
+    alpacacore::test::Latch second_waits;
+    remote::set_command_waiting_hook_for_testing(*rig.driver, [&] { second_waits.block(); });
     std::thread second([&] { rig.driver->refresh(); });
-    CHECK(quiet_for([&] { return rig.upstream.calls("refresh") > 1; }));
+    CHECK(second_waits.wait_entered());  // CHECK, not REQUIRE: the threads are joined below either way
+    CHECK(rig.upstream.calls("refresh") == 1);
+    second_waits.release();
     first_body.release();
     first.join();
     second.join();
@@ -577,12 +575,18 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a write sent during a Refr
     rig.driver->refresh();
     const std::size_t measurement = gets_after(rig.http.requests(), from);
     REQUIRE(measurement > 1);
-    // At the first measurement GET after the next Refresh PUT, an AveragePeriod write is sent from another thread.
+    // At the first measurement GET after the next Refresh PUT, an AveragePeriod write is sent from another thread; that
+    // GET answers once the write's caller waits for the Refresh.
     std::atomic<bool> triggered{false};
+    std::atomic<bool> write_waited{false};
+    alpacacore::test::Latch second_waits;
+    remote::set_command_waiting_hook_for_testing(*rig.driver, [&] { second_waits.block(); });
     std::thread second;
     rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
         if (request.method == "GET" && rig.upstream.calls("refresh") == 2 && !triggered.exchange(true)) {
             second = std::thread([&] { rig.driver->set_average_period(0.0); });
+            write_waited.store(second_waits.wait_entered());
+            second_waits.release();
         }
         return rig.upstream.answer(request);
     });
@@ -590,6 +594,7 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a write sent during a Refr
     rig.driver->refresh();
     REQUIRE(triggered.load());
     second.join();
+    CHECK(write_waited.load());
     const auto requests = rig.http.requests();
     // The Refresh's PUT, its whole measurement, then the write's PUT: the write never cut the measurement short.
     REQUIRE(requests.size() == from + 1 + measurement + 1);

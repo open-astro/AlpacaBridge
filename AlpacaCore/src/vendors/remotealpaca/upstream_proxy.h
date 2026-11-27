@@ -364,7 +364,11 @@ public:
             bool done = false;
             std::exception_ptr error;
         };
-        std::lock_guard<std::mutex> order(command_order_mutex_);
+        std::unique_lock<std::mutex> order(command_order_mutex_, std::try_to_lock);
+        if (!order.owns_lock()) {
+            if (command_waiting_hook_) command_waiting_hook_();  // test seam: this caller waits for an earlier command
+            order.lock();
+        }
         auto outcome = std::make_shared<Outcome>();
         command_op_.start([this, outcome, body = std::move(body)](util::OperationContext& ctx) {
             std::exception_ptr error;
@@ -403,6 +407,10 @@ public:
 
     // Set while no command runs; a command's caller calls it after its body has ended, before it answers.
     void set_command_done_hook(std::function<void()> hook) { command_done_hook_ = std::move(hook); }
+
+    // Set while no command runs; a command's caller calls it when an earlier command holds the order mutex, before it
+    // waits for it, with no lock held.
+    void set_command_waiting_hook(std::function<void()> hook) { command_waiting_hook_ = std::move(hook); }
 
     std::uint64_t command_generation() const { return command_generation_.current(); }
 
@@ -525,7 +533,8 @@ private:
     // Decision 0009 rule 3: false on a loss, so every member throws NotConnected and DeviceState is empty. No
     // LinkLostStamp: nothing here moves on a relink (no #521 consumer).
     std::atomic<bool> connected_{false};
-    std::function<void()> command_done_hook_;  // test seam: set_command_done_hook()
+    std::function<void()> command_done_hook_;     // test seam: set_command_done_hook()
+    std::function<void()> command_waiting_hook_;  // test seam: set_command_waiting_hook()
     // Held by a command's caller across run_command(), so commands reach the upstream in caller order (see the lock
     // order at the top). No other lock is held when it is taken.
     std::mutex command_order_mutex_;

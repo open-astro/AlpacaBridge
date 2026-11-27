@@ -54,4 +54,8 @@ void set_poll_paused_for_testing(RotatorDriver& driver, bool paused);
 // can hold a body before anything reaches the upstream. Set it while no command runs.
 void set_command_hook_for_testing(RotatorDriver& driver, std::function<void()> hook);
 
+// Runs `hook` in a command's caller that finds an earlier command still running, before it waits for it (commands
+// reach the upstream in caller order), so a test knows the caller is waiting. Set it while no command runs.
+void set_command_waiting_hook_for_testing(RotatorDriver& driver, std::function<void()> hook);
+
 }  // namespace alpacacore::vendor::remotealpaca

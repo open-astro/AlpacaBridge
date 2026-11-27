@@ -147,12 +147,12 @@ public:
     // A capability every rotator driver answers while disconnected (the contract sweep's Can getters): then it is
     // what the last Connect read, and true before any Connect read it (IRotatorV3 and later must answer true).
     // Connected, the upstream's answer or its error, which keeps answering while the link is faulted (static
-    // metadata).
+    // metadata). One state-lock hold picks the answer, so a racing Disconnect never makes the read throw NotConnected.
     bool get_can_reverse() const override {
-        if (!proxy_.connected()) {
-            return proxy_.with_state([this](const Proxy::State&) { return limits_.can_reverse.value.value_or(true); });
-        }
-        return proxy_.with_connected([this](const Proxy::State&) { return limits_.can_reverse.get(); });
+        return proxy_.with_state([this](const Proxy::State&) {
+            if (!proxy_.connected()) return limits_.can_reverse.value.value_or(true);
+            return limits_.can_reverse.get();
+        });
     }
 
     // Read at Connect: keeps answering while the link is faulted (static metadata).
@@ -193,7 +193,7 @@ public:
 
     // Forwarded; refused while the link is faulted (decision 0009 rule 1). Written through on success.
     void set_reverse(bool reverse) override {
-        (void)proxy_.with_connected([](const Proxy::State& state) { return state.served().measured_at; });
+        require_frame();
         run([this, reverse](util::OperationContext& ctx) {
             if (command_hook_) command_hook_();
             proxy_.client().put("reverse", {{"Reverse", reverse ? "True" : "False"}});
@@ -212,18 +212,20 @@ public:
         });
     }
 
-    // IRotator.Move: relative to the current Position; the upstream adds it. Refused while the link is faulted.
+    // IRotator.Move: relative to the current Position; the upstream adds it. Refused while the link is faulted. An
+    // offset of 0 has nowhere to go: it writes no IsMoving.
     void move(double position) override {
         validate_angle(position);
-        (void)seen_frame();  // refused while the link is faulted (decision 0009 rule 1)
+        require_frame();
         start_move("move", position, position != 0.0);
     }
 
+    // The frame's Position can be a poll period old (another client, a hand controller or a coasting Halt may have
+    // moved the rotator since), so an absolute move always writes IsMoving true; the next poll has the upstream's.
     void move_absolute(double position) override {
         validate_angle(position);
-        const Seen seen = seen_frame();
-        start_move("moveabsolute", position,
-                   !seen.position || util::wrap_degrees(*seen.position) != util::wrap_degrees(position));
+        require_frame();
+        start_move("moveabsolute", position, true);
     }
 
     // To a raw mechanical angle.
@@ -231,9 +233,8 @@ public:
         validate_angle(position);
         proxy_.require_connected();
         require_mechanical("MoveMechanical");
-        const Seen seen = seen_frame();
-        start_move("movemechanical", position,
-                   !seen.mechanical || util::wrap_degrees(*seen.mechanical) != util::wrap_degrees(position));
+        require_frame();
+        start_move("movemechanical", position, true);  // as MoveAbsolute: the frame's angle may be stale
     }
 
     // The upstream keeps the offset (IRotatorV4: it persists); Position is written through as the synced angle.
@@ -241,7 +242,7 @@ public:
         validate_angle(position);
         proxy_.require_connected();
         require_mechanical("Sync");
-        (void)seen_frame();  // refused while the link is faulted (decision 0009 rule 1)
+        require_frame();
         run([this, position](util::OperationContext& ctx) {
             if (command_hook_) command_hook_();
             proxy_.client().put("sync", {{"Position", number_text(position)}});
@@ -254,6 +255,9 @@ public:
     // Set while no command runs; a command body calls it first, before its PUT.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
 
+    // Set while no command runs; a caller that waits for an earlier command calls it first.
+    void set_command_waiting_hook(std::function<void()> hook) { proxy_.set_command_waiting_hook(std::move(hook)); }
+
 protected:
     // DeviceState's TimeStamp is when the served frame was measured, not the request time (decision 0010).
     std::optional<std::chrono::nanoseconds> device_state_age() const override {
@@ -261,18 +265,9 @@ protected:
     }
 
 private:
-    // Where the frame has the rotator, for whether a move has somewhere to go; read under the state lock and refused
-    // while the link is faulted.
-    struct Seen {
-        std::optional<double> position;
-        std::optional<double> mechanical;
-    };
-
-    Seen seen_frame() const {
-        return proxy_.with_connected([](const Proxy::State& state) {
-            const auto reading = state.served();
-            return Seen{reading.value.position.value, reading.value.mechanical_position.value};
-        });
+    // A command that needs the link: NotConnected, or refused while the link is faulted (decision 0009 rule 1).
+    void require_frame() const {
+        (void)proxy_.with_connected([](const Proxy::State& state) { return state.served().measured_at; });
     }
 
     // NotImplemented for a member an IRotatorV1 or V2 upstream lacks: it is never called, so an upstream that answers
@@ -287,11 +282,11 @@ private:
                               AlpacaError::NotImplemented);
     }
 
-    // The three moves: forwarded in the command slot. IsMoving is written through true when the move has somewhere to
-    // go, so a client reads it true at once; a move with nowhere to go leaves the polled value, since an earlier move
-    // may still run. TargetPosition is the upstream's own, read after the PUT: a failed read leaves it to the next poll
-    // and does not fail a move the upstream took. Position stays the measured one until the next poll, which also
-    // drops any sample taken before the command (decision 0010 rule 4).
+    // The three moves: forwarded in the command slot. IsMoving is written through true when `moves` (every absolute or
+    // mechanical move, a relative one with an offset), so a client reads it true at once; a relative Move of 0 leaves
+    // the polled value, since an earlier move may still run. TargetPosition is the upstream's own, read after the PUT:
+    // a failed read leaves it to the next poll and does not fail a move the upstream took. Position stays the measured
+    // one until the next poll, which also drops any sample taken before the command (decision 0010 rule 4).
     void start_move(const char* member, double position, bool moves) {
         run([this, member, position, moves](util::OperationContext& ctx) {
             if (command_hook_) command_hook_();
@@ -390,6 +385,12 @@ void set_poll_paused_for_testing(RotatorDriver& driver, bool paused) {
 void set_command_hook_for_testing(RotatorDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaRotatorDriver*>(&driver)) {
         remote->set_command_hook(std::move(hook));
+    }
+}
+
+void set_command_waiting_hook_for_testing(RotatorDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaRotatorDriver*>(&driver)) {
+        remote->set_command_waiting_hook(std::move(hook));
     }
 }
 
