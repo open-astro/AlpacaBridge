@@ -57,7 +57,9 @@ struct GeminiRig : PolledRig<FakeGeminiFocuser, alpacacore::FocuserDriver> {
           }) {}
 };
 
-int wire_reads(const FakeGeminiFocuser& fake) { return fake.count(":00#") + fake.count(":01#") + fake.count(":06#"); }
+int wire_reads(const FakeGeminiFocuser& fake) {
+    return fake.count(":00#") + fake.count(":01#") + fake.count(":06#") + fake.count(":24#");
+}
 
 // A blind command is counted when the fake's reader thread has seen it.
 bool wire_saw(const FakeGeminiFocuser& fake, const std::string& prefix) {
@@ -112,7 +114,63 @@ TEST_CASE("Gemini Focuser Snapshot - getters between poll ticks cause no wire re
     CHECK(rig.driver().get_position() == 2500);
     CHECK(rig.driver().get_is_moving() == true);
     CHECK(rig.driver().get_temperature() == Catch::Approx(-3.5));
-    CHECK(wire_reads(rig.fake()) == reads_before + 3);
+    CHECK(wire_reads(rig.fake()) == reads_before + 4);
+}
+
+// Issue #2695: TempComp is served from the polled frame like Position, so a read never waits behind the poll.
+TEST_CASE("Gemini Focuser Snapshot - TempComp reads between poll ticks cause no wire reads",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_temp_comp_reply(true);
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_temp_comp() == true);
+
+    const int reads_before = rig.fake().count(":24#");
+    for (int i = 0; i < 50; ++i) (void)rig.driver().get_temp_comp();
+    CHECK(rig.fake().count(":24#") == reads_before);
+
+    // The next tick measures the device again and the getter follows.
+    rig.fake().set_temp_comp_reply(false);
+    CHECK(rig.driver().get_temp_comp() == true);  // unchanged until the tick
+    rig.tick();
+    CHECK(rig.driver().get_temp_comp() == false);
+    CHECK(rig.fake().count(":24#") == reads_before + 1);
+}
+
+TEST_CASE("Gemini Focuser Snapshot - TempComp is true right after a successful set_temp_comp",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_temp_comp() == false);
+
+    rig.driver().set_temp_comp(true);
+    CHECK(wire_saw(rig.fake(), ":231#"));  // the write still reaches the device
+    CHECK(rig.driver().get_temp_comp() == true);
+}
+
+TEST_CASE("Gemini Focuser Snapshot - a TempComp probe that fails keeps Position and backs off",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_garbage_temp_comp(true);
+    REQUIRE(rig.connect());
+
+    CHECK(rig.driver().get_position() == 1000);
+    try {
+        (void)rig.driver().get_temp_comp();
+        FAIL("expected DriverException");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(rig.fake().count(":24#") == 1);  // the connect-time frame asked once
+
+    rig.tick();
+    rig.tick();
+    CHECK(rig.fake().count(":24#") == 1);  // backed off; Position keeps polling
+
+    rig.fake().set_garbage_temp_comp(false);
+    tick(rig.clock(), 31s, kBound);
+    CHECK(rig.fake().count(":24#") == 2);
+    CHECK(rig.driver().get_temp_comp() == false);
 }
 
 TEST_CASE("Gemini Focuser Snapshot - IsMoving is true right after a successful Move",
@@ -494,19 +552,25 @@ bool reports_loss(const alpacacore::FocuserDriver& driver) {
 
 }  // namespace
 
-TEST_CASE("Gemini Focuser Link - a cable pulled during a command loses the link at once",
+// Falsified by: gemini_focuser_driver.cpp: probe() drop the link_alive() check after measure() (the hangup on the
+// optional :24# read is swallowed and the poll parks for the next tick with the link gone).
+TEST_CASE("Gemini Focuser Link - a cable pulled during a poll's TempComp read ends the poll at once",
           "[gemini][focuser][unit][fake][link-lost]") {
     GeminiRig rig;
     REQUIRE(rig.connect());
     const std::string old_pts = rig.fake().slave_path();
     REQUIRE(alpacacore::util::is_serial_port_in_use(old_pts));
 
-    rig.fake().hold_next_reply(300ms);  // the focuser sits on the ":24#" reply while the cable is pulled
+    // TempComp is read by the poll, never by the getter (#2695): the focuser sits on the ":24#" reply while the cable
+    // is pulled, and the poll must end in this cycle.
+    rig.fake().hold_reply_to(":24#", 300ms);
     std::thread pull = unplug_when_asked(rig.fake(), ":24#", rig.fake().count(":24#"));
     const auto start = std::chrono::steady_clock::now();
-    require_alpaca_error([&] { (void)rig.driver().get_temp_comp(); }, kNotConnected);
+    rig.clock().advance(kTick);
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
     pull.join();
     CHECK(std::chrono::steady_clock::now() - start < 2s);  // the hangup, not a serial timeout
+    CHECK(rig.clock().waiter_count() == 0);
     require_lost(rig.driver(), old_pts);
     // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
     CHECK(reports_loss(rig.driver()));
