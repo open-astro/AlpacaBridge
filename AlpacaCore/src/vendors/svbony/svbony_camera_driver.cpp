@@ -746,8 +746,8 @@ public:
     }
 
     // True from a PulseGuide until the drain has sent every queued pulse and the last one returned from SVBPulseGuide
-    // (#2735). The newest sent pulse's failure is raised until the next PulseGuide or a Connect or Disconnect (the
-    // ASCOM async FAQ).
+    // (#2735). Then the newest sent pulse's failure is raised (the ASCOM async FAQ): a later PulseGuide reads true
+    // again until its own pulse replaces it, and a Connect or Disconnect clears it.
     bool get_is_pulse_guiding() const override {
         if (pulse_draining_.load()) {
             return true;
@@ -1054,7 +1054,6 @@ public:
             throw_not_connected();
         }
         bool start_drain = false;
-        std::optional<std::pair<int, std::string>> previous_failure;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
@@ -1066,7 +1065,6 @@ public:
                                           " pulses are already queued behind the pulse in progress",
                                       AlpacaError::InvalidOperation);
             }
-            previous_failure = std::exchange(pulse_failure_, std::nullopt);
             pulse_queue_.push_back(QueuedPulse{camera_id_, guide_direction, duration});
             start_drain = !pulse_draining_.load();
             pulse_draining_.store(true);
@@ -1084,7 +1082,6 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_queue_.clear();
             pulse_draining_.store(false);
-            pulse_failure_ = std::move(previous_failure);
             throw;
         }
     }
