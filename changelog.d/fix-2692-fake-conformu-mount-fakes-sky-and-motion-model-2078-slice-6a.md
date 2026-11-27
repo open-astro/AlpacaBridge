@@ -1,0 +1,3 @@
+### Changed
+
+- **The SynScan hand-controller fake (`FakeSynScanHandset`) has a ConformU mode that moves like a mount** (issue #2692, slice 6 of #2078). Built from a `FakeMountMotionModel::Config`, it answers from the shared motion model: a GOTO reports slewing and the target only after its travel time (`L`, `e`), a Sync re-labels the reported position, tracking follows the sky and stopped tracking lets RA drift east, and variable- and fixed-rate `P` moves move their axis (an RA move replaces tracking). The site (`w`/`W`) and clock (`h`/`H`) reads and writes are kept. Test-only: no driver code changes, and the SynScan row of the fake ConformU run list stays `pending` with its new reason. Tests: `FakeSynScanHandset ConformU mode` in `test_synscan_telescope.cpp`.
