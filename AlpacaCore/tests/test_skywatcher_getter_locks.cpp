@@ -18,8 +18,6 @@
 // Decision 0005: the budget is wall time spent in a getter, not a driver
 // timeout; no case here waits on a task-clock deadline.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
@@ -497,5 +495,3 @@ TEST_CASE("SkyWatcher getters - the connect's stop-confirm wait holds up no stat
     second->set_connected(false);
     first->set_connected(false);
 }
-
-#endif  // !_WIN32

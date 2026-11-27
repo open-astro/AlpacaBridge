@@ -17,8 +17,6 @@
 // injected latency per transaction (set_reply_latency): a getter that asked the
 // board would pay it and show in transactions_served().
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -692,5 +690,3 @@ TEST_CASE("SkyWatcher snapshot - an explicit disconnect refuses the guide rate a
     require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, lost);
     require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
 }
-
-#endif  // _WIN32

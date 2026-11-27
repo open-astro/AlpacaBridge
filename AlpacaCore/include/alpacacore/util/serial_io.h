@@ -25,10 +25,6 @@
 //                          that into `flags & ~O_NONBLOCK` (i.e. -1 & ~flag)
 //                          can leave the fd non-blocking, spinning a reader
 //                          thread at 100% CPU. The result must be checked.
-//
-// The serial helpers are POSIX-only; callers already wrap their serial code
-// in `#ifndef _WIN32`, so they are compiled into the same branches.
-// errno_string() below is portable and sits outside that guard.
 
 #include <cerrno>
 #include <cstring>
@@ -57,23 +53,14 @@ inline const char* strerror_r_message(int ret, const char* buf) { return ret == 
 // anything else in the expression can clobber it.
 inline std::string errno_string(int err) {
     char buf[256]{};
-#if defined(_WIN32)
-    if (::strerror_s(buf, sizeof(buf), err) != 0) {
-        return "errno " + std::to_string(err);
-    }
-    return std::string(buf);
-#else
     const char* msg = detail::strerror_r_message(::strerror_r(err, buf, sizeof(buf)), buf);
     if (msg == nullptr || *msg == '\0') {
         return "errno " + std::to_string(err);
     }
     return std::string(msg);
-#endif
 }
 
 }  // namespace alpacacore::util
-
-#ifndef _WIN32
 
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -227,5 +214,3 @@ inline bool set_nonblocking(int fd) {
 }
 
 }  // namespace alpacacore::util
-
-#endif  // _WIN32

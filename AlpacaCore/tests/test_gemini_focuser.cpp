@@ -123,8 +123,6 @@ TEST_CASE("Gemini Focuser Driver - Unique IDs", "[gemini][focuser][unit]") {
     CHECK(driver1->get_unique_id() == "GEMINI_FOCUSER_1");
 }
 
-#ifndef _WIN32
-
 TEST_CASE("Gemini Focuser Driver - concurrent set_connected(true) is one transition (#333)",
           "[gemini][focuser][concurrency]") {
     // The focuser was the only Gemini driver without a transition mutex, so
@@ -262,10 +260,6 @@ TEST_CASE("Gemini Focuser Driver - connect/disconnect cycles reuse the port clea
 // else asserts this focuser's CONNECTED capability answers. Gemini is the one
 // of the five that really supports temperature compensation, so
 // TempCompAvailable == true is a claim worth pinning rather than losing.
-//
-// Inside the _WIN32 guard with every other FakeGeminiFocuser case: the fake is
-// pty-backed and POSIX-only, so a case using it outside the guard makes the
-// guard read as if it no longer means anything.
 TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemini][focuser][unit][fake]") {
     alpacacore::test::FakeGeminiFocuser fake;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
@@ -405,8 +399,6 @@ TEST_CASE("Gemini protocol wrapper - a late reply to the previous command is dis
     CHECK(wrapper.get_position() == 2000);
     wrapper.disconnect();
 }
-
-#endif  // _WIN32
 
 // A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
 // errno at once, not a read timeout after serial_timeout_s.

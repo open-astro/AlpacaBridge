@@ -21,8 +21,6 @@
 // (issue #213). The reply-hold sleep (hold_next_reply) stays on wall time: it models
 // transport latency the driver waits for in real time.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/task_clock.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -176,5 +174,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // _WIN32

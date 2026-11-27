@@ -48,8 +48,6 @@
 //      going to read, and a fake whose destructor can hang is worse than one
 //      that drops a frame.
 
-#ifndef _WIN32
-
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -278,5 +276,3 @@ inline std::size_t pty_write_bounded(int fd, const std::string& data, const std:
 }
 
 }  // namespace alpacacore::test
-
-#endif  // _WIN32

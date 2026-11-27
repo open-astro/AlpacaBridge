@@ -17,8 +17,6 @@
 // an acquire that opens the port twice, would show. Run under TSan (sanitizers-tsan, RUN_TSAN=1 pre-flight).
 // The explicit-port factories: the by-index ones scan real /dev/ttyUSB* adapters at connect and never find a pty.
 
-#ifndef _WIN32
-
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
@@ -179,5 +177,3 @@ TEST_CASE("iFR rotator - destruction races an in-flight connect", "[ioptron][ifr
         },
         25);
 }
-
-#endif  // !_WIN32

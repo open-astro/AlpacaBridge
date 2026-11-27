@@ -33,13 +33,9 @@
 
 #include "wandererastro_serial_scan.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <alpacacore/util/serial_link.h>
 #include <errno.h>
 #include <termios.h>
-#endif
 
 namespace alpacacore::vendor::wandererastro {
 
@@ -65,7 +61,6 @@ constexpr const char* kSerialOwner = "WandererCover";
 // cannot park a read and hang Disconnect (#1202).
 constexpr int kReadWindowMs = 500;
 
-#ifndef _WIN32
 // A read error that ends the connected link's read loop: the one serial rule (util::SerialLink, #2262: EIO, ENXIO,
 // ENODEV, EBADF). The connected paths feed it to serial_link_.note_error(), which keeps the verdict on the link.
 bool is_hangup_errno(int err) { return util::is_serial_loss_errno(err); }
@@ -78,7 +73,6 @@ void configure_line(struct termios& tty) {
     util::make_raw_8n1(tty, B19200);
     tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);  // keep DTR high on close — avoids CH340 MCU reset on reopen
 }
-#endif
 
 // Parse one 'A'-delimited status line into a WandererStatus. Returns false if
 // the line does not look like a WandererCover status frame.
@@ -126,7 +120,6 @@ bool parse_status_line(const std::string& line, WandererStatus& out) {
 // and report the model/firmware if one identifies a WandererCover. Returns true
 // on a positive identification.
 bool probe_port(const std::string& port_path, WandererPortInfo& info) {
-#ifndef _WIN32
     // The probe claim is held for exactly this function: a driver that claimed
     // the port first refuses the probe before it opens anything, so the probe
     // never reads (steals) bytes from a connected device's stream.
@@ -179,14 +172,9 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
         info.firmware_version = status.firmware_version;
         return true;
     }
-#else
-    (void)port_path;
-    (void)info;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
 // on, so without this check it would open EVERY serial device on the box --
 // unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
@@ -197,14 +185,12 @@ bool raw_port_looks_like_cover_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wanderer_cover_usb_tokens());
 }
-#endif  // _WIN32
 
 }  // namespace
 
 std::vector<WandererPortInfo> enumerate_wanderer_ports() {
     std::vector<WandererPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -272,7 +258,6 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
             results.push_back(info);
         }
     }
-#endif
 
     return results;
 }
@@ -440,7 +425,6 @@ private:
         }
     }
 
-#ifndef _WIN32
     // Decision 0009 point 3 (issue #1988): the port is gone. Caller holds
     // mutex_ and connected_ is true. The cached status and firmware date are
     // cleared and link_lost_ is stored in one status_mutex_ section, so a
@@ -481,7 +465,6 @@ private:
         }
         lose_link_locked(reason);
     }
-#endif
 
     void send_command(const std::string& code) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -490,21 +473,6 @@ private:
         ALPACA_LOG_TRACE("WandererAstro", "Command: " + code);
         // Loop until the whole payload is written: a short write would drop the
         // trailing '\n', leaving the controller with a buffered partial command.
-#ifdef _WIN32
-        std::size_t total = 0;
-        while (total < payload.size()) {
-            DWORD written = 0;
-            // Guard written == 0: a WriteFile that returns TRUE with 0 bytes
-            // (seen on some CH340/CH341 Windows drivers under backpressure) would
-            // otherwise spin this loop forever while holding mutex_.
-            if (!WriteFile(serial_handle_, payload.data() + total, static_cast<DWORD>(payload.size() - total), &written,
-                           nullptr) ||
-                written == 0) {
-                throw AlpacaException("Serial write failed", AlpacaError::DriverException);
-            }
-            total += written;
-        }
-#else
         if (!serial_link_.write_all(payload)) {
             const int err = errno;
             if (serial_link_.lost()) {  // the link's verdict (#2262)
@@ -514,7 +482,6 @@ private:
             }
             throw AlpacaException("Serial write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#endif
     }
 
     void reader_loop() {
@@ -523,28 +490,6 @@ private:
         while (running_.load()) {
             char ch = 0;
             bool got = false;
-#ifdef _WIN32
-            HANDLE handle;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                handle = serial_handle_;
-            }
-            if (handle == INVALID_HANDLE_VALUE) break;
-            DWORD bytes_read = 0;
-            if (ReadFile(handle, &ch, 1, &bytes_read, nullptr)) {
-                if (bytes_read == 1) {
-                    got = true;
-                }
-                // bytes_read == 0 is the ReadTotalTimeoutConstant window elapsing
-                // with no data — naturally rate-limited, just loop.
-            } else {
-                // I/O error (e.g. device unplugged): back off so the loop doesn't
-                // peg a CPU core until stop_reader() runs. Linux is rate-limited
-                // by the bounded read window and needs no equivalent.
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            const int fd = -1;
-#else
             int fd;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -568,15 +513,13 @@ private:
                 }
                 // Another persistent read error: the read window bounds the
                 // no-data path but not errors, so back off to avoid a CPU spin
-                // until stop_reader() runs. (The Windows branch above does the
-                // same on ReadFile failure.)
+                // until stop_reader() runs.
                 {
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     link_.note_read_error(err);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-#endif
             if (check_link_silence(fd)) {
                 break;  // the fault stood past the staleness bound: the link is lost
             }
@@ -621,7 +564,6 @@ private:
                 if (buffer.size() > MAX_LINE_LEN) buffer.clear();
             }
         }
-#ifndef _WIN32
         if (link_lost_.load()) {
             // Release the port of a lost link here, on the one thread that
             // reads its fd (decision 0009 point 3). The next connect() or
@@ -629,7 +571,6 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             close_serial();
         }
-#endif
     }
 
     // Issue #237: latch a link fault after kCoverLinkSilenceMs without a
@@ -659,18 +600,12 @@ private:
         if (latched.has_value()) {
             ALPACA_LOG_ERROR("WandererAstro", "WandererCover: serial link faulted (" + *latched +
                                                   "); cached status is invalid until frames resume");
-#ifndef _WIN32
             util::restore_serial_line_settings(fd);
-#else
-            (void)fd;
-#endif
         }
-#ifndef _WIN32
         if (stale.has_value()) {
             end_link_from_reader(*stale);
             return true;
         }
-#endif
         return false;
     }
 
@@ -682,38 +617,6 @@ private:
     }
 
     void open_serial() {
-#ifdef _WIN32
-        std::string port_name = "\\\\.\\" + config_.serial_port;
-        serial_handle_ =
-            CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port, AlpacaError::NotConnected);
-        }
-        DCB dcb = {};
-        dcb.DCBlength = sizeof(dcb);
-        if (!GetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            throw AlpacaException("Failed to get serial port state", AlpacaError::DriverException);
-        }
-        dcb.BaudRate = static_cast<DWORD>(config_.baud_rate);
-        dcb.ByteSize = 8;
-        dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
-        dcb.fDtrControl = DTR_CONTROL_ENABLE;
-        dcb.fRtsControl = RTS_CONTROL_ENABLE;
-        if (!SetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
-        COMMTIMEOUTS timeouts = {};
-        timeouts.ReadIntervalTimeout = 50;
-        timeouts.ReadTotalTimeoutConstant = 500;
-        timeouts.ReadTotalTimeoutMultiplier = 0;
-        SetCommTimeouts(serial_handle_, &timeouts);
-        PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
-#else
         // SerialLink claims the port before it opens it (a port another
         // connected device holds is refused untouched, a scan's probe is waited
         // for) and holds it exclusively until close_serial() (#1202).
@@ -724,18 +627,10 @@ private:
             throw AlpacaException(error, AlpacaError::NotConnected);
         }
         tcflush(serial_link_.fd(), TCIOFLUSH);
-#endif
     }
 
     void close_serial() {
-#ifdef _WIN32
-        if (serial_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-        }
-#else
         serial_link_.close();  // releases the port's claim with the fd
-#endif
     }
 
     mutable std::mutex mutex_;         // guards serial handle + connected_/config_
@@ -759,11 +654,7 @@ private:
     std::atomic<bool> link_lost_{false};
     bool connect_hangup_ = false;  // the reader hung up before connect() published the session; guarded by mutex_
 
-#ifdef _WIN32
-    HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
-#else
     util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by mutex_
-#endif
 };
 
 // --- WandererProtocolWrapper public interface forwarding ---

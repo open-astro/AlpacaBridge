@@ -43,8 +43,6 @@
 // last, is what has to extend it. Do not "verify" a change here
 // against the driver's own readback.
 
-#ifndef _WIN32
-
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
@@ -1853,8 +1851,6 @@ TEST_CASE("SkyWatcher pointing - a catalog-built driver maps decAxisSense to the
     CHECK(name_for("normal") == "Sky-Watcher EQMOD direct mount, eps: override normal");
     CHECK(name_for("reversed") == "Sky-Watcher EQMOD direct mount, eps: override reversed");
 }
-
-#endif  // !_WIN32
 
 TEST_CASE("SkyWatcher pointing - a target inside the goto aim-ahead of HA=0 is not re-goto'd for the other branch",
           "[skywatcher][telescope][pointing]") {

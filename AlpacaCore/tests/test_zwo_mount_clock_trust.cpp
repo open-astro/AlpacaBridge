@@ -17,8 +17,6 @@
 // cleared latch, both restored on exit) and drives the re-sync through the driver's hook, FakeZwoMount's command log
 // and FakeTaskClock; real time only bounds a rendezvous.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
@@ -753,5 +751,3 @@ TEST_CASE("ZWO host clock - SiderealTime and the pier sides follow the mount clo
     CHECK(rig.driver->get_side_of_pier() ==
           alpacacore::util::pier_side_for_hour_angle(alpacacore::util::wrap_hour_angle(mount_lst - ra)));
 }
-
-#endif  // _WIN32

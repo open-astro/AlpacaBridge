@@ -18,8 +18,6 @@
 // to return an Alpaca error instead, kept until a later valid command
 // (AbortSlew, a new slew initiator, disconnect) clears it.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/motion_guards.h>
@@ -1197,5 +1195,3 @@ TEST_CASE("SkyWatcher sync - each Connect exempts its first Sync again", "[skywa
     CHECK(mount.frames_seen('E') == writes_before);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

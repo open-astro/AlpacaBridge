@@ -14,7 +14,6 @@
 // handset: the connected link holds its port through SerialLink, a connect to
 // a port another device holds is refused with the holder's name, and a port
 // another program retunes cannot hang a command or disconnect.
-#ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
@@ -125,5 +124,3 @@ TEST_CASE("ZWO mount serial - EBADF on the mount's fd is a lost link until the n
     CHECK(wrapper.send_command(":GVP") == "AM5");
     wrapper.disconnect();
 }
-
-#endif  // _WIN32

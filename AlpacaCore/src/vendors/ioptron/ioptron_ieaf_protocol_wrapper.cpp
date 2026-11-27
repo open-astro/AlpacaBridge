@@ -28,14 +28,12 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::ioptron {
 
@@ -54,10 +52,8 @@ constexpr int READ_CHAR_TIMEOUT_MS = 1000;
 // registry (#1202): the iEAF and the iAFS2/3 are one kind of device to it.
 constexpr const char* kSerialOwner = "iOptron focuser";
 
-#ifndef _WIN32
 // The iEAF runs at a fixed 115200 8N1 raw, whatever the config's baud says.
 void configure_ieaf_line(struct termios& tty) { util::make_raw_8n1(tty, B115200); }
-#endif
 
 bool parse_device_info(const std::string& resp, IeafDeviceInfo& out) {
     // ":DeviceInfo#" → "%6d%2d%4d#": position, model code, firmware/build.
@@ -92,7 +88,6 @@ bool ieaf_refuses_model(std::int32_t model) {
 // straight to the focuser MCU — no Arduino-style DTR reset on open, so no
 // CH340 HUPCL dance is needed here.
 bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info) {
-#ifndef _WIN32
     // The probe claim waits out another scan's probe of this port (the mount
     // and the iEFW scans match the same Prolific adapters) and is held until
     // this function returns.
@@ -132,14 +127,9 @@ bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info) {
             return true;
         }
     }
-#else
-    (void)port_path;
-    (void)info;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 namespace {
 // The raw /dev/ttyUSBn fallback has no by-id symlink name to filter on;
 // restrict it to Prolific PL2303-class adapters (the bridge the iEAF ships
@@ -152,12 +142,10 @@ bool raw_port_looks_like_ieaf_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, ieaf_usb_tokens());
 }
 }  // namespace
-#endif
 
 std::vector<IeafPortInfo> enumerate_ieaf_ports() {
     std::vector<IeafPortInfo> results;
 
-#ifndef _WIN32
     // Canonical paths already probed via by-id, so the raw-node pass below
     // never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -252,7 +240,6 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
                                        std::to_string(info.firmware) + ")");
         results.push_back({c.path, c.name, info});
     }
-#endif
 
     return results;
 }
@@ -397,7 +384,6 @@ private:
     }
 
     void connect_serial() {
-#ifndef _WIN32
         // SerialLink claims the port (a port another connected device holds is
         // refused, naming it), takes TIOCEXCL and keeps the fd non-blocking.
         std::string error;
@@ -408,16 +394,11 @@ private:
         }
 
         tcflush(link_.fd(), TCIOFLUSH);
-#else
-        throw AlpacaException("iEAF driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     void disconnect_locked() {
         connected_ = false;
-#ifndef _WIN32
         link_.close();  // releases TIOCEXCL and the registry claim
-#endif
     }
 
     void set_fault(const std::string& text) {
@@ -441,15 +422,12 @@ private:
     }
 
     void tcflush_port() {
-#ifndef _WIN32
         if (link_) {
             tcflush(link_.fd(), TCIOFLUSH);
         }
-#endif
     }
 
     void write_data(const std::string& data) {
-#ifndef _WIN32
         if (!link_.write_all(data)) {
             const int err = errno;
             if (link_.lost()) {
@@ -457,14 +435,10 @@ private:
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#else
-        (void)data;
-#endif
     }
 
     std::string read_response() {
         std::string response;
-#ifndef _WIN32
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
         const auto r = util::read_until(
@@ -480,9 +454,6 @@ private:
             default:
                 throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
         }
-#else
-        throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
-#endif
 
         ALPACA_LOG_TRACE("iOptron", "iEAF response: " + response);
         return response;
@@ -510,7 +481,6 @@ private:
         ALPACA_LOG_TRACE("iOptron", "iEAF command (blind): " + cmd);
         tcflush_port();
         write_data(cmd);
-#ifndef _WIN32
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
@@ -525,7 +495,6 @@ private:
         if (r.outcome == util::ReadOutcome::LinkDead) {
             fail_link_locked("iEAF serial link lost (errno " + std::to_string(r.err) + ")");
         }
-#endif
         ALPACA_LOG_DEBUG("iOptron", "iEAF no ack for " + cmd);
     }
 
@@ -538,9 +507,7 @@ private:
     mutable std::mutex fault_mutex_;
     std::string fault_;
 
-#ifndef _WIN32
     util::SerialLink link_;
-#endif
 };
 
 // --- IeafProtocolWrapper public interface forwarding ---

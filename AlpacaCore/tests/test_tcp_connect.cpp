@@ -12,8 +12,6 @@
 
 // util::connect_tcp (#2711): the bounded outbound TCP connect, against loopback listeners and injected resolvers.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/tcp_connect.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -189,5 +187,3 @@ TEST_CASE("TCP connect - a cancel ends a pending host name lookup", "[util][tcp]
     CHECK(t.took < std::chrono::milliseconds(500));
     CHECK(t.result.error == "cancelled");
 }
-
-#endif  // !_WIN32

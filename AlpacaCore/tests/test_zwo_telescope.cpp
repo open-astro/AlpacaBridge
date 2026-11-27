@@ -32,12 +32,10 @@
 #include "getter_stall_probe.h"
 #include "sidereal_time_check.h"
 
-#ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_mount.h"
-#endif
 
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -337,8 +335,6 @@ TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo
     CHECK_FALSE(driver->get_connecting());
     require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
 }
-
-#ifndef _WIN32
 
 // ── The client-clock disagreement warning (#409) ─────────────────────────────
 
@@ -781,9 +777,6 @@ TEST_CASE("ZWO mount site longitude converts between east-positive API and west-
     }
 }
 
-#endif  // _WIN32
-
-#ifndef _WIN32
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under a second", "[zwo][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
@@ -809,9 +802,7 @@ TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under 
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
 }
-#endif
 
-#ifndef _WIN32
 namespace {
 
 // The AM5 for the getter-stall cases: a FakeZwoMount on a FakeTaskClock. A case holds one exchange open with
@@ -1044,8 +1035,6 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
     worker.join();
     CHECK_FALSE(driver->get_connected());
 }
-
-#endif
 
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 

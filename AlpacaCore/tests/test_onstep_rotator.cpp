@@ -40,11 +40,9 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "rotator_sync_offset_test_dir.h"
-#ifndef _WIN32
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "onstep_controller.h"
-#endif
 
 namespace onstep = alpacacore::vendor::onstep;
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -135,8 +133,6 @@ TEST_CASE("OnStep Rotator Driver - a mechanical angle maps into the firmware's t
     CHECK_FALSE(rotator_angle_within_travel(200.0, 90.0, 0.0, 180.0).has_value());
     CHECK_FALSE(rotator_angle_within_travel(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 180.0).has_value());
 }
-
-#ifndef _WIN32
 
 namespace {
 
@@ -693,5 +689,3 @@ TEST_CASE("OnStep shared link - no other exchange lands between a rotator move a
     telescope->set_connected(false);
     rotator->set_connected(false);
 }
-
-#endif  // !_WIN32

@@ -213,15 +213,10 @@ LocalTimeInfo compute_local_timezone_info(std::time_t base_time) {
     LocalTimeInfo info{};
     std::tm local_tm {};
     std::tm utc_tm {};
-#ifdef _WIN32
-    localtime_s(&local_tm, &base_time);
-    gmtime_s(&utc_tm, &base_time);
-#else
     // Reentrant forms: the re-sync body (open-astro#2419) runs this off the client's thread, and any other thread of
     // the process (another driver, the server) may be in localtime/gmtime, whose shared std::tm it would overwrite.
     localtime_r(&base_time, &local_tm);
     gmtime_r(&base_time, &utc_tm);
-#endif
     std::time_t local_time = std::mktime(&local_tm);
     std::time_t utc_as_local = std::mktime(&utc_tm);
     double offset_seconds = std::difftime(local_time, utc_as_local);
@@ -1072,11 +1067,7 @@ private:
         LocalTimeInfo tz_info = compute_local_timezone_info(utc_time_t);
 
         std::tm local_tm {};
-#ifdef _WIN32
-        localtime_s(&local_tm, &utc_time_t);
-#else
         localtime_r(&utc_time_t, &local_tm);  // reentrant, as in compute_local_timezone_info()
-#endif
 
         TimeInfo info;
         info.hour = local_tm.tm_hour;

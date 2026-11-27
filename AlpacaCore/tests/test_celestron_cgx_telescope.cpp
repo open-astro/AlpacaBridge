@@ -37,14 +37,12 @@
 #include <thread>
 #include <vector>
 
-#ifndef _WIN32
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <cstdio>
 #include <memory>
-#endif
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
@@ -840,7 +838,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
     CHECK_FALSE(driver->get_connected());
 }
 
-#ifndef _WIN32
 // Issue #1457: a stop retry must not wait for another device's probe on the
 // node. Since #1456 a port claim waits out such a probe (up to 20 s per
 // attempt); since #1759 the retry runs with mutex_ free, so no getter that
@@ -944,7 +941,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     write.get();
     release.get();
 }
-#endif
 
 TEST_CASE("Celestron CGX USB Telescope Driver - stop communication failures persist through completion properties",
           "[celestron][cgx][telescope][integration]") {
@@ -1585,7 +1581,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM er
     require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
 }
 
-#ifndef _WIN32
 TEST_CASE("Celestron CGX USB Telescope Driver - home timeout names the axis still pending",
           "[celestron][cgx][telescope][integration]") {
     using namespace std::chrono_literals;
@@ -2228,7 +2223,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     second->set_connected(false);
 }
 
-#ifndef _WIN32
 TEST_CASE("Celestron CGX USB Telescope Driver - a logical reconnect discards AUX bytes that arrived while disconnected",
           "[celestron][cgx][telescope][integration]") {
     // Rig 2026-11-22: after an hour logically disconnected on the held fd, the first GET_VER read a backlog of stale
@@ -2259,7 +2253,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a logical reconnect discards AUX
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
-#endif
 
 TEST_CASE("Celestron CGX USB Telescope Driver - continuity budget expires on the injected clock",
           "[celestron][cgx][telescope][continuity-clock]") {
@@ -5058,4 +5051,3 @@ TEST_CASE("Celestron CGX USB Telescope Driver - the travel guard takes the state
     CHECK(polled_steps >= 60);  // stopped at the 60 s point, past the 90 deg a re-home may start from
     CHECK(mount.count_command(0x10, 0x0b) == 1);
 }
-#endif

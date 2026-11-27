@@ -24,8 +24,6 @@
 // connect in flight. Operations racing a disconnect are EXPECTED to throw;
 // what must never happen is a crash, hang, or TSan report.
 
-#ifndef _WIN32
-
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/telescope_driver.h>
@@ -470,5 +468,3 @@ TEST_CASE("iEAF focuser - destruction races an in-flight connect", "[ioptron][fo
         },
         25);
 }
-
-#endif  // !_WIN32

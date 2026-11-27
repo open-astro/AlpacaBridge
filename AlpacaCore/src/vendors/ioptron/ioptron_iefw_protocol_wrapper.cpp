@@ -28,14 +28,12 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::ioptron {
 
@@ -66,11 +64,9 @@ constexpr int READ_CHAR_TIMEOUT_MS = 1000;
 // registry (#1202).
 constexpr const char* kSerialOwner = "iOptron filter wheel";
 
-#ifndef _WIN32
 // The iEFW's fixed 115200 8N1 raw mode. Shared by the auto-detect probe and
 // the live connection.
 void configure_iefw_line(struct termios& tty) { util::make_raw_8n1(tty, B115200); }
-#endif
 
 }  // namespace
 
@@ -100,7 +96,6 @@ bool iefw_refuses_model(std::int32_t model) {
 // fills `info`) only if the reply parses and its code names no other product.
 // Prolific PL2303 bridge like the focusers: no DTR-reset quirk on open.
 bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info) {
-#ifndef _WIN32
     // The probe claim waits out another scan's probe of this port (the mount
     // and the iEAF scans match the same Prolific adapters) and is held until
     // this function returns.
@@ -140,14 +135,9 @@ bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info) {
             return true;
         }
     }
-#else
-    (void)port_path;
-    (void)info;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 namespace {
 // Raw /dev/ttyUSBn nodes have no by-id name to filter on; restrict the
 // fallback to Prolific PL2303-class adapters. The iOptron mount and the
@@ -159,12 +149,10 @@ bool raw_port_looks_like_iefw_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, iefw_usb_tokens());
 }
 }  // namespace
-#endif
 
 std::vector<IefwPortInfo> enumerate_iefw_ports() {
     std::vector<IefwPortInfo> results;
 
-#ifndef _WIN32
     std::set<std::string> probed;
 
     struct Candidate {
@@ -254,7 +242,6 @@ std::vector<IefwPortInfo> enumerate_iefw_ports() {
                                        std::to_string(info.firmware) + ")");
         results.push_back({c.path, c.name, info});
     }
-#endif
 
     return results;
 }
@@ -417,7 +404,6 @@ private:
     }
 
     void connect_serial() {
-#ifndef _WIN32
         // SerialLink claims the port (a port another connected device holds is
         // refused, naming it), takes TIOCEXCL and keeps the fd non-blocking.
         std::string error;
@@ -427,16 +413,11 @@ private:
             throw AlpacaException(error, AlpacaError::NotConnected);
         }
         tcflush(link_.fd(), TCIOFLUSH);
-#else
-        throw AlpacaException("iEFW driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     void disconnect_locked() {
         connected_ = false;
-#ifndef _WIN32
         link_.close();  // releases TIOCEXCL and the registry claim
-#endif
     }
 
     void set_fault(const std::string& text) {
@@ -465,15 +446,12 @@ private:
     }
 
     void tcflush_port() {
-#ifndef _WIN32
         if (link_) {
             tcflush(link_.fd(), TCIOFLUSH);
         }
-#endif
     }
 
     void write_data(const std::string& data) {
-#ifndef _WIN32
         if (!link_.write_all(data)) {
             const int err = errno;
             if (link_.lost()) {
@@ -481,14 +459,10 @@ private:
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#else
-        (void)data;
-#endif
     }
 
     std::string read_response() {
         std::string response;
-#ifndef _WIN32
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
         const auto r = util::read_until(
@@ -504,9 +478,6 @@ private:
             default:
                 throw AlpacaException("iEFW read timeout", AlpacaError::DriverException);
         }
-#else
-        throw AlpacaException("iEFW read timeout", AlpacaError::DriverException);
-#endif
 
         ALPACA_LOG_TRACE("iOptron", "iEFW response: " + response);
         return response;
@@ -531,7 +502,6 @@ private:
         ALPACA_LOG_TRACE("iOptron", "iEFW command (ack): " + cmd);
         tcflush_port();
         write_data(cmd);
-#ifndef _WIN32
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
@@ -546,7 +516,6 @@ private:
         if (r.outcome == util::ReadOutcome::LinkDead) {
             fail_link_locked("iEFW serial link lost (errno " + std::to_string(r.err) + ")");
         }
-#endif
         ALPACA_LOG_DEBUG("iOptron", "iEFW no ack for " + cmd);
     }
 
@@ -559,9 +528,7 @@ private:
     mutable std::mutex fault_mutex_;
     std::string fault_;
 
-#ifndef _WIN32
     util::SerialLink link_;
-#endif
 };
 
 // --- IefwProtocolWrapper public interface forwarding ---

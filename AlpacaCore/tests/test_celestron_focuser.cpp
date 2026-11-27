@@ -40,7 +40,6 @@
 #include "connect_hold_gate.h"
 #include "driver_rig.h"
 
-#ifndef _WIN32
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -48,7 +47,6 @@
 #include "fake_celestron_focuser.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
-#endif
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::vendor::celestron::create_celestron_focuser;
@@ -123,8 +121,6 @@ TEST_CASE("Celestron Focuser Driver - Connect to a missing port fails", "[celest
     require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
 }
-
-#ifndef _WIN32
 
 using alpacacore::test::FakeCelestronFocuser;
 using alpacacore::test::FakeTaskClock;
@@ -986,5 +982,3 @@ TEST_CASE("Celestron Focuser Driver - FakeCelestronFocuser travel mode: a Halt s
     std::this_thread::sleep_for(50ms);
     CHECK(rig.fake().raw_position() == stopped);
 }
-
-#endif  // _WIN32

@@ -36,15 +36,12 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
-#include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
 
-#ifndef _WIN32
 #include <filesystem>
-#endif
 
 namespace alpacacore::vendor::synscan {
 
@@ -62,16 +59,13 @@ constexpr int kSocketTimeoutMs = 200;
 // device holds, and lists one a SynScan mount holds without opening it.
 constexpr const char* kSerialOwner = "SynScan mount";
 
-#ifndef _WIN32
 // 9600 8N1 raw, no flow control: the handset's only rate.
 void configure_synscan_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
-#endif
 
 // Probe a serial port for a SynScan hand controller using the echo command (Kx).
 // Returns HC firmware version string (e.g. "04.42.00") on success, empty on failure.
 // SynScan V command returns 6 hex-ASCII digits (e.g. "042A00#"), unlike NexStar binary format.
 std::string probe_synscan_port(const std::string& port_path) {
-#ifndef _WIN32
     // Probe claim, held for exactly this function: a connected device's port
     // is refused before it is opened, another scan's probe is waited for.
     std::string error;
@@ -152,13 +146,8 @@ std::string probe_synscan_port(const std::string& port_path) {
     }
 
     return "";
-#else
-    (void)port_path;
-    return "";
-#endif
 }
 
-#ifndef _WIN32
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
 // on, so without this check it would open EVERY serial device on the box --
 // unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
@@ -190,14 +179,12 @@ bool synscan_candidate_free(const std::string& resolved, const std::string& name
     }
     return true;
 }
-#endif  // _WIN32
 
 } // anonymous namespace
 
 std::vector<SynScanPortInfo> enumerate_synscan_ports() {
     std::vector<SynScanPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -269,7 +256,6 @@ std::vector<SynScanPortInfo> enumerate_synscan_ports() {
             results.push_back({resolved, "", fw});
         }
     }
-#endif
 
     return results;
 }
@@ -831,48 +817,6 @@ public:
 
 private:
     bool connect_serial(const std::string& port_path, int baud_rate) {
-#ifdef _WIN32
-        std::string full_port = port_path;
-        if (full_port.rfind("\\\\.\\", 0) != 0) {
-            full_port = "\\\\.\\" + full_port;
-        }
-        serial_handle_ = CreateFileA(
-            full_port.c_str(),
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            0,
-            nullptr);
-        if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        DCB dcb{};
-        dcb.DCBlength = sizeof(dcb);
-        if (!GetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-        dcb.BaudRate = static_cast<DWORD>(baud_rate);
-        dcb.ByteSize = 8;
-        dcb.StopBits = ONESTOPBIT;
-        dcb.Parity = NOPARITY;
-        if (!SetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-
-        COMMTIMEOUTS timeouts{};
-        timeouts.ReadIntervalTimeout = 50;
-        timeouts.ReadTotalTimeoutConstant = 50;
-        timeouts.ReadTotalTimeoutMultiplier = 10;
-        timeouts.WriteTotalTimeoutConstant = 50;
-        timeouts.WriteTotalTimeoutMultiplier = 10;
-        SetCommTimeouts(serial_handle_, &timeouts);
-        return true;
-#else
         speed_t speed = B9600;
         switch (baud_rate) {
             case 9600: speed = B9600; break;
@@ -905,41 +849,9 @@ private:
         // is what echo_test()'s drain-past-stale-tokens loop is for.
         tcflush(serial_fd_, TCIOFLUSH);
         return true;
-#endif
     }
 
     bool connect_network(const std::string& host, int port) {
-#ifdef _WIN32
-        socket_handle_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (socket_handle_ == INVALID_SOCKET) {
-            return false;
-        }
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<unsigned short>(port));
-        addr.sin_addr.s_addr = inet_addr(host.c_str());
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
-            // getaddrinfo is the reentrant replacement for gethostbyname.
-            addrinfo hints{};
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-            addrinfo* result = nullptr;
-            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
-                closesocket(socket_handle_);
-                socket_handle_ = INVALID_SOCKET;
-                return false;
-            }
-            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-            freeaddrinfo(result);
-        }
-        if (::connect(socket_handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-            return false;
-        }
-        configure_network_timeouts();
-        return true;
-#else
         constexpr int kConnectTimeoutMs = 7000;
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
@@ -999,33 +911,18 @@ private:
         }
         configure_network_timeouts();
         return true;
-#endif
     }
 
     void disconnect_serial() {
-#ifdef _WIN32
-        if (serial_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-        }
-#else
         serial_fd_ = -1;
         link_.close();
-#endif
     }
 
     void disconnect_network() {
-#ifdef _WIN32
-        if (socket_handle_ != INVALID_SOCKET) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-        }
-#else
         if (socket_fd_ >= 0) {
             close(socket_fd_);
             socket_fd_ = -1;
         }
-#endif
     }
 
     bool write_data(const std::string& data) {
@@ -1036,68 +933,23 @@ private:
     }
 
     bool write_serial(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > std::numeric_limits<DWORD>::max()) {
-            return false;
-        }
-        // Loop until the whole payload is written so a short WriteFile (which can
-        // return TRUE with bytes_written < requested under backpressure) can't
-        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
-        std::size_t total = 0;
-        while (total < data_size) {
-            DWORD bytes_written = 0;
-            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
-                           nullptr) ||
-                bytes_written == 0) {
-                return false;
-            }
-            total += bytes_written;
-        }
-        return true;
-#else
         return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
-#endif
     }
 
     bool write_network(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            return false;
-        }
-        // Loop over short sends so partial bytes can't corrupt the next
-        // command's framing (mirrors the POSIX send_all path below).
-        std::size_t total = 0;
-        while (total < data_size) {
-            int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
-            if (bytes_sent <= 0) {
-                return false;
-            }
-            total += static_cast<std::size_t>(bytes_sent);
-        }
-        return true;
-#else
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
         // the server.
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
-#endif
     }
 
     // One reply read for both transports: util::read_until on the tty or
     // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
     // old 10 ms pacing sleep is gone.
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
-#ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
             return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
-#else
-        (void)spec;
-        (void)deadline;
-        throw AlpacaException("SynScan mount reads are Linux-only");
-#endif
     }
 
     // A hangup on a read (decision 0009 rule 2a): the port is gone over serial, the peer closed or reset the stream
@@ -1232,19 +1084,11 @@ private:
     }
 
     void configure_network_timeouts() {
-#ifdef _WIN32
-        DWORD timeout = kSocketTimeoutMs;
-        setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-#else
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-#endif
     }
 
 private:
@@ -1261,14 +1105,9 @@ private:
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
-#ifdef _WIN32
-    HANDLE serial_handle_;
-    SOCKET socket_handle_;
-#else
     util::SerialLink link_;
     int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
-#endif
     std::string last_connect_error_;
 };
 

@@ -27,8 +27,6 @@
 // follows :ST1#/:ST0#, a :Z pulse and the arrows move the axes at the guide and :SR rates, :SLO/:SLA set the site and
 // :SUT/:GUT keep the mount's clock. The scripted behaviour above is the default and does not change.
 
-#ifndef _WIN32
-
 #include <poll.h>
 #include <unistd.h>
 
@@ -777,5 +775,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

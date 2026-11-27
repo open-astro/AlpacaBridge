@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 //
 // Motion-owner follow-ups (issue #2467): tests that pin the #2263 motion-claim table for this driver.
-#ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -265,5 +264,3 @@ TEST_CASE("SkyWatcher motion owner - a superseded pulse dispatch logs INFO, not 
     driver->move_axis(1, 0.0);
     driver->set_connected(false);
 }
-
-#endif  // !_WIN32

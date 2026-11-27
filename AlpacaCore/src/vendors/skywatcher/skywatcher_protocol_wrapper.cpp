@@ -20,7 +20,6 @@
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
-#ifndef _WIN32
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,7 +34,6 @@
 #include <unistd.h>
 
 #include <filesystem>
-#endif
 
 #include <algorithm>
 #include <atomic>
@@ -317,7 +315,6 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
 
 // ── Serial probe / enumeration ──────────────────────────────────────────────
 
-#ifndef _WIN32
 namespace {
 
 // Operator-facing owner name for the serial-port registry (#1202): the probe
@@ -455,12 +452,10 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, skywatcher_usb_tokens());
 }
 }  // namespace
-#endif  // _WIN32
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     std::vector<SkyWatcherPortInfo> results;
 
-#ifndef _WIN32
     std::set<std::string> probed;
 
     // One candidate, in scan order (#1202; issue #230 before it). A port
@@ -533,7 +528,6 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         probed.insert(resolved);
         consider(resolved, "");
     }
-#endif
 
     return results;
 }
@@ -542,7 +536,6 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
 
 namespace {
 
-#ifndef _WIN32
 // Probe one host with ":e1\r" over UDP. Returns firmware string or empty.
 std::string probe_skywatcher_udp(const std::string& host, int port, int timeout_ms) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -651,13 +644,11 @@ void broadcast_discover(std::vector<SkyWatcherHostInfo>& results, int port, int 
     }
     close(fd);
 }
-#endif  // _WIN32
 
 }  // namespace
 
 std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
     std::vector<SkyWatcherHostInfo> results;
-#ifndef _WIN32
     constexpr int kPort = 11880;
     // AP-mode address per the MC command set spec.
     std::string fw = probe_skywatcher_udp("192.168.4.1", kPort, 500);
@@ -666,9 +657,6 @@ std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
         ALPACA_LOG_INFO("SkyWatcher", "Found motor controller at 192.168.4.1 (MC firmware " + fw + ")");
     }
     broadcast_discover(results, kPort, timeout_ms);
-#else
-    (void)timeout_ms;
-#endif
     return results;
 }
 
@@ -704,11 +692,9 @@ public:
                                    std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
         connected_ = ok;
-#ifndef _WIN32
         // A connect, failed or done, leaves the serial link's verdict clear (#2262); a loss in the driver's
         // handshake that follows latches it again.
         link_.clear_loss();
-#endif
         return ok;
     }
 
@@ -732,9 +718,7 @@ public:
     // outage-length decision.
     void clear_loss_locked() {
         link_lost_.store(false);
-#ifndef _WIN32
         link_.clear_loss();
-#endif
         std::lock_guard<std::mutex> lock(health_mutex_);
         lost_fault_.clear();
     }
@@ -772,7 +756,6 @@ public:
             // judge the current one.
             return connected_.load() && !link_lost_.load();
         }
-#ifndef _WIN32
         bool present = true;
         const std::uint64_t generation = session_generation();
         {
@@ -808,7 +791,6 @@ public:
             }
             return false;
         }
-#endif
         return connected_.load();
     }
 
@@ -856,7 +838,6 @@ public:
                     note_exchange_ok();
                 } else if (exchange_timed_out_) {
                     note_exchange_failed(e.what());
-#ifndef _WIN32
                     // open-astro#912: line settings belong to the tty, not the
                     // fd, so another process's open can leave it at the wrong
                     // rate while this fd keeps talking. Re-apply ours on every
@@ -864,7 +845,6 @@ public:
                     if (info_.type == ConnectionType::Serial) {
                         (void)link_.restore_line_settings();
                     }
-#endif
                 }
             }
             throw;
@@ -1049,19 +1029,16 @@ private:
         // link_path_ is cleared below it has no node to check, so a later
         // store left Connected reading true mid-close (open-astro#882).
         connected_ = false;
-#ifndef _WIN32
         {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             link_path_.clear();
         }
-#endif
         {
             // open-astro#505: a fault belongs to the session that latched it.
             std::lock_guard<std::mutex> lock(health_mutex_);
             link_health_.reset();
             ++session_generation_;
         }
-#ifndef _WIN32
         // SerialLink::close() drops TIOCEXCL (open-astro#912: the flag lives on
         // the tty and survives our close while anything else still holds it
         // open, so a reconnect would fail EBUSY), closes the fd and releases
@@ -1072,7 +1049,6 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
-#endif
     }
 
     // Decision 0009 point 2: a socket errno is lost-at-once only when it says
@@ -1104,7 +1080,6 @@ private:
         throw AlpacaException(what + "; network link to the motor controller lost", AlpacaError::NotConnected);
     }
 
-#ifndef _WIN32
     // open-astro#445: the serial fd is unusable (the adapter left the bus).
     // Close it -- releasing the port name and its registry claim -- and report
     // NotConnected, which is what the client needs to act on, rather than a
@@ -1135,10 +1110,8 @@ private:
         (void)link_.note_error(err);
         return link_.lost() || serial_node_removed_locked();
     }
-#endif
 
     bool connect_serial(const ConnectionInfo& info) {
-#ifndef _WIN32
         // SerialLink::open (#1202) claims the port in the cross-vendor registry
         // BEFORE opening it (issue #230: a by-id symlink and its /dev/ttyUSBn
         // target compare equal there), so a port another connected device
@@ -1192,14 +1165,9 @@ private:
                                 util::errno_string(errno));
         }
         return true;
-#else
-        (void)info;
-        return false;
-#endif
     }
 
     bool connect_udp(const ConnectionInfo& info) {
-#ifndef _WIN32
         socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd_ < 0) {
             connect_failure_ = "no network socket could be created (" + util::errno_string(errno) + ")";
@@ -1248,10 +1216,6 @@ private:
             return false;
         }
         return true;
-#else
-        (void)info;
-        return false;
-#endif
     }
 
     // Absorb a late reply on the serial link: read and discard everything
@@ -1276,30 +1240,20 @@ private:
     // never relies on VTIME, so the caller's deadline is always enforced, on
     // every tty.
     int poll_serial_readable(int budget_ms) {
-#ifndef _WIN32
         struct pollfd pfd {};
         pfd.fd = serial_fd_;
         pfd.events = POLLIN;
         pfd.revents = 0;
         return ::poll(&pfd, 1, budget_ms);
-#else
-        (void)budget_ms;
-        return 0;
-#endif
     }
 
     // Mirror of poll_serial_readable for the write side.
     int poll_serial_writable(int budget_ms) {
-#ifndef _WIN32
         struct pollfd pfd {};
         pfd.fd = serial_fd_;
         pfd.events = POLLOUT;
         pfd.revents = 0;
         return ::poll(&pfd, 1, budget_ms);
-#else
-        (void)budget_ms;
-        return 0;
-#endif
     }
 
     // Write the whole frame on the non-blocking fd, bounded by a deadline SHARED
@@ -1312,7 +1266,6 @@ private:
     // POLLOUT until the deadline instead, the write-side mirror of the poll-bounded
     // reads. errno is left set on failure for the caller's link-loss classification.
     bool write_all_bounded(const char* data, std::size_t len, std::chrono::steady_clock::time_point deadline) {
-#ifndef _WIN32
         std::size_t total = 0;
         while (total < len) {
             const auto remaining =
@@ -1354,16 +1307,9 @@ private:
             return false;
         }
         return true;
-#else
-        (void)data;
-        (void)len;
-        (void)deadline;
-        return false;
-#endif
     }
 
     void settle_serial(int window_ms) {
-#ifndef _WIN32
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
         for (;;) {
             const auto remaining =
@@ -1402,13 +1348,9 @@ private:
             }
         }
         tcflush(serial_fd_, TCIFLUSH);
-#else
-        (void)window_ms;
-#endif
     }
 
     std::string exchange_serial(const std::string& frame, int timeout_ms, int attempts = 1) {
-#ifndef _WIN32
         for (int attempt = 0; attempt < attempts; ++attempt) {
             // Leftover bytes from a timed-out earlier exchange would be parsed
             // as this command's reply — drain them first. A plain flush only
@@ -1527,16 +1469,9 @@ private:
             throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");
         }
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");  // unreachable
-#else
-        (void)frame;
-        (void)timeout_ms;
-        (void)attempts;
-        throw AlpacaException("Serial not supported on this platform");
-#endif
     }
 
     std::string exchange_udp(const std::string& frame, int timeout_ms, int expected_data_len) {
-#ifndef _WIN32
         for (int attempt = 0; attempt < kUdpRetries; ++attempt) {
             // Drain any stale datagram (a late reply to a timed-out command)
             // before sending, so replies can't get off-by-one.
@@ -1628,14 +1563,8 @@ private:
         exchange_timed_out_ = true;
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "' after " +
                               std::to_string(kUdpRetries) + " attempts");
-#else
-        (void)frame;
-        (void)timeout_ms;
-        throw AlpacaException("Network not supported on this platform");
-#endif
     }
 
-#ifndef _WIN32
     void drain_udp() {
         char buf[64];
         while (true) {
@@ -1737,7 +1666,6 @@ private:
             }
         }
     }
-#endif
 
     SerialRead serial_read_;
     SerialWrite serial_write_;
@@ -1746,7 +1674,6 @@ private:
     std::atomic<bool> connected_{false};
     ConnectionInfo info_{};
     std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
-#ifndef _WIN32
     // The connected serial port (#1202): registry claim + fd + TIOCEXCL, and
     // the line settings re-applied on silence (#912). Closed while
     // disconnected or on UDP. serial_fd_ is link_.fd() while it is open.
@@ -1793,9 +1720,6 @@ private:
     bool link_dirty_ = false;
     bool serial_dirty_ = false;  // a serial exchange timed out; settle before the next write
     std::string fw_reply_;
-#endif
-    // Outside the platform guard: connect()/default_timeout() touch it on
-    // every platform (the Windows stubs still compile against it).
     std::atomic<int> response_timeout_ms_{1000};
 };
 

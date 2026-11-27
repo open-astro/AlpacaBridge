@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 //
 // Motion-owner follow-ups (issue #2467): tests that pin the #2263 motion-claim table for this driver.
-#ifndef _WIN32
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/telescope_driver.h>
@@ -410,5 +409,3 @@ TEST_CASE(
         if (read.timeout) CHECK(*read.timeout <= left);
     }
 }
-
-#endif  // !_WIN32

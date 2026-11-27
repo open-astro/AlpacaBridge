@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#ifndef _WIN32
-
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -734,5 +732,3 @@ TEST_CASE("ZWO mount network - a cancel ends an explicit Connect to a mount that
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
     CHECK(wrapper.last_connect_error().find("cancelled") != std::string::npos);
 }
-
-#endif  // !_WIN32

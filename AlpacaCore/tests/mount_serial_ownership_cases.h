@@ -17,8 +17,6 @@
 // (pty_responder.h). Each vendor's test file names its own cases and passes
 // its wrapper, a serial ConnectionInfo and a driver factory. POSIX-only.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
@@ -128,5 +126,3 @@ void retuned_port_times_out_and_recovers(Wrapper& wrapper, const Info& info, Pty
 }
 
 }  // namespace alpacacore::test::mount_serial
-
-#endif  // _WIN32

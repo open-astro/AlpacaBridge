@@ -27,8 +27,6 @@
 // .github/instructions/skywatcher.instructions.md and SUPPORTED-DRIVERS.md):
 // gotos are compensated; PulseGuide and MoveAxis are not.
 
-#ifndef _WIN32
-
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/telescope_driver.h>
@@ -843,5 +841,3 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
     CHECK(mount.frames_seen('E') == 0);
     telescope->set_connected(false);
 }
-
-#endif

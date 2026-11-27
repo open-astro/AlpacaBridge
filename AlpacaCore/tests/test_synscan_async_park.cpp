@@ -15,7 +15,6 @@
 // background, Slewing stays true until the mount arrives, and AtPark flips
 // true in the same step Slewing drops. A FakeMountServer plays a SynScan
 // handset whose GOTO takes ~1.5 s, so the whole lifecycle runs hardware-free.
-#ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -1123,5 +1122,3 @@ TEST_CASE("SynScan - a park whose position check cannot read the mount fails wit
     CHECK(st->goto_count.load() == 1);
     driver->set_connected(false);
 }
-
-#endif  // !_WIN32

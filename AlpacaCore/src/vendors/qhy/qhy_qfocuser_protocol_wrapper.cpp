@@ -35,13 +35,11 @@
 #include <thread>
 #include <vector>
 
-#ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <termios.h>
 #include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::qhy {
 
@@ -138,7 +136,6 @@ bool parse_device_info(const std::map<std::string, std::string>& fields, QFocuse
     return true;
 }
 
-#ifndef _WIN32
 // 9600 8N1 raw. The fd stays non-blocking (SerialLink): with O_NONBLOCK set,
 // the real GD32 CDC-ACM port answers the first write() with EAGAIN while its
 // USB bulk endpoint is still idle (seen on hardware 2026-09-13), which a bare
@@ -185,7 +182,6 @@ std::string read_json_object(ReadByte read_byte, int timeout_ms, bool& link_dead
     }
     return {};
 }
-#endif
 
 }  // namespace
 
@@ -257,7 +253,6 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text) {
 // device holds is refused before it is opened (DEBUG log, "not found").
 // Public so a hardware-free test can run it on a pty (#2040).
 bool probe_qfocuser_port(const std::string& port_path, QFocuserDeviceInfo& info) {
-#ifndef _WIN32
     std::string error;
     util::SerialLink link =
         util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_tty, &error);
@@ -297,14 +292,9 @@ bool probe_qfocuser_port(const std::string& port_path, QFocuserDeviceInfo& info)
             return true;
         }
     }
-#else
-    (void)port_path;
-    (void)info;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 namespace {
 // The raw /dev/ttyACMn fallback has no by-id symlink name to filter on;
 // restrict it to the GigaDevice GD32 CDC-ACM interface the Q-Focuser ships
@@ -316,12 +306,10 @@ bool raw_port_looks_like_qfocuser_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, qfocuser_usb_tokens());
 }
 }  // namespace
-#endif
 
 std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
     std::vector<QFocuserPortInfo> results;
 
-#ifndef _WIN32
     std::set<std::string> probed;
 
     struct Candidate {
@@ -411,7 +399,6 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
                                      ", board " + std::to_string(infos[i].board_version) + ")");
         results.push_back({c.path, c.name, infos[i]});
     }
-#endif
 
     return results;
 }
@@ -436,10 +423,8 @@ public:
         in_connect_ = true;
         for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
-#ifndef _WIN32
             // Each attempt judges the link afresh: the one-off hangup an earlier attempt met must not fail this one.
             link_.clear_loss();
-#endif
             try {
                 // INDI retries once when the first reply is not idx 1: the
                 // firmware can answer a fresh open with a stale or reboot
@@ -454,11 +439,9 @@ public:
             }
         }
         in_connect_ = false;
-#ifndef _WIN32
         // The handshake retries absorb a half-enumerated node's one-off hangup at open (see fail_link_locked()), so
         // a loss seen inside it is not a loss of this connection, and a connect that failed keeps none either.
         link_.clear_loss();
-#endif
         if (!success) {
             close_port_locked();
             throw AlpacaException("Q-Focuser handshake failed after " + std::to_string(kHandshakeRetries) +
@@ -477,9 +460,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;  // state first, then the close (#1202)
         close_port_locked();
-#ifndef _WIN32
         link_.clear_loss();  // decision 0009 rule 5: a Disconnect clears the verdict
-#endif
     }
 
     bool is_connected() const {
@@ -491,11 +472,7 @@ public:
     // property and must not queue behind an in-flight transaction. The latch is
     // the util::SerialLink verdict (#2262), kept across the port release.
     bool link_alive() const noexcept {
-#ifndef _WIN32
         return !link_.lost();
-#else
-        return true;
-#endif
     }
 
     std::int32_t get_position() {
@@ -581,7 +558,6 @@ private:
     // connected device holds is refused before it is opened, and the reason
     // (naming the holder) is the connect refusal the client sees.
     void open_port_locked() {
-#ifndef _WIN32
         std::string error;
         link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner, configure_tty,
                                        &error);
@@ -590,17 +566,12 @@ private:
         }
         serial_fd_ = link_.fd();
         tcflush(serial_fd_, TCIOFLUSH);
-#else
-        throw AlpacaException("Q-Focuser driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     // The alias first, then the link (TIOCNXCL, close, registry claim).
     void close_port_locked() {
-#ifndef _WIN32
         serial_fd_ = -1;
         link_.close();
-#endif
     }
 
     // Send one command and return the parsed reply whose "idx" is
@@ -630,7 +601,6 @@ private:
 
     std::map<std::string, std::string> transact_locked(const std::string& cmd, int expected_idx, int timeout_ms,
                                                        int alt_idx = -2) {
-#ifndef _WIN32
         if (serial_fd_ < 0) {
             // The port was released by an earlier link-loss detection (below)
             // and nothing has reconnected since.
@@ -745,13 +715,6 @@ private:
             return *stale;
         }
         throw AlpacaException("Q-Focuser timed out waiting for reply to " + cmd, AlpacaError::DriverException);
-#else
-        (void)cmd;
-        (void)expected_idx;
-        (void)timeout_ms;
-        (void)alt_idx;
-        throw AlpacaException("Q-Focuser driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     mutable std::mutex mutex_;
@@ -762,12 +725,10 @@ private:
     // command's OUT. -2 after a connect (no reply yet); a timeout leaves it, since the firmware's held reply is
     // still that one. Guarded by mutex_.
     std::int32_t last_reply_idx_ = -2;
-#ifndef _WIN32
     // The connected port (#1202): registry claim + fd + TIOCEXCL, and the lost-link verdict link_alive() reads
     // (#2262, issue #527's latch), kept across the port release until the next connect() or a disconnect().
     util::SerialLink link_;
     int serial_fd_ = -1;     // link_.fd() while the link is open, else -1
-#endif
 };
 
 QFocuserProtocolWrapper::QFocuserProtocolWrapper() : impl_(std::make_unique<Impl>()) {}

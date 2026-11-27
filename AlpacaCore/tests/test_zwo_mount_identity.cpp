@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#ifndef _WIN32
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_port_registry.h>
@@ -813,8 +811,6 @@ TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverifie
         CHECK(rig.received() == before_old_call);
     }
 }
-
-#endif  // !_WIN32
 
 // #2204: Decision 0017 rule 8 still refuses the wrong device, but through :GMA#, not a model list.
 // Falsified by: zwo_mount_protocol_wrapper.cpp get_mount_info() refusing a model that is_zwo_mount_model() omits.

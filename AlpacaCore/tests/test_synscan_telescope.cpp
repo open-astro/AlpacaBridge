@@ -33,13 +33,11 @@
 #include "driver_rig.h"
 #include "sidereal_time_check.h"
 
-#ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
 #include "hc_motion_rig.h"
-#endif
 
 using alpacacore::DeviceType;
 
@@ -47,7 +45,6 @@ namespace {
 
 using alpacacore::test::require_alpaca_error;
 
-#ifndef _WIN32
 std::unique_ptr<alpacacore::TelescopeDriver> make_connected_driver(const alpacacore::test::FakeMountServer& server) {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
@@ -59,7 +56,6 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_connected_driver(const alpacac
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     return driver;
 }
-#endif
 
 } // namespace
 
@@ -226,7 +222,6 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     require_alpaca_error([&] { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
-#ifndef _WIN32  // needs the fake mount server
 TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan][telescope][unit]") {
     // A target write needs the connection (decision 0009 rule 3, open-astro#1786).
     alpacacore::test::FakeMountServer server;
@@ -254,7 +249,6 @@ TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan]
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
     driver->set_connected(false);
 }
-#endif
 
 // Falsified by: AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp get_destination_side_of_pier: putting back
 // the old "<op>: RA out of range" / "<op>: Dec out of range" check, or changing the validate_ra_dec message text in
@@ -426,7 +420,6 @@ TEST_CASE("SynScan Telescope Driver - guide-rate range errors precede NotConnect
 // flag let a write to either unlock both, so a client reading the target it
 // did not set got a default 0 rather than an error -- which ConformU reports as
 // "Read before write should generate an error and didn't".
-#ifndef _WIN32  // needs the fake mount server
 TEST_CASE("SynScan Telescope Driver - the two target properties are independent", "[synscan][telescope][unit]") {
     alpacacore::test::FakeMountServer server;
     REQUIRE(server.ok());
@@ -454,9 +447,6 @@ TEST_CASE("SynScan Telescope Driver - the two target properties are independent"
     CHECK(driver->get_target_declination() == -30.25);
     driver->set_connected(false);
 }
-#endif
-
-#ifndef _WIN32
 
 TEST_CASE("SynScan Telescope Driver - UTCDate requires a mount sample or successful write without getter I/O",
           "[synscan][telescope][unit][utcdate]") {
@@ -1198,8 +1188,6 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("SynScan Telescope Driver - SiderealTime follows the clock to under a second", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
@@ -1231,7 +1219,6 @@ TEST_CASE("SynScan Telescope Driver spec audit - DestinationSideOfPier rejects o
                          alpacacore::AlpacaError::InvalidValue);
 }
 
-#ifndef _WIN32  // needs the fake mount server
 TEST_CASE("SynScan Telescope Driver - connected unsupported members keep their NotImplemented answers",
           "[synscan][telescope][unit][spec-audit]") {
     alpacacore::test::FakeMountServer server;
@@ -1277,7 +1264,6 @@ TEST_CASE("SynScan Telescope Driver - connected rate getters read zero and CanSe
     require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
 }
-#endif
 
 TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
           "[synscan][telescope][unit][spec-audit]") {
@@ -1292,7 +1278,6 @@ TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws 
     CHECK(driver->get_site_elevation() == 42.0);
 }
 
-#ifndef _WIN32
 // FakeSynScanHandset in ConformU mode (#2692): the handset wire answered from FakeMountMotionModel, driven by a clock
 // the case advances. The cases talk to the responder directly, as test_ioptron_fake_motion_mode.cpp does.
 namespace {
@@ -1389,4 +1374,3 @@ TEST_CASE("FakeSynScanHandset ConformU mode: a fixed-rate move runs its axis at 
     rig.advance(seconds(10));
     CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
 }
-#endif

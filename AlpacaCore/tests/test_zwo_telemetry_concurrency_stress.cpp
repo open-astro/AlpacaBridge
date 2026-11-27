@@ -10,7 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#ifndef _WIN32
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock_trust.h>
@@ -1570,4 +1569,3 @@ TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo
         CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
     }
 }
-#endif

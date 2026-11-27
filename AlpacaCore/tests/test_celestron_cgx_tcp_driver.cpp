@@ -14,8 +14,6 @@
 // waits run on the fake task clock with the state poll held (cgx_clock_cleanup.h); the wire timing (a dropped reply's
 // 1000 ms timeout, the 300 ms re-send) is real, bounded time (decision 0005 rule 6).
 
-#ifndef _WIN32
-
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -671,5 +669,3 @@ TEST_CASE("Celestron CGX WiFi Telescope Driver - value ranges and unsupported me
     CHECK(rig.adapter.count(kRa, 0x02) == 0);
     CHECK(rig.adapter.count(kRa, 0x26) == 0);
 }
-
-#endif  // !_WIN32

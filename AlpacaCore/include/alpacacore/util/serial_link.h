@@ -52,11 +52,6 @@
 // so the fault text survives the port release until the next open (a new
 // link moved in) or an explicit clear_loss() on Disconnect (decision 0009
 // rule 5). The link never closes an fd under another thread's poll().
-//
-// POSIX-only, like serial_io.h; callers include it inside their existing
-// `#ifndef _WIN32` branches.
-
-#ifndef _WIN32
 
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
@@ -576,5 +571,3 @@ private:
 };
 
 }  // namespace alpacacore::util
-
-#endif  // _WIN32

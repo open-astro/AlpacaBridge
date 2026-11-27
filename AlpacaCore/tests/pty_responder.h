@@ -21,8 +21,6 @@
 // The keep-alive slave fd (PtyPair) lets a case read and change the line
 // settings the wrapper applied, the way another program would retune the port.
 
-#ifndef _WIN32
-
 #include <poll.h>
 #include <unistd.h>
 
@@ -163,5 +161,3 @@ inline std::string answer_handset_echo(const std::string& chunk) {
 }
 
 }  // namespace alpacacore::test
-
-#endif  // _WIN32

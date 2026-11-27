@@ -20,8 +20,6 @@
 // on a hardware-free host. Operations racing a disconnect are EXPECTED to
 // throw; what must never happen is a crash, hang, or TSan report.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -441,5 +439,3 @@ TEST_CASE("SynScan telescope - connect racing disconnect leaves the status poll 
     CHECK(handset->position_polls.load() > final_before);
     CHECK(alpacacore::test::settle_connected(*driver, false, 5s));
 }
-
-#endif  // !_WIN32

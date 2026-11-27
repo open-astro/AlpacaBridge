@@ -193,7 +193,6 @@ TEST_CASE("Celestron CGX AUX link - claims kernel exclusive ownership and releas
     CHECK(reopened >= 0);
 }
 
-#ifndef _WIN32
 TEST_CASE("Celestron CGX AUX link - healthy same-port reconnect keeps the session generation and fd",
           "[celestron][cgx][protocol][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
@@ -981,4 +980,3 @@ TEST_CASE("Celestron CGX AUX link - enforces its deadline while unrelated frames
     protocol.disconnect();
     mount.sever_link();
 }
-#endif

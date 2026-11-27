@@ -32,14 +32,12 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::ioptron {
 
@@ -61,9 +59,7 @@ constexpr long kRotatorUnitsPerTurn = 360L * 360000L;
 // device to the registry: the second driver's scan counts the first one's port as its sibling's.
 constexpr const char* kSerialOwner = "iOptron iFR";
 
-#ifndef _WIN32
 void configure_ifr_line(struct termios& tty) { util::make_raw_8n1(tty, B115200); }
-#endif
 
 // A fixed-width decimal field with an optional leading sign, every other character a digit. The firmware pads
 // with zeros after the sign ("+0500000..."); a short reply or a stray byte fails the parse instead of shifting
@@ -134,7 +130,6 @@ bool ifr_refuses_model(std::int32_t model) {
 }
 
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info) {
-#ifndef _WIN32
     // The probe claim waits out another scan's probe of this port (the mount, iEAF and iEFW scans match the same
     // Prolific adapters) and is held until this function returns.
     std::string error;
@@ -162,14 +157,9 @@ bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info) {
             return true;
         }
     }
-#else
-    (void)port_path;
-    (void)info;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 namespace {
 // The raw /dev/ttyUSBn fallback has no by-id name to filter on; keep it to the Prolific PL2303-class bridge the
 // iFR carries (067b:23a3, like the iAFS2/3), so the scan does not open every serial device on the box.
@@ -179,11 +169,9 @@ bool raw_port_looks_like_ifr_candidate(const std::string& port_path) {
     return util::usb_tty_descriptor_matches(*descriptor, ifr_usb_tokens());
 }
 }  // namespace
-#endif
 
 std::vector<IfrPortInfo> enumerate_ifr_ports() {
     std::vector<IfrPortInfo> results;
-#ifndef _WIN32
     std::set<std::string> seen;
     struct Candidate {
         std::string path;
@@ -258,7 +246,6 @@ std::vector<IfrPortInfo> enumerate_ifr_ports() {
         ALPACA_LOG_INFO("iOptron", "Found iFR on " + c.path + " (model " + std::to_string(infos[i].model) + ")");
         results.push_back({c.path, c.name, infos[i]});
     }
-#endif
     return results;
 }
 
@@ -274,14 +261,10 @@ public:
     IfrDeviceInfo open(const std::string& port) {
         std::lock_guard<std::mutex> lock(io_mutex_);
         port_ = port;
-#ifndef _WIN32
         std::string error;
         link_ = util::SerialLink::open(port, util::SerialClaimKind::Link, kSerialOwner, configure_ifr_line, &error);
         if (!link_) throw AlpacaException(error, AlpacaError::NotConnected);
         tcflush(link_.fd(), TCIOFLUSH);
-#else
-        throw AlpacaException("iOptron iFR driver is Linux-only", AlpacaError::DriverException);
-#endif
         IfrDeviceInfo info;
         bool answered = false;
         for (int attempt = 0; attempt < kHandshakeRetries && !answered; ++attempt) {
@@ -393,11 +376,7 @@ public:
 
 private:
     bool link_open_locked() const {
-#ifndef _WIN32
         return static_cast<bool>(link_);
-#else
-        return false;
-#endif
     }
 
     void ensure_open_locked() const {
@@ -407,9 +386,7 @@ private:
     }
 
     void close_locked() {
-#ifndef _WIN32
         link_.close();  // releases TIOCEXCL and the registry claim; a no-op once closed
-#endif
     }
 
     void set_fault(const std::string& text) {
@@ -431,7 +408,6 @@ private:
     }
 
     void write_locked(const std::string& data) {
-#ifndef _WIN32
         if (!link_.write_all(data)) {  // the util::SerialLink verdict judges the errno (#2262)
             const int err = errno;
             if (link_.lost()) {
@@ -439,15 +415,11 @@ private:
             }
             throw AlpacaException("iFR write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#else
-        (void)data;
-#endif
     }
 
     // Flush stale input, send, read to the '#'. The reply keeps its '#'.
     std::string query_locked(const std::string& cmd, int timeout_ms) {
         ALPACA_LOG_TRACE("iOptron", "iFR command: " + cmd);
-#ifndef _WIN32
         tcflush(link_.fd(), TCIFLUSH);
         write_locked(cmd);
         util::ReadSpec spec;
@@ -467,18 +439,12 @@ private:
             default:
                 throw AlpacaException("iFR did not answer " + cmd, AlpacaError::DriverException);
         }
-#else
-        (void)cmd;
-        (void)timeout_ms;
-        throw AlpacaException("iFR did not answer", AlpacaError::DriverException);
-#endif
     }
 
     // Motion and setting commands answer one byte and no '#': '1' accepted, '0' refused. Always consume it, or
     // it prefixes the next status reply. A hangup while waiting is a lost link, not silence.
     IfrAck ack_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("iOptron", "iFR command (ack): " + cmd);
-#ifndef _WIN32
         tcflush(link_.fd(), TCIFLUSH);
         write_locked(cmd);
         util::ReadSpec spec;
@@ -495,9 +461,6 @@ private:
         if (r.outcome == util::ReadOutcome::LinkDead) {
             fail_link_locked("iFR serial link lost (errno " + std::to_string(r.err) + ")");
         }
-#else
-        (void)cmd;
-#endif
         ALPACA_LOG_DEBUG("iOptron", "iFR no ack for " + cmd);
         return IfrAck::Silent;
     }
@@ -509,9 +472,7 @@ private:
     std::atomic<bool> lost_{false};
     mutable std::mutex fault_mutex_;  // leaf: the loss reason only, never held across an exchange
     std::string fault_;
-#ifndef _WIN32
     util::SerialLink link_;
-#endif
 };
 
 namespace {

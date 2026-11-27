@@ -32,11 +32,9 @@
 
 #include "wandererastro_serial_scan.h"
 
-#ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <errno.h>
 #include <termios.h>
-#endif
 
 namespace alpacacore::vendor::wandererastro {
 
@@ -61,7 +59,6 @@ constexpr const char* kSerialOwner = "WandererRotator";
 // read() and hang Disconnect (#1202).
 constexpr int kReadWindowMs = 500;
 
-#ifndef _WIN32
 // A read error that ends the connected link's read loop: the one serial rule (util::SerialLink, #2262: EIO, ENXIO,
 // ENODEV, EBADF). The connected paths feed it to serial_link_.note_error(), which keeps the verdict on the link.
 bool is_hangup_errno(int err) { return util::is_serial_loss_errno(err); }
@@ -265,8 +262,6 @@ bool probe_rotator_port(const std::string& port_path, RotatorPortInfo& info) {
     return false;
 }
 
-#endif  // _WIN32
-
 }  // namespace
 
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
@@ -288,7 +283,6 @@ std::optional<std::string> detail::raw_rotator_skip_reason(const std::optional<u
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
     std::vector<RotatorPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -362,21 +356,16 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
             results.push_back(info);
         }
     }
-#endif
 
     return results;
 }
 
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths) {
     std::vector<RotatorPortInfo> results;
-#ifndef _WIN32
     for (const auto& path : candidate_paths) {
         RotatorPortInfo info;
         if (probe_rotator_port(path, info)) results.push_back(info);
     }
-#else
-    (void)candidate_paths;
-#endif
     return results;
 }
 
@@ -387,10 +376,6 @@ public:
     ~Impl() { disconnect(); }
 
     std::string connect(const RotatorConnectionConfig& config) {
-#ifdef _WIN32
-        (void)config;
-        throw AlpacaException("WandererRotator serial support is POSIX-only", AlpacaError::DriverException);
-#else
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (connected_) {
             throw AlpacaException("WandererRotator already connected; call disconnect() first",
@@ -437,7 +422,6 @@ public:
         ALPACA_LOG_INFO("WandererAstro", "Connected to " + handshake->model + " (firmware " +
                                              std::to_string(handshake->firmware) + ") on " + config_.serial_port);
         return handshake->model;
-#endif
     }
 
     void disconnect() {
@@ -460,9 +444,7 @@ public:
             firmware_date_.clear();
             loss_reason_.clear();  // decision 0009 point 5: a Disconnect clears the loss reason
         }
-#ifndef _WIN32
         close_serial_locked();  // a no-op when a lost link already released the port
-#endif
         link_lost_.store(false);
     }
 
@@ -496,7 +478,6 @@ public:
     }
 
     void move_relative(double delta_degrees) {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         {
@@ -533,10 +514,6 @@ public:
         monitor_running_.store(true);
         monitor_reading_ = true;  // under io_mutex_, before the monitor can read the fd
         monitor_thread_ = std::thread([this, commanded] { monitor_move(commanded); });
-#else
-        (void)delta_degrees;
-        throw AlpacaException("WandererRotator serial support is POSIX-only", AlpacaError::DriverException);
-#endif
     }
 
     // Acknowledge a missing completion report (Sync does this: the client has
@@ -548,7 +525,6 @@ public:
     }
 
     void halt() {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         {
@@ -563,24 +539,18 @@ public:
         // controller decelerates and then reports its final angle; the monitor
         // thread picks that up and clears the moving flag.
         write_command_locked("Stop", /*terminator=*/false);
-#endif
     }
 
     void set_reverse(bool reverse) {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         ensure_not_moving("set reverse");
         write_command_locked(reverse ? "1700001" : "1700000", /*terminator=*/true);
         std::lock_guard<std::mutex> state_lock(state_mutex_);
         state_.reverse = reverse;
-#else
-        (void)reverse;
-#endif
     }
 
     void set_backlash(double degrees) {
-#ifndef _WIN32
         if (degrees < 0.0 || degrees > 3.0) {
             throw AlpacaException("Backlash must be within [0, 3] degrees, got " + std::to_string(degrees),
                                   AlpacaError::InvalidValue);
@@ -591,20 +561,15 @@ public:
         write_command_locked(std::to_string(static_cast<int>(degrees * 10.0) + 1600000), /*terminator=*/true);
         std::lock_guard<std::mutex> state_lock(state_mutex_);
         state_.backlash = degrees;
-#else
-        (void)degrees;
-#endif
     }
 
     void set_zero() {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         ensure_not_moving("set zero");
         write_command_locked("1500002", /*terminator=*/true);
         std::lock_guard<std::mutex> state_lock(state_mutex_);
         state_.mechanical_angle = 0.0;
-#endif
     }
 
 private:
@@ -618,7 +583,6 @@ private:
         }
     }
 
-#ifndef _WIN32
     // Decision 0009 point 3 (issue #1989): the port is gone. Caller holds
     // io_mutex_ and connected_ is true. Resets the cached state and firmware
     // date as disconnect() does and keeps the reason, before link_lost_ is
@@ -639,7 +603,6 @@ private:
         ALPACA_LOG_ERROR("WandererAstro",
                          "WandererRotator link lost on " + config_.serial_port + ": " + reason + " (port released)");
     }
-#endif
 
     void ensure_not_moving(const char* what) const {
         std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -664,7 +627,6 @@ private:
         return buf;
     }
 
-#ifndef _WIN32
     // Extrapolate the in-flight angle at ~1 degree / 240 ms toward the target.
     // Caller must hold state_mutex_.
     double extrapolated_angle_locked() const {
@@ -824,7 +786,6 @@ private:
         }
         state_.moving = false;
     }
-#endif
 
     void stop_monitor() {
         monitor_running_.store(false);
@@ -837,7 +798,6 @@ private:
         }
     }
 
-#ifndef _WIN32
     void open_serial_locked() {
         // SerialLink claims the port before it opens it (a port another
         // connected device holds is refused untouched, a scan's probe is waited
@@ -854,7 +814,6 @@ private:
     void close_serial_locked() {
         serial_link_.close();  // releases the port's claim with the fd
     }
-#endif
 
     mutable std::mutex io_mutex_;     // guards serial fd + connected_/config_
     mutable std::mutex state_mutex_;  // guards state_ + move bookkeeping + firmware_date_
@@ -883,9 +842,7 @@ private:
     // close to the monitor, which still reads the fd (issue #1989).
     bool monitor_reading_ = false;
 
-#ifndef _WIN32
     util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by io_mutex_
-#endif
 };
 
 // --- WandererRotatorProtocolWrapper public interface forwarding ---

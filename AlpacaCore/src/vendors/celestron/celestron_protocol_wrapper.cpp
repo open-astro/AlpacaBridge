@@ -41,9 +41,7 @@
 #include <set>
 #include <thread>
 
-#ifndef _WIN32
 #include <filesystem>
-#endif
 
 namespace alpacacore::vendor::celestron {
 
@@ -61,15 +59,12 @@ constexpr int kSocketTimeoutMs = 200;
 // device holds, and lists one a Celestron mount holds without opening it.
 constexpr const char* kSerialOwner = "Celestron mount";
 
-#ifndef _WIN32
 // NexStar spec: 8N1 raw, no flow control.
 void configure_nexstar_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
-#endif
 
 // Probe a serial port for a NexStar hand controller using the echo command (Kx).
 // Returns HC firmware version string (e.g. "5.35") on success, empty on failure.
 std::string probe_nexstar_port(const std::string& port_path) {
-#ifndef _WIN32
     // Probe claim, held for exactly this function: a connected device's port
     // is refused before it is opened, another scan's probe is waited for.
     std::string error;
@@ -121,13 +116,8 @@ std::string probe_nexstar_port(const std::string& port_path) {
 
     // Got echo but not version — still a NexStar device
     return "unknown";
-#else
-    (void)port_path;
-    return "";
-#endif
 }
 
-#ifndef _WIN32
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
 // on, so without this check it would open EVERY serial device on the box --
 // unrelated FTDI dongles, GPS receivers, or another mount controller sharing
@@ -159,14 +149,12 @@ bool celestron_candidate_free(const std::string& resolved, const std::string& na
     }
     return true;
 }
-#endif  // _WIN32
 
 } // anonymous namespace
 
 std::vector<CelestronPortInfo> enumerate_celestron_ports() {
     std::vector<CelestronPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -240,7 +228,6 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
             results.push_back({resolved, "", fw});
         }
     }
-#endif
 
     return results;
 }

@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
@@ -233,5 +231,3 @@ TEST_CASE("Celestron CGX USB telescope - destruction races an in-flight connect"
     mount->set_auto_home_searching_reads(kRacedHomeSearchingReads);
     alpacacore::test::run_destruction_during_connect_stress([mount] { return make_driver(mount); }, 25);
 }
-
-#endif  // !_WIN32
