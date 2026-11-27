@@ -2006,6 +2006,54 @@ TEST_CASE("Bisque park - AbortSlew during the park poll returns at once and a sl
     REQUIRE_NOTHROW(parked.get());
 }
 
+// #2806: ITelescopeV4 AbortSlew raises InvalidWhileParked while AtPark is true (ConformU "Parked:AbortSlew"). The
+// refusal sends TheSkyX nothing and leaves the mount parked.
+TEST_CASE("Bisque AbortSlew - a parked mount refuses it with InvalidWhileParked and is sent nothing (#2806)",
+          "[bisque][telescope][unit][park]") {
+    ClockedBisque rig;
+    rig.driver->set_connected(false);
+    rig.mount.parked = true;  // the connect reads IsParked
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    REQUIRE(rig.driver->get_at_park());
+    const int aborts = rig.mount.abort_commands.load();
+    const int stops = rig.mount.move_stops.load();
+
+    require_alpaca_error([&] { rig.driver->abort_slew(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.abort_commands.load() == aborts);
+    CHECK(rig.mount.move_stops.load() == stops);
+    CHECK(rig.driver->get_at_park());
+}
+
+// #2806: only AtPark refuses AbortSlew. A Park still in flight (sent, IsParked not yet true) is not AtPark, so an
+// AbortSlew then still reaches TheSkyX and cancels the Park (ascom-contract: AbortSlew during a park clears parking_).
+TEST_CASE("Bisque AbortSlew - during a Park in flight it still sends Abort and cancels the Park (#2806)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // A failing check must not leave the park poll running: its future would wait for it.
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+    REQUIRE_FALSE(rig.driver->get_at_park());
+    const int aborts = rig.mount.abort_commands.load();
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    CHECK(rig.mount.abort_commands.load() == aborts + 1);
+
+    rig.mount.park_polls_needed = 0;  // the next IsParked reports parked; the cancelled Park must not set AtPark
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
 // #1838: the slew gate drops mutex_ for IsTracking. A disconnect that lands in that gap must refuse the slew
 // when the gate re-locks, before anything is sent.
 TEST_CASE("Bisque slew - a disconnect inside the IsTracking gap refuses both slew forms (#1838)",

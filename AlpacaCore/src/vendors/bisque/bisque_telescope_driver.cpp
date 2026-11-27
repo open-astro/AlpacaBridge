@@ -1289,6 +1289,11 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         // Only a lost link refuses: a latched fault still lets the stop try, as OnStep and SynScan do (#2102).
         check_connected();
+        // ITelescopeV4: InvalidWhileParked while AtPark is true (#2806). A Park still in flight (parking_) is not
+        // AtPark, so AbortSlew still cancels it.
+        if (parked_) {
+            throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
+        }
         // #2410: what was moving, so a stop that fails or is not verified keeps reporting it (fail closed).
         const bool slew_was_active = slewing_cached_;
         const bool axes_were_active[2] = {manual_axis_slewing_[0], manual_axis_slewing_[1]};
