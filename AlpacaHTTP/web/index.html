@@ -1807,6 +1807,7 @@
                         <input type="number" id="remotealpaca-safety-poll-period" name="remoteAlpacaSafetyPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
                         <small>How often this server reads the other server, 1 to 60 seconds. The safety monitor reads unsafe once the link is lost: at once when the other server refuses the connection, otherwise after 3 poll periods (at least 30 seconds) with no answer. Until then it serves the last answer, and it reports an error after three failed reads in a row.</small>
                     </div>
+                  </div>
                   <div id="remotealpaca-focuser-fields" data-device-type="focuser" style="display: none;">
                     <h3>Remote Alpaca Focuser</h3>
 
@@ -1830,7 +1831,6 @@
                         <input type="number" id="remotealpaca-focuser-poll-period" name="remoteAlpacaFocuserPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
                         <small>How often this server reads the other server, 1 to 60 seconds. IsMoving and Position are the values of the last read; a Move reads IsMoving true at once. Halt is sent even while the reads fail.</small>
                     </div>
-                  </div>
                   </div>
                   <div id="remotealpaca-rotator-fields" data-device-type="rotator" style="display: none;">
                     <h3>Remote Alpaca Rotator</h3>
