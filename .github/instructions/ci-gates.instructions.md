@@ -177,10 +177,11 @@ author must do. Read the docstring before changing a gate.
   `publish_results: false` (no public badge). It runs on `ubuntu-latest`, like CodeQL, because the
   action's Docker image is amd64 only. It does not gate merges; `scheduled-failure.yml` watches it
   by workflow name.
-- **Authored code badge** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to
-  `main` it writes `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on the
-  `badges` branch, which the README badge reads through img.shields.io/endpoint. Check 25 holds the
-  README line to that endpoint and never to a number, so never paste a count into the README.
+- **Authored code badge** (`.github/workflows/authored-lines-badge.yml`, issues #2079, #2739): on every
+  push to `main` it writes `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on the
+  `badges` branch, with the shields.io badge drawn from it as `authored-lines.svg`, which the README
+  shows. Check 25 holds the README line to that SVG and never to a number, so never paste a count into
+  the README.
 - **libgpiod and the bundled libgphoto2 are cached** (`deps-gpiod-...` key in `ci.yml`): the jobs that need them (the all-vendors shards, `sanitizers-tsan`, `clang-tidy`) restore one staging tree keyed on the libgpiod pin and `scripts/build_bundled_gphoto.sh`, build both into it only on a miss, and copy it into `/`. Bumping either pin or the script changes the key. `nightly-build.yml` still builds them every run.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363; docs-drift check 27
   fails a job without one, issue #2059), sized from healthy green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
