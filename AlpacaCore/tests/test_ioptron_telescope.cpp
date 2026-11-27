@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -4582,5 +4583,85 @@ TEST_CASE("iOptron Telescope Driver - findhomeissensorsearch is true only on the
     CHECK(std::find(actions.begin(), actions.end(), "findhomeissensorsearch") != actions.end());
     CHECK(driver->can_action("FindHomeIsSensorSearch"));  // action names are case-insensitive
     CHECK(driver->action("FindHomeIsSensorSearch", "") == expected);
+    driver->set_connected(false);
+}
+
+// Issue #2761: after a Sync the mount's physical frame is what decides the pier side it uses. SideOfPier names the
+// side of the mount's own position, and DestinationSideOfPier the side of the RA the GOTO sends (the client RA less
+// the Sync offset). Both used to mix the two frames, so a +1 h Sync near the meridian named the wrong side.
+namespace {
+
+constexpr double kPierSiteLatitude = -33.856784;
+constexpr double kPierSiteLongitude = 151.215297;
+// The driver's pointing clock: SetUTCDate pins it, so the hour angles below do not depend on the host clock.
+const auto kPierUtc = std::chrono::system_clock::from_time_t(1700000000);
+
+// The RA, in hours, of the last ":SRA" the mount received (the RA the GOTO sent).
+double last_sent_ra_hours(const FakeIoptronMount& mount) {
+    const auto sent = mount.commands();
+    for (auto it = sent.rbegin(); it != sent.rend(); ++it) {
+        if (it->rfind(":SRA", 0) == 0) return std::atoll(it->substr(4, 9).c_str()) / (15.0 * 3600.0 * 100.0);
+    }
+    return -1.0;
+}
+
+int physical_side_for_ra(double ra_hours) {
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    return alpacacore::util::pier_side_for_hour_angle(alpacacore::util::shortest_ra_delta_hours(lst, ra_hours));
+}
+
+}  // namespace
+
+TEST_CASE("iOptron SideOfPier - after a +1 h Sync it names the side of the mount's own position",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double physical_ra = alpacacore::util::wrap_hours(lst - 0.5);  // hour angle +0.5 h: pier east (0)
+    mount.set_position(physical_ra, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    driver->set_utc_date(kPierUtc);
+
+    driver->sync_to_coordinates(alpacacore::util::wrap_hours(physical_ra + 1.0), 20.0);  // synced frame: HA -0.5
+    pass_connect_cache(clock);
+
+    REQUIRE(physical_side_for_ra(physical_ra) == 0);
+    CHECK(driver->get_side_of_pier() == 0);
+    CHECK(mount.count(":MS1#") == 0);  // nothing moved: the answer is the mount's position as it stands
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron DestinationSideOfPier - after a +1 h Sync it names the side the GOTO lands on",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double start_ra = alpacacore::util::wrap_hours(lst - 3.0);
+    mount.set_position(start_ra, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    driver->set_utc_date(kPierUtc);
+    driver->sync_to_coordinates(alpacacore::util::wrap_hours(start_ra + 1.0), 20.0);  // offset +1 h
+
+    // Client RA at hour angle -0.5 h (west, 1) in the synced frame; the mount's frame is 1 h earlier: HA +0.5 (0).
+    const double client_ra = alpacacore::util::wrap_hours(lst + 0.5);
+    const int destination = driver->get_destination_side_of_pier(client_ra, 20.0);
+
+    driver->slew_to_coordinates_async(client_ra, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    const double sent_ra = last_sent_ra_hours(mount);  // the ledger: the RA the GOTO sent
+    CHECK(sent_ra == Catch::Approx(alpacacore::util::wrap_hours(client_ra - 1.0)).margin(1e-4));
+    clock.advance(std::chrono::seconds(31));
+    REQUIRE_FALSE(driver->get_slewing());
+    clock.advance(std::chrono::seconds(31));
+
+    CHECK(mount.ra_hours() == Catch::Approx(sent_ra).margin(1e-4));  // the fake's position: it landed there
+    const int landed = physical_side_for_ra(mount.ra_hours());
+    CHECK(landed == 0);
+    CHECK(destination == landed);
+    CHECK(driver->get_side_of_pier() == landed);
     driver->set_connected(false);
 }
