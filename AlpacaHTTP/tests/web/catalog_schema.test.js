@@ -106,7 +106,7 @@ const OFFERED = {
     rotator: ['ifr', 'onstep', 'remotealpaca', 'wandererastro', 'zwo'],
     safetymonitor: ['remotealpaca'],
     switch: ['gemini', 'ioptron', 'onstep', 'playerone', 'remotealpaca', 'touptek', 'wandererastro', 'zwo'],
-    telescope: ['bisque', 'celestron', 'ioptron', 'onstep', 'skywatcher', 'synscan', 'zwo'],
+    telescope: ['bisque', 'celestron', 'ioptron', 'onstep', 'remotealpaca', 'skywatcher', 'synscan', 'zwo'],
 };
 
 test('offeredVendors offers each available vendor for the device types it has a descriptor for', () => {

@@ -1880,6 +1880,30 @@
                         <small>How often this server reads the other server's switch values, 1 to 60 seconds; each read asks every switch. The switch names and ranges are read once, when the device connects.</small>
                     </div>
                   </div>
+                  <div id="remotealpaca-telescope-fields" data-device-type="telescope" style="display: none;">
+                    <h3>Remote Alpaca Telescope</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-telescope-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-telescope-host" name="remoteAlpacaTelescopeHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-telescope-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-telescope-port" name="remoteAlpacaTelescopePort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-telescope-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-telescope-device-number" name="remoteAlpacaTelescopeDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the Telescope device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-telescope-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-telescope-poll-period" name="remoteAlpacaTelescopePollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds. The position, Slewing and Tracking are the values of the last read; a slew reads Slewing true at once. AbortSlew and a MoveAxis stop are sent even while the reads fail, and a MoveAxis this server sent is stopped after 60 seconds with no new MoveAxis.</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),

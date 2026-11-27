@@ -24,8 +24,10 @@
 // with_state() live under it too), then the module's snapshot and health mutexes. No upstream call runs under the
 // state mutex.
 // The command order mutex stands apart from that chain: only a command's caller takes it, holding no other lock, across
-// run_command(), and under it takes only the slot's and the outcome's own mutexes. No body, poll, Connect or Disconnect
-// takes it, so the join of the slot by a Connect or a Disconnect always ends the body a waiting caller waits for.
+// run_command(), and under it takes only the slot's and the outcome's own mutexes. No command body, poll, Connect or
+// Disconnect takes it, so the join of the slot by a Connect or a Disconnect always ends the body a waiting caller waits
+// for. A driver's own slot body may be a caller (the Telescope's MoveAxis cap sends its stop as a command); the driver
+// joins that slot before the Connect or Disconnect joins this one.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/async_operation.h>

@@ -93,6 +93,9 @@ public:
     std::vector<std::string> get_string_list(std::string_view member, const RemoteParams& params = {});
     // An array of whole numbers inside int, as get_int() reads each one.
     std::vector<int> get_int_list(std::string_view member, const RemoteParams& params = {});
+    // An array of {"Minimum": x, "Maximum": y} objects of finite numbers, as (minimum, maximum) pairs (a Telescope's
+    // AxisRates).
+    std::vector<std::pair<double, double>> get_rate_list(std::string_view member, const RemoteParams& params = {});
 
     // PUT `member` with a form body; a Value in the reply is ignored.
     void put(std::string_view member, const RemoteParams& params = {});

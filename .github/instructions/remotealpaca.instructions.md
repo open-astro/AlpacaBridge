@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator.
+3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator and Telescope.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -190,15 +190,58 @@ branded Name, snapshot, poll and link rules as the ObservingConditions device, w
 - A refused connection on a write is a lost link at once; another call with no reply is `DriverException`. Actions and
   `Command*` are not forwarded.
 
+#### The Telescope proxied device (issue #1753 slice 5, #2710)
+
+The same config, self-loop check, Connect (Platform 7 is `ITelescopeV4`; an `ITelescopeV3` upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bare mount only, also through a proxy).
+
+- **Connect** refuses an upstream older than `ITelescopeV3` (every Alpaca telescope is V3 or later; V4 added only the
+  members this server answers itself), then reads once, each a value or the upstream's error: every `Can*` but
+  `CanSlew` and `CanSlewAltAz`, `CanMoveAxis` and `AxisRates` for axes 0 to 2, `AlignmentMode`, `EquatorialSystem`,
+  the optics, the site, `TrackingRate`, `TrackingRates`, the rate offsets, the guide rates, the targets,
+  `DoesRefraction` and `SlewSettleTime`. They answer while the link is faulted. This server's writes forward them and
+  write them through; a change another client makes upstream shows at the next Connect. The `Can*` getters answer
+  while disconnected (the last Connect's answer, false before any) under one state-lock hold.
+- **Snapshot.** The frame is the twelve ITelescopeV4 `DeviceState` members, twelve GETs per poll: `RightAscension`,
+  `Declination`, `Altitude`, `Azimuth`, `SiderealTime`, `UTCDate`, `Slewing`, `Tracking`, `AtPark`, `AtHome`,
+  `SideOfPier`, `IsPulseGuiding`. `UTCDate` and `SiderealTime` are served advanced by the frame's age. A stale frame
+  is served; a latched fault refuses it; `DeviceState` is the telescope base's, its `TimeStamp` the frame's age.
+- **Commands** refuse in the gate's order (`util/telescope_command_gate.h`): the argument ranges every telescope
+  shares (`InvalidValue`), connected, the link fault; the upstream judges parked, Tracking and its own ranges, and its
+  error passes through. The async slews, `Park`, `FindHome`, a `SideOfPier` write and a non-zero `MoveAxis` write
+  `Slewing` true through; only a poll writes it false, never a fault or a loss. `PulseGuide` writes `IsPulseGuiding`
+  true, `Unpark` `AtPark` false, the syncs the synced position; a coordinate slew or sync reads the upstream's targets
+  back (a read with no reply leaves them). `DestinationSideOfPier` is forwarded in the command slot.
+- **Stops.** `AbortSlew` and `MoveAxis(axis, 0)` are forwarded even while the link is faulted (refused only for a lost
+  link); `AbortSlew` leaves `Slewing` to the poll (ITelescopeV4: true until the motion stopped).
+- **Not proxied:** the synchronous slews (`SlewToCoordinates`, `SlewToTarget`, `SlewToAltAz`) answer
+  `NotImplemented` after their argument and connection checks, and `CanSlew` and `CanSlewAltAz` read false
+  (ITelescopeV4 deprecates them, and an Alpaca mount should not implement them). The optics setters (config
+  injection) are `NotImplemented`: the optics are the upstream's.
+- **MoveAxis cap.** A non-zero `MoveAxis` starts a per-axis slot body (`util::run_motion_deadline()`,
+  `util::kMaxMoveAxisDuration`), because the upstream may cap nothing. Its verified stop sends `MoveAxis(axis, 0)` as
+  a command (caller order) and reads `Slewing`, `RightAscension` and `Declination` live from its own thread; while
+  the other axis runs this server's `MoveAxis`, `Slewing` reads stopped for it and the other coordinate is pinned. The
+  outcome is kept for `Slewing` until the next motion command or Connect. A renewal supersedes it, a stop or
+  `AbortSlew` cancels it, Connect and Disconnect join it before the command slot.
+- **Relink stop.** A link lost while this server's GoTo, Park, FindHome, flip or `MoveAxis` ran (and no poll since
+  read `Slewing` false) owes the stop (`util::RelinkMotionStop`, kept across a Disconnect): the next Connect sends
+  `AbortSlew` and `MoveAxis(axis, 0)` on every movable axis before the first frame when the upstream still reports
+  `Slewing`. An upstream error answer counts as sent; a call with no reply fails the Connect and keeps it owed.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
-`test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
+`test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
+`test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop), the contract sweep
+and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
 `AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
 `Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
 `finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
-`finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`)
-with the poll on `FakeTaskClock`. The contract sweep's snapshot
+`finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`,
+`Kind::Telescope` a German mount whose slews land at once or, with `hold_motion(true)`, run until `finish_motion()`
+or AbortSlew) with the poll on `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
 ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row

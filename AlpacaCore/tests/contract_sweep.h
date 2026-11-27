@@ -95,6 +95,7 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -759,6 +760,21 @@ inline ContractEntry contract_entry_remotealpaca_switch() {
         "and CanWrite/CanAsync are the upstream's, read at Connect); id 0 of the scripted "
         "upstream (alpaca_upstream_script.h) is writable");
 }
+// The capabilities answer while disconnected: false before any Connect read the upstream's, CanMoveAxis included
+// (remotealpaca_telescope_driver.cpp can()). Command* are not forwarded.
+inline ContractEntry contract_entry_remotealpaca_telescope() {
+    ContractEntry entry = make_entry(
+        "remotealpaca_telescope", "remotealpaca", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteDeviceConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_telescope(n, config);
+        },
+        kSrcAgents);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -1025,7 +1041,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #define CS_REMOTEALPACA(X)              \
     X(remotealpaca_observingconditions) \
-    X(remotealpaca_safetymonitor) X(remotealpaca_rotator) X(remotealpaca_filterwheel) X(remotealpaca_switch)
+    X(remotealpaca_safetymonitor)       \
+    X(remotealpaca_rotator) X(remotealpaca_filterwheel) X(remotealpaca_switch) X(remotealpaca_telescope)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1168,6 +1185,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "rotator", "fake_http_client.h"},              // the same, as a Rotator
     {"remotealpaca", "filterwheel", "fake_http_client.h"},          // the same, as a FilterWheel
     {"remotealpaca", "switch", "fake_http_client.h"},               // the same, as a Switch
+    {"remotealpaca", "telescope", "fake_http_client.h"},            // the same, as a Telescope
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1226,6 +1244,8 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"remotealpaca_filterwheel", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp"},
     {"remotealpaca_switch", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp"},
+    {"remotealpaca_telescope", "remotealpaca",
+     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

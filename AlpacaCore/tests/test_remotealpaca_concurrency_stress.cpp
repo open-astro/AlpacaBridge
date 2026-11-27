@@ -11,9 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator,
-// FilterWheel and Switch proxied devices (issues #101, #1753, #2706, #2708, #2709). The upstream is the scripted
-// AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient (decision 0015 rule 2), so every
-// Connect lands and the poll and the command bodies run during the storm. The last case of each device races
+// FilterWheel, Switch and Telescope proxied devices (issues #101, #1753, #2706, #2708, #2709, #2710). The upstream is
+// the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient (decision 0015 rule 2), so
+// every Connect lands and the poll and the command bodies run during the storm. The last case of each device races
 // refused-connection losses against the lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
@@ -22,12 +22,14 @@
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 
 #include <atomic>
 #include <chrono>
@@ -156,6 +158,40 @@ void operate_switch(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     guard([&] { s.set_async_value(1, 60.0); });
     guard([&] { s.set_async(1, false); });
     guard([&] { s.set_switch_name(1, "Heater"); });
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> make_telescope(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_telescope(0, stress_config(),
+                                                 std::make_shared<alpacacore::test::LockedHttpClient>(http.client()),
+                                                 {}, alpacacore::util::default_task_clock());
+}
+
+// The Telescope's frame, Connect reads and capabilities, and its commands (the MoveAxis cap started and cancelled),
+// each in its own guard. InvalidWhileParked is the scripted upstream's own answer while a Park has landed.
+void operate_telescope(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& t = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { static_cast<void>(t.get_right_ascension()); });
+    guard([&] { static_cast<void>(t.get_slewing()); });
+    guard([&] { static_cast<void>(t.get_utc_date()); });
+    guard([&] { static_cast<void>(t.get_sidereal_time()); });
+    guard([&] { static_cast<void>(t.get_at_park()); });
+    guard([&] { static_cast<void>(t.get_can_move_axis(0)); });
+    guard([&] { static_cast<void>(t.get_can_park()); });
+    guard([&] { static_cast<void>(t.get_axis_rate_ranges(0)); });
+    guard([&] { static_cast<void>(t.get_site_latitude()); });
+    guard([&] { static_cast<void>(t.get_target_right_ascension()); });
+    guard([&] { static_cast<void>(t.get_device_state()); });
+    guard([&] { static_cast<void>(t.get_link_fault()); });
+    guard([&] { t.slew_to_coordinates_async(5.0, 10.0); });
+    guard([&] { t.move_axis(0, 1.0); });
+    guard([&] { t.move_axis(0, 0.0); });
+    guard([&] { t.pulse_guide(0, 10); });
+    guard([&] { t.set_target_right_ascension(4.0); });
+    guard([&] { t.set_tracking(true); });
+    guard([&] { static_cast<void>(t.get_destination_side_of_pier(5.0, 10.0)); });
+    guard([&] { t.park(); });
+    guard([&] { t.unpark(); });
+    guard([&] { t.abort_slew(); });
 }
 
 // Every member the driver serves, each in its own guard so one throw skips no later call.
@@ -604,6 +640,88 @@ TEST_CASE("Remote Alpaca switch - refused-connection losses race connects, disco
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());      // the Disconnect ended any kept reason
     CHECK(upstream.calls("setswitchvalue") > 0);  // writes ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca telescope - concurrent connect/disconnect/operate stress",
+          "[remotealpaca][telescope][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Telescope};
+    upstream.install(http);
+    auto driver = make_telescope(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713). InvalidWhileParked: the upstream's
+    // answer to a command another thread's Park has made a parked mount refuse; the guard's set is one per case, so
+    // an unexpected code still fails.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation,
+                                            alpacacore::AlpacaError::InvalidWhileParked};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.calls("slewtocoordinatesasync") > 0);  // the commands ran on a connected driver
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca telescope - destruction races an in-flight connect", "[remotealpaca][telescope][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Telescope};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_telescope(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca telescope - racing disconnect is never dropped", "[remotealpaca][telescope][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Telescope};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_telescope(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 60 is refused (a Connect makes some fifty, so most land), so the poll, the
+// commands and the relink stop lose the link at once while lifecycle threads connect and disconnect it and readers
+// race the getters. TSan checks the loss path, the relink stop's note and send, the MoveAxis caps' start, cancel and
+// join, and the write-throughs against the getters and set_connected().
+TEST_CASE("Remote Alpaca telescope - refused-connection losses race connects, disconnects, commands and reads",
+          "[remotealpaca][telescope][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Telescope};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 60 == 59) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_telescope(http);
+
+    // A refused command is NotConnected (the loss is its answer); InvalidOperation and InvalidWhileParked as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation,
+                                            alpacacore::AlpacaError::InvalidWhileParked};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); });
+
+    // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
+    CHECK(upstream.calls("abortslew") > 0);   // commands ran on a connected driver, not only NotConnected
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
