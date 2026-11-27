@@ -572,7 +572,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions and SafetyMonitor devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor and Rotator devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
@@ -592,6 +592,8 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingCondi
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Rotator Drivers
+
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Rotator device of another Alpaca server through this one. `IsMoving`, `Position` and `MechanicalPosition` are the values of the last poll of the other server; a move reads `IsMoving` true at once, and `Halt` is sent even while the polls fail. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 ### iOptron
 

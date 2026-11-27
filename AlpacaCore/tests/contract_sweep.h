@@ -91,6 +91,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -716,6 +717,17 @@ inline ContractEntry contract_entry_remotealpaca_safetymonitor() {
         },
         kSrcAgents);
 }
+inline ContractEntry contract_entry_remotealpaca_rotator() {
+    return make_entry(
+        "remotealpaca_rotator", "remotealpaca", "rotator", DeviceType::Rotator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteDeviceConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_rotator(n, config);
+        },
+        kSrcAgents);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -980,7 +992,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions) X(remotealpaca_safetymonitor)
+#define CS_REMOTEALPACA(X) X(remotealpaca_observingconditions) X(remotealpaca_safetymonitor) X(remotealpaca_rotator)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1120,6 +1132,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"remotealpaca", "observingconditions", "fake_http_client.h"},  // a scripted upstream (alpaca_upstream_script.h)
     {"remotealpaca", "safetymonitor", "fake_http_client.h"},        // the same, as a SafetyMonitor
+    {"remotealpaca", "rotator", "fake_http_client.h"},              // the same, as a Rotator
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1174,6 +1187,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp"},
     {"remotealpaca_safetymonitor", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp"},
+    {"remotealpaca_rotator", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

@@ -3547,7 +3547,8 @@ function updateIfrConfigFields() {
 function updateRemoteAlpacaConfigFields() {
     const sections = {
         observingconditions: document.getElementById('remotealpaca-observingconditions-fields'),
-        safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields')
+        safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields'),
+        rotator: document.getElementById('remotealpaca-rotator-fields')
     };
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
@@ -5155,8 +5156,10 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.timeoutMs = timeoutMs;
         }
     } else if (deviceData.vendor === 'remotealpaca') {
-        // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions) or remoteAlpacaSafety* (SafetyMonitor).
-        const prefix = normalizeDeviceType(deviceData.deviceType) === 'safetymonitor' ? 'remoteAlpacaSafety' : 'remoteAlpaca';
+        // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions), remoteAlpacaSafety* (SafetyMonitor)
+        // or remoteAlpacaRotator* (Rotator).
+        const remoteAlpacaPrefixes = { safetymonitor: 'remoteAlpacaSafety', rotator: 'remoteAlpacaRotator' };
+        const prefix = remoteAlpacaPrefixes[normalizeDeviceType(deviceData.deviceType)] || 'remoteAlpaca';
         deviceData.upstreamHost = (formData.get(`${prefix}Host`) || '').trim();
         const upstreamPort = readOptionalNumber(formData, `${prefix}Port`);
         if (upstreamPort !== null) {

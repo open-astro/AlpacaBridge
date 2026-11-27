@@ -103,7 +103,7 @@ const OFFERED = {
     filterwheel: ['ioptron', 'playerone', 'qhy', 'touptek', 'wandererastro', 'zwo'],
     focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'touptek', 'zwo'],
     observingconditions: ['remotealpaca', 'weewx'],
-    rotator: ['ifr', 'onstep', 'wandererastro', 'zwo'],
+    rotator: ['ifr', 'onstep', 'remotealpaca', 'wandererastro', 'zwo'],
     safetymonitor: ['remotealpaca'],
     switch: ['gemini', 'ioptron', 'onstep', 'playerone', 'touptek', 'wandererastro', 'zwo'],
     telescope: ['bisque', 'celestron', 'ioptron', 'onstep', 'skywatcher', 'synscan', 'zwo'],

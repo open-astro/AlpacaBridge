@@ -23,6 +23,9 @@
 // helper's state mutex (the leaf of the driver's own locks; a driver's own fields read under with_connected() or
 // with_state() live under it too), then the module's snapshot and health mutexes. No upstream call runs under the
 // state mutex.
+// The command order mutex stands apart from that chain: only a command's caller takes it, holding no other lock, across
+// run_command(), and under it takes only the slot's and the outcome's own mutexes. No body, poll, Connect or Disconnect
+// takes it, so the join of the slot by a Connect or a Disconnect always ends the body a waiting caller waits for.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/async_operation.h>
@@ -38,8 +41,10 @@
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -102,6 +107,13 @@ inline std::string name_from_upstream(const std::string& upstream_name) {
                 std::find_if(model.begin(), model.end(), [](unsigned char c) { return std::isspace(c) == 0; }));
     if (model.empty() || model.find('(') != std::string::npos) return {};
     return util::branded_name(kBrand, model);
+}
+
+// A double in its shortest round-trip form, for a form body.
+inline std::string number_text(double value) {
+    std::array<char, 64> buffer{};
+    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    return std::string(buffer.data(), result.ptr);
 }
 
 inline std::uint32_t new_client_id() {
@@ -183,6 +195,10 @@ public:
     const std::atomic<bool>& connected_flag() const { return connected_; }
     bool link_lost() const { return state_.link_lost(); }
     bool connected() const { return connected_.load() && !state_.link_lost(); }
+
+    // The upstream's InterfaceVersion as the last Connect read it (0 before any): which members it has. It is set
+    // before the driver's own reads at Connect and before the first frame is sampled.
+    int upstream_interface_version() const { return forwarded_version_.load(); }
 
     // Once a Connect has read them: the brand and the upstream's Name (decision 0024), and the upstream's Description.
     std::string name() const {
@@ -335,10 +351,12 @@ public:
     }
 
     // A command runs as a body in its own slot (decision 0023, decision 0006 rule 1); the caller waits for the body's
-    // outcome, which the per-call timeout bounds, and gets its error unchanged. A refused connection is a lost link at
-    // once (NotConnected); another call with no reply is a DriverException, or NotConnected when the poll lost the
-    // link meanwhile. Both are decided inside the body: a Connect joins the slot first, so no reconnect lands between
-    // the failure and its answer (#2456).
+    // outcome, which the per-call timeout bounds, and gets its error unchanged. Commands are serialized in caller
+    // order: the caller holds command_order_mutex_ across the start and the wait, so a later command (a Halt) never
+    // reaches the upstream before an earlier one (a move) whose superseded body would otherwise still run beside it. A
+    // refused connection is a lost link at once (NotConnected); another call with no reply is a DriverException, or
+    // NotConnected when the poll lost the link meanwhile. Both are decided inside the body: a Connect joins the slot
+    // first, so no reconnect lands between the failure and its answer (#2456).
     void run_command(std::function<void(util::OperationContext&)> body) {
         struct Outcome {
             std::mutex mutex;
@@ -346,6 +364,7 @@ public:
             bool done = false;
             std::exception_ptr error;
         };
+        std::lock_guard<std::mutex> order(command_order_mutex_);
         auto outcome = std::make_shared<Outcome>();
         command_op_.start([this, outcome, body = std::move(body)](util::OperationContext& ctx) {
             std::exception_ptr error;
@@ -413,7 +432,7 @@ private:
     // Connected=true.
     void forward_connect(int version) {
         forwarded_connect_ = true;
-        forwarded_version_ = version;
+        forwarded_version_.store(version);
         if (version < platform7_version_) {
             client_.put("connected", {{"Connected", "True"}});
             return;
@@ -434,7 +453,7 @@ private:
     void forward_disconnect() {
         forwarded_connect_ = false;
         try {
-            if (forwarded_version_ < platform7_version_) {
+            if (forwarded_version_.load() < platform7_version_) {
                 client_.put("connected", {{"Connected", "False"}});
             } else {
                 client_.put("disconnect");
@@ -507,10 +526,14 @@ private:
     // LinkLostStamp: nothing here moves on a relink (no #521 consumer).
     std::atomic<bool> connected_{false};
     std::function<void()> command_done_hook_;  // test seam: set_command_done_hook()
+    // Held by a command's caller across run_command(), so commands reach the upstream in caller order (see the lock
+    // order at the top). No other lock is held when it is taken.
+    std::mutex command_order_mutex_;
     // Under the driver's transition_mutex_: the upstream was told Connect and not yet Disconnect, and its
     // InterfaceVersion then.
     bool forwarded_connect_ = false;
-    int forwarded_version_ = 0;
+    // Atomic: upstream_interface_version() reads it from the poll, the getters and the commands.
+    std::atomic<int> forwarded_version_{0};
 
     // The state lock, a leaf of the driver's own locks (decision 0016): the snapshot mutex nests under it. Never held
     // across an upstream call.

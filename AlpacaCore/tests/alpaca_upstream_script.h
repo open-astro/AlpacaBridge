@@ -12,19 +12,21 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions or SafetyMonitor device for the remotealpaca driver tests (issue #1753
-// slices 3 and 4): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake task clock with
-// no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP; this one answers
-// per member and per SensorName, keeps the upstream's Connected and AveragePeriod as a real server does, and counts
-// calls per member.
+// A scripted upstream ObservingConditions, SafetyMonitor or Rotator device for the remotealpaca driver tests (issue
+// #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on the fake task clock
+// with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real HTTP; this one
+// answers per member and per SensorName, keeps the upstream's Connected and AveragePeriod (and a Rotator's moves, Sync
+// and Reverse) as a real server does, and counts calls per member.
 // An unscripted member answers 0x400 (not implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,13 +42,29 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
     // SafetyMonitor: a SafetyMonitor 3 upstream (Platform 7) named "Alpaca Simulator Safety Monitor" reading safe.
+    // Rotator: a Rotator 4 upstream (Platform 7) named "Alpaca Simulator Rotator" at Position 100 and
+    // MechanicalPosition 90 (a Sync offset of 10), TargetPosition 100, not moving, StepSize 0.5, CanReverse true,
+    // Reverse false. A move runs until finish_move() (or a Halt) ends it, so a test sees IsMoving true on the upstream
+    // for as long as it needs.
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
         set("connecting", "false");
+        if (kind == Kind::Rotator) {
+            set("interfaceversion", "4");
+            set("name", "\"Alpaca Simulator Rotator\"");
+            set("description", "\"ASCOM Alpaca Simulator Rotator\"");
+            set("canreverse", "true");
+            set("stepsize", "0.5");
+            set("reverse", "false");
+            set("ismoving", "false");
+            set_rotator_locked(100.0, 90.0);
+            set("targetposition", number(100.0));
+            return;
+        }
         if (kind == Kind::SafetyMonitor) {
             set("interfaceversion", "3");
             set("name", "\"Alpaca Simulator Safety Monitor\"");
@@ -120,6 +138,21 @@ public:
         return connected_;
     }
 
+    // A Rotator: ends the running move at its target (Position the target, MechanicalPosition the target less the Sync
+    // offset, IsMoving false).
+    void finish_move() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        replies_[{"ismoving", ""}] = {"false", 0, {}};
+        if (rotator_target_) set_rotator_locked(*rotator_target_, *rotator_target_ - (position_ - mechanical_));
+        rotator_target_.reset();
+    }
+
+    // A Rotator: the member and the Position of the last move PUT, as sent ("" before any).
+    std::string last_move() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_move_;
+    }
+
     static std::string number(double value) { return std::to_string(value); }
 
     util::HttpResponse answer(const FakeHttpClient::Request& request) {
@@ -171,10 +204,41 @@ private:
             connected_ = lower(field(params, "Connected")) == "true";
         } else if (member == "averageperiod") {
             replies_[{"averageperiod", ""}] = {decode(field(params, "AveragePeriod")), 0, {}};
+        } else if (member == "move" || member == "moveabsolute" || member == "movemechanical") {
+            // The move runs until finish_move() or a Halt; TargetPosition is where it goes, as a real rotator has it.
+            const std::string sent = decode(field(params, "Position"));
+            last_move_ = member + " " + sent;
+            const double value = std::stod(sent);
+            const double target = member == "move"           ? position_ + value
+                                  : member == "moveabsolute" ? value
+                                                             : value + (position_ - mechanical_);
+            rotator_target_ = wrap(target);
+            replies_[{"targetposition", ""}] = {number(*rotator_target_), 0, {}};
+            replies_[{"ismoving", ""}] = {"true", 0, {}};
+        } else if (member == "halt") {
+            rotator_target_.reset();
+            replies_[{"ismoving", ""}] = {"false", 0, {}};
+        } else if (member == "sync") {
+            // The offset moves; MechanicalPosition stays.
+            set_rotator_locked(wrap(std::stod(decode(field(params, "Position")))), mechanical_);
+        } else if (member == "reverse") {
+            replies_[{"reverse", ""}] = {lower(field(params, "Reverse")), 0, {}};
         } else if (member != "refresh") {
             return {{}, 0x400, "Method " + member + " is not implemented"};
         }
         return {{}, 0, {}};
+    }
+
+    void set_rotator_locked(double position, double mechanical) {
+        position_ = position;
+        mechanical_ = mechanical;
+        replies_[{"position", ""}] = {number(position), 0, {}};
+        replies_[{"mechanicalposition", ""}] = {number(mechanical), 0, {}};
+    }
+
+    static double wrap(double degrees) {
+        const double wrapped = std::fmod(degrees, 360.0);
+        return wrapped < 0.0 ? wrapped + 360.0 : wrapped;
     }
 
     static std::string lower(std::string text) {
@@ -213,6 +277,11 @@ private:
     std::map<std::string, Reply> put_errors_;
     std::map<std::string, int> calls_;
     bool connected_ = false;
+    // A Rotator's angles, its running move's target (none while none runs) and its last move PUT.
+    double position_ = 0.0;
+    double mechanical_ = 0.0;
+    std::optional<double> rotator_target_;
+    std::string last_move_;
 };
 
 }  // namespace alpacacore::test
