@@ -4617,8 +4617,7 @@ TEST_CASE("iOptron SideOfPier - after a +1 h Sync it names the side of the mount
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
-    const double lst =
-        alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
     const double physical_ra = alpacacore::util::wrap_hours(lst - 0.5);  // hour angle +0.5 h: pier east (0)
     mount.set_position(physical_ra, 20.0);
     FakeTaskClock clock;
@@ -4639,8 +4638,7 @@ TEST_CASE("iOptron DestinationSideOfPier - after a +1 h Sync it names the side t
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
     mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
-    const double lst =
-        alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
     const double start_ra = alpacacore::util::wrap_hours(lst - 3.0);
     mount.set_position(start_ra, 20.0);
     FakeTaskClock clock;

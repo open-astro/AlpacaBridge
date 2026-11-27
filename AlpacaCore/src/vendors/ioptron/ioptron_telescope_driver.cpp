@@ -1175,8 +1175,9 @@ public:
                 }
 
                 const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
-                const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
-                const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
+                // The mount's own frame: the pier side follows where the mount points, not the Sync-shifted RA
+                // clients see (#2761).
+                const double hour_angle = util::shortest_ra_delta_hours(lst, cached_ra_hours_);
                 return util::pier_side_for_hour_angle(hour_angle);
             });
     }
@@ -1197,7 +1198,9 @@ public:
 
                                           const double lst = util::local_sidereal_hours(current_utc_time_locked(),
                                                                                         site_longitude_cached_);
-                                          const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
+                                          // The RA the GOTO sends, in the mount's frame (#2761).
+                                          const double hour_angle = util::shortest_ra_delta_hours(
+                                              lst, util::wrap_hours(ra - sync_offset_ra_hours_));
 
                                           return util::pier_side_for_hour_angle(hour_angle);
                                       });
