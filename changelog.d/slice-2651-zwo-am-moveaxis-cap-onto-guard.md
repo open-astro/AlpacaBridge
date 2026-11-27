@@ -1,0 +1,3 @@
+### Changed
+
+- **The ZWO AM 60 s MoveAxis cap runs on the shared motion guard** (issue #2651, third part): each axis has a slot body, `util::run_motion_deadline()`, and the driver uses `util::kMaxMoveAxisDuration` as its 60 s. A cap stop the mount ignores is sent three times, then Slewing raises `util::kStopNotVerifiedText` and nothing more goes out for that move; a cap stop on one axis verifies that axis alone while the other keeps jogging, and a MoveAxis whose cap cannot start stops the axis and throws. Tests (arm64 only, the ZWO driver does not build on x86_64): the `[goto-safety]` MoveAxis cap cases in `test_zwo_async_slew_failure.cpp`.
