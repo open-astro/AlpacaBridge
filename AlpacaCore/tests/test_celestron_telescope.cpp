@@ -3242,28 +3242,30 @@ TEST_CASE("FakeCelestronHandset ConformU mode: an AUX guide pulse moves its axis
 }
 
 // ConformU "Parked:Tracking = true didn't raise an error when Parked as required" (fake ConformU run of #2692, the
-// NexStar row): the driver over the ConformU-mode handset, the way fake_conformu_server builds it, on the real task
-// clock. Red on purpose: set_tracking() in celestron_telescope_driver.cpp checks no park state, and that file is held
-// by another change, so this case is [!shouldfail] until the driver fix lands (Catch2 then reports the case as passing
-// unexpectedly; delete the tag with the fix).
+// NexStar row): the driver over the ConformU-mode handset, the way fake_conformu_server builds it, with the task clock
+// and the model's clock stepped by the case (decision 0005 rule 2). Red on purpose: set_tracking() in
+// celestron_telescope_driver.cpp checks no park state, and that file is held by another change, so this case is
+// [!shouldfail] until the driver fix lands (Catch2 then reports the case as passing unexpectedly; delete the tag with
+// the fix).
 TEST_CASE("Celestron Telescope Driver - enabling Tracking while parked is refused with InvalidOperation",
           "[celestron][telescope][fake][mount-model][unit][!shouldfail]") {
-    auto motion = alpacacore::test::FakeCelestronHandset::conformu_motion_config();
-    motion.slew_deg_per_s = 1000.0;  // the park GOTO lands in well under a second
-    alpacacore::test::FakeCelestronHandset handset(alpacacore::util::default_task_clock(), motion);
-    alpacacore::test::FakeMountServer server(handset.responder());
+    ModelledNexStar rig;
+    alpacacore::test::FakeMountServer server(rig.handset.responder());
     REQUIRE(server.ok());
     alpacacore::vendor::celestron::ConnectionInfo conn;
     conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
-        0, conn, -33.856784, 151.215297, 42.0, /*sync_time_on_connect=*/true);
+        0, conn, -33.856784, 151.215297, 42.0, /*sync_time_on_connect=*/true,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, rig.task_clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->park();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    while (!driver->get_at_park() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // The park GOTO takes modelled time and the driver polls it on the task clock: step both a second at a time.
+    for (int second = 0; second < 600 && !driver->get_at_park(); ++second) {
+        rig.advance(std::chrono::seconds(1));
+        rig.task_clock.advance(std::chrono::seconds(1));
+        REQUIRE(rig.task_clock.wait_for_woken_settled(std::chrono::seconds(5)));
     }
     REQUIRE(driver->get_at_park());
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);

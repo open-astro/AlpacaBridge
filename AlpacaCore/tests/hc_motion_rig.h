@@ -19,6 +19,7 @@
 #ifndef _WIN32
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <string>
