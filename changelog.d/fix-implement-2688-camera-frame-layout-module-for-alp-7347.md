@@ -1,0 +1,3 @@
+### Changed
+
+- **One frame layout module for camera images** (ZWO, SVBONY, Player One, ToupTek and Altair, QHY), issue #2688. The five camera drivers now build their `ImageArray` through `util::build_frame_image` (`AlpacaCore/include/alpacacore/util/frame_layout.h`) instead of five copies of the stride, crop, byte-order and BGR-to-RGB code. No camera changes output: ToupTek and Altair keep the one-pixel edge fill of #977, the others keep zero fill. Player One now refuses a buffer shorter than its frame, as the other four already did. Covered by `AlpacaCore/tests/test_frame_layout.cpp` (each format, 16-bit byte order, BGR to RGB, stride, crop, both edge rules, short buffer and size overflow); the per-vendor camera tests are unchanged.

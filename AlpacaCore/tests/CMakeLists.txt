@@ -35,6 +35,7 @@ set(TEST_SOURCES
     test_fake_pty_write.cpp
     test_host_clock.cpp
     test_host_clock_write_gate.cpp
+    test_frame_layout.cpp
     test_image_validation.cpp
     test_motion_limits.cpp
     test_poll_settle.cpp
