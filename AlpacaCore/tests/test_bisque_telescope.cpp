@@ -1250,6 +1250,27 @@ TEST_CASE("Bisque AtHome - Tracking on clears it and Tracking off does not (#246
     CHECK_FALSE(rig.driver->get_at_home());
 }
 
+// #2807: ITelescopeV4 Tracking = true raises InvalidWhileParked while AtPark is true (ConformU "Parked:Tracking =
+// true"), and no SetTracking reaches TheSkyX. Tracking = false stays allowed on a parked mount and is sent.
+TEST_CASE("Bisque Tracking - true is refused while parked and false is still sent (#2807)",
+          "[bisque][telescope][unit][park]") {
+    ClockedBisque rig;
+    rig.driver->set_connected(false);
+    rig.mount.parked = true;  // the connect reads IsParked
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    REQUIRE(rig.driver->get_at_park());
+    const int sends = rig.mount.set_tracking_commands.load();
+
+    require_alpaca_error([&] { rig.driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.set_tracking_commands.load() == sends);
+
+    REQUIRE_NOTHROW(rig.driver->set_tracking(false));
+    CHECK(rig.mount.set_tracking_commands.load() == sends + 1);
+    CHECK_FALSE(rig.driver->get_tracking());
+    CHECK(rig.driver->get_at_park());
+}
+
 TEST_CASE("Bisque AbortSlew - a getter does not stall behind a pending pulse guide",
           "[bisque][telescope][pulseguiding]") {
     auto entered = std::make_shared<std::atomic<bool>>(false);

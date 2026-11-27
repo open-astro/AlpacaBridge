@@ -538,7 +538,14 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        check_link_now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_link_locked();
+            // ITelescopeV4: Tracking = true is InvalidWhileParked while AtPark is true (#2807); false stays allowed.
+            if (tracking && parked_) {
+                throw AlpacaException("Tracking is not allowed while parked", AlpacaError::InvalidWhileParked);
+            }
+        }
         auto& protocol = BisqueProtocolWrapper::instance();
         // ignore_rates=true uses sidereal. The exchange runs without mutex_.
         protocol.set_tracking(tracking, true, 0.0, 0.0);
