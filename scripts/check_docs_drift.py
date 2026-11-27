@@ -4858,6 +4858,31 @@ def self_test():
             (Path(tmp) / ADOPTION_DIR / stray).write_text("x", encoding="utf-8")
         check("adoption files: every file in the folder is listed, not only 0*.md",
               _adoption_names(tmp) == ["0001-example.md", "10-snapshot.md", "README.md"])
+    # Check 23 end to end over a fixture repository: the rosters are read from docs/adoption/, a roster with
+    # no `## Adoption` section is reported, and a scanned file with no row is reported.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fixture = {
+            "docs/decisions/0001-example.md": good_record,
+            "docs/decisions/0002-second.md": good_record,
+            "docs/adoption/0001-example.md": "# Example: adoption\n\n## Roster\n\nx\n",
+            "docs/adoption/0002-second.md": ("# Second: adoption\n\n## Adoption\n\nScan: `AlpacaCore/src/*_driver.cpp`\n"
+                                             "Symbol: `Clock`\n\n| Driver | Source | State | Issue | Notes |\n"
+                                             "| --- | --- | --- | --- | --- |\n"
+                                             "| A | `AlpacaCore/src/a_driver.cpp` | adopted | | |\n"),
+            "AlpacaCore/src/a_driver.cpp": "Clock c;\n",
+            "AlpacaCore/src/b_driver.cpp": "Clock d;\n",
+        }
+        for name, text in fixture.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+        f = check_decision_adoption(root)
+        check("adoption check 23: a docs/adoption roster with no `## Adoption` section is reported",
+              any("docs/adoption/0001-example.md: no `## Adoption` section" in x for x in f))
+        check("adoption check 23: a scanned file with no row in a docs/adoption roster is reported",
+              any("docs/adoption/0002-second.md" in x and "AlpacaCore/src/b_driver.cpp" in x for x in f))
 
     pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
               "\n      - name: Next\n          ver=9.9.9\n")
