@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -257,10 +258,21 @@ public:
         if (connected && get_connected()) {
             return;  // idempotent: connected, and the poll is running
         }
+        // Under transition_mutex_, so no other set_connected() sees the flag; cleared on every way out.
+        struct ClearDisconnecting {
+            std::atomic<bool>& flag;
+            ~ClearDisconnecting() { flag.store(false); }
+        } clear_disconnecting{disconnecting_};
+        if (!connected) {
+            // From here no motion body sends its PUT (owned_motion() refuses it), and the jog stops queue behind any
+            // move already running (they are a command), so a move that raced this Disconnect is stopped too; the caps
+            // are joined after the stops, so a cap such a move started is joined as well.
+            disconnecting_.store(true);
+            stop_jogs_before_disconnect();
+        }
         // The caps of the session that ends: a cap's stop runs as a command, which no Connect or Disconnect waits for
         // under a lock the cap needs.
         stop_move_axis_caps();
-        if (!connected) stop_jogs_before_disconnect();
         end_motion_session();
         if (connected) {
             proxy_.connect([this] { return read_settings(); });
@@ -575,15 +587,17 @@ public:
     // The caps are cancelled only once the upstream took the stop: a stop with no reply leaves them armed.
     void abort_slew() override {
         proxy_.require_connected();
-        run([this](util::OperationContext&) {
-            proxy_.client().put("abortslew");
-            for (auto& cap : move_axis_cap_) cap->cancel();
-            proxy_.with_state([this](Proxy::State&) {
-                driver_motion_ = false;
-                axis_moving_ = {false, false, false};
-                motion_error_.clear();
-            });
-        });
+        run(
+            [this](util::OperationContext&) {
+                proxy_.client().put("abortslew");
+                for (auto& cap : move_axis_cap_) cap->cancel();
+                proxy_.with_state([this](Proxy::State&) {
+                    driver_motion_ = false;
+                    axis_moving_ = {false, false, false};
+                    motion_error_.clear();
+                });
+            },
+            /*stop=*/true);
     }
 
     // MoveAxis(axis, 0) is forwarded even while the link is faulted, as AbortSlew; its cap is cancelled only once the
@@ -595,14 +609,16 @@ public:
         const bool stop = util::check_move_axis(kLimits, axis, rate, StateChecks{*this});
         const auto index = static_cast<std::size_t>(axis);
         if (stop) {
-            run([this, axis, index](util::OperationContext&) {
-                proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
-                move_axis_cap_[index]->cancel();
-                proxy_.with_state([this, index](Proxy::State&) {
-                    axis_moving_[index] = false;
-                    motion_error_.clear();
-                });
-            });
+            run(
+                [this, axis, index](util::OperationContext&) {
+                    proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
+                    move_axis_cap_[index]->cancel();
+                    proxy_.with_state([this, index](Proxy::State&) {
+                        axis_moving_[index] = false;
+                        motion_error_.clear();
+                    });
+                },
+                /*stop=*/true);
             return;
         }
         run([this, axis, index, rate](util::OperationContext& ctx) {
@@ -611,8 +627,16 @@ public:
                     proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", number_text(rate)}});
                 });
             } catch (const RemoteTransportError&) {
-                proxy_.with_state([this, index](Proxy::State&) { axis_moving_[index] = true; });
-                send_axis_stop(axis, "after a MoveAxis with no reply");
+                // The axis may run. A stop the upstream answered ends it; a stop with no reply leaves it this server's
+                // jog, capped, so the cap still stops it and its outcome ends the ownership.
+                const bool stopped = send_axis_stop(axis, "after a MoveAxis with no reply");
+                proxy_.with_state([this, index, stopped](Proxy::State&) { axis_moving_[index] = !stopped; });
+                if (!stopped) {
+                    try {
+                        start_move_axis_cap(axis);
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): it logged and sent a stop
+                    }
+                }
                 throw;
             }
             proxy_.with_state([this, index](Proxy::State&) { axis_moving_[index] = true; });
@@ -805,7 +829,13 @@ private:
         (void)proxy_.with_connected([](const Proxy::State& state) { return state.served().measured_at; });
     }
 
-    void run(std::function<void(util::OperationContext&)> body) {
+    // A command, in caller order. While a Disconnect runs, every command but a stop (AbortSlew, MoveAxis(axis, 0)) is
+    // refused in its caller, before it queues: the Disconnect's own stops then wait for the commands already queued
+    // only, never for a stream of new ones.
+    void run(std::function<void(util::OperationContext&)> body, bool stop = false) {
+        if (!stop && disconnecting_.load()) {
+            throw AlpacaException("Device not connected: a Disconnect is in progress", AlpacaError::NotConnected);
+        }
         proxy_.run_command([this, body = std::move(body)](util::OperationContext& ctx) {
             if (command_hook_) command_hook_();
             body(ctx);
@@ -855,6 +885,10 @@ private:
     // upstream error answer (it refused the motion) gives the ownership back as it was.
     template <class Put>
     void owned_motion(Put&& put) {
+        // A Disconnect in progress (its jog stops may already have gone out) or done: the move would run unwatched.
+        if (disconnecting_.load() || !get_connected()) {
+            throw AlpacaException("Device not connected: a Disconnect is in progress", AlpacaError::NotConnected);
+        }
         const bool before = proxy_.with_state([this](Proxy::State&) {
             ++motion_seq_;
             return std::exchange(driver_motion_, true);
@@ -891,11 +925,29 @@ private:
     // no reply owes the relink stop, so the next Connect sends it. Under transition_mutex_ only.
     void stop_jogs_before_disconnect() {
         if (proxy_.lost() || !proxy_.connected()) return;
+        try {
+            proxy_.run_command([this](util::OperationContext&) { send_disconnect_stops(); });
+        } catch (const std::exception& e) {
+            // The command did not run (a draining slot) or the link went: the relink stop covers every axis.
+            ALPACA_LOG_INFO(detail::kComponent, std::string("Disconnect stops did not run: ") + e.what());
+            proxy_.with_state([this](Proxy::State&) {
+                if (std::any_of(axis_moving_.begin(), axis_moving_.end(), [](bool m) { return m; })) {
+                    relink_stop_.note_link_lost(true);
+                }
+            });
+        }
+    }
+
+    // The Disconnect's command body: MoveAxis(axis, 0) for each axis this server moves, read now, after every move
+    // queued before it. The first stop with no reply owes the relink stop, which covers every axis, so the rest are
+    // not waited for.
+    void send_disconnect_stops() {
         const auto moving = proxy_.with_state([this](Proxy::State&) { return axis_moving_; });
         for (int axis = 0; axis < kAxes; ++axis) {
             if (!moving[static_cast<std::size_t>(axis)]) continue;
             if (!send_axis_stop(axis, "at Disconnect")) {
                 proxy_.with_state([this](Proxy::State&) { relink_stop_.note_link_lost(true); });
+                break;
             }
         }
     }
@@ -1169,7 +1221,9 @@ private:
     bool driver_motion_ = false;
     std::uint64_t motion_seq_ = 0;
     std::array<bool, kAxes> axis_moving_{false, false, false};  // this server's MoveAxis per axis
-    std::string motion_error_;                                  // a MoveAxis cap's outcome, raised by Slewing
+    // Set by set_connected(false) for the length of the Disconnect: a motion body refuses its PUT (owned_motion()).
+    std::atomic<bool> disconnecting_{false};
+    std::string motion_error_;  // a MoveAxis cap's outcome, raised by Slewing
     util::RelinkMotionStop relink_stop_;
     // The Connect's reads before the store, under transition_mutex_ (only the connect path touches it).
     Settings read_settings_;

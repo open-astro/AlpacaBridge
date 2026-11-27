@@ -666,7 +666,9 @@ TEST_CASE("Remote Alpaca telescope - concurrent connect/disconnect/operate stres
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
-    CHECK(upstream.calls("slewtocoordinatesasync") > 0);  // the commands ran on a connected driver
+    // The commands ran on a connected driver. A stop, not a slew: a slew is refused while a Disconnect runs, and the
+    // lifecycle threads disconnect often enough that a run can send none.
+    CHECK(upstream.calls("abortslew") > 0);
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);

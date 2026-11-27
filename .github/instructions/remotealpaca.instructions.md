@@ -232,9 +232,10 @@ bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bar
   the first frame, whatever `Slewing` reads. An upstream error answer counts as sent; a call with no reply fails the
   Connect and keeps it owed. A motion PUT makes the motion this server's before it goes out (a PUT with no reply may
   have started the mount); only an upstream error answer gives it back. A `MoveAxis` PUT with no reply also gets a
-  best-effort stop at once.
-- **Disconnect** stops each axis this server's `MoveAxis` still runs (the caps are joined first, so none is left to
-  end it), before the forwarded Disconnect; a stop with no reply owes the relink stop. `AbortSlew` and
+  best-effort stop at once, and stays capped when that stop gets no reply either.
+- **Disconnect** stops each axis this server's `MoveAxis` still runs, before the forwarded Disconnect. The stops run
+  as a command, so they queue behind a move already sent; from the Disconnect's start a motion body refuses its PUT
+  (`NotConnected`), and the caps are joined after the stops. The first stop with no reply owes the relink stop. `AbortSlew` and
   `MoveAxis(axis, 0)` cancel a cap only once the upstream answered the stop.
 
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,

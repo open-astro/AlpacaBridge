@@ -859,6 +859,91 @@ TEST_CASE("Remote Alpaca Telescope motion - a motion PUT with no reply is stoppe
     }
 }
 
+// A MoveAxis whose PUT and best-effort stop both get no reply leaves an axis that may run: it is still capped, so the
+// cap stops it at its deadline.
+TEST_CASE("Remote Alpaca Telescope motion - a MoveAxis whose PUT and stop get no reply is still capped",
+          "[remotealpaca][telescope][goto-safety]") {
+    Rig rig;
+    std::atomic<bool> lose_replies{false};
+    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+        const bool move = request.method == "PUT" && request.url.find("/moveaxis") != std::string::npos;
+        if (lose_replies.load() && move) {
+            // The move reaches the upstream and its reply is lost; the stop is lost before it arrives.
+            if (request.form_body.find("Rate=0&") == std::string::npos) (void)rig.upstream.answer(request);
+            return alpacacore::util::HttpResponse{500, ""};
+        }
+        return rig.upstream.answer(request);
+    });
+    rig.connect();
+    lose_replies.store(true);
+    require_alpaca_error([&] { rig.driver->move_axis(0, 1.5); }, AlpacaError::DriverException);
+    lose_replies.store(false);
+    REQUIRE(rig.upstream.axis_moving(0));
+    run_to_cap(rig);
+    CHECK(stop_steps_until_raised(rig, 40) >= 0);
+    CHECK_FALSE(rig.upstream.axis_moving(0));
+}
+
+// A MoveAxis racing a Disconnect: the Disconnect's jog stops queue behind the move already sent (caller order), so an
+// axis that move started is stopped; a move sent while the Disconnect runs is refused before its PUT.
+TEST_CASE("Remote Alpaca Telescope Disconnect - a MoveAxis that races it is stopped or refused",
+          "[remotealpaca][telescope][goto-safety]") {
+    SECTION("a move whose PUT went out before the Disconnect is stopped by it") {
+        Rig rig;
+        alpacacore::test::Latch put_sent;
+        std::atomic<bool> hold{false};
+        rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+            auto reply = rig.upstream.answer(request);
+            if (hold.load() && request.method == "PUT" && request.url.find("/moveaxis") != std::string::npos &&
+                request.form_body.find("Rate=0&") == std::string::npos) {
+                hold.store(false);
+                put_sent.block();  // the move's body sits between its PUT and taking the axis as this server's
+            }
+            return reply;
+        });
+        rig.connect();
+        hold.store(true);
+        std::thread mover([&] { (void)error_code_of([&] { rig.driver->move_axis(0, 1.0); }); });
+        CHECK(put_sent.wait_entered());
+        alpacacore::test::Latch disconnect_waits;
+        remote::set_command_waiting_hook_for_testing(*rig.driver, [&] { disconnect_waits.block(); });
+        std::thread disconnecter([&] { rig.driver->set_connected(false); });
+        CHECK(disconnect_waits.wait_entered());  // the Disconnect's stops wait for the move: CHECK, the threads join
+        disconnect_waits.release();
+        put_sent.release();
+        mover.join();
+        disconnecter.join();
+        CHECK_FALSE(rig.driver->get_connected());
+        CHECK_FALSE(rig.upstream.axis_moving(0));
+    }
+    SECTION("a move sent while the Disconnect's stops run is refused") {
+        Rig rig;
+        alpacacore::test::Latch stop_sent;
+        std::atomic<bool> hold{false};
+        rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+            auto reply = rig.upstream.answer(request);
+            if (hold.load() && request.method == "PUT" && request.url.find("/moveaxis") != std::string::npos &&
+                request.form_body.find("Rate=0&") != std::string::npos) {
+                hold.store(false);
+                stop_sent.block();  // the Disconnect's stop of axis 0 is on the wire
+            }
+            return reply;
+        });
+        rig.connect();
+        rig.driver->move_axis(0, 1.0);
+        hold.store(true);
+        std::thread disconnecter([&] { rig.driver->set_connected(false); });
+        CHECK(stop_sent.wait_entered());
+        // Refused in its caller, before it queues behind the Disconnect's stops.
+        const int code = error_code_of([&] { rig.driver->move_axis(1, 1.0); });
+        stop_sent.release();
+        disconnecter.join();
+        CHECK(code == AlpacaError::NotConnected);
+        CHECK_FALSE(rig.upstream.axis_moving(0));
+        CHECK_FALSE(rig.upstream.axis_moving(1));
+    }
+}
+
 // The other axis's move is this server's too: the whole mount's Slewing reads as stopped for the axis being verified.
 TEST_CASE("Remote Alpaca Telescope MoveAxis - one axis's cap stops that axis only and verifies while the other moves",
           "[remotealpaca][telescope][goto-safety]") {
