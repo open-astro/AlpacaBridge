@@ -14,7 +14,7 @@ Symbol: `SerialLink`
 | Driver | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- |
 | Celestron NexStar | `AlpacaCore/src/vendors/celestron/celestron_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
-| Celestron CGX mount, AUX focuser | `AlpacaCore/src/vendors/celestron/celestron_cgx_protocol_wrapper.cpp` | adopted | #1448 | `main` only; one owner name per device; `SerialExclusive::Required`; keeps its link across a logical disconnect ([decision 0011](0011-cgx-logical-reference-continuity.md) rule 1) |
+| Celestron CGX mount, AUX focuser | `AlpacaCore/src/vendors/celestron/celestron_cgx_protocol_wrapper.cpp` | adopted | #1448 | `main` only; one owner name per device; `SerialExclusive::Required`; keeps its link across a logical disconnect ([decision 0011](../decisions/0011-cgx-logical-reference-continuity.md) rule 1) |
 | Gemini focuser, flat panel, PDH | `AlpacaCore/src/vendors/gemini/gemini_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/gemini/gemini_flatpanel_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/gemini/gemini_pdh_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435 |
 | iOptron mount, iEAF, iEFW | `AlpacaCore/src/vendors/ioptron/ioptron_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_protocol_wrapper.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_iefw_protocol_wrapper.cpp` | adopted | #1448 | Ported from #1435; replaces the #995 exclusive hold |
 | iOptron iFR focuser-rotator | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_protocol_wrapper.cpp` | adopted | #2002 | one `SerialLink` per unit, shared by the focuser and the rotator through `IfrLink::acquire()` under one owner name (`iOptron iFR`); the second device joins the open session instead of claiming the port again |
