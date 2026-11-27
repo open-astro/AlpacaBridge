@@ -4102,6 +4102,24 @@ int main() {
         EXPECT(cfg.value("pollPeriodSeconds", -1) == 17);
         remove_device(router, "remotealpaca", "switch", 9640);
     }
+    {
+        // case: remotealpaca telescope config round-trips every field (#2710)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9660},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32328},
+                                           {"upstreamDeviceNumber", 2},
+                                           {"pollPeriodSeconds", 13}},
+                                          "Telescope", 9660);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32328);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 2);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 13);
+        remove_device(router, "remotealpaca", "telescope", 9660);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -9435,7 +9453,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 51);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 52);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -11575,6 +11593,20 @@ int main() {
         EXPECT(!refused.ok);
         EXPECT(refused.message.find("is this server") != std::string::npos);
         EXPECT(listed_entry(router, "Switch", 9641).is_null());
+    }
+    {
+        // case: configuredevice refuses a remotealpaca telescope upstream that is this server (#2710)
+        // Decision 0023 rule 4, as for the other proxied devices above.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9661},
+                                     {"upstreamHost", "localhost"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "Telescope");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "Telescope", 9661).is_null());
     }
 #endif
 

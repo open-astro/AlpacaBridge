@@ -311,6 +311,17 @@ std::optional<int> whole_int(const Json& value) {
     return static_cast<int>(parsed);
 }
 
+// A Number literal as a finite double into `out`; false (and `out` unchanged) when it is not one.
+bool finite_number_into(const Json& value, double& out) {
+    if (value.kind != Json::Kind::Number) return false;
+    double parsed = 0.0;
+    const auto* end = value.text.data() + value.text.size();
+    const auto result = std::from_chars(value.text.data(), end, parsed);
+    if (result.ec != std::errc() || result.ptr != end || !std::isfinite(parsed)) return false;
+    out = parsed;
+    return true;
+}
+
 // application/x-www-form-urlencoded and query encoding: RFC 3986 unreserved characters as they are, every
 // other byte as %XX.
 std::string url_encode(std::string_view text) {
@@ -466,12 +477,7 @@ int RemoteAlpacaClient::get_int(std::string_view member, const RemoteParams& par
 double RemoteAlpacaClient::get_double(std::string_view member, const RemoteParams& params) {
     const Reply reply = call(Verb::Get, member, params);
     const Json& value = reply.value(prefix_);
-    double parsed = 0.0;
-    if (value.kind == Json::Kind::Number) {
-        const auto* end = value.text.data() + value.text.size();
-        const auto result = std::from_chars(value.text.data(), end, parsed);
-        if (result.ec == std::errc() && result.ptr == end && std::isfinite(parsed)) return parsed;
-    }
+    if (double parsed = 0.0; finite_number_into(value, parsed)) return parsed;
     throw RemoteTransportError(prefix_ + "the reply to " + reply.member + " has a " + kind_name(value.kind) +
                                " Value, not a finite number");
 }
@@ -515,6 +521,31 @@ std::vector<int> RemoteAlpacaClient::get_int_list(std::string_view member, const
     }
     throw RemoteTransportError(prefix_ + "the reply to " + reply.member + " has a " + kind_name(value.kind) +
                                " Value, not an array of whole numbers inside int");
+}
+
+std::vector<std::pair<double, double>> RemoteAlpacaClient::get_rate_list(std::string_view member,
+                                                                         const RemoteParams& params) {
+    const Reply reply = call(Verb::Get, member, params);
+    const Json& value = reply.value(prefix_);
+    std::vector<std::pair<double, double>> list;
+    if (value.kind == Json::Kind::Array) {
+        for (const Json& item : value.items) {
+            const Json* minimum = item.kind == Json::Kind::Object ? item.find("Minimum") : nullptr;
+            const Json* maximum = item.kind == Json::Kind::Object ? item.find("Maximum") : nullptr;
+            // Plain doubles, not std::optional: GCC 14 at -O1 and above reports the optional's payload as maybe
+            // uninitialized here (-Werror=maybe-uninitialized in the sanitizer builds).
+            double low = 0.0;
+            double high = 0.0;
+            if (minimum == nullptr || maximum == nullptr || !finite_number_into(*minimum, low) ||
+                !finite_number_into(*maximum, high)) {
+                break;
+            }
+            list.emplace_back(low, high);
+        }
+        if (list.size() == value.items.size()) return list;
+    }
+    throw RemoteTransportError(prefix_ + "the reply to " + reply.member + " has a " + kind_name(value.kind) +
+                               " Value, not an array of Minimum and Maximum rates");
 }
 
 void RemoteAlpacaClient::put(std::string_view member, const RemoteParams& params) { call(Verb::Put, member, params); }

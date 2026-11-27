@@ -1,7 +1,8 @@
 # remotealpaca vendor: devices of an upstream Alpaca server served as proxied
 # devices (decision 0023, issue #1753): the upstream client, the self-loop check
-# and the ObservingConditions, SafetyMonitor, Rotator, FilterWheel and Switch
-# drivers over the shared UpstreamProxy (upstream_proxy.h), with their catalog factories.
+# and the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch and Telescope
+# drivers over the shared UpstreamProxy (upstream_proxy.h), with their catalog
+# factories.
 
 if(ALPACACORE_ENABLE_REMOTEALPACA)
     if(NOT TARGET alpacacore_http_client)
@@ -17,6 +18,7 @@ if(ALPACACORE_ENABLE_REMOTEALPACA)
         remotealpaca_switch_driver.cpp
         remotealpaca_rotator_driver.cpp
         remotealpaca_filterwheel_driver.cpp
+        remotealpaca_telescope_driver.cpp
         remotealpaca_catalog.cpp
     )
 
