@@ -53,7 +53,7 @@ namespace err = alpacacore::AlpacaError;
 using namespace std::chrono_literals;
 
 // The driver's link is gone at once: Connected false, DeviceState empty, a read answers NotConnected.
-void require_link_lost(alpacacore::TelescopeDriver& driver) {
+[[maybe_unused]] void require_link_lost(alpacacore::TelescopeDriver& driver) {
     CHECK_FALSE(driver.get_connected());
     CHECK(driver.get_device_state().empty());
     try {
@@ -84,7 +84,7 @@ struct DisconnectOnExit {
 
 // The default handset until `mute` is set, then one that takes every command and answers nothing: a reply timeout,
 // the link still up.
-alpacacore::test::FakeMountServer::Responder mutable_responder(std::shared_ptr<std::atomic<bool>> mute) {
+[[maybe_unused]] alpacacore::test::FakeMountServer::Responder mutable_responder(std::shared_ptr<std::atomic<bool>> mute) {
     auto base = alpacacore::test::FakeMountServer::default_responder();
     return [base, mute](const std::string& chunk) { return mute->load() ? std::string() : base(chunk); };
 }
