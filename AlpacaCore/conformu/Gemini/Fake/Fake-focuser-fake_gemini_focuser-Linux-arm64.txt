@@ -1,0 +1,101 @@
+FAKE REPORT: ConformU against FakeGeminiFocuser (simulated focuser over a pseudo-terminal), not hardware. Not hardware validation.
+13:25:44.594 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Tue 27 October 2026 03:08:39          
+13:25:44.594                                              
+13:25:44.594 Operating system is Debian GNU/Linux 13 (trixie), Processor is Intel/AMD 64bit, Application is 64bit.          
+13:25:44.594                                              
+13:25:44.594 Alpaca device:  (127.0.0.1:11111 Focuser/0)          
+13:25:44.595                                              
+13:25:44.595 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 11111, Alpaca device number: 0
+13:25:44.608 CreateDevice                        INFO     Alpaca device created OK
+13:25:44.608 CreateDevice                        INFO     Successfully created driver
+13:25:45.700 CreateDevice                        OK       Found a valid interface version: 4
+13:25:45.700 CreateDevice                        OK       Driver instance created successfully
+13:25:45.700                                              
+13:25:45.700 Connect to device                            
+13:25:46.352 Connected                           OK       Connected to device successfully using Connected = True
+13:25:46.905 Connected                           OK       Disconnected from device successfully using Connected = False
+13:25:47.908 Connect                             OK       Connected to device successfully using Connect()
+13:25:47.908                                              
+13:25:47.909 Common Driver Methods                        
+13:25:47.909 InterfaceVersion                    OK       4
+13:25:47.910 Connected                           OK       True
+13:25:47.912 Description                         OK       Gemini Automatic Astro Focuser Pro Driver
+13:25:47.913 DriverInfo                          OK       AlpacaCore Gemini Focuser Driver
+13:25:47.913 DriverVersion                       OK       5.0.2
+13:25:47.914 Name                                OK       Gemini Automatic Astro Focuser Pro
+13:25:47.914                                              
+13:25:47.916 SupportedActions                    OK       Driver returned an empty action list
+13:25:47.916 Action                              INFO     Conform cannot test the Action method
+13:25:47.916                                              
+13:25:47.920 DeviceState                         OK       Received 4 operational state properties.
+13:25:47.920 DeviceState                         OK         IsMoving = False
+13:25:47.920 DeviceState                         OK         Position = 1000
+13:25:47.920 DeviceState                         OK         Temperature = 12.5
+13:25:47.920 DeviceState                         OK         TimeStamp = 11/27/2026 12:25:47 AM
+13:25:47.922 DeviceState                         OK       Found all expected operational properties
+13:25:47.922                                              
+13:25:47.922 Properties                                   
+13:25:47.923 Absolute                            OK       True
+13:25:47.923 IsMoving                            OK       False
+13:25:47.924 MaxStep                             OK       50000
+13:25:47.925 MaxIncrement                        OK       50000
+13:25:47.925 Position                            OK       1000
+13:25:47.936 StepSize                            OK       Optional member returned a NotImplementedException error.
+13:25:47.938 TempCompAvailable                   OK       True
+13:25:47.939 TempComp Read                       OK       False
+13:25:47.939 TempComp Write                      OK       Successfully turned temperature compensation on
+13:25:47.948 TempComp Write                      OK       Successfully turned temperature compensation off
+13:25:47.951 Temperature                         OK       12.5
+13:25:47.951                                              
+13:25:47.951 Methods                                      
+13:25:47.951 Halt                                OK       Focuser halted OK
+13:25:48.457 Move - TempComp False               OK       Absolute move OK
+13:25:49.665 Move - TempComp True V3             OK       Absolute move OK
+13:25:50.670 Move - To 0                         OK       Reported position: 0.
+13:25:51.174 Move - Below 0                      OK       Movement below 0 was not permitted. (Actually moved to 0)
+13:25:51.676 Move - To MidPoint                  OK       Reported position: 25000.
+13:25:52.180 Move - To MaxStep                   OK       Reported position: 50000.
+13:25:52.682 Move - Above MaxStep                OK       Movement above MaxStep was not permitted. (Actually moved to 50000)
+13:25:52.683                                              
+13:25:52.683 Disconnect from device                       
+13:25:52.684 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+13:25:52.684                                              
+13:25:52.684 Conformance test has finished                
+13:25:52.684                                              
+13:25:52.684 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+13:25:52.684                                     
+13:25:52.684 Timing Summary                               See Help for further information.
+13:25:52.684 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+13:25:52.684 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+13:25:52.684 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+13:25:52.684 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+13:25:52.684                                              
+13:25:52.684 Connect                                      At 13:25:46.906 Connect                  0.001 seconds. ✓ (STANDARD)
+13:25:52.684 InterfaceVersion                             At 13:25:47.909 InterfaceVersion         0.000 seconds. ✓ (FAST)
+13:25:52.684 Connected                                    At 13:25:47.910 Connected                0.001 seconds. ✓ (FAST)
+13:25:52.684 Description                                  At 13:25:47.912 Description              0.002 seconds. ✓ (FAST)
+13:25:52.684 DriverInfo                                   At 13:25:47.913 DriverInfo               0.001 seconds. ✓ (FAST)
+13:25:52.684 DriverVersion                                At 13:25:47.913 DriverVersion            0.001 seconds. ✓ (FAST)
+13:25:52.684 Name                                         At 13:25:47.914 Name                     0.000 seconds. ✓ (FAST)
+13:25:52.684 SupportedActions                             At 13:25:47.916 SupportedActions         0.002 seconds. ✓ (FAST)
+13:25:52.684 DeviceState                                  At 13:25:47.920 DeviceState              0.004 seconds. ✓ (FAST)
+13:25:52.684 Absolute                                     At 13:25:47.923 Absolute                 0.001 seconds. ✓ (FAST)
+13:25:52.684 IsMoving                                     At 13:25:47.923 IsMoving                 0.000 seconds. ✓ (FAST)
+13:25:52.684 MaxStep                                      At 13:25:47.924 MaxStep                  0.001 seconds. ✓ (FAST)
+13:25:52.684 MaxIncrement                                 At 13:25:47.925 MaxIncrement             0.000 seconds. ✓ (FAST)
+13:25:52.684 Position                                     At 13:25:47.925 Position                 0.001 seconds. ✓ (FAST)
+13:25:52.684 TempCompAvailable                            At 13:25:47.938 TempCompAvailable        0.001 seconds. ✓ (FAST)
+13:25:52.684 TempComp Read                                At 13:25:47.939 TempComp Read            0.000 seconds. ✓ (FAST)
+13:25:52.684 TempComp Write                               At 13:25:47.939 TempComp Write           0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Temperature                                  At 13:25:47.950 Temperature              0.001 seconds. ✓ (FAST)
+13:25:52.684 Halt                                         At 13:25:47.951 Halt                     0.001 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 6000                                 At 13:25:47.954 Move to 6000             0.001 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 6000                                 At 13:25:49.162 Move to 6000             0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 0                                    At 13:25:50.168 Move to 0                0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Move to -10                                  At 13:25:50.671 Move to -10              0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 25000                                At 13:25:51.174 Move to 25000            0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 50000                                At 13:25:51.677 Move to 50000            0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Move to 50010                                At 13:25:52.180 Move to 50010            0.000 seconds. ✓ (STANDARD)
+13:25:52.684 Disconnect                                   At 13:25:52.683 Disconnect               0.000 seconds. ✓ (STANDARD)
+13:25:52.684                                              
+13:25:52.684 Congratulations, all members returned within their target response times!!          

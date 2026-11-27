@@ -6789,10 +6789,10 @@ TEST_CASE("SkyWatcher async - a MoveAxis with no new call is stopped after 60 s"
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
-    // The cap is checked by the status poll, the one driver thread parked on the clock while a jog runs.
+    // Two threads park on the clock while a jog runs: the status poll and the cap's body (#2651).
     const auto poll_steps = [&](int seconds) {
         for (int i = 0; i < seconds; ++i) {
-            if (!clock.wait_for_waiters(kPollerWaiter, kRendezvous)) return false;
+            if (!clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous)) return false;
             clock.advance(std::chrono::seconds(1));
             if (!clock.wait_for_woken_settled(kRendezvous)) return false;
         }
@@ -6805,7 +6805,13 @@ TEST_CASE("SkyWatcher async - a MoveAxis with no new call is stopped after 60 s"
     REQUIRE(poll_steps(59));
     CHECK(mount.axis_running(2));  // 89 s since the first call, 59 s since the last: still wanted
     CHECK(driver->get_slewing());
-    REQUIRE(poll_steps(2));
+    // The cap's body wakes at 60 s and verifies its stop, one read per 250 ms round (#2651): finer steps than the
+    // poll's.
+    for (int i = 0; i < 24; ++i) {
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));  // the body's end leaves the poll alone
+        clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+    }
     CHECK_FALSE(mount.axis_running(2));
     CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);
     driver->abort_slew();  // clears the stored error

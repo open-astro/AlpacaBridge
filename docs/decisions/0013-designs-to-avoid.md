@@ -54,7 +54,7 @@ Instead: compose. A driver holds the helper as a member, constructs it with the 
 
 What it is: writing a shared Dome or SafetyMonitor implementation (or an abstraction layer over shutters, roof sensors and safety inputs) before a real device needs it.
 
-Why rejected: the base interfaces exist (`dome_driver.h`, `safetymonitor_driver.h`, under the ten Alpaca device types) and no vendor implements them as of this record (the first Dome or SafetyMonitor driver PR must update this section). An abstraction written without a device guesses at what dome and roof hardware share and is wrong the first time a real one arrives. It also adds code that no test against hardware can check.
+Why rejected: the base interfaces exist (`dome_driver.h`, `safetymonitor_driver.h`, under the ten Alpaca device types). No vendor implements Dome as of this record (the first Dome driver PR must update this section). The first SafetyMonitor driver is the `remotealpaca` proxied device (#1753): it serves another Alpaca server's SafetyMonitor through the vendor's shared upstream proxy, which is common to every proxied device type, not to safety hardware, so it is no SafetyMonitor abstraction and the rule below still holds for one. An abstraction written without a device guesses at what dome and roof hardware share and is wrong the first time a real one arrives. It also adds code that no test against hardware can check.
 
 Instead: write the first Dome or SafetyMonitor driver for a named device, through the usual three layers, with a catalog descriptor and a fake for tests ([testing](../../.github/instructions/testing.instructions.md)). Extract a shared helper only when a second device shows what is common. Shutter control belongs to the Dome interface; do not add a separate device type (`AGENTS.md`, Out of Scope Guardrails).
 
@@ -77,7 +77,7 @@ The rules a change is checked against. Each names where it applies and what chec
 3. No vendor protocol class derived from another vendor's (section 3). Scope: `AlpacaCore/include/alpacacore/vendor/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
 4. No JSON type in an AlpacaCore interface, config, catalog descriptor or device state; a vendor wrapper's parse of its own wire replies stays inside the wrapper ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) (section 4). Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review (a JSON type in a header under `include/alpacacore/` or in a driver's state, config or catalog code).
 5. No base class per shared helper; `AsyncConnectable` is the only one (section 5). Scope: `AlpacaCore/include/alpacacore/**`. Checked by: review.
-6. No shared Dome or SafetyMonitor implementation before a named device needs it (section 6). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
+6. No shared Dome or SafetyMonitor implementation before a named device needs it (section 6). Scope: `AlpacaCore/src/vendors/**`. Checked by: review (a Dome or SafetyMonitor helper, or an abstraction over shutters, roof sensors or safety inputs, under `src/vendors` that no named device's driver uses).
 7. No production `ByteChannel` between the serial and socket wrappers and their file descriptors (section 7). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review.
 
 ## Alternatives rejected

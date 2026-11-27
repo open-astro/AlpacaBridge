@@ -194,7 +194,6 @@ constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
 // alongside open-astro#547's client-silence interval -- the two read as
 // one policy (see that header for the full rationale) rather than two
 // unrelated numbers.
-using alpacacore::util::kMaxMoveAxisDuration;
 using alpacacore::util::kRelinkMotionPreserveWindow;
 // A goto the controller reports stopped can still be finishing its approach:
 // EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
@@ -2921,6 +2920,8 @@ public:
         }
         bool need_stop_task = false;
         bool started = false;
+        util::HoldWindow cap_window;
+        std::uint64_t cap_owner = 0;
         util::MotionClaim stop_task_claim;
         int channel = kAxisRa;
         {
@@ -2935,6 +2936,10 @@ public:
             // clear manual_axis_slewing_ or restore tracking over the new
             // command. The other axis's body has its own generation.
             stop_generation_[axis].bump();
+            // The cap of the move this call replaces or ends sends no stop from here on (decision 0006 rules 3 and 6;
+            // #2651): its stop checks this generation under the operation lock, so a body that woke at its deadline
+            // while the locks were released below finds itself superseded.
+            move_axis_cap_[axis].cancel();
             const bool moving = !is_stop;
             if (moving) {
                 supersede_pulse_locked(axis);
@@ -2958,10 +2963,10 @@ public:
                 start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
-                // open-astro#2407: the dead-man. This call owns the axis until kMaxMoveAxisDuration passes.
-                move_axis_cap_owner_[axis] = stop_generation_[axis].current();
-                move_axis_cap_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;
-                move_axis_cap_armed_[axis] = true;
+                // open-astro#2407, #2651: the dead-man. This call owns the axis until util::kMaxMoveAxisDuration
+                // passes; its cap body starts below, once the locks are released.
+                cap_owner = stop_generation_[axis].current();
+                cap_window.arm(clock_.now(), util::kMaxMoveAxisDuration);
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
                 // initiator: issue the stop and return inside the STANDARD
@@ -2995,6 +3000,8 @@ public:
         }
         if (started) {
             start_limit_guard();
+            run_move_axis_cap_before_start_hook();
+            start_move_axis_cap(axis, cap_owner, cap_window);
         }
         if (!need_stop_task) {
             return;
@@ -3135,6 +3142,8 @@ public:
         // reason under mutex_ before its tail and returns without restoring.
         stop_ops_[0].cancel();
         stop_ops_[1].cancel();
+        move_axis_cap_[0].cancel();  // #2651: AbortSlew owns both axes; no cap stop follows its own
+        move_axis_cap_[1].cancel();
         // ITelescopeV4: aborting a MoveAxis returns Tracking to the state it
         // had before the move. A jog leaves tracking_ as it found it, so that
         // state is still tracking_ here.
@@ -4315,6 +4324,18 @@ private:
         }
     }
 
+    // Test seam: runs in move_axis()'s unlocked gap, before start_move_axis_cap().
+    void run_move_axis_cap_before_start_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = move_axis_cap_before_start_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // Test seam: runs in spawn_rate_verify_task_locked()'s unlocked gap, before start().
     void run_rate_verify_before_start_hook() {
         std::function<void()> hook;
@@ -4387,7 +4408,6 @@ private:
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return false;
             }
-            enforce_move_axis_cap_locked();  // open-astro#2407
             ra_cpr = axis_params_[0].counts_per_revolution;
             dec_cpr = axis_params_[1].counts_per_revolution;
         }
@@ -6511,41 +6531,125 @@ private:
         }
     }
 
-    // open-astro#2407 (#2396 AB-9): the MoveAxis dead-man, run by every status poll (kStatusPollPeriod), so it
-    // adds no clock waiter of its own. A newer MoveAxis call on the axis (stop_generation_ moves on), or anything
-    // that ends the jog (manual_axis_slewing_ false), disarms that axis's cap; an expired one stops the axis.
-    // Caller holds the operation lock and mutex_.
-    void enforce_move_axis_cap_locked() {
-        const auto now = clock_.now();
-        for (int axis = 0; axis < 2; ++axis) {
-            if (!move_axis_cap_armed_[axis]) {
-                continue;
+    // ── The MoveAxis cap (open-astro#2407, #2651) ────────────────────────────────────────────────────────────────
+    // A non-zero MoveAxis starts a body in its own axis's slot (move_axis_cap_[axis]) that waits through its context
+    // until the 60 s window the move armed has passed, then runs util::run_motion_deadline()'s verified stop of that
+    // axis and keeps the outcome for Slewing. The body owns the move only while stop_generation_[axis] is the value
+    // the move left: a renewal, MoveAxis(axis, 0) and a stop-completion body supersede it, and a disconnect joins it.
+
+    // Starts the cap body of `axis`. Call with no driver lock held (decision 0006 rule 4). A start the slot refuses
+    // fails closed: the axis just started is stopped and MoveAxis throws. Two MoveAxis calls on one axis reach here
+    // after their locks are released, in either order: under the axis's start lock, a call whose move a newer command
+    // has already superseded starts nothing, so an older body can never replace the newer move's cap (#2651 review).
+    void start_move_axis_cap(int axis, std::uint64_t owner, util::HoldWindow window) {
+        const std::lock_guard<std::mutex> start_lock(move_axis_cap_start_mutex_[axis]);
+        if (stop_generation_[axis].current() != owner) {
+            return;  // a newer MoveAxis, a stop or AbortSlew owns the axis, and starts its own cap if it needs one
+        }
+        try {
+            move_axis_cap_[axis].start([this, axis, owner, window](util::OperationContext& ctx) {
+                run_move_axis_cap(axis, owner, window, ctx);
+            });
+        } catch (const std::exception& ex) {
+            const std::string why = ex.what();
+            std::string stop_error;
+            {
+                StateLock lock(lock_gate_);
+                if (connected_ && manual_axis_slewing_[axis] && stop_generation_[axis].current() == owner) {
+                    try {
+                        wire().instant_stop(axis == 0 ? kAxisRa : kAxisDec);
+                        advance_model_anchor_locked();
+                        cmd_axis_rate_deg_s_[axis] = 0.0;
+                        manual_axis_slewing_[axis] = false;
+                    } catch (const std::exception& stop_ex) {
+                        stop_error = stop_ex.what();
+                        relink_stop_pending_ = true;
+                    }
+                }
             }
-            if (!manual_axis_slewing_[axis] || stop_generation_[axis].current() != move_axis_cap_owner_[axis]) {
-                move_axis_cap_armed_[axis] = false;
-                continue;
-            }
-            if (now >= move_axis_cap_deadline_[axis]) {
-                stop_capped_move_axis_locked(axis, "MoveAxis ran for " + std::to_string(kMaxMoveAxisDuration.count()) +
-                                                       " s with no new MoveAxis call");
-            }
+            throw AlpacaException(
+                "MoveAxis could not start its time limit (" + why + ")" +
+                    (stop_error.empty() ? "; the axis was stopped" : "; stopping the axis failed: " + stop_error),
+                AlpacaError::DriverException);
         }
     }
 
-    // Stops a capped jog and leaves the axis at rest: no tracking restore (the client that owned the jog is
-    // gone, so the drive stays off), and the next Slewing read raises why. A stop that fails is owed to the
-    // next connect (relink_stop_pending_). Caller holds mutex_.
-    void stop_capped_move_axis_locked(int axis, const std::string& why) {
-        const int channel = axis == 0 ? kAxisRa : kAxisDec;
-        move_axis_cap_armed_[axis] = false;
-        stop_generation_[axis].bump();  // supersedes a stop body still polling this axis
-        std::string stop_error;
+    static std::string move_axis_cap_text(int axis) {
+        return "Axis " + std::to_string(axis) + " stopped: MoveAxis ran for " +
+               std::to_string(util::kMaxMoveAxisDuration.count()) + " s with no new MoveAxis call";
+    }
+
+    void run_move_axis_cap(int axis, std::uint64_t owner, util::HoldWindow window, util::OperationContext& ctx) {
+        const std::string expired = move_axis_cap_text(axis);
         try {
-            wire().instant_stop(channel);
-        } catch (const std::exception& e) {
-            stop_error = e.what();
-            relink_stop_pending_ = true;
+            util::run_motion_deadline(ctx, clock_, window, move_axis_cap_hooks(axis, owner, ctx), expired);
+        } catch (const AlpacaException& ex) {
+            keep_move_axis_cap_outcome(axis, owner, ctx, expired, ex);
         }
+    }
+
+    // True while the cap body of `axis` still owns its move: connected, not cancelled or superseded, the axis still
+    // jogging and no newer MoveAxis call on it. Caller holds mutex_.
+    bool move_axis_cap_owns_locked(int axis, std::uint64_t owner, const util::OperationContext& ctx) const {
+        return connected_ && ctx.stop_reason() == util::StopReason::None && manual_axis_slewing_[axis] &&
+               stop_generation_[axis].current() == owner;
+    }
+
+    // The hooks of one axis's verified stop. Each takes the operation lock for its own exchange and holds none between
+    // them (decision 0016). The verification reads that axis alone: its motor controller's running bit, and its own
+    // axis angle with the other field pinned (the board's axis frame), so the other axis jogging on never reads as
+    // this axis moving.
+    util::StopVerifyHooks move_axis_cap_hooks(int axis, std::uint64_t owner, util::OperationContext& ctx) {
+        const int channel = axis == 0 ? kAxisRa : kAxisDec;
+        util::StopVerifyHooks hooks;
+        hooks.send_stop = [this, axis, channel, owner, &ctx] {
+            StateLock lock(lock_gate_);
+            if (!move_axis_cap_owns_locked(axis, owner, ctx)) {
+                return;  // a newer command or a disconnect owns the axis: it sends nothing
+            }
+            wire().instant_stop(channel);
+        };
+        hooks.read_status = [this, channel]() -> std::optional<util::MotionStatusReading> {
+            {
+                StateLock lock(lock_gate_, StateLock::Mode::State);
+                if (!connected_) return std::nullopt;
+            }
+            const bool running = wire().inquire_status(channel).running;
+            return util::MotionStatusReading{running, clock_.now()};
+        };
+        hooks.read_position = [this, axis, channel]() -> std::optional<util::PositionReading> {
+            uint32_t cpr = 0;
+            {
+                StateLock lock(lock_gate_, StateLock::Mode::State);
+                if (!connected_) return std::nullopt;
+                cpr = axis_params_[axis].counts_per_revolution;
+            }
+            const double degrees = counts_to_degrees(wire().inquire_position(channel), cpr);
+            // The axis's angle: axis 0 reports it as hours (the field axis_miss_arcsec scales back by 15).
+            const util::MountPosition position{axis == 0 ? degrees / 15.0 : 0.0, axis == 0 ? 0.0 : degrees};
+            return util::PositionReading{position, clock_.now()};
+        };
+        return hooks;
+    }
+
+    // What the cap kept, only while the body still owns its move. The stop verified: the axis is at rest, with no
+    // tracking restore (the client that owned the jog is gone, so the drive stays off), and the next Slewing read
+    // raises why (INFO, decision 0007 rule 9: any client jog of 60 s reaches it). The stop did not verify: the flag
+    // stays, the axis may still move, and a stop owed to the next connect is recorded (relink_stop_pending_).
+    void keep_move_axis_cap_outcome(int axis, std::uint64_t owner, const util::OperationContext& ctx,
+                                    const std::string& expired, const AlpacaException& ex) {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        if (!move_axis_cap_owns_locked(axis, owner, ctx)) {
+            return;
+        }
+        if (ex.what() != expired) {
+            relink_stop_pending_ = true;  // unverified: the next connect still owes a stop
+            last_slew_error_ = expired + "; the stop failed (" + ex.what() + "), the mount may still be moving";
+            ALPACA_LOG_WARN("SkyWatcher", last_slew_error_);
+            return;
+        }
+        const int channel = axis == 0 ? kAxisRa : kAxisDec;
+        stop_generation_[axis].bump();  // supersedes a stop body still polling this axis
         advance_model_anchor_locked();
         cmd_axis_rate_deg_s_[axis] = 0.0;
         motion_owner_.cancel(util::MotionOwner::axes_of(util::MotionCommand::MoveAxis, channel - 1));
@@ -6554,11 +6658,7 @@ private:
             tracking_ = false;  // the RA drive is stopped with the jog
         }
         invalidate_position_cache_locked(false);
-        last_slew_error_ =
-            "Axis " + std::to_string(axis) + " stopped: " + why +
-            (stop_error.empty() ? std::string{}
-                                : "; the stop failed (" + stop_error + "), the mount may still be moving");
-        // INFO (decision 0007 rule 9): any client jog of 60 s reaches it, and Slewing reports it.
+        last_slew_error_ = expired;
         ALPACA_LOG_INFO("SkyWatcher", last_slew_error_);
     }
 
@@ -6652,6 +6752,8 @@ private:
         // Cancel every slot body before joining any, so they unwind in
         // parallel; the slots join below with no driver mutex held.
         slew_.cancel();
+        move_axis_cap_[0].cancel();
+        move_axis_cap_[1].cancel();
         stop_ops_[0].cancel();
         stop_ops_[1].cancel();
         pulse_ops_[0].cancel();
@@ -6659,6 +6761,8 @@ private:
         rate_verify_.cancel();
         duty_.cancel();
         slew_.cancel_all_and_join();
+        move_axis_cap_[0].cancel_all_and_join();
+        move_axis_cap_[1].cancel_all_and_join();
         pulse_ops_[0].cancel_all_and_join();
         pulse_ops_[1].cancel_all_and_join();
         stop_ops_[0].cancel_all_and_join();
@@ -6763,6 +6867,8 @@ private:
         claim = motion_owner_.claim(util::MotionCommand::Slew);
         supersede_pulse_locked(0);
         supersede_pulse_locked(1);
+        move_axis_cap_[0].cancel();  // #2651: the slew took both axes; no cap has a jog left to stop
+        move_axis_cap_[1].cancel();
         // The replaced body is Superseded and leaves the axes to this
         // operation; abandon_slew_body_locked() skips a stop once the flag
         // is down, so only a canceller that stopped the axes may clear it.
@@ -7085,11 +7191,21 @@ public:
         abort_verify_.set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_move_axis_cap_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        move_axis_cap_[0].set_spawn_for_testing(spawn);
+        move_axis_cap_[1].set_spawn_for_testing(std::move(spawn));
+    }
+
     void set_status_poll_paused_for_testing(bool paused) { status_poll_paused_for_testing_.store(paused); }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         status_poll_after_sample_hook_ = std::move(hook);
+    }
+
+    void set_move_axis_cap_before_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        move_axis_cap_before_start_hook_ = std::move(hook);
     }
 
     void set_rate_verify_before_start_hook_for_testing(std::function<void()> hook) {
@@ -7471,6 +7587,7 @@ private:
     std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> rate_verify_before_start_hook_;
+    std::function<void()> move_axis_cap_before_start_hook_;
     std::function<void()> disconnect_before_close_hook_;
     std::function<void()> duty_before_exit_stop_hook_;
     mutable std::mutex stopped_body_wake_hook_mutex_;
@@ -7501,11 +7618,14 @@ private:
     util::OperationGeneration stop_generation_[2];
     util::AsyncOperation stop_ops_[2] = {{"SkyWatcher MoveAxis stop (RA)", stop_generation_[0], clock_},
                                          {"SkyWatcher MoveAxis stop (Dec)", stop_generation_[1], clock_}};
-    // open-astro#2407: the MoveAxis dead-man (enforce_move_axis_cap_locked(), run by the status poll). Under
-    // mutex_.
-    std::chrono::steady_clock::time_point move_axis_cap_deadline_[2]{};
-    std::uint64_t move_axis_cap_owner_[2] = {0, 0};
-    bool move_axis_cap_armed_[2] = {false, false};
+    // open-astro#2407, #2651: the 60 s MoveAxis cap of each axis (run_move_axis_cap()); a generation of its own per
+    // axis, so a renewal on one axis never supersedes the other's body.
+    util::OperationGeneration move_axis_cap_generation_[2];
+    // Held across start_move_axis_cap()'s ownership check and start(); taken with no driver lock held, and no
+    // driver lock is taken under it except the refused-start stop's.
+    std::mutex move_axis_cap_start_mutex_[2];
+    util::AsyncOperation move_axis_cap_[2] = {{"SkyWatcher MoveAxis cap (RA)", move_axis_cap_generation_[0], clock_},
+                                              {"SkyWatcher MoveAxis cap (Dec)", move_axis_cap_generation_[1], clock_}};
     // open-astro#2407: the AbortSlew stop check (run_abort_verify()).
     util::OperationGeneration abort_verify_generation_;
     util::AsyncOperation abort_verify_{"SkyWatcher AbortSlew stop check", abort_verify_generation_, clock_};
@@ -7681,6 +7801,13 @@ void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
     }
 }
 
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_move_axis_cap_spawn_for_testing(std::move(spawn));
+    }
+}
+
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_status_poll_paused_for_testing(paused);
@@ -7690,6 +7817,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_move_axis_cap_before_start_hook_for_testing(std::move(hook));
     }
 }
 

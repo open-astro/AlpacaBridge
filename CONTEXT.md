@@ -53,7 +53,8 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md), a link is lost
   when the transport is gone or when a fault has stood past `util::kLinkStalenessBound`
   (30 s). `Connected` then reads false and operations throw `NotConnected` until the
-  client connects again. Each driver's row in that record's Adoption table says which
+  client connects again (a SafetyMonitor's `IsSafe` reads `false` instead, decision 0009
+  rule 3). Each driver's row in that record's Adoption table says which
   evidence it acts on at once (for example a removed device node, #445) and which it
   leaves to the bound.
 - Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that has been

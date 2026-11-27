@@ -174,6 +174,12 @@ std::pair<double, double> optics_for_testing(const TelescopeDriver& driver);
 void set_abort_verify_spawn_for_testing(TelescopeDriver& driver,
                                         std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam (issue #2651): replaces the thread factory of both MoveAxis cap slots (one per axis), so a case can make
+/// a cap body's start fail. Call only while no start is in flight. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: while paused the driver's status poll (decision 0010) wakes and
 /// samples nothing, so a case can age the snapshot's frame on the task clock
 /// without the board going quiet. `driver` must come from the factories above;
@@ -185,6 +191,11 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// window. Pass an empty function to clear it, and release anything the hook
 /// blocks on before the driver is destroyed.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs on the thread of a non-zero MoveAxis, after the rate command, with the driver locks
+/// released and the axis's cap body not yet started, so a case can land a second MoveAxis on the axis in that
+/// window (#2651). Pass an empty function to clear it, and release anything the hook blocks on first.
+void set_move_axis_cap_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seam: `hook` runs on the thread that changes the RA rate, in the window
 /// where it has released the driver locks and not yet started the rate-applied

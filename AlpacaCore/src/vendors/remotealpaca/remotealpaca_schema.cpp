@@ -10,9 +10,13 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The remotealpaca ObservingConditions schema (decision 0023, issue #1753 slice 3). No vendor header: compiles in
-// every build (including vendors-OFF), so `available` in GET /management/v1/devicecatalog reflects only whether a
-// factory is registered. No per-field rule: the refusals live in the factory (see remotealpaca_fields.h).
+// The remotealpaca schemas, ObservingConditions and SafetyMonitor (decision 0023, issue #1753 slices 3 and 4). No
+// vendor header: compiles in every build (including vendors-OFF), so `available` in GET /management/v1/devicecatalog
+// reflects only whether a factory is registered. No per-field rule: the refusals live in the factory (see
+// remotealpaca_fields.h).
+
+#include <string_view>
+#include <utility>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "remotealpaca_fields.h"
@@ -20,13 +24,17 @@
 namespace alpacacore::catalog {
 
 void register_remotealpaca_schema(DeviceCatalog& catalog) {
-    Schema schema;
-    schema.key = DeviceKey{"remotealpaca", DeviceType::ObservingConditions};
-    schema.display_name = "Remote Alpaca Observing Conditions";
-    schema.build_option = "ALPACACORE_ENABLE_REMOTEALPACA";
-    schema.vendor_label = "Remote Alpaca";
-    schema.fields = remotealpaca_observingconditions_fields();
-    catalog.add(std::move(schema));
+    const auto add = [&catalog](DeviceType type, std::string_view display_name) {
+        Schema schema;
+        schema.key = DeviceKey{"remotealpaca", type};
+        schema.display_name = display_name;
+        schema.build_option = "ALPACACORE_ENABLE_REMOTEALPACA";
+        schema.vendor_label = "Remote Alpaca";
+        schema.fields = remotealpaca_device_fields();
+        catalog.add(std::move(schema));
+    };
+    add(DeviceType::ObservingConditions, "Remote Alpaca Observing Conditions");
+    add(DeviceType::SafetyMonitor, "Remote Alpaca Safety Monitor");
 }
 
 }  // namespace alpacacore::catalog

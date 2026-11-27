@@ -23,27 +23,17 @@
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/vendor/remotealpaca/remote_device_config.h>
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <string>
 
 namespace alpacacore::vendor::remotealpaca {
 
-// The poll period: 1 to 60 seconds, 2 by default (#1753 maintainer decision, 2026-11-16).
-inline constexpr std::chrono::seconds kDefaultPollPeriod{2};
-inline constexpr std::chrono::seconds kMinPollPeriod{1};
-inline constexpr std::chrono::seconds kMaxPollPeriod{60};
-
-struct RemoteObservingConditionsConfig {
-    std::string host;                // the upstream server: a name or an IP address, no scheme, no brackets
-    int port = 0;                    // 1 to 65535
-    int upstream_device_number = 0;  // the upstream's own ObservingConditions device number
-    std::chrono::seconds poll_period{kDefaultPollPeriod};
-};
+// The ObservingConditions device's configuration is the one every proxied device takes.
+using RemoteObservingConditionsConfig = RemoteDeviceConfig;
 
 // Throws AlpacaException(InvalidValue) for a malformed host, a port outside 1 to 65535, a negative upstream device
 // number or a poll period outside 1 to 60 seconds. Touches no network. `self` answers this server's listening

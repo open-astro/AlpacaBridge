@@ -433,9 +433,16 @@ datagrams before each send so replies cannot get off-by-one.
     however short the outage. A GOTO-mode axis found running after a link loss is stopped too: it is never
     tracking. The #521 window (`kRelinkMotionPreserveWindow`) now keeps only a speed-mode axis the driver
     cannot attribute (tracking, most likely); a first connect with no loss stamp still stops nothing.
-  - *MoveAxis cap.* One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at most
-    (`enforce_move_axis_cap_locked()`, run by every status poll, so it adds no clock waiter); a new MoveAxis call on the axis restarts it. On expiry the axis gets `:L`,
-    RA's drive stays off (no tracking restore: the client that owned the jog is gone) and Slewing raises.
+  - *MoveAxis cap* (#2651). One MoveAxis call keeps its axis running for `util::kMaxMoveAxisDuration` (60 s) at
+    most. Each non-zero MoveAxis starts a body in that axis's own slot (`move_axis_cap_[axis]`) that waits on the
+    task clock until the window the move armed has passed; a new MoveAxis call on the axis, `MoveAxis(axis, 0)`, a
+    stop-completion body or AbortSlew supersedes it, and a disconnect joins it. On expiry the body runs
+    `util::run_motion_deadline()`: `:L` on that axis, verified by its running bit and its own axis angle, up to 3
+    stops in all. A verified stop leaves RA's drive off (no tracking restore: the client that owned the jog is gone)
+    and Slewing raises why (INFO). A stop that does not verify keeps the axis reading as moving, sets
+    `relink_stop_pending_` and stores the failure (`util::kStopNotVerifiedText` after 3 stops) for Slewing at WARN.
+    A start the slot refuses stops the axis just started and MoveAxis throws. Seam:
+    `set_move_axis_cap_spawn_for_testing()`.
   - *Non-convergence.* A landing still more than `kFarMissArcsec` (600") off after the three re-gotos is a
     failed slew (the failure path stops both axes and Slewing raises "did not converge"); a smaller residual
     keeps the old bound. The RA part is measured on the sky (times cos(dec)), so a good landing near the pole is

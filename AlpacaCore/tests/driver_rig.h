@@ -33,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -150,12 +151,20 @@ std::chrono::microseconds timed(Fn&& fn) {
 }
 
 // Runs `fn`, a call that waits on `clock` (a verified AbortSlew, #2412), on its own thread and steps the clock by
-// `step` until it returns, then rethrows what it threw. Fails the case when it has not returned after 60 s of real
-// time (the thread is released first, so it can be joined).
+// `step` until it returns, then rethrows what it threw. A step is taken only once what the previous step woke has
+// settled and a thread is parked on the clock that was not parked before `fn` started: the call's own thread, or a
+// thread it started and waits on (a connect worker, an op body). A thread already parked at the start (a paused status
+// poll) does not count, so virtual time follows the call's real progress, not the runner's speed: a call held in real
+// time (a slow wire reply) never moves the clock, so it cannot age a paused poll's frame past
+// util::kLinkStalenessBound (#2685). The loop polls `done` every 20 ms, so a call that returns without parking ends
+// it. Fails the case when it has not returned after 60 s of real time (the thread is released first, so it can be
+// joined).
 template <typename Fn>
 void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step = std::chrono::milliseconds(50)) {
+    using std::chrono::milliseconds;
     std::exception_ptr error;
     std::atomic<bool> done{false};
+    const auto parked_before = clock.waiter_threads();
     std::thread caller([&] {
         try {
             fn();
@@ -164,7 +173,21 @@ void call_stepping(FakeTaskClock& clock, Fn&& fn, std::chrono::nanoseconds step 
         }
         done.store(true);
     });
-    const bool returned = clock.drain_until([&] { return done.load(); }, step, std::chrono::seconds(60));
+    const auto caller_id = caller.get_id();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        bool parked = clock.wait_for_waiter_thread(caller_id, milliseconds(20));
+        if (!parked) {
+            const auto waiting = clock.waiter_threads();
+            parked = std::any_of(waiting.begin(), waiting.end(),
+                                 [&](std::thread::id id) { return parked_before.count(id) == 0; });
+        }
+        if (parked && !done.load()) {
+            clock.advance(step);
+            static_cast<void>(clock.wait_for_woken_settled(milliseconds(100)));
+        }
+    }
+    const bool returned = done.load();
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

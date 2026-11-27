@@ -44,7 +44,7 @@ Symbol: `transition_mutex_`
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
-| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1840 | served from `PolledState`; MaxStep read once at connect; `TempComp` stays a live read under the wrapper lock, which Rule 1 allows because it needs device access |
+| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1840 | served from `PolledState`; MaxStep read once at connect; `TempComp` is read by the poll and served from `PolledState` too (#2695), `set_temp_comp` writing through |
 | Gemini PDH switch |  | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted |  |  |
 | gphoto camera |  | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | adopted |  |  |
 | iOptron filter wheel |  | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted |  |  |
@@ -86,7 +86,7 @@ Symbol: `transition_mutex_`
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
 | ZWO switch |  | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted |  |  |
 | ZWO telescope |  | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  |  |
-| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp` | adopted | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
+| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | snapshot-served (ObservingConditions, SafetyMonitor, over the shared `UpstreamProxy`, which holds the state lock, a leaf, and the rule that no upstream call runs under it); commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
 
 ## Alternatives rejected
 

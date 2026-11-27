@@ -61,9 +61,9 @@ void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thr
 /// Test seam (#2467): runs on the PulseGuide caller's thread after the pulse's wire turn is released and before its
 /// stop timer starts, with no driver lock held. Call only while no PulseGuide is in flight.
 void set_pulse_start_hook_for_testing(TelescopeDriver& driver, std::function<void(int axis)> hook);
-/// The same for the MoveAxis bound's slot (#2412).
-void set_motion_bound_spawn_for_testing(TelescopeDriver& driver,
-                                        std::function<std::thread(std::function<void()>)> spawn);
+/// The same for the MoveAxis cap slots (#2412, #2651), one per axis: both get the factory.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test seams of the status poll (decision 0010): the poll's own module seams (util::PolledState). Pausing makes the
 /// poll wait its ticks on the task clock and probe nothing; poll_status_now runs one full tick (alt/az, pier side and
