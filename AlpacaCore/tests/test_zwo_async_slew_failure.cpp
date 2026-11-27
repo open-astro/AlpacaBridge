@@ -2003,7 +2003,7 @@ TEST_CASE("ZWO goto-safety - a MoveAxis cap stop the mount ignores is sent 3 tim
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
     CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
     CHECK(message.find(alpacacore::util::kStopNotVerifiedText) != std::string::npos);
-    run_polls(rig, std::chrono::seconds(10), std::chrono::milliseconds(250));
+    run_polls(rig, std::chrono::seconds(10));
     CHECK(rig.mount.count(":Qe") == 3);  // no retry from the cap
     CHECK(count_exact(rig.mount, ":Q") == 3);
     rig.mount.set_ignore_axis_stops(false);
