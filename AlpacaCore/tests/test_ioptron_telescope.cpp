@@ -4492,6 +4492,33 @@ TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at
     driver->set_connected(false);
 }
 
+// Issue #2760: the landing gate's own 300 s stop (reached by a client's Slewing read, not the watchdog) is verified too.
+TEST_CASE("iOptron async landing gate - a 300 s bound stop the mount ignored once is sent again",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/300.0);
+    REQUIRE(mount.ok());
+    mount.status_lies_until_stable();  // reads stopped while the position runs: the landing gate holds it
+    mount.ignore_stops(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    io::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(600));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::seconds(300));
+    CHECK(contains(slewing_failure(*driver), "did not settle within 300 s"));
+    REQUIRE(mount.count(":Q#") == 1);
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":Q#") >= 2; }));
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron motion bound - an async Alt/Az GOTO still slewing at 300 s is stopped with no client polling",
           "[ioptron][telescope][unit][fake][goto-safety]") {
     FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
