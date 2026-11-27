@@ -1474,7 +1474,7 @@ TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is sent 3 times an
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     // The status poll would fail against the silent mount too, and on a loaded host enough of its failures reach the
-    // link-loss threshold before the third stop: the driver closes the transport and that stop finds it "Not connected".
+    // link-loss threshold before the third stop: the driver closes the transport, so that stop finds no link.
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
     REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
