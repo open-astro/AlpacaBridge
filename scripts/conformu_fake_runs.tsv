@@ -56,7 +56,7 @@ touptek	filterwheel	-	no-fake	6	-	no fake exists yet
 touptek	focuser	-	no-fake	6	-	no fake exists yet
 ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
 ioptron	camera	-	no-fake	6	-	no fake exists yet
-playerone	switch	-	no-fake	6	-	no fake exists yet
+playerone	switch	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-switch-fake_playerone_sdk-Linux-arm64.txt	-
 qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v2	no-fake	6	-	no fake exists yet

@@ -9,8 +9,8 @@
 # `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
-# Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
+# Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH, ToupTek StellaVita
+# and Player One thermal switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
 # remotealpaca ObservingConditions since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),

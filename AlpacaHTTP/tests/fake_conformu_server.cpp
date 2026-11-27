@@ -260,6 +260,12 @@ const std::vector<ConformuHost> kHosts = {
      "FakeTouptekPowerboxSDK (simulated StellaVita GPIO ports, in process)", [] { return true; },
      driver_of(cu::make_touptek_switch)},
 #endif
+#ifdef FAKE_CONFORMU_PLAYERONE
+    {"playerone", "switch", "fake_playerone_sdk.h", alpacacore::DeviceType::Switch, "playerone-fake",
+     "Player One thermal switch (fake SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
+     "FakePlayerOneSDK (a simulated Player One camera with a dew heater and fan, in process)", [] { return true; },
+     driver_of(cu::make_playerone_switch)},
+#endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
      "ZWO ASI camera (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",

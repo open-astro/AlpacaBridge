@@ -186,6 +186,7 @@
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
+#include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 
 #include "fake_playerone_pw_sdk.h"
 #include "fake_playerone_sdk.h"
@@ -3385,6 +3386,35 @@ Tier2Host tier2_host_playerone_filterwheel() {
     };
     return h;
 }
+
+// The thermal switch over the camera SDK fake, whose default camera reports a dew heater and a fan.
+Tier2Host tier2_host_playerone_switch() {
+    Tier2Host h{"playerone_switch",
+                "playerone",
+                "switch",
+                "fake_playerone_sdk.h",
+                DeviceType::Switch,
+                "playerone_switch",
+                {},
+                true,
+                {},
+                ""};
+    const auto make = [](alpacacore::test::FakePlayerOneSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::playerone::create_playerone_switch(0, 0, "", fake);
+    };
+    h.connectable = [make](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        sdk->set_thermal_controls(true, true);
+        if (hold) sdk->set_open_delay(kHold);
+        return host_over(sdk, make);
+    };
+    h.failing = [make]() {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        sdk->set_no_cameras(true);
+        return host_over(sdk, make);
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SVBONY
@@ -3640,7 +3670,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB)
+#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB) X(playerone_switch, PRB)
 #else
 #define CS2_PLAYERONE(X)
 #endif

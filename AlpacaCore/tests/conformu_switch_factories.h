@@ -45,6 +45,12 @@
 
 #include "fake_serial_streamer.h"
 #endif
+#ifdef FAKE_CONFORMU_PLAYERONE
+#include <alpacacore/util/thermal_camera_choice.h>
+#include <alpacacore/vendor/playerone/playerone_switch_driver.h>
+
+#include "fake_playerone_sdk.h"
+#endif
 #if defined(FAKE_CONFORMU_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
@@ -89,6 +95,23 @@ inline FakeTouptekPowerboxSDK& touptek_powerbox() {
 inline std::unique_ptr<SwitchDriver> make_touptek_switch(int device_number) {
     return vendor::touptek::create_touptek_switch(device_number, vendor::touptek::default_stellavita_config(),
                                                   touptek_powerbox());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_PLAYERONE
+// The fake's default camera with a dew heater and a fan (0-100 percent each), bound by Auto as the one camera that
+// has them. Its own SDK instance: the server serves one row, so it never shares a camera with the camera row.
+inline FakePlayerOneSDK& playerone_thermal_sdk() {
+    static FakePlayerOneSDK sdk;
+    [[maybe_unused]] static const bool thermal = [] {
+        sdk.set_thermal_controls(true, true);
+        return true;
+    }();
+    return sdk;
+}
+inline std::unique_ptr<SwitchDriver> make_playerone_switch(int device_number) {
+    return vendor::playerone::create_playerone_switch(device_number, util::kAutoThermalCamera, "",
+                                                      playerone_thermal_sdk());
 }
 #endif
 
