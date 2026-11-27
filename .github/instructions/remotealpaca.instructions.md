@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator, Telescope and Focuser.
+3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator, Telescope and Focuser, 2 for CoverCalibrator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -265,18 +265,55 @@ bound.
 - A refused connection on any of the three is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.
 
+#### The CoverCalibrator proxied device (issue #1753 slice 5, #2704)
+
+The same config, self-loop check, Connect (Platform 7 is `ICoverCalibratorV2`; a version 1 upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound.
+
+- **Connect** reads `CoverState`, `CalibratorState` and `MaxBrightness` once. A `CoverState` or `CalibratorState` of
+  `NotPresent` marks that part absent for the connection: its state getter answers `NotPresent` and `CoverMoving` or
+  `CalibratorChanging` false (ICoverCalibratorV2), `Brightness` (no calibrator) and the part's commands answer
+  `NotImplemented` after the connection check, and none of them is asked of the upstream again. A state answered with an
+  error counts as present. `MaxBrightness` is the upstream's value or error, served unchanged. All of it is static: it
+  keeps answering while the link is faulted.
+- **Members by version.** An `ICoverCalibratorV1` upstream has no `CoverMoving` or `CalibratorChanging`: each answers
+  `NotImplemented` naming the upstream's version, after the connection check, and is never called.
+- **Snapshot.** The frame is `CoverState`, `CoverMoving`, `CalibratorState`, `CalibratorChanging` and `Brightness`, each
+  a value or the upstream's error (a state number outside the ASCOM enumeration is a `DriverException` answer). A stale
+  frame is served, never refused (decision 0010 rule 6): each getter answers the last poll's value until the loss bound.
+  While a fault is latched `CoverState` and `CalibratorState` read `Unknown` (the ASCOM word for it, as the WandererAstro
+  cover; driver-lifecycle "Cache-backed reads must track link health"), and `CoverMoving`, `CalibratorChanging` and
+  `Brightness` throw `DriverException`. `DeviceState` is the base class's, from the same getters.
+- **OpenCover and CloseCover** are refused while the link is faulted. The body forwards the command and writes
+  `CoverState` `Moving` through, and `CoverMoving` true from a V2 upstream, whatever the frame said: the frame can be a
+  poll period old, so only the poll writes the cover settled.
+- **CalibratorOn**: a negative brightness is `InvalidValue` before the connection check, one above the `MaxBrightness`
+  the Connect read is `InvalidValue` after it (with no `MaxBrightness` value the upstream judges the range, and its
+  `InvalidValue` passes through). **CalibratorOn and CalibratorOff** are refused while faulted. The body forwards the
+  command and writes `CalibratorState` `NotReady` through, and `CalibratorChanging` true from a V2 upstream; CalibratorOn
+  also writes `Brightness` as sent. Only the poll writes the calibrator `Ready` or `Off`.
+- **HaltCover** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
+  (`NotConnected`). Its body writes `CoverMoving` false through and then reads the upstream's `CoverState` and writes it
+  through (only the upstream knows where the cover stopped); a read with no usable reply leaves it to the next poll and
+  does not fail the Halt. A HaltCover sent while an OpenCover's body runs waits for it (the caller order above).
+- A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
+  Actions and `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
 `test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
 `test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop),
-`test_remotealpaca_focuser.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
-`AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
-`Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
-`finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
-`finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`,
-`Kind::Telescope` a German mount whose slews land at once or, with `hold_motion(true)`, run until `finish_motion()`
-or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until `finish_move()` or a Halt) with the poll on
+`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, the contract sweep and the `[stress]` cases
+in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
+(`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`; `Kind::SafetyMonitor` scripts a
+SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until `finish_move()` or a Halt, `Kind::FilterWheel`
+a FilterWheel whose Position write reads -1 until `finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose
+asynchronous writes run until `finish_async()`, `Kind::Telescope` a German mount whose slews land at once or, with
+`hold_motion(true)`, run until `finish_motion()` or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until
+`finish_move()` or a Halt, `Kind::CoverCalibrator` a CoverCalibrator whose cover commands run until `finish_cover()` or
+a HaltCover and whose calibrator commands run until `finish_calibrator()`) with the poll on
 `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
