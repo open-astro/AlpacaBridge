@@ -158,6 +158,59 @@ TEST_CASE("FakeSVBSDK - idle stop preserves next capture read hold", "[svbony][u
     sdk.close_camera(17);
 }
 
+TEST_CASE("FakeSVBSDK - on a timing clock a frame comes only after the exposure and a pulse guide blocks",
+          "[svbony][unit][fake-sdk]") {
+    // #2693: the ConformU host's model. SVBGetVideoData reports Timeout until the Exposure value has passed since
+    // the capture started, and SVBPulseGuide returns only after the pulse.
+    using alpacacore::vendor::svbony::SVBVideoDataResult;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    sdk.set_timing_clock(&clock);
+    sdk.open_camera(17);
+    sdk.set_control_value(17, alpacacore::vendor::svbony::SVBControlType::Exposure, 2'000'000, false);  // us
+    std::vector<std::uint8_t> buffer(16 * 8 * 2);
+    sdk.start_video_capture(17);
+    const auto read = [&] {
+        return std::async(std::launch::async,
+                          [&] { return sdk.get_video_data(17, buffer.data(), static_cast<long>(buffer.size()), 500); });
+    };
+
+    auto early = read();  // its 500 ms wait ends 1.5 s before the exposure does
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    clock.advance(500ms);
+    CHECK(early.get() == SVBVideoDataResult::Timeout);
+
+    clock.advance(1499ms);
+    auto across = read();  // the exposure ends 1 ms into this read's wait
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    CHECK(across.wait_for(0s) == std::future_status::timeout);
+    clock.advance(1ms);
+    CHECK(across.get() == SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+
+    auto guide = std::async(std::launch::async,
+                            [&] { sdk.pulse_guide(17, alpacacore::vendor::svbony::SVBGuideDirection::North, 300); });
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));
+    clock.advance(299ms);
+    CHECK(guide.wait_for(0s) == std::future_status::timeout);
+    clock.advance(1ms);
+    REQUIRE(guide.wait_for(2s) == std::future_status::ready);
+    guide.get();
+    sdk.close_camera(17);
+}
+
+TEST_CASE("FakeSVBSDK - the sensor temperature its caps list reads", "[svbony][unit][fake-sdk]") {
+    // #2693: SVBGetControlCaps lists CurrentTemperature, so SVBGetControlValue answers it (0.1 C units).
+    alpacacore::test::FakeSVBSDK sdk;
+    sdk.open_camera(17);
+    long value = 0;
+    bool is_auto = true;
+    REQUIRE(sdk.get_control_value(17, alpacacore::vendor::svbony::SVBControlType::CurrentTemperature, value, is_auto));
+    CHECK(value == 250);
+    CHECK_FALSE(is_auto);
+    sdk.close_camera(17);
+}
+
 TEST_CASE("SVBONY Camera - metadata stays unset until the first accepted frame", "[svbony][camera][unit][metadata]") {
     alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeSVBSDK sdk;

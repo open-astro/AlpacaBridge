@@ -79,6 +79,22 @@ void step(FakeTaskClock& clock, std::chrono::nanoseconds d) {
     clock.wait_for_woken_settled(std::chrono::seconds(10));
 }
 
+// The status poll's thread, named while it is the only clock waiter. A MoveAxis starts a cap body that also waits on
+// the clock (#2729), and then step()'s wait_for_waiters(1) no longer means the poll is parked (#2746).
+std::thread::id status_poll_thread(FakeTaskClock& clock) {
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    const auto threads = clock.waiter_threads();
+    REQUIRE(threads.size() == 1);
+    return *threads.begin();
+}
+
+// step(), but it waits for the status poll itself to park, whatever else waits on the clock.
+void step_poll(FakeTaskClock& clock, std::thread::id poll, std::chrono::nanoseconds d) {
+    REQUIRE(clock.wait_for_waiter_thread(poll, kRendezvous));
+    clock.advance(d);
+    clock.wait_for_woken_settled(std::chrono::seconds(10));
+}
+
 using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::parse_timestamp;
@@ -485,13 +501,14 @@ TEST_CASE("SkyWatcher snapshot - stale-frame lost link past the window, then rel
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
     driver->set_tracking(true);
+    const std::thread::id poll = status_poll_thread(clock);
     driver->move_axis(1, FakeSkyWatcherMount::kSiderealDegPerSec * 8.0);
     REQUIRE(mount.axis_running(1));
     REQUIRE(mount.axis_running(2));
 
     // The poll stops answering the clock: no latch, the frame ages out.
     sw::set_status_poll_paused_for_testing(*driver, true);
-    step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
+    step_poll(clock, poll, alpacacore::util::kLinkStalenessBound + seconds(1));
     REQUIRE_FALSE(driver->get_connected());
 
     // The mount kept turning unattended for longer than the preserve window,
@@ -517,7 +534,8 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     auto driver = sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0, {}, {}, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    driver->set_tracking(true);                                           // RA axis turns
+    driver->set_tracking(true);  // RA axis turns
+    const std::thread::id poll = status_poll_thread(clock);
     driver->move_axis(1, FakeSkyWatcherMount::kSiderealDegPerSec * 8.0);  // and Dec
     REQUIRE(mount.axis_running(1));
     REQUIRE(mount.axis_running(2));
@@ -526,14 +544,14 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     // status poll alone latches the fault (decision 0009, stage one) ...
     mount.set_silent(true);
     for (int i = 0; i < 6 && driver->get_link_fault().empty(); ++i) {
-        step(clock, milliseconds(150));
+        step_poll(clock, poll, milliseconds(150));
     }
     REQUIRE_FALSE(driver->get_link_fault().empty());
     CHECK(driver->get_connected());  // faulted, not lost
 
     // ... and past the staleness bound the link is lost (stage two), with
     // link_lost_at stamped for UDP too.
-    step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
+    step_poll(clock, poll, alpacacore::util::kLinkStalenessBound + seconds(1));
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
     require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);

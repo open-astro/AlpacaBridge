@@ -31,7 +31,6 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -113,13 +112,6 @@ struct Frame {
 
 using Proxy = detail::UpstreamProxy<Frame>;
 
-// A double in its shortest round-trip form, for a form body.
-std::string number_text(double value) {
-    std::array<char, 64> buffer{};
-    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-    return std::string(buffer.data(), result.ptr);
-}
-
 class RemoteAlpacaObservingConditionsDriver final : public ObservingConditionsDriver,
                                                     protected alpacacore::AsyncConnectable {
 public:
@@ -200,7 +192,7 @@ public:
         proxy_.require_connected();
         if (caller_hook_) caller_hook_();
         proxy_.run_command([this, period](util::OperationContext& ctx) {
-            proxy_.client().put("averageperiod", {{"AveragePeriod", number_text(period)}});
+            proxy_.client().put("averageperiod", {{"AveragePeriod", detail::number_text(period)}});
             if (command_hook_) command_hook_();
             // Write-through (decision 0010 rule 2): the next read sees the period before the next poll. A superseded
             // body writes nothing (decision 0006 rule 6): the newer command's value stands. Nor does a body whose
@@ -293,6 +285,9 @@ public:
     // Set while no command runs; a Refresh or AveragePeriod caller calls it after its body has ended, before it
     // answers.
     void set_command_done_hook(std::function<void()> hook) { proxy_.set_command_done_hook(std::move(hook)); }
+
+    // Set while no command runs; a caller that waits for an earlier command calls it first.
+    void set_command_waiting_hook(std::function<void()> hook) { proxy_.set_command_waiting_hook(std::move(hook)); }
 
     std::uint64_t command_generation() const { return proxy_.command_generation(); }
 
@@ -411,6 +406,12 @@ void set_caller_hook_for_testing(ObservingConditionsDriver& driver, std::functio
 void set_command_done_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
     if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
         remote->set_command_done_hook(std::move(hook));
+    }
+}
+
+void set_command_waiting_hook_for_testing(ObservingConditionsDriver& driver, std::function<void()> hook) {
+    if (auto* remote = dynamic_cast<RemoteAlpacaObservingConditionsDriver*>(&driver)) {
+        remote->set_command_waiting_hook(std::move(hook));
     }
 }
 

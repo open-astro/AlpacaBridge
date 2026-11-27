@@ -10,10 +10,10 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The remotealpaca schemas, ObservingConditions and SafetyMonitor (decision 0023, issue #1753 slices 3 and 4). No
-// vendor header: compiles in every build (including vendors-OFF), so `available` in GET /management/v1/devicecatalog
-// reflects only whether a factory is registered. No per-field rule: the refusals live in the factory (see
-// remotealpaca_fields.h).
+// The remotealpaca schemas, ObservingConditions, SafetyMonitor and Rotator (decision 0023, issue #1753 slices 3 to 5).
+// No vendor header: compiles in every build (including vendors-OFF), so `available` in GET
+// /management/v1/devicecatalog reflects only whether a factory is registered. No per-field rule: the refusals live in
+// the factory (see remotealpaca_fields.h).
 
 #include <string_view>
 #include <utility>
@@ -35,6 +35,7 @@ void register_remotealpaca_schema(DeviceCatalog& catalog) {
     };
     add(DeviceType::ObservingConditions, "Remote Alpaca Observing Conditions");
     add(DeviceType::SafetyMonitor, "Remote Alpaca Safety Monitor");
+    add(DeviceType::Rotator, "Remote Alpaca Rotator");
 }
 
 }  // namespace alpacacore::catalog

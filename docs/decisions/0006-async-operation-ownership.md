@@ -83,6 +83,7 @@ Symbol: `AsyncOperation`
 | ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1918 | telemetry poll slot; GOTO, per-axis pulse-queue and disconnect-teardown slots; claim protocol; send gate |
 | WeeWX observing conditions | | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085 | feed poll body |
 | remotealpaca observing conditions | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753 | upstream poll body; the Refresh and AveragePeriod write bodies in a command slot; both slots are held by the vendor's shared `UpstreamProxy` |
+| remotealpaca rotator | | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp`, `AlpacaCore/src/vendors/remotealpaca/upstream_proxy.h` | adopted | #1753, #2708 | upstream poll body; the Move, MoveAbsolute, MoveMechanical, Sync, Halt and Reverse write bodies in the command slot, serialized in caller order by the proxy's command order mutex, so a Halt reaches the upstream after an earlier move and a superseded body writes nothing (rule 6); both slots are held by the vendor's shared `UpstreamProxy` |
 
 ## Links
 

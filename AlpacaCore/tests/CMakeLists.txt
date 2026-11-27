@@ -61,6 +61,7 @@ set(TEST_SOURCES
     test_hold_window.cpp
     test_pointing_math.cpp
     test_fake_mount_motion_model.cpp
+    test_fake_timed_completion.cpp
     test_telescope_command_gate.cpp
     test_camera_frame_request.cpp
     test_sexagesimal.cpp
@@ -256,10 +257,10 @@ if(TARGET alpacacore_http_client)
     list(APPEND TEST_SOURCES test_http_client.cpp)
 endif()
 if(TARGET alpacacore_remotealpaca)
-    # The upstream Alpaca client against the loopback fake Alpaca server, the proxied ObservingConditions and
-    # SafetyMonitor over the scripted HTTP client and their [stress] registration (issue #1753).
+    # The upstream Alpaca client against the loopback fake Alpaca server, the proxied ObservingConditions,
+    # SafetyMonitor and Rotator over the scripted HTTP client and their [stress] registration (issue #1753).
     list(APPEND TEST_SOURCES test_remotealpaca_client.cpp test_remotealpaca_observingconditions.cpp
-         test_remotealpaca_safetymonitor.cpp test_remotealpaca_concurrency_stress.cpp)
+         test_remotealpaca_safetymonitor.cpp test_remotealpaca_rotator.cpp test_remotealpaca_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.

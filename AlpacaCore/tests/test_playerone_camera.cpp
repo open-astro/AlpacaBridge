@@ -1609,6 +1609,34 @@ TEST_CASE("FakePlayerOneSDK behind LockedPlayerOneSDK - forwards values and out-
     CHECK(fake.close_count() == 1);
 }
 
+TEST_CASE("FakePlayerOneSDK - on a timing clock an image is ready only after the exposure",
+          "[playerone][camera][unit][fake-sdk]") {
+    // #2693: the ConformU host's model. POAImageReady turns true only once POA_EXPOSURE has passed since the start.
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakePlayerOneSDK fake;
+    fake.set_timing_clock(&clock);
+    fake.open_camera(17);
+    fake.set_config_int(17, /*config_id=*/0, 2'000'000, false);  // POA_EXPOSURE, microseconds
+    fake.start_exposure(17, /*single_frame=*/true);
+    CHECK_FALSE(fake.image_ready(17));
+    clock.advance(std::chrono::milliseconds(1999));
+    CHECK_FALSE(fake.image_ready(17));
+    clock.advance(std::chrono::milliseconds(1));
+    CHECK(fake.image_ready(17));
+    fake.close_camera(17);
+}
+
+TEST_CASE("FakePlayerOneSDK - the camera reports a pixel size", "[playerone][camera][unit][fake-sdk]") {
+    // #2693: POACameraProperties::pixelSize is never 0 on a camera; ConformU refuses a PixelSizeX of 0.
+    alpacacore::test::FakePlayerOneSDK fake;
+    const auto cameras = fake.enumerate_cameras();
+    REQUIRE_FALSE(cameras.empty());
+    CHECK(cameras.front().pixel_size_um > 0.0);
+    fake.open_camera(17);
+    CHECK(fake.get_camera_properties_by_id(17).pixel_size_um == cameras.front().pixel_size_um);
+    fake.close_camera(17);
+}
+
 TEST_CASE("Player One Camera Driver - FakePlayerOneSDK exposure behind LockedPlayerOneSDK",
           "[playerone][camera][unit][fake-sdk]") {
     alpacacore::test::FakePlayerOneSDK fake;

@@ -17,11 +17,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -29,6 +32,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#include "fake_timed_completion.h"
 
 namespace alpacacore::test {
 
@@ -74,7 +79,11 @@ namespace alpacacore::test {
  *    case that sets it to block a named method owns the consequences and
  *    must release the block before its driver is destroyed (the three #339
  *    cases). LockedQHYSDK::slowest_call_ms() is the mechanical check that no
- *    method has quietly gained a block; the forward sweep asserts it.
+ *    method has quietly gained a block; the forward sweep asserts it. The one
+ *    timed block is opt-in too: set_timing_clock(), null in every ordinary
+ *    test, makes guide() block for its pulse as ControlQHYCCDGuide does
+ *    (#2693); the ConformU host sets it, so its disconnect waits at most one
+ *    pulse.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT: the driver and every
  *    body it joins reach the SDK through its `sdk_` reference. Declare the fake before the driver
  *    (locals destroy in reverse order); never stash a driver beyond the
@@ -121,7 +130,12 @@ namespace alpacacore::test {
  *   needs mem_length_override set to width * height * 3.
  * - exposure_remaining defaults to 0 (the exposure is over), so a case that
  *   does not set it gets the frame call straight after the arm, where a real
- *   camera reports the remaining time during the exposure (#2721).
+ *   camera reports the remaining time during the exposure (#2721). With
+ *   set_timing_clock() the fake reports the time left in microseconds until
+ *   the EXPOSURE param has passed since start_single_frame (#2693); the SDK
+ *   documents no unit, and microseconds never end the wait early.
+ * - get_single_frame() never blocks (rule 1), where the real call waits for
+ *   the exposure; the driver's own exposure-remaining poll is the wait.
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
@@ -224,6 +238,10 @@ public:
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
     uint32_t exposure_remaining = 0;  // get_exposure_remaining's return; 100 or less: the exposure is over (#2721)
+    /// Times the exposure and the guide pulse on `clock` (nullptr, the default: both at once). Set before a driver
+    /// uses the fake: start_single_frame() arms the EXPOSURE param, get_exposure_remaining() reports the time left
+    /// and guide() blocks for its pulse (#2693).
+    void set_timing_clock(util::TaskClock* clock) { timing_.set_clock(clock); }
     // When set, get_single_frame throws this NotConnected text instead of returning, as the real wrapper does for a
     // handle closed under the call (#2292).
     std::optional<std::string> frame_throw;
@@ -587,12 +605,19 @@ public:
     bool start_single_frame(const std::string& camera_id) override {
         hit("start_single_frame");
         require_open(camera_id);
+        const auto exposure_us = params.find(vendor::qhy::control::EXPOSURE);  // find(), not operator[] (#510)
+        timing_.start(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double, std::micro>(exposure_us == params.end() ? 0.0 : exposure_us->second)));
         return read_directly;
     }
 
     uint32_t get_exposure_remaining(const std::string& camera_id) override {
         hit("get_exposure_remaining");
         require_open(camera_id);
+        if (!timing_.ready()) {
+            const auto left = std::chrono::ceil<std::chrono::microseconds>(timing_.remaining()).count();
+            return static_cast<uint32_t>(std::min<std::int64_t>(left, std::numeric_limits<uint32_t>::max()));
+        }
         return exposure_remaining;
     }
 
@@ -654,10 +679,11 @@ public:
     void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override {
         hit("guide");
         require_open(camera_id);
-        // The real call blocks for the full pulse duration; this must not.
         last_guide_id = camera_id;
         last_guide_direction = qhy_direction;
         last_guide_duration_ms = duration_ms;
+        // The real call blocks for the full pulse; this does only on a timing clock (rule 1).
+        timing_.block_for(std::chrono::milliseconds(duration_ms));
     }
 
     void control_temp(const std::string& camera_id, double target_temp_c) override {
@@ -880,6 +906,8 @@ private:
     // would buy nothing and would cost FakeQHYSDK its move constructor, which
     // the default_camera()/make_fake() factories return by value.
     uint32_t last_mem_length_ = 0;
+    // The exposure and guide timing (#2693), guarded like last_mem_length_; cancel_exposure() does not touch it.
+    FakeTimedCompletion timing_;
     ROI roi_{};
     uint32_t wbin_ = 1;
     uint32_t hbin_ = 1;
