@@ -67,8 +67,14 @@ struct ParkSlewHooks {
     /// it may throw; it checks `superseded` itself when it releases the mutex.
     std::function<std::string()> verify_at_target;
     /// When set, a miss reported by `verify_at_target` repeats the whole flow once (dispatch to verify) before it
-    /// fails: a handset that ends a GOTO far off its aim lands on it when the GOTO is sent again (#1105).
+    /// fails, unless `repeat_allowed` refuses: a handset that ends a GOTO far off its aim lands on it when the GOTO is
+    /// sent again (#1105).
     bool repeat_on_miss = false;
+    /// Optional; empty means the repeat is allowed. Asked only after `verify_at_target` reports a miss, when
+    /// `repeat_on_miss` is set: false fails the park with the miss and "; the GOTO was not repeated", because a GOTO
+    /// the mount refused or a limit stopped short is not sent again (#2763). Like the other hooks it checks
+    /// `superseded` itself when it releases the mutex.
+    std::function<bool()> repeat_allowed;
     /// Publishes AtPark true and Slewing false in the same locked step.
     std::function<void()> complete;
 };
@@ -181,13 +187,13 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
             return;
         }
         if (!miss.empty()) {
-            if (hooks.repeat_on_miss) {
+            if (hooks.repeat_on_miss && (!hooks.repeat_allowed || hooks.repeat_allowed())) {
                 ParkSlewHooks again = hooks;
                 again.repeat_on_miss = false;
                 run_park_slew(ctx, lock, clock, settle_seconds, again);
                 return;
             }
-            hooks.fail(miss);
+            hooks.fail(hooks.repeat_on_miss ? miss + "; the GOTO was not repeated" : miss);
             return;
         }
     }

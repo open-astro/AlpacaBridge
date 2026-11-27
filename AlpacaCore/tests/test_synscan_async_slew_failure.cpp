@@ -71,7 +71,7 @@ struct FakeSynScanState {
     std::atomic<Clock::rep> goto_started{0};
     std::atomic<bool> goto_stopped{false};
     // The position a precise GOTO landed on; empty until the first one (#1105). With land_on_goto false the mount
-    // never moves, so the driver's landing check fails the slew after one repeat GOTO.
+    // never moves, so the driver's landing check fails the slew with no repeat GOTO (#2763).
     std::atomic<bool> land_on_goto{true};
     // true: a GOTO reports itself in progress until a cancel ('M') ends it, so the driver's wait times out (#2412).
     std::atomic<bool> goto_hangs{false};
@@ -660,7 +660,7 @@ TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide
     CHECK(position_is_distinct);
     driver->slew_to_coordinates_async(target_ra, target_dec);
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
-    // The mount never moves, so the slew ends with the far-miss failure after one repeat GOTO (#1105).
+    // The mount never moves, so the slew ends with the far-miss failure and no repeat GOTO (#2763).
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
 
     // The fake mount acknowledges the GOTO but stays at its fixed position.
