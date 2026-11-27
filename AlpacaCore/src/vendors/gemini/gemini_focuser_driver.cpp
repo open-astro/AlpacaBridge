@@ -467,6 +467,8 @@ private:
                 temp_comp_retry_at_ = now + kTemperatureRetry;
                 ALPACA_LOG_DEBUG("Gemini", "Focuser TempComp read failed; retrying in 30 s");
             }
+        } else if (const auto last = state_.read(); last && last->value.temp_comp) {
+            frame.temp_comp = last->value.temp_comp;  // keep the last value (a write-through) meanwhile
         }
         return frame;
     }
