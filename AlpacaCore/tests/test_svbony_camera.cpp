@@ -904,6 +904,9 @@ TEST_CASE("SVBONY Camera Driver - a removal error from a pulse guide drops Conne
     camera->pulse_guide(0, 10);
     REQUIRE(eventually([&] { return !camera->get_connected(); }));
     REQUIRE(eventually([&] { return sdk.open_count() == 0; }));
+    // The drain keeps the failure after the loss closed the handle: wait for it to land.
+    REQUIRE(
+        eventually([&] { return error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); }).first != 0; }));
     const auto [code, text] = error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); });
     CHECK(code == alpacacore::AlpacaError::NotConnected);
     CHECK(text == "pulse_guide: SVB_ERROR_CAMERA_REMOVED");
