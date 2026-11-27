@@ -28,6 +28,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -205,6 +206,13 @@ public:
             set_sensor(kSensorNames[i], 10.0 + static_cast<double>(i));
         }
         set_for("timesincelastupdate", "", "1.5");
+    }
+
+    // Called before each call is answered, on the calling thread with no script lock held: a test advances the fake
+    // task clock in it to give every upstream call a duration (a per-call delay, never a real sleep). Empty clears it.
+    void set_call_hook(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        call_hook_ = std::move(hook);
     }
 
     void install(FakeHttpClient& http) {
@@ -386,6 +394,12 @@ public:
                                        ? request.form_body
                                        : (query_at == std::string::npos ? std::string() : url.substr(query_at + 1));
         const std::string transaction = field(params, "ClientTransactionID");
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hook = call_hook_;
+        }
+        if (hook) hook();
 
         Reply reply{{}, 0x400, "Method " + member + " is not implemented"};
         {
@@ -757,6 +771,7 @@ private:
     std::map<std::pair<std::string, std::string>, Reply> replies_;
     std::map<std::string, Reply> put_errors_;
     std::map<std::string, int> calls_;
+    std::function<void()> call_hook_;  // set_call_hook()
     bool connected_ = false;
     // A Rotator's angles, its running move's target (none while none runs) and its last move PUT.
     double position_ = 0.0;
