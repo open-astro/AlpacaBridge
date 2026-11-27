@@ -153,6 +153,7 @@
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 
 #include "fake_qhy_cfw3.h"
@@ -3161,6 +3162,40 @@ Tier2Host tier2_host_qhy_filterwheel() {
     return h;
 }
 
+// The integrated CFW on the camera's own handle (registry entry qhy_filterwheel), over the camera row's SDK fake. Its
+// connect opens the shared handle with sdk_.open_camera(id) (qhy_filterwheel_driver.cpp), held as for the camera.
+Tier2Host tier2_host_qhy_filterwheel_sdk() {
+    Tier2Host h{"qhy_filterwheel_sdk",
+                "qhy",
+                "filterwheel",
+                "fake_qhy_sdk.h",
+                DeviceType::FilterWheel,
+                "qhy_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<QhySdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") alpacacore::test::connect_hold(kQhyOpenHold);
+            };
+        }
+        return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", s.sdk);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<QhySdkHold>();
+        hold->fake.sdk_resource_available = false;  // fake_qhy_sdk.h: the resource load fails
+        return host_over(hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", s.sdk);
+        });
+    };
+    return h;
+}
+
 Tier2Host tier2_host_qhy_focuser() {
     Tier2Host h{"qhy_focuser", "qhy", "focuser", "fake_qhy_qfocuser.h", DeviceType::Focuser, "qhy_focuser", {},
                 true,          {},    ""};
@@ -3615,7 +3650,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_REMOTEALPACA(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
+#define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_filterwheel_sdk, PRB) X(qhy_focuser, NPR)
 #else
 #define CS2_QHY(X)
 #endif
@@ -4697,6 +4732,19 @@ Tier3Recipe tier3_recipe_qhy_filterwheel() {
             }};
 }
 
+// The wheel reads -1 (turning) for good once the move is ordered; then every status read throws. The driver's move
+// deadline (15 s on the real clock) is past the case. Falsified by: Position answering the requested slot when the read
+// fails.
+Tier3Recipe tier3_recipe_qhy_filterwheel_sdk() {
+    return {[](Hosted& hosted) {
+                t3_start_filterwheel_move(hosted);
+                t3_fake<QhySdkHold>(hosted).fake.cfw_position_script = {-1};  // no driver thread reads the fake
+            },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.fail_from("get_cfw_position"); },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeQHYSDK::fail_from(get_cfw_position) mid-move"};
+}
+
 // The Q-Focuser advances one step per position poll, so a 500-step move never ends; then the firmware goes silent.
 // Falsified by: IsMoving answering false when the position poll times out.
 Tier3Recipe tier3_recipe_qhy_focuser() {
@@ -4874,7 +4922,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_focuser, OK)
+#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_filterwheel_sdk, OK) X(qhy_focuser, OK)
 #else
 #define CT3_QHY(X)
 #endif

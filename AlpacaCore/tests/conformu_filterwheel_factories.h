@@ -30,8 +30,11 @@
 #endif
 #ifdef FAKE_CONFORMU_QHY
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 
 #include "fake_qhy_cfw3.h"
+#include "fake_qhy_sdk.h"
+#include "locked_qhy_sdk.h"
 #endif
 #ifdef FAKE_CONFORMU_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
@@ -76,6 +79,24 @@ inline std::unique_ptr<FilterWheelDriver> make_qhy_cfw3_filterwheel(int device_n
     vendor::qhy::Cfw3Settings settings;
     settings.boot_timeout_ms = 150;
     return vendor::qhy::create_qhy_cfw3_filterwheel(device_number, qhy_cfw3().slave_path(), settings);
+}
+
+// The integrated CFW on a camera's own handle (the miniCam8M), over FakeQHYSDK behind LockedQHYSDK, as the camera row
+// is. A move turns the wheel through the slots between, as GetQHYCCDCFWStatus reports them, so ConformU sees Position
+// -1 while the driver masks the transit slots. Two reads per slot, not kWheelMovingReads: the driver ends a move on a
+// non-target slot read three times over 2 s (a wheel at rest, qhy_filterwheel_driver.cpp kSettleMinReads), which a
+// real wheel passing a slot in about a second never shows, whatever the client's poll rate.
+struct QhyWheelHost {
+    FakeQHYSDK fake = FakeQHYSDK::with_one_camera("fake-qhy-0", "miniCam8M");
+    LockedQHYSDK sdk{fake};
+    QhyWheelHost() { fake.cfw_reads_per_slot = 2; }
+};
+inline QhyWheelHost& qhy_wheel_host() {
+    static QhyWheelHost host;
+    return host;
+}
+inline std::unique_ptr<FilterWheelDriver> make_qhy_filterwheel(int device_number) {
+    return vendor::qhy::create_qhy_filterwheel(device_number, "fake-qhy-0", qhy_wheel_host().sdk);
 }
 #endif
 

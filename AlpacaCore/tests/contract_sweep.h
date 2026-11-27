@@ -1208,6 +1208,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"gemini", "switch", "fake_gemini_pdh.h"},
     {"qhy", "camera", "fake_qhy_sdk.h"},
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
+    {"qhy", "filterwheel", "fake_qhy_sdk.h"},   // the CFW on the camera handle: hosted as qhy_filterwheel_sdk
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},

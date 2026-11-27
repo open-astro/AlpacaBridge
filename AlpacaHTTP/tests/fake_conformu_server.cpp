@@ -188,6 +188,10 @@ const std::vector<ConformuHost> kHosts = {
     {"qhy", "filterwheel", "fake_qhy_cfw3.h", alpacacore::DeviceType::FilterWheel, "qhy-fake",
      "QHYCFW3 (fake, test only)", "ALPACACORE_ENABLE_QHY", "FakeQhyCfw3 (simulated CFW3 over a pseudo-terminal)",
      [] { return !cu::qhy_cfw3().slave_path().empty(); }, driver_of(cu::make_qhy_cfw3_filterwheel)},
+    {"qhy", "filterwheel", "fake_qhy_sdk.h", alpacacore::DeviceType::FilterWheel, "qhy-fake",
+     "QHY CFW on the camera handle (fake SDK, test only)", "ALPACACORE_ENABLE_QHY",
+     "FakeQHYSDK (simulated QHYCCD SDK with a miniCam8M integrated CFW, in process)", [] { return true; },
+     driver_of(cu::make_qhy_filterwheel)},
 #endif
 #ifdef FAKE_CONFORMU_PLAYERONE
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h", alpacacore::DeviceType::FilterWheel, "playerone-fake",

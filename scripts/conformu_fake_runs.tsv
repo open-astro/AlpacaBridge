@@ -27,6 +27,7 @@ gemini	covercalibrator	fake_gemini_flatpanel.h	run	6	AlpacaCore/conformu/Gemini/
 gemini	switch	fake_gemini_pdh.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-switch-fake_gemini_pdh-Linux-arm64.txt	-
 qhy	camera	fake_qhy_sdk.h	run	6	AlpacaCore/conformu/QHY/Fake/Fake-camera-fake_qhy_sdk-Linux-arm64.txt	-
 qhy	filterwheel	fake_qhy_cfw3.h	run	4	AlpacaCore/conformu/QHY/Fake/Fake-filterwheel-fake_qhy_cfw3-Linux-arm64.txt	-
+qhy	filterwheel	fake_qhy_sdk.h	run	6	AlpacaCore/conformu/QHY/Fake/Fake-filterwheel-fake_qhy_sdk-Linux-arm64.txt	-
 qhy	focuser	fake_qhy_qfocuser.h	run	3	AlpacaCore/conformu/QHY/Fake/Fake-focuser-fake_qhy_qfocuser-Linux-arm64.txt	-
 playerone	camera	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-camera-fake_playerone_sdk-Linux-arm64.txt	-
 playerone	filterwheel	fake_playerone_pw_sdk.h	run	4	AlpacaCore/conformu/Player One/Fake/Fake-filterwheel-fake_playerone_pw_sdk-Linux-arm64.txt	-
@@ -57,6 +58,5 @@ touptek	focuser	-	no-fake	6	-	no fake exists yet
 ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
 ioptron	camera	-	no-fake	6	-	no fake exists yet
 playerone	switch	-	no-fake	6	-	no fake exists yet
-qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v2	no-fake	6	-	no fake exists yet

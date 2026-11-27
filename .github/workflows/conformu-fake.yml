@@ -10,8 +10,9 @@
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
 # Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
-# remotealpaca ObservingConditions since slice 6; a row runs
+# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras, the
+# remotealpaca ObservingConditions and the QHY integrated filter wheel since
+# slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
