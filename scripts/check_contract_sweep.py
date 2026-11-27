@@ -169,6 +169,20 @@ def strip_comments(text: str) -> str:
     return "".join(out)
 
 
+def comment_only_change(before: str | None, after: str | None) -> bool:
+    """True when two versions of a C/C++ file differ only in comments or whitespace. None is a file that is
+    absent on that side (added or deleted), which is never comment-only. The ConformU fake workflow's `runs`
+    job uses it so a comment edit in a file its paths filter names runs no row.
+    shortcut: raw string literals (R"(...)") are not parsed; the nightly run still runs every row."""
+    if before is None or after is None:
+        return False
+    def code(text: str) -> list[str]:
+        # Blanked comments leave trailing spaces and empty lines; a mid-line block comment that changes
+        # length still reads as a change, which runs the rows (the safe side).
+        return [line.rstrip() for line in strip_comments(text).splitlines() if line.strip()]
+    return code(before) == code(after)
+
+
 def router_function_parsed(router_text: str) -> bool:
     """Whether register_device_from_config() was found and its braces matched. Zero arms inside it is
     legitimate once every vendor is a catalog descriptor (open-astro#664 Part D, the last arm left in
@@ -797,6 +811,20 @@ def self_test() -> int:
             "SNAPSHOT HOOK MISSING: kSnapshotAdopterRoster row bisque_telescope")
         expect("hook without roster row", _run(sweep=FIX_SWEEP + "#define CS3_QHY(X) X(qhy_focuser, q)\n"),
                "SNAPSHOT HOOK NOT IN ROSTER: qhy_focuser")
+        # comment_only_change: the ConformU fake workflow skips a C/C++ file whose change is only comments.
+        code = 'int a = 1; // old note\nconst char* u = "http://x"; /* block */\n'
+        if not comment_only_change(code, code.replace("old note", "a much longer new note").replace("block", "b")):
+            problems.append("comment_only_change: a comment-only edit was read as a code change")
+        if comment_only_change(code, code.replace("a = 1", "a = 2")):
+            problems.append("comment_only_change: a code edit was read as comments only")
+        if comment_only_change(code, code.replace('"http://x"', '"http://y"')):
+            problems.append("comment_only_change: an edit after // inside a string literal was read as comments only")
+        if comment_only_change(code, code.replace('"http://x"', '"http://  x"')):
+            problems.append("comment_only_change: a whitespace edit inside a string literal was read as comments only")
+        if not comment_only_change(code, code.replace("// old note\n", "// old note\n// a second line\n\n")):
+            problems.append("comment_only_change: added comment lines were read as a code change")
+        if comment_only_change(None, code) or comment_only_change(code, None):
+            problems.append("comment_only_change: an added or deleted file was read as comments only")
         expect("empty adoption table", _run(adr="## Adoption\n"), "EMPTY SNAPSHOT ADOPTION TABLE")
         expect("empty roster", _run(roster=""), "EMPTY SNAPSHOT ROSTER")
         expect("no hooks", _run(sweep=FIX_SWEEP.replace("#define CS3_", "#define XX_")), "EMPTY SNAPSHOT HOOKS")
