@@ -260,6 +260,20 @@ const std::vector<ConformuHost> kHosts = {
      "FakeTouptekPowerboxSDK (simulated StellaVita GPIO ports, in process)", [] { return true; },
      driver_of(cu::make_touptek_switch)},
 #endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+    {"touptek", "switch", "fake_touptek_sdk.h", alpacacore::DeviceType::Switch, "touptek-fake",
+     "ToupTek camera thermal switch (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated cooled ToupTek camera's dew heater, fan and tail light, in process)",
+     [] { return true; }, driver_of(cu::make_touptek_thermal_switch)},
+    {"touptek", "filterwheel", "fake_touptek_sdk.h", alpacacore::DeviceType::FilterWheel, "touptek-fake",
+     "ToupTek AFW (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AFW filter wheel, in process)", [] { return true; },
+     driver_of(cu::make_touptek_filterwheel)},
+    {"touptek", "focuser", "fake_touptek_sdk.h", alpacacore::DeviceType::Focuser, "touptek-fake",
+     "ToupTek AAF (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AAF focuser, in process)", [] { return true; },
+     driver_of(cu::make_touptek_focuser)},
+#endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
      "ZWO ASI camera (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",

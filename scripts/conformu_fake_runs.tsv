@@ -51,9 +51,9 @@ zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet
 wandererastro	rotator	-	no-fake	6	-	no fake exists yet
-touptek	switch	-thermal	no-fake	6	-	no fake exists yet
-touptek	filterwheel	-	no-fake	6	-	no fake exists yet
-touptek	focuser	-	no-fake	6	-	no fake exists yet
+touptek	switch	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	filterwheel	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-filterwheel-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	focuser	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-focuser-fake_touptek_sdk-Linux-arm64.txt	-
 ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
 ioptron	camera	-	no-fake	6	-	no fake exists yet
 playerone	switch	-	no-fake	6	-	no fake exists yet

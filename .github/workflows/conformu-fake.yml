@@ -11,7 +11,8 @@
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
 # Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
 # switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
-# remotealpaca ObservingConditions since slice 6; a row runs
+# remotealpaca ObservingConditions since slice 6, and the ToupTek thermal
+# switch, AFW filter wheel and AAF focuser since #2697; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -96,6 +97,8 @@ on:
       - "AlpacaCore/tests/fake_ioptron_gpio.h"
       - "AlpacaCore/tests/fake_gemini_pdh.h"
       - "AlpacaCore/tests/fake_touptek_powerbox_sdk.h"
+      - "AlpacaCore/tests/fake_touptek_sdk.h"
+      - "AlpacaCore/tests/locked_touptek_sdk.h"
       - "AlpacaCore/tests/fake_iguider_v4l2.h"
       - "AlpacaCore/tests/locked_iguider_v4l2.h"
       - "AlpacaCore/tests/fake_gphoto_sdk.h"
@@ -207,8 +210,9 @@ jobs:
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
           # Vendors whose build requires libgpiod >= 2.0, which the runner's apt does not ship (iOptron's is optional).
           NEEDS_GPIOD = {"zwo"}
-          # The iMate and StellaVita switch rows build their power box only with libgpiod; the vendor's other rows do not.
-          NEEDS_GPIOD_SWITCH = {"ioptron", "touptek"}
+          # The iMate and StellaVita switch rows build their power box only with libgpiod; the vendor's other rows (the
+          # ToupTek thermal switch among them) do not. Keyed on the row's fake.
+          NEEDS_GPIOD_FAKES = {"fake_ioptron_gpio.h", "fake_touptek_powerbox_sdk.h"}
           # Vendors that link the bundled libgphoto2 (scripts/build_bundled_gphoto.sh), never the distro's.
           NEEDS_GPHOTO = {"gphoto"}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
@@ -232,6 +236,7 @@ jobs:
                           "AlpacaCore/tests/locked_gphoto_sdk.h": "gphoto",
                           "AlpacaCore/tests/fake_raw_decoder.h": "gphoto",
                           "AlpacaCore/tests/locked_qhy_sdk.h": "qhy",
+                          "AlpacaCore/tests/locked_touptek_sdk.h": "touptek",
                           "AlpacaCore/tests/fake_timed_completion.h": ("qhy", "playerone"),
                           "scripts/build_bundled_gphoto.sh": "gphoto",
                           "AlpacaCore/tests/conformu_observingconditions_factories.h": "remotealpaca",
@@ -315,7 +320,7 @@ jobs:
                       "options": " ".join("-DALPACACORE_ENABLE_%s=ON" % o
                                           for o in BUILT_BY.get(vendor, [vendor.upper()])),
                       "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
-                      "gpiod": vendor in NEEDS_GPIOD or (dtype == "switch" and vendor in NEEDS_GPIOD_SWITCH),
+                      "gpiod": vendor in NEEDS_GPIOD or fake in NEEDS_GPIOD_FAKES,
                       "gphoto": vendor in NEEDS_GPHOTO,
                   })
           print("rows=" + json.dumps(rows))

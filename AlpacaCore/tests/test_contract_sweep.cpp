@@ -165,6 +165,9 @@
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
+#include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
@@ -3223,6 +3226,79 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+// The AAF and AFW of test_touptek_concurrency_stress.cpp, each alone on the fake.
+struct ToupTekFocuserHold {
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::LockedToupTekSDK sdk{fake};
+    ToupTekFocuserHold() {
+        alpacacore::test::FakeToupTekSDK::ToupFocuserInfo focuser;
+        focuser.id = "fake-aaf-0";
+        focuser.name = "FakeAAF";
+        focuser.model_name = "AAF";
+        fake.focusers.push_back(focuser);
+    }
+};
+struct ToupTekWheelHold {
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::LockedToupTekSDK sdk{fake};
+    ToupTekWheelHold() {
+        alpacacore::test::FakeToupTekSDK::ToupFilterWheelInfo wheel;
+        wheel.id = "fake-afw-0";
+        wheel.name = "FakeAFW";
+        wheel.model_name = "AFW-M";
+        fake.wheels.push_back(wheel);
+    }
+};
+
+// A ToupTek host over `Hold`: before_call holds the named open, throw_from fails it.
+template <class Hold, class Make>
+Tier2Host touptek_sdk_host(const char* id, const char* device_type, DeviceType type, const char* registry_id,
+                           const char* open_call, Make make) {
+    Tier2Host h{id, "touptek", device_type, "fake_touptek_sdk.h", type, registry_id, {}, true, {}, ""};
+    h.connectable = [open_call, make](bool hold) {
+        auto sdk_hold = std::make_shared<Hold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [open_call](const std::string& name) {
+                if (name == open_call) alpacacore::test::connect_hold(kHold);
+            };
+        }
+        return host_over(sdk_hold, make);
+    };
+    h.failing = [open_call, make]() {
+        auto sdk_hold = std::make_shared<Hold>();
+        sdk_hold->fake.throw_from.insert(open_call);  // fake_touptek_sdk.h fault injection
+        return host_over(sdk_hold, make);
+    };
+    return h;
+}
+
+// The thermal switch on the camera of ToupTekSdkHold, bound by index 0.
+Tier2Host tier2_host_touptek_switch_thermal() {
+    return touptek_sdk_host<ToupTekSdkHold>(
+        "touptek_switch_thermal", "switch", DeviceType::Switch, "touptek_switch_thermal", "open_camera_by_id",
+        [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, s.sdk);
+        });
+}
+
+Tier2Host tier2_host_touptek_filterwheel() {
+    return touptek_sdk_host<ToupTekWheelHold>(
+        "touptek_filterwheel", "filterwheel", DeviceType::FilterWheel, "touptek_filterwheel", "open_filter_wheel_by_id",
+        [](ToupTekWheelHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(0, 0, s.sdk);
+        });
+}
+
+Tier2Host tier2_host_touptek_focuser() {
+    return touptek_sdk_host<ToupTekFocuserHold>(
+        "touptek_focuser", "focuser", DeviceType::Focuser, "touptek_focuser", "open_focuser_by_id",
+        [](ToupTekFocuserHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0, s.sdk);
+        });
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_ALTAIR
 // Recipe of altair_concurrency_stress.cpp: the touptek_camera host through the
 // Altair factory, over the same fake.
@@ -3625,7 +3701,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_TOUPTEK_STELLAVITA(X)
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CS2_TOUPTEK(X) X(touptek_camera, CAM) CS2_TOUPTEK_STELLAVITA(X)
+#define CS2_TOUPTEK(X) X(touptek_camera, CAM) X(touptek_switch_thermal, PRB) X(touptek_filterwheel, PRB) X(touptek_focuser, NPR) CS2_TOUPTEK_STELLAVITA(X)
 #else
 #define CS2_TOUPTEK(X)
 #endif
@@ -4737,6 +4813,32 @@ Tier3Recipe tier3_recipe_toup_family_camera() {
 Tier3Recipe tier3_recipe_touptek_camera() { return tier3_recipe_toup_family_camera(); }
 #endif
 
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+// The AFW reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
+// requested slot when the read fails.
+Tier3Recipe tier3_recipe_touptek_filterwheel() {
+    return {[](Hosted& hosted) {
+                t3_fake<ToupTekWheelHold>(hosted).fake.wheel_moving_reads = 1 << 30;
+                t3_start_filterwheel_move(hosted);
+            },
+            [](Hosted& hosted) { t3_fake<ToupTekWheelHold>(hosted).fake.fail_from("get_filter_wheel_position"); },
+            [](Hosted& hosted) { t3_fake<ToupTekWheelHold>(hosted).fake.clear_fail("get_filter_wheel_position"); },
+            "FakeToupTekSDK::fail_from(\"get_filter_wheel_position\") mid-move"};
+}
+
+// The AAF reports ISMOVING for good; then every AAF read throws. Falsified by: IsMoving answering false when the
+// read fails.
+Tier3Recipe tier3_recipe_touptek_focuser() {
+    return {[](Hosted& hosted) {
+                t3_fake<ToupTekFocuserHold>(hosted).fake.aaf_moving_reads = 1 << 30;
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<ToupTekFocuserHold>(hosted).fake.fail_from("aaf_get"); },
+            [](Hosted& hosted) { t3_fake<ToupTekFocuserHold>(hosted).fake.clear_fail("aaf_get"); },
+            "FakeToupTekSDK::fail_from(\"aaf_get\") mid-move"};
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_ALTAIR
 Tier3Recipe tier3_recipe_altair_camera() { return tier3_recipe_toup_family_camera(); }
 #endif
@@ -4879,7 +4981,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CT3_TOUPTEK(X) X(touptek_camera, OK)
+#define CT3_TOUPTEK(X) X(touptek_camera, OK) X(touptek_filterwheel, OK) X(touptek_focuser, OK)
 #else
 #define CT3_TOUPTEK(X)
 #endif
