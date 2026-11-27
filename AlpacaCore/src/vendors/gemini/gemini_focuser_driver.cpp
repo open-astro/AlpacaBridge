@@ -502,7 +502,7 @@ private:
     std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
     std::optional<util::TaskClock::clock::time_point> temp_comp_retry_at_;
     util::OperationGeneration state_poll_generation_;
-    // Position, motion and temperature served to the getters (open-astro#1229).
+    // Position, motion, temperature and TempComp served to the getters (open-astro#1229).
     // Declared after clock_ and protocol_: it is destroyed first and joins its
     // poll body while both are still alive.
     util::PolledState<StateFrame> state_;
