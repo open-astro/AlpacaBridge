@@ -747,12 +747,15 @@ public:
 
     // True from a PulseGuide until the drain has sent every queued pulse and the last one returned from SVBPulseGuide
     // (#2735). Then the newest sent pulse's failure is raised (the ASCOM async FAQ): a later PulseGuide reads true
-    // again until its own pulse replaces it, and a Connect or Disconnect clears it.
+    // again until its own pulse replaces it, and a Connect or Disconnect clears it. Disconnected or lost, it is
+    // NotConnected with the loss reason first (decision 0009 rule 3, #2792); a pulse that lost the link kept that text.
     bool get_is_pulse_guiding() const override {
+        ensure_connected();
         if (pulse_draining_.load()) {
             return true;
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (pulse_draining_.load()) {
             return true;
         }
