@@ -75,6 +75,13 @@ int thrown_code(Command&& command) {
     return 0;
 }
 
+// Disconnects a singleton wrapper when the case ends, a failed REQUIRE included, so the next case can connect.
+template <typename Wrapper>
+struct DisconnectOnExit {
+    Wrapper& wrapper;
+    ~DisconnectOnExit() { wrapper.disconnect(); }
+};
+
 // The default handset until `mute` is set, then one that takes every command and answers nothing: a reply timeout,
 // the link still up.
 alpacacore::test::FakeMountServer::Responder mutable_responder(std::shared_ptr<std::atomic<bool>> mute) {
@@ -127,11 +134,11 @@ TEST_CASE("iOptron mount - a TCP hangup while a command waits for its reply is N
     REQUIRE(server.ok());
     auto& wrapper = ioptron::iOptronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(ioptron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     server.hang_up_on(":Hang");  // takes the command, never answers, resets the connection
     CHECK(thrown_code([&] { (void)wrapper.send_command(":Hang#", true, 3000); }) == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
     CHECK_FALSE(wrapper.is_connected());
-    wrapper.disconnect();
 }
 
 // Falsified by: ioptron_protocol_wrapper.cpp fail_link_if_gone_locked() judging a TCP send by link_.lost() only (a
@@ -142,6 +149,9 @@ TEST_CASE("iOptron mount - a send on a reset TCP connection is NotConnected",
     REQUIRE(server.ok());
     auto& wrapper = ioptron::iOptronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(ioptron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
+    // One answered exchange first: the fake registers a connection when it serves it, and drops only those.
+    REQUIRE_NOTHROW((void)wrapper.send_command(":GVER#", true, 1000));
     REQUIRE(server.drop_connections());
     // The first send after a peer's reset can still go out; the second meets EPIPE or ECONNRESET.
     int code = 0;
@@ -150,7 +160,6 @@ TEST_CASE("iOptron mount - a send on a reset TCP connection is NotConnected",
     }
     CHECK(code == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
-    wrapper.disconnect();
 }
 
 // Falsified by: ioptron_protocol_wrapper.cpp throw_link_lost() or fail_link_if_gone_locked() treating a reply timeout
@@ -161,11 +170,11 @@ TEST_CASE("iOptron mount - a reply timeout over TCP stays a failed exchange", "[
     REQUIRE(server.ok());
     auto& wrapper = ioptron::iOptronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(ioptron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     mute->store(true);
     CHECK(thrown_code([&] { (void)wrapper.send_command(":GVER#", true, 150); }) == err::DriverException);
     CHECK(wrapper.link_alive());
     CHECK(wrapper.is_connected());
-    wrapper.disconnect();
 }
 #endif  // ALPACACORE_ENABLE_IOPTRON
 
@@ -244,11 +253,11 @@ TEST_CASE("Celestron mount - a TCP hangup while a command waits for its reply is
     REQUIRE(server.ok());
     auto& wrapper = cel::CelestronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(celestron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     server.hang_up_on("Hang");  // takes the command, never answers, resets the connection
     CHECK(thrown_code([&] { (void)wrapper.send_command("Hang", true, 3000); }) == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
     CHECK_FALSE(wrapper.is_connected());
-    wrapper.disconnect();
 }
 
 // Falsified by: celestron_protocol_wrapper.cpp fail_link_if_gone_locked() judging a TCP send by link_.lost() only (a
@@ -259,6 +268,8 @@ TEST_CASE("Celestron mount - a send on a reset TCP connection is NotConnected",
     REQUIRE(server.ok());
     auto& wrapper = cel::CelestronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(celestron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
+    REQUIRE_NOTHROW((void)wrapper.send_command("V", true, 1000));  // the fake drops only a connection it has served
     REQUIRE(server.drop_connections());
     int code = 0;
     for (int i = 0; i < 3 && code == 0; ++i) {
@@ -266,7 +277,6 @@ TEST_CASE("Celestron mount - a send on a reset TCP connection is NotConnected",
     }
     CHECK(code == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
-    wrapper.disconnect();
 }
 
 // Falsified by: celestron_protocol_wrapper.cpp throw_link_lost() or fail_link_if_gone_locked() treating a reply
@@ -277,11 +287,11 @@ TEST_CASE("Celestron mount - a reply timeout over TCP stays a failed exchange", 
     REQUIRE(server.ok());
     auto& wrapper = cel::CelestronProtocolWrapper::instance();
     REQUIRE(wrapper.connect(celestron_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     mute->store(true);
     CHECK(thrown_code([&] { (void)wrapper.send_command("V", true, 150); }) == err::DriverException);
     CHECK(wrapper.link_alive());
     CHECK(wrapper.is_connected());
-    wrapper.disconnect();
 }
 #endif  // ALPACACORE_ENABLE_CELESTRON
 
@@ -341,11 +351,11 @@ TEST_CASE("SynScan mount - a TCP hangup while a command waits for its reply is N
     REQUIRE(server.ok());
     auto& wrapper = syn::SynScanProtocolWrapper::instance();
     REQUIRE(wrapper.connect(synscan_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     server.hang_up_on("Hang");  // takes the command, never answers, resets the connection
     CHECK(thrown_code([&] { (void)wrapper.send_command("Hang", true, 3000); }) == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
     CHECK_FALSE(wrapper.is_connected());
-    wrapper.disconnect();
 }
 
 // Falsified by: synscan_protocol_wrapper.cpp fail_link_if_gone_locked() judging a TCP send by link_.lost() only (a
@@ -356,6 +366,8 @@ TEST_CASE("SynScan mount - a send on a reset TCP connection is NotConnected",
     REQUIRE(server.ok());
     auto& wrapper = syn::SynScanProtocolWrapper::instance();
     REQUIRE(wrapper.connect(synscan_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
+    REQUIRE_NOTHROW((void)wrapper.send_command("V", true, 1000));  // the fake drops only a connection it has served
     REQUIRE(server.drop_connections());
     int code = 0;
     for (int i = 0; i < 3 && code == 0; ++i) {
@@ -363,7 +375,6 @@ TEST_CASE("SynScan mount - a send on a reset TCP connection is NotConnected",
     }
     CHECK(code == err::NotConnected);
     CHECK_FALSE(wrapper.link_alive());
-    wrapper.disconnect();
 }
 
 // Falsified by: synscan_protocol_wrapper.cpp throw_link_lost() or fail_link_if_gone_locked() treating a reply timeout
@@ -374,11 +385,11 @@ TEST_CASE("SynScan mount - a reply timeout over TCP stays a failed exchange", "[
     REQUIRE(server.ok());
     auto& wrapper = syn::SynScanProtocolWrapper::instance();
     REQUIRE(wrapper.connect(synscan_endpoint(server.port())));
+    DisconnectOnExit guard{wrapper};
     mute->store(true);
     CHECK(thrown_code([&] { (void)wrapper.send_command("V", true, 150); }) == err::DriverException);
     CHECK(wrapper.link_alive());
     CHECK(wrapper.is_connected());
-    wrapper.disconnect();
 }
 #endif  // ALPACACORE_ENABLE_SYNSCAN
 

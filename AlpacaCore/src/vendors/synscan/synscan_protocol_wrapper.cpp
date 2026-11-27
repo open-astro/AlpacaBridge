@@ -1100,22 +1100,22 @@ private:
 #endif
     }
 
-    // A hangup on a read. Over serial the port is gone (decision 0009 rule 2a): the link is lost at once. Over TCP it
-    // stays a DriverException, and the driver's fault latch and staleness bound decide.
+    // A hangup on a read (decision 0009 rule 2a): the port is gone over serial, the peer closed or reset the stream
+    // over TCP (EOF reads as ECONNRESET). Either way the link is lost at once.
     [[noreturn]] void throw_link_lost(int err) {
-        const std::string reason = std::string("SynScan ") +
-                                   (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
-                                   " link lost (hangup): " + util::errno_string(err);
-        if (connection_type_ == ConnectionType::Serial) fail_link_locked(reason);
-        throw AlpacaException(reason);
+        fail_link_locked(std::string("SynScan ") + (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                         " link lost (hangup): " + util::errno_string(err));
     }
 
-    // A failed write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the util::SerialLink
-    // verdict, #2262) is the serial port gone: the link is lost at once. A write timeout is not. Serial only: a TCP
-    // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
+    // A failed write that says the link is gone (`err` the write's errno) loses it at once: over serial the
+    // util::SerialLink verdict (EIO/ENXIO/ENODEV/EBADF, #2262), over TCP util::socket_hangup_errno() (EPIPE,
+    // ECONNRESET, ENOTCONN, EBADF, ENOTSOCK). A write timeout, EHOSTUNREACH or ENETUNREACH is not: that stays a failed
+    // exchange for the fault latch.
     void fail_link_if_gone_locked(int err) {
-        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
-            fail_link_locked("SynScan serial link lost (write): " + util::errno_string(err));
+        if (connection_type_ == ConnectionType::Serial ? link_.lost() : util::socket_hangup_errno(err)) {
+            fail_link_locked(std::string("SynScan ") +
+                             (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                             " link lost (write): " + util::errno_string(err));
         }
     }
 
@@ -1124,12 +1124,18 @@ private:
     // exchange, so the link is connected; the driver calls the wrapper with its own mutexes free, so no driver lock is
     // taken under this one.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
-        ALPACA_LOG_ERROR("SynScan", "Mount link lost on " + connection_info_.port_path + ": " + reason +
+        ALPACA_LOG_ERROR("SynScan", "Mount link lost on " + location_locked() + ": " + reason +
                                         " (port released; reconnect to resume)");
         set_fault(reason);
         link_lost_.store(true);
         disconnect_locked();
         throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
+    std::string location_locked() const {
+        return connection_type_ == ConnectionType::Serial
+                   ? connection_info_.port_path
+                   : connection_info_.host + ":" + std::to_string(connection_info_.tcp_port);
     }
 
     // A read that set_interrupt(true) ended (#2070): the disconnect that raised it owns the link, so this is not a

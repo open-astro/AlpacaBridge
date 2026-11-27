@@ -730,13 +730,13 @@ TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][t
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).rfind("Unpark could not stop the park slew: ", 0) == 0);
     }
-    CHECK_FALSE(driver->get_at_park());
+    // The reset connection is a lost link at once (decision 0009 rule 2a, #2718): every read answers NotConnected.
+    CHECK_FALSE(driver->get_connected());
     try {
         static_cast<void>(driver->get_slewing());
-        FAIL("Slewing must surface the failed Unpark stop");
+        FAIL("Slewing must not read a value over a lost link");
     } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        CHECK(std::string(ex.what()).find("Unpark could not stop") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
     }
 
     driver->set_connected(false);
@@ -784,13 +784,13 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
     REQUIRE(server.drop_connections());
     REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10000));
     CHECK(stop_errors.load() == 1);
-    CHECK_FALSE(driver->get_at_park());
+    // The reset connection is a lost link at once (decision 0009 rule 2a, #2718): every read answers NotConnected.
+    CHECK_FALSE(driver->get_connected());
     try {
         static_cast<void>(driver->get_slewing());
-        FAIL("Slewing must surface the failed Park");
+        FAIL("Slewing must not read a value over a lost link");
     } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        CHECK(std::string(ex.what()).find("stopping after failure failed") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
     }
 
     driver->set_connected(false);

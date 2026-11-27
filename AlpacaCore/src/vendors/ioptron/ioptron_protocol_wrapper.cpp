@@ -1172,7 +1172,13 @@ public:
             if (ret <= 0) break;
             char ch;
             ssize_t n = recv(socket_fd_, &ch, 1, 0);
-            if (n <= 0) break;
+            // The peer's EOF (0) or reset is a hangup, not a quiet line (decision 0009 rule 2a); EAGAIN and EINTR end
+            // the drain.
+            if (n == 0) throw_link_lost(ECONNRESET);
+            if (n < 0) {
+                if (util::socket_hangup_errno(errno)) throw_link_lost(errno);
+                break;
+            }
             wait_ms = 0;
         }
 #else
@@ -1221,7 +1227,8 @@ public:
             spec.first_byte_timeout = read_slice();
             spec.skip.clear();
             spec.max_len = kMaxStale;
-            (void)read_reply(spec, std::chrono::steady_clock::now() + kMaxStale * read_slice());
+            const auto r = read_reply(spec, std::chrono::steady_clock::now() + kMaxStale * read_slice());
+            if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
         }
     }
 
@@ -1544,25 +1551,24 @@ private:
 #endif
     }
 
-    // A hangup on a read. Over serial the port is gone (decision 0009 rule 2a): the link is lost at once. Over TCP it
-    // stays a DriverException, and the driver's fault latch and staleness bound decide.
+    // A hangup on a read (decision 0009 rule 2a): the port is gone over serial, the peer closed or reset the stream
+    // over TCP (EOF reads as ECONNRESET). Either way the link is lost at once.
     [[noreturn]] void throw_link_lost(int err) {
-        const std::string reason = std::string("iOptron mount ") +
-                                   (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
-                                   " link lost (hangup): " + util::errno_string(err);
-        if (connection_type_ == ConnectionType::Serial) {
-            fail_link_locked(reason);
-        }
-        throw AlpacaException(reason);
+        fail_link_locked(std::string("iOptron mount ") +
+                         (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                         " link lost (hangup): " + util::errno_string(err));
     }
 
-    // A failed serial write the link judges lost (EIO/ENXIO/ENODEV/EBADF, `err` the write's errno: the
-    // util::SerialLink verdict, #2262) is the port gone: the link is lost at once. A write timeout is not; a TCP send
-    // fails with a socket errno instead, so the network link keeps its fault latch.
+    // A failed write that says the link is gone (`err` the write's errno) loses it at once: over serial the
+    // util::SerialLink verdict (EIO/ENXIO/ENODEV/EBADF, #2262), over TCP util::socket_hangup_errno() (EPIPE,
+    // ECONNRESET, ENOTCONN, EBADF, ENOTSOCK). A write timeout, EHOSTUNREACH or ENETUNREACH is not: that stays a failed
+    // exchange for the fault latch.
     void fail_link_if_gone_locked(int err) {
 #ifndef _WIN32
-        if (connection_type_ == ConnectionType::Serial && link_.lost()) {
-            fail_link_locked("iOptron mount serial link lost (write): " + util::errno_string(err));
+        if (connection_type_ == ConnectionType::Serial ? link_.lost() : util::socket_hangup_errno(err)) {
+            fail_link_locked(std::string("iOptron mount ") +
+                             (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                             " link lost (write): " + util::errno_string(err));
         }
 #else
         (void)err;

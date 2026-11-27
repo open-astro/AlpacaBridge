@@ -801,18 +801,15 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fa
 
     latch_by_polls(*driver, clock, mount);
 
-    // The link is gone, so the blind :Q# cannot be written: the stop was not
-    // sent, AbortSlew must say so, and the latch must stay set.
+    // The link is gone, so the blind :Q# cannot be written: the stop was not sent and AbortSlew must say so. Over TCP
+    // the reset is a lost link at once (decision 0009 rule 2a, #2718), so it says NotConnected rather than the
+    // latch's DriverException, and every later call answers NotConnected until a reconnect: the latch's refusal of
+    // the reads can no longer be told apart from the lost link's, so only the lost-link outcome is asserted.
     mount.reset_link();
-    try {
-        driver->abort_slew();
-        FAIL("AbortSlew succeeded on a reset link");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        CHECK(contains(ex.what(), "AbortSlew failed"));
-    }
-    CHECK(contains(sync_failure(*driver), kLatched));
-    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 20.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
     driver->set_connected(false);
 }
@@ -821,7 +818,7 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fa
 //
 // The serial cases run on the pty fake (PtyIoptronMount) with a FakeTaskClock and no site or time sync on connect,
 // so the clock-sync body sends nothing and every driver wait is stepped by advance(). The fault cases run on the TCP
-// fake, whose hangups stay a DriverException for the latch.
+// fake, where a hangup is a lost link at once too (decision 0009 rule 2a, #2718).
 namespace {
 
 namespace io = alpacacore::vendor::ioptron;
@@ -2577,8 +2574,9 @@ TEST_CASE("iOptron hold window - MoveAxis inside a GOTO's hold ends the window",
     driver->set_connected(false);
 }
 
-// Rule 2: a failed dispatch clears the window. The link is reset, so the synchronous slew's :SRA# write fails;
-// Slewing reads the status cached at connect instead of the 5 s window.
+// Rule 2: a failed dispatch clears the window. The link is reset, so the synchronous slew's :SRA# write fails; over
+// TCP that is a lost link at once (decision 0009 rule 2a, #2718), so Slewing answers NotConnected: the 5 s window is
+// not served over it.
 TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch fails leaves Slewing false",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2588,13 +2586,15 @@ TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch 
 
     mount.reset_link();
     CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
-    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
 // A synchronous slew whose dispatch throws also ends slew_in_progress_. Left true, it would stop the #843 mask: the
-// mount's system status 2 during a guide pulse would read as Slewing. The status 2 is the one cached at connect, and
-// the link is reset after the pulse, so no read goes to it.
+// mount's system status 2 during a guide pulse would read as Slewing. The link is reset after the pulse; over TCP that
+// is a lost link at once (decision 0009 rule 2a, #2718), so both getters answer NotConnected and neither serves the
+// cached status 2 or the pulse window.
 TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a guide pulse",
           "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2607,12 +2607,14 @@ TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a gui
     REQUIRE(driver->get_is_pulse_guiding());
     mount.reset_link();
     CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
-    CHECK(driver->get_is_pulse_guiding());
-    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_is_pulse_guiding(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
-// Rule 2: a Park whose :MP1# cannot be written takes its window back.
+// Rule 2: a Park whose :MP1# cannot be written takes its window back. Over TCP the failed write is a lost link at once
+// (decision 0009 rule 2a, #2718): Park and Slewing answer NotConnected.
 TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2621,8 +2623,9 @@ TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false
     auto driver = hold_driver(mount, clock);
 
     mount.reset_link();
-    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(driver->get_slewing());
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -3628,8 +3631,9 @@ TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the ea
     driver->set_connected(false);
 }
 
-// Rule 2: a PulseGuide whose command cannot be written leaves no pulse window: IsPulseGuiding is false and the next
-// Dec read is the cached position, not a prediction. Inside the 30 s connect cache, so no read goes to the reset link.
+// Rule 2: a PulseGuide whose command cannot be written leaves no pulse window. Over TCP the failed write is a lost
+// link at once (decision 0009 rule 2a, #2718), so IsPulseGuiding and the Dec read answer NotConnected: neither the
+// window nor a predicted position is served over it.
 TEST_CASE("iOptron hold window - a PulseGuide whose command fails leaves no pulse window",
           "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -3643,8 +3647,9 @@ TEST_CASE("iOptron hold window - a PulseGuide whose command fails leaves no puls
     REQUIRE(driver->get_is_pulse_guiding());
     mount.reset_link();
     CHECK_THROWS(driver->pulse_guide(0, 2000));
-    CHECK_FALSE(driver->get_is_pulse_guiding());
-    CHECK(driver->get_declination() == Catch::Approx(20.0));
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_is_pulse_guiding(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -3730,7 +3735,10 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
 
 // open-astro#1223: the 750 ms retry delay after a failed site command is a cancellable wait on the driver's
 // clock too. A disconnect that lands inside it joins at once; an uncancellable sleep would park the join
-// forever on a FakeTaskClock nobody advances.
+// forever on a FakeTaskClock nobody advances. Over TCP a failed site command is a hangup, a lost link at once
+// (decision 0009 rule 2a, #2718), and a set command's missing ack is no failure, so the body never reaches the retry
+// delay: that premise cannot exist over TCP any more. The case pins the lost-link outcome instead: the first :SLA
+// fails, the link is lost, and a disconnect over it joins at once without the clock moving.
 TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry delay does not wait it out",
           "[ioptron][telescope][unit][fake][taskclock]") {
     alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
@@ -3743,12 +3751,12 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry de
     wait_for_ioptron_connect_parked(clock);
     // The clock-sync body is parked in its 250 ms start delay, next to the state poll.
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
-    // Drop the link, so the first set_latitude send fails and the body lands in its retry delay.
+    // Drop the link, so the first set_latitude send fails.
     mount.reset_link();
-    const auto waits = clock.wait_count();
     clock.advance(std::chrono::milliseconds(250));
-    // The first set_latitude fails; the body registers its retry delay as the next wait, and the poll its next tick.
-    REQUIRE(clock.wait_for_wait_count(waits + 2, std::chrono::seconds(5)));
+    // The failed send is a lost link at once (decision 0009 rule 2a, #2718): the body does not retry, and Connected
+    // reads false.
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }));
 
     std::promise<void> disconnected;
     auto done = disconnected.get_future();

@@ -402,6 +402,16 @@ TEST_CASE("read_until_socket - a non-socket fd is LinkDead with ENOTSOCK", "[ser
     CHECK(r.err == ENOTSOCK);
 }
 
+// Falsified by: serial_read.h socket_hangup_errno() omitting EBADF, or taking EHOSTUNREACH, ENETUNREACH or ETIMEDOUT
+TEST_CASE("socket_hangup_errno - a gone connection is a hangup, an unreachable host is not",
+          "[serial][serial_read][issue2718]") {
+    for (const int gone : {ENOTCONN, ECONNRESET, EPIPE, ENOTSOCK, EBADF})
+        CHECK(alpacacore::util::socket_hangup_errno(gone));
+    for (const int reachability : {EHOSTUNREACH, ENETUNREACH, ETIMEDOUT, EAGAIN, EINTR}) {
+        CHECK_FALSE(alpacacore::util::socket_hangup_errno(reachability));
+    }
+}
+
 // Falsified by: serial_read.h socket_read_byte() turning a poll() timeout (pr == 0) into -1/ETIMEDOUT instead of 0
 TEST_CASE("read_until_socket - terminator, skip, late bytes and deadline", "[serial][serial_read][issue1604]") {
     SocketPair sp;

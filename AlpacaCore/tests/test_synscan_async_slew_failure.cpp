@@ -255,7 +255,8 @@ TEST_CASE("SynScan MoveAxis - failed dispatch preserves a stored slew error",
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
-    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    // The reset connection is a lost link at once (decision 0009 rule 2a, #2718): Slewing answers NotConnected.
+    CHECK(read_slewing(*driver) == SlewingRead::ThrewOther);
     driver->set_connected(false);
 }
 
@@ -1097,9 +1098,10 @@ TEST_CASE("SynScan hold window - the pulse window is armed before the guide rate
 }
 
 // Rule 2 (#1836): a rate command that fails clears the window it armed, so IsPulseGuiding reads false at once, not for
-// the pulse plus the 1 s completion delay. Over TCP a send on a reset connection fails without losing the link, so
-// the getter still answers. An earlier RA stop whose tracking restore timed out leaves the cached mode owed to the
-// handset, so the pulse reads no `t` and the rate command is its first exchange after the slewing gate's `L`.
+// the pulse plus the 1 s completion delay. Over TCP a send on a reset connection is a lost link at once (decision 0009
+// rule 2a, #2718), so the window is checked through the lost link: IsPulseGuiding answers NotConnected. An earlier RA
+// stop whose tracking restore timed out leaves the cached mode owed to the handset, so the pulse reads no `t` and the
+// rate command is its first exchange after the slewing gate's `L`.
 TEST_CASE("SynScan hold window - a failed pulse rate command leaves IsPulseGuiding false",
           "[synscan][telescope][hold-window][pulseguiding]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1116,8 +1118,11 @@ TEST_CASE("SynScan hold window - a failed pulse rate command leaves IsPulseGuidi
     st->reject_tracking.store(false);
     REQUIRE(server.drop_connections());
 
-    REQUIRE_THROWS(driver->pulse_guide(2, 500));  // East: RA; the rate command's write fails
-    CHECK_FALSE(driver->get_is_pulse_guiding());
+    // East: RA; the rate command's write fails and the link is lost at once (decision 0009 rule 2a, #2718).
+    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(driver->get_is_pulse_guiding()); },
+                         alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -1573,7 +1578,8 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
 // AbortSlew keeps its window only while that canceller runs, as the RA guard against reading the `t` 0 its blind stop
 // left. A canceller that fails or is refused clears it on its way out, so IsPulseGuiding does not stay true over a
 // stopped axis for the rest of the cut-short pulse. Each first pulse is 3 s on a fake clock that never advances, and
-// the getters answer after each failure (over TCP a failed exchange does not lose the link).
+// a failed send over TCP is a hangup, a lost link at once (decision 0009 rule 2a, #2718): the getters then answer
+// NotConnected, so a case checks what reached the handset, get_connected() and that NotConnected.
 
 // #2263: a replacement no longer cuts the older pulse short; it supersedes it only once its own rate command has
 // landed. The link is reset before the replacement, so its rate command fails: the older RA pulse was not
@@ -1597,10 +1603,14 @@ TEST_CASE("SynScan hold window - a replacement whose rate command fails leaves t
     alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
     // The rate command's own failure, not a slewing refusal: the older pulse was never stopped, so no failed stop of
     // it marked the axis as moving.
-    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::DriverException);
+    // The status read's hangup lost the link at once (decision 0009 rule 2a, #2718), so the replacement is refused as
+    // NotConnected and the getters answer NotConnected rather than the put-back window.
+    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::NotConnected);
     CHECK(st->command_count('P') == rate_commands);  // no stop of the older pulse reached the handset
-    CHECK(driver->get_is_pulse_guiding());
-    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(driver->get_is_pulse_guiding()); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -1623,9 +1633,13 @@ TEST_CASE("SynScan hold window - a MoveAxis whose send fails leaves the pulse on
     // The handset hangs up on a status read, so the MoveAxis's rate command is the first send that fails.
     server.hang_up_on("L");
     alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
-    REQUIRE_THROWS(driver->move_axis(1, 0.5));
+    // The status read's hangup lost the link at once (decision 0009 rule 2a, #2718): NotConnected, not the pulse's
+    // window.
+    require_alpaca_error([&] { driver->move_axis(1, 0.5); }, alpacacore::AlpacaError::NotConnected);
     CHECK(st->command_count('P') == rate_commands);  // no stop of the pulse reached the handset
-    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(driver->get_is_pulse_guiding()); },
+                         alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -1687,7 +1701,9 @@ TEST_CASE("SynScan hold window - a refused Park leaves a running pulse alone (#2
 
 // AbortSlew whose stops fail leaves the slew state as it was (the mount may still be moving), but the pulse it cut
 // short is over: its window is cleared, and the restore its RA stop owes stays (Tracking false). The handset hangs up
-// on the cancel-GOTO, after the cut-short pulse's blind stop has landed, so the axis stops that follow fail.
+// on the cancel-GOTO, after the cut-short pulse's blind stop has landed, so the axis stops that follow fail. A reply
+// timeout on the cancel does not fail AbortSlew, so the hangup is the only failure here, and over TCP it is a lost
+// link at once (decision 0009 rule 2a, #2718): the getters answer NotConnected, not the cleared window.
 TEST_CASE("SynScan hold window - an AbortSlew whose stop fails clears the window of a pulse it cut short",
           "[synscan][telescope][hold-window][pulseguiding][abort]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1703,8 +1719,10 @@ TEST_CASE("SynScan hold window - an AbortSlew whose stop fails clears the window
     REQUIRE(driver->get_is_pulse_guiding());
     server.hang_up_on("M");
     require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(driver->get_is_pulse_guiding());
-    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(driver->get_is_pulse_guiding()); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { static_cast<void>(driver->get_tracking()); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -2324,29 +2342,20 @@ TEST_CASE("SynScan async - a deadline stop that fails says the mount may still b
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     const auto started = clock.now();
-    // Up to just short of the deadline, then the link goes: the status reads that follow fail and keep the last
-    // answer (in progress), and the stops at the deadline meet a closed peer. The SynScan stops are blind sends, so
-    // only a dead link can fail them.
+    // Up to just short of the deadline, then the link goes: the status reads that follow fail. The SynScan stops are
+    // blind sends, so only a dead link can fail them. Over TCP the hangup is a lost link at once (decision 0009
+    // rule 2a, #2718): the first read that meets it releases the socket, the deadline body finds the link gone and
+    // there is no kept "the mount may still be moving" text to read back (a stop that fails on a link that stays up
+    // cannot be built over TCP). Slewing and every later getter answer NotConnected.
     REQUIRE(
         advance_virtual_until(clock, [&] { return clock.now() - started >= kSlewDeadline - std::chrono::seconds(3); }));
     REQUIRE(read_slewing(*driver) == SlewingRead::True);
     REQUIRE(server.drop_connections());
-    // The dead link latches a fault, which Slewing raises too; the kept slew error takes precedence once it exists.
-    std::string message;
     REQUIRE(advance_virtual_until(
-        clock,
-        [&] {
-            message.clear();
-            return read_slewing(*driver, &message) != SlewingRead::True &&
-                   message.find("Slew timed out") != std::string::npos;
-        },
-        std::chrono::seconds(30)));
-    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
-    // The kept text, not re-recorded by the async body's dispatch-failure path, which would clear Slewing on a mount
-    // that may still be moving.
-    CHECK(message.rfind("Slew timed out after 120 s; stopping after failure failed: ", 0) == 0);
-    CHECK(message.find("the mount may still be moving") != std::string::npos);
-    CHECK(message.find("the mount was stopped") == std::string::npos);
+        clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::seconds(30)));
+    CHECK(read_slewing(*driver) == SlewingRead::ThrewOther);
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -2504,22 +2513,20 @@ TEST_CASE("SynScan MoveAxis - a MoveAxis not renewed for 60 s is stopped and Sle
 }
 
 // #2412: a rate command that threw may still have reached the handset, which then moves the axis. The driver cannot
-// know, so it fails closed: the axis keeps reading as moving and the 60 s bound watches it. Here the write fails on
-// a socket the peer closed, which is not a lost link yet.
+// know, so it fails closed on a link that stays up. Over TCP the write that fails on a socket the peer closed is a
+// lost link at once (decision 0009 rule 2a, #2718), so the premise of a bound watching the axis over a live link
+// cannot arise: the start is refused as NotConnected, the link is gone and no bound body is spawned for the axis
+// (the link's loss ends any motion bound).
 TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
     REQUIRE(rig.server.drop_connections());
     // Dec: an RA start reads the tracking mode first, and that read fails before any rate command is sent.
-    CHECK_THROWS_AS(rig.driver->move_axis(1, 1.0), alpacacore::AlpacaException);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (rig.bound_thread.load() == std::thread::id{} && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    REQUIRE(rig.bound_thread.load() != std::thread::id{});  // the bound watches the axis
-    REQUIRE(rig.clock.wait_for_waiter_thread(rig.bound_thread.load(), std::chrono::seconds(5)));
+    require_alpaca_error([&] { rig.driver->move_axis(1, 1.0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.bound_spawns.load() == 0);
     rig.advance(std::chrono::seconds(65));
-    CHECK(rig.warns.load() ==
-          4);  // at 60 s it tried the axis's stop 3 times (the dropped link refused each), then kept the failure
+    CHECK(rig.warns.load() == 0);  // no bound ran: nothing could be sent over the lost link
 }
 
 // A stop the handset answered is known to have landed: only its tracking restore failed. The axis is not put back
@@ -2540,14 +2547,20 @@ TEST_CASE("SynScan MoveAxis - a stop whose tracking restore failed is not bounde
 }
 
 // The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis, so it stays watched.
+// The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis. Over TCP the failed write is a
+// lost link at once (decision 0009 rule 2a, #2718), so the call throws NotConnected, the link is gone and the cap's
+// own stop is never attempted over it (the bound that outlives a failed stop is the one in "a bound stop that fails
+// is not retried", where the cap's own write finds the dropped link).
 TEST_CASE("SynScan MoveAxis - a stop that threw leaves the axis bounded", "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
     rig.start_move(1);
     rig.advance(std::chrono::seconds(30));
     REQUIRE(rig.server.drop_connections());
-    CHECK_THROWS_AS(rig.driver->move_axis(1, 0.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->move_axis(1, 0.0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
     rig.advance(std::chrono::seconds(65));
-    CHECK(rig.warns.load() == 4);  // the cap still tried the axis's stop 3 times, then kept the failure
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.warns.load() == 0);  // no cap stop is sent over the lost link
 }
 
 TEST_CASE("SynScan MoveAxis - each non-zero MoveAxis restarts the 60 s bound", "[synscan][telescope][goto-safety]") {

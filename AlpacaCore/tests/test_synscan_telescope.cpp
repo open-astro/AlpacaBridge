@@ -905,7 +905,10 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
+    // Over TCP the dropped connection is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew reports the
+    // stops it could not send, and the Slewing read that follows answers NotConnected; neither waits for the
+    // staleness bound.
+    SECTION("a dropped link is lost at once: AbortSlew reports it and Slewing throws NotConnected") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
@@ -914,12 +917,12 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
+        CHECK_FALSE(driver->get_connected());
         try {
             (void)driver->get_slewing();
-            FAIL("Slewing returned a completion value after the stop failed");
+            FAIL("Slewing returned a value over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
 
@@ -985,16 +988,18 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
         CHECK(errors == 1);
     }
 
-    // Falsified by: synscan_telescope_driver.cpp run_pulse_stop_body cancel branch, drop the manual_axis_slewing_
-    // write: the next pulse is then refused with the link error instead of InvalidOperation. A replacement pulse
-    // supersedes instead of cancelling (#2263), so the cancel comes from AbortSlew, whose own stops fail too.
-    SECTION("after the cancel a pulse is refused while the axis may still be moving") {
-        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
+    // The dropped TCP link is a lost link at once (decision 0009 rule 2a, #2718), so after AbortSlew's stops fail
+    // a pulse is refused with NotConnected: the link, not the cancelled pulse's axis, is the reason. (The
+    // InvalidOperation "axis may still be moving" refusal needs a failed stop on a link that stays up, which a
+    // blind send over TCP cannot give.)
+    SECTION("after the cancel over a dropped link a pulse is refused as NotConnected") {
+        // abort_slew's own write meets the lost link, so it throws NotConnected (decision 0009 rule 2a, #2718).
+        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
         try {
             driver->pulse_guide(2, 300);
-            FAIL("PulseGuide started although the cancelled pulse's stop failed");
+            FAIL("PulseGuide started over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
         CHECK(errors == 1);
         driver.reset();

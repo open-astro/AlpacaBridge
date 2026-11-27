@@ -69,8 +69,9 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
   to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the Celestron NexStar, iOptron mount and
   SynScan wrappers lose the link on the tty (decision 0009, `NotConnected`, port released; the iOptron serial
-  blind-command ack drain and the SynScan fire-and-forget reply drain too) and throw the `DriverException`
-  "<mount> network link lost (hangup): <errno text>" over TCP only, and the ZWO mount feeds
+  blind-command ack drain and the SynScan fire-and-forget reply drain too) and, since #2718, over TCP too ("<mount>
+  network link lost (hangup): <errno text>", socket released, `NotConnected`; a read hears EOF or `ECONNRESET`, a send
+  `util::socket_hangup_errno()`, and a reply timeout, `EHOSTUNREACH` and `ENETUNREACH` stay a failed exchange), and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
   `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and, since #2220, over

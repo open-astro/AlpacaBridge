@@ -1582,10 +1582,11 @@ TEST_CASE("SynScan Link - a Tracking write waiting its turn when the cable is pu
     CHECK_FALSE(driver.get_connected());
 }
 
-// Over TCP (SynScan Wi-Fi) a hangup is not a pulled cable: it stays a DriverException and the fault latch and the
-// staleness bound decide, as before.
-TEST_CASE("SynScan Link - over TCP a hangup is a failed exchange, not a lost link",
-          "[synscan][telescope][unit][fake][link-lost]") {
+// Over TCP (SynScan Wi-Fi) a peer hangup is positive evidence that the transport is gone, as a pulled cable is over
+// serial (decision 0009 rule 2a, #2718): the exchange in flight answers NotConnected and Connected reads false at once.
+// Falsified by: synscan_protocol_wrapper.cpp throw_link_lost() failing the link over serial only (the exchange answers
+// DriverException and Connected stays true)
+TEST_CASE("SynScan Link - over TCP a hangup is a lost link at once", "[synscan][telescope][unit][fake][link-lost]") {
     TcpRig rig(3000);
     const auto& st = rig.fake().st;
     auto* const driver = &rig.driver();
@@ -1618,9 +1619,9 @@ TEST_CASE("SynScan Link - over TCP a hangup is a failed exchange, not a lost lin
     REQUIRE(st->transactions.load() > before);
     REQUIRE(rig.fake().server.drop_connections());  // the read in flight meets the reset
     call.join();
-    CHECK(code == err::DriverException);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_link_fault().empty());
+    CHECK(code == err::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 

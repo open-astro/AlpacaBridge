@@ -366,8 +366,9 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
 }
 
 // AbortSlew's claim supersedes the Park body, which then leaves the park state alone, so a failed stop must end the
-// park itself: nothing is left to complete it. The link drops once the park GOTO is out, so every stop fails. The fake
-// clock stands still, so the dropped link is never declared lost; a relink would clear the park state itself.
+// park itself: nothing is left to complete it. The link drops once the park GOTO is out, so every stop fails. Over TCP
+// the hangup is a lost link at once (decision 0009 rule 2a, #2718): the failed stop is AbortSlew's own DriverException,
+// but the link is gone, so the park state is cleared by the loss and every later call answers NotConnected.
 TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends the park",
           "[synscan][initiator-supersede]") {
     Rig rig;
@@ -385,11 +386,13 @@ TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends t
     const auto aborted = error_of([&] { rig.driver->abort_slew(); });
     REQUIRE(aborted.first == alpacacore::AlpacaError::DriverException);
     REQUIRE(aborted.second.rfind("AbortSlew stop failed: ", 0) == 0);
-    // Refused only while a park is in flight or done; on the dropped link it fails on the wire instead.
-    CHECK(error_of([&] { rig.driver->set_tracking(true); }).first != alpacacore::AlpacaError::InvalidWhileParked);
-    // A Park that starts clears the stored AbortSlew error at once; Park during a park returns doing nothing.
-    rig.driver->park();
-    CHECK(error_of([&] { (void)rig.driver->get_slewing(); }).second.rfind("AbortSlew stop failed: ", 0) != 0);
+    // The lost link (decision 0009 rule 2a, #2718) refuses everything with NotConnected, not InvalidWhileParked.
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(error_of([&] { rig.driver->set_tracking(true); }).first == alpacacore::AlpacaError::NotConnected);
+    CHECK(error_of([&] { rig.driver->park(); }).first == alpacacore::AlpacaError::NotConnected);
+    const auto slewing = error_of([&] { (void)rig.driver->get_slewing(); });
+    CHECK(slewing.first == alpacacore::AlpacaError::NotConnected);
+    CHECK(slewing.second.rfind("AbortSlew stop failed: ", 0) != 0);
 }
 
 // PulseGuide's mode read and its rate command are one wire turn (decision 0006, "Claim"): a Tracking write that
