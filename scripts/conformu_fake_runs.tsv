@@ -54,8 +54,8 @@ wandererastro	rotator	-	no-fake	6	-	no fake exists yet
 touptek	switch	-thermal	no-fake	6	-	no fake exists yet
 touptek	filterwheel	-	no-fake	6	-	no fake exists yet
 touptek	focuser	-	no-fake	6	-	no fake exists yet
-ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
-ioptron	camera	-	no-fake	6	-	no fake exists yet
+ioptron	filterwheel	fake_ioptron_ieaf.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-filterwheel-fake_ioptron_ieaf-Linux-arm64.txt	-
+ioptron	camera	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_playerone_sdk-Linux-arm64.txt	-
 playerone	switch	-	no-fake	6	-	no fake exists yet
 qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet

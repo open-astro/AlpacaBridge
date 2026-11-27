@@ -2666,6 +2666,34 @@ Tier2Host tier2_host_ioptron_focuser() {
     };
     return h;
 }
+// The iEFW-15 on the iEAF fake: :DeviceInfo# answers model code 99 (5 slots), which the wheel driver needs; the fake's
+// default model is the iEAF focuser, which it refuses (#2204).
+Tier2Host tier2_host_ioptron_filterwheel() {
+    Tier2Host h{"ioptron_filterwheel",
+                "ioptron",
+                "filterwheel",
+                "fake_ioptron_ieaf.h",
+                DeviceType::FilterWheel,
+                "ioptron_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto iefw = std::make_shared<alpacacore::test::FakeIoptronIeaf>();
+        iefw->set_model(99);
+        if (hold) iefw->hold_next_reply(kHold);
+        return host_over(iefw, [](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_iefw_filterwheel(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 // The iFR focuser-rotator: both rows over FakeIoptronIfr, each device on its own fake (one session per fake).
 Tier2Host tier2_host_ifr_focuser() {
     Tier2Host h{"ifr_focuser", "ifr", "focuser", "fake_ioptron_ifr.h", DeviceType::Focuser, "ifr_focuser", {},
@@ -3330,19 +3358,13 @@ Tier2Host tier2_host_touptek_switch() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-Tier2Host tier2_host_playerone_camera() {
-    Tier2Host h{"playerone_camera",
-                "playerone",
-                "camera",
-                "fake_playerone_sdk.h",
-                DeviceType::Camera,
-                "playerone_camera",
-                {},
-                true,
-                {},
-                ""};
-    h.connectable = [](bool hold) {
+// The Player One camera over FakePlayerOneSDK. The iOptron iCAM row (ioptron_camera) is the same driver behind the
+// iOptron factory (register_ioptron_icam_factory()), its fake listing the camera by the iCAM's SDK name.
+Tier2Host playerone_camera_host(const char* id, const char* vendor, const char* camera_name) {
+    Tier2Host h{id, vendor, "camera", "fake_playerone_sdk.h", DeviceType::Camera, id, {}, true, {}, ""};
+    h.connectable = [camera_name](bool hold) {
         auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        if (camera_name != nullptr) sdk->set_camera_name(camera_name);
         if (hold) sdk->set_open_delay(kHold);
         return host_over(sdk, [](alpacacore::test::FakePlayerOneSDK& fake) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::playerone::create_playerone_camera(0, 0, fake);
@@ -3357,6 +3379,8 @@ Tier2Host tier2_host_playerone_camera() {
     };
     return h;
 }
+Tier2Host tier2_host_playerone_camera() { return playerone_camera_host("playerone_camera", "playerone", nullptr); }
+Tier2Host tier2_host_ioptron_camera() { return playerone_camera_host("ioptron_camera", "ioptron", "iCAM178M"); }
 
 Tier2Host tier2_host_playerone_filterwheel() {
     Tier2Host h{"playerone_filterwheel",
@@ -3594,8 +3618,8 @@ Tier2Host tier2_host_wandererastro_switch() {
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #define CS2_IOPTRON(X) \
-    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM) X(ifr_focuser, NPR) \
-    X(ifr_rotator, PRB) CS2_IOPTRON_POWERBOX(X)
+    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(ioptron_filterwheel, PRB) X(iguider_camera, CAM) \
+    X(ifr_focuser, NPR) X(ifr_rotator, PRB) CS2_IOPTRON_POWERBOX(X)
 #else
 #define CS2_IOPTRON(X)
 #endif
@@ -3640,7 +3664,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB)
+#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB) X(ioptron_camera, CAM)
 #else
 #define CS2_PLAYERONE(X)
 #endif
@@ -4160,6 +4184,20 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
                                 });
                         }},
                        DeviceType::Focuser, clock);
+}
+
+// iEFW: the wheel keeps reporting -1 (moving), then every :WP# answers a reply the wrapper cannot parse. Falsified by:
+// get_position() answering a slot, not raising, when the :WP# read fails.
+Tier3Recipe tier3_recipe_ioptron_filterwheel() {
+    using Fake = alpacacore::test::FakeIoptronIeaf;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_wheel_moving_polls(1 << 30);
+                auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+                f.set_position(f.get_position() == 1 ? 2 : 1);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_wheel_position(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_wheel_position(false); },
+            "FakeIoptronIeaf::fail_wheel_position(true) mid-move"};
 }
 
 // iFR: a move the fake never finishes (it keeps reporting the motor running), then the unit stops answering with
@@ -4793,6 +4831,9 @@ Tier3Recipe tier3_recipe_playerone_camera() {
                        DeviceType::Camera, clock);
 }
 
+// The iCAM row is the same driver: the Player One camera recipe.
+Tier3Recipe tier3_recipe_ioptron_camera() { return tier3_recipe_playerone_camera(); }
+
 // The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
 // requested slot when the read fails.
 Tier3Recipe tier3_recipe_playerone_filterwheel() {
@@ -4834,7 +4875,8 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #define CT3_IOPTRON(X) \
-    X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK) X(ifr_focuser, OK) X(ifr_rotator, OK)
+    X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(ioptron_filterwheel, OK) X(iguider_camera, OK) \
+    X(ifr_focuser, OK) X(ifr_rotator, OK)
 #else
 #define CT3_IOPTRON(X)
 #endif
@@ -4894,7 +4936,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK)
+#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK) X(ioptron_camera, OK)
 #else
 #define CT3_PLAYERONE(X)
 #endif
@@ -5122,6 +5164,7 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_LASTEXP_iguider_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_svbony_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_playerone_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_ioptron_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_gphoto_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_touptek_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_altair_camera(id) CS2_LASTEXP_RUN(id)

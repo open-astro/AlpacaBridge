@@ -1190,6 +1190,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "switch", "fake_mount_server.h"},   // the auxiliary features on the controller's shared link (#2222)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"ioptron", "filterwheel", "fake_ioptron_ieaf.h"},  // the iEFW on the iEAF fake (model code 99)
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
     {"ifr", "rotator", "fake_ioptron_ifr.h"},
     // The iMate PowerBox, compiled only with libgpiod.
@@ -1211,6 +1212,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
+    {"ioptron", "camera", "fake_playerone_sdk.h"},  // the iCAM: the Player One driver behind the iOptron factory
     {"touptek", "camera", "fake_touptek_sdk.h"},
     // The StellaVita backend; the thermal switch has no fake.
     {"touptek", "switch", "fake_touptek_powerbox_sdk.h"},

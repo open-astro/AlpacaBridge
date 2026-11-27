@@ -28,6 +28,11 @@
 
 #include "fake_zwo_efw_sdk.h"
 #endif
+#ifdef FAKE_CONFORMU_IOPTRON
+#include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
+
+#include "fake_ioptron_ieaf.h"
+#endif
 #ifdef FAKE_CONFORMU_QHY
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 
@@ -46,8 +51,8 @@
 
 namespace alpacacore::test::conformu {
 
-// The SDK wheels report Position -1 for this many reads after a move, so ConformU sees the wheel turn (the real
-// EFW and Phoenix report -1 while moving); the fakes' default settles at once.
+// The SDK and iEFW wheels report Position -1 for this many reads after a move, so ConformU sees the wheel turn (the
+// real EFW, Phoenix and iEFW report -1 while moving); the fakes' default settles at once.
 inline constexpr int kWheelMovingReads = 3;
 
 #ifdef FAKE_CONFORMU_ZWO
@@ -62,6 +67,24 @@ inline FakeZWOEFWSDK& zwo_efw() {
 }
 inline std::unique_ptr<FilterWheelDriver> make_zwo_filterwheel(int device_number) {
     return vendor::zwo::create_zwo_efw_filterwheel(device_number, zwo_efw().id, zwo_efw());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_IOPTRON
+// An iEFW-15: :DeviceInfo# answers model code 99 (5 slots), and :WP# answers -1 for kWheelMovingReads polls after
+// a :WM to another slot (the fake's default model is the iEAF focuser, which the wheel driver refuses).
+inline FakeIoptronIeaf& ioptron_iefw() {
+    static FakeIoptronIeaf fake;
+    static const bool configured = [] {
+        fake.set_model(99);
+        fake.set_wheel_moving_polls(kWheelMovingReads);
+        return true;
+    }();
+    (void)configured;
+    return fake;
+}
+inline std::unique_ptr<FilterWheelDriver> make_ioptron_filterwheel(int device_number) {
+    return vendor::ioptron::create_iefw_filterwheel(device_number, ioptron_iefw().slave_path());
 }
 #endif
 

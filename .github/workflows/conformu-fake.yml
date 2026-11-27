@@ -10,8 +10,9 @@
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
 # Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
-# remotealpaca ObservingConditions since slice 6; a row runs
+# switches, the ZWO, ToupTek, Altair, QHY, Player One and iOptron iCAM cameras,
+# the iOptron iEFW filter wheel and the remotealpaca ObservingConditions since
+# slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -205,6 +206,10 @@ jobs:
           sys.path.insert(0, "scripts")
           from check_contract_sweep import comment_only_change
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
+          # A row whose driver another vendor's option builds: the iOptron iCAM is the Player One camera driver
+          # (register_ioptron_icam_factory() in playerone_catalog.cpp), so that row builds and is reached by Player One.
+          ROW_BUILT_BY = {("ioptron", "camera"): ["PLAYERONE"]}
+          ROW_SOURCE_DIRS = {("ioptron", "camera"): ["ioptron", "playerone"]}
           # Vendors whose build requires libgpiod >= 2.0, which the runner's apt does not ship (iOptron's is optional).
           NEEDS_GPIOD = {"zwo"}
           # The iMate and StellaVita switch rows build their power box only with libgpiod; the vendor's other rows do not.
@@ -287,8 +292,8 @@ jobs:
               owner = VENDOR_FILES.get(path, ())
               return (owner,) if isinstance(owner, str) else owner
 
-          def reaches(vendor, fake):
-              dirs = SOURCE_DIRS.get(vendor, [vendor])
+          def reaches(vendor, dtype, fake):
+              dirs = ROW_SOURCE_DIRS.get((vendor, dtype), SOURCE_DIRS.get(vendor, [vendor]))
               mine = ["AlpacaCore/src/vendors/%s/" % d for d in dirs]
               mine += ["AlpacaCore/include/alpacacore/vendor/%s/" % d for d in dirs]
               mine += ["AlpacaCore/conformu/%s/Fake/" % REPORT_DIRS.get(vendor, vendor)]
@@ -306,14 +311,15 @@ jobs:
                   if cells[0] == "vendor" or cells[3] != "run":
                       continue
                   vendor, dtype, fake = cells[0], cells[1], cells[2]
-                  if not shared_change and not reaches(vendor, fake):
+                  if not shared_change and not reaches(vendor, dtype, fake):
                       continue
                   stem = fake[:-2] if fake.endswith(".h") else fake
                   legacy = (vendor, dtype, fake) == ("skywatcher", "telescope", "fake_skywatcher_mount.h")
                   rows.append({
                       "key": "%s/%s/%s" % (vendor, dtype, fake),
                       "options": " ".join("-DALPACACORE_ENABLE_%s=ON" % o
-                                          for o in BUILT_BY.get(vendor, [vendor.upper()])),
+                                          for o in ROW_BUILT_BY.get((vendor, dtype),
+                                                                    BUILT_BY.get(vendor, [vendor.upper()]))),
                       "slug": vendor if legacy else "%s-%s-%s" % (vendor, dtype, stem),
                       "gpiod": vendor in NEEDS_GPIOD or (dtype == "switch" and vendor in NEEDS_GPIOD_SWITCH),
                       "gphoto": vendor in NEEDS_GPHOTO,
