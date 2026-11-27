@@ -28,7 +28,8 @@ UNREACHABLE = [re.compile(p) for p in (
     r".*\.md",                           # no CMake file, test or run_all_tests.sh reads Markdown
     r"\.github/instructions/.*",
     r"\.github/ISSUE_TEMPLATE/.*",
-    r"\.github/scripts/.*",              # merge gate and unicode scan, run by their workflows
+    r"\.github/scripts/(check-unicode\.py|merge-gate\.sh)",  # run by static-checks and merge-gate.yml;
+                                         # coverage-compilers.sh wraps the shards' compilers, so it builds
     r"\.github/workflows/(?!ci\.yml$)[^/]+\.yml",  # ci.yml defines the build jobs, so it reaches
     r"\.claude/.*",
     r"scripts/check_[a-z0-9_]+\.py",     # gate scripts the static-checks job runs
@@ -56,6 +57,10 @@ def self_test():
         (["scripts/build_bundled_gphoto.sh"], True, "the gphoto build script builds"),
         (["VERSION"], True, "the version file builds"),
         (["AlpacaCore/tests/CMakeLists.txt"], True, "CMake builds"),
+        ([".github/scripts/coverage-compilers.sh"], True, "the coverage compiler wrapper the shards run builds"),
+        ([".github/scripts/check-unicode.py", ".github/scripts/merge-gate.sh"], False, "the unicode scan and merge gate skip"),
+        ([".claude/commands/pr-checker.md", ".claude/rules/x.md"], False, "Claude config skips"),
+        (["AlpacaHTTP/web/notes.md", "debian/README.md"], False, "Markdown skips anywhere: no CMake file, test or package step on a PR reads it"),
     ]
     failures = [name for files, want, name in cases if reaches_build(files) is not want]
     for name in failures:
