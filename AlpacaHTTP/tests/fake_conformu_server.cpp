@@ -122,6 +122,12 @@ const std::vector<ConformuHost> kHosts = {
      "FakeIoptronMount (simulated HAE16 EQ over loopback TCP, motion from FakeMountMotionModel)",
      [] { return cu::ioptron_mount().ok(); }, driver_of(cu::make_ioptron_telescope)},
 #endif
+#ifdef FAKE_CONFORMU_BISQUE
+    {"bisque", "telescope", "fake_bisque_mount.h", alpacacore::DeviceType::Telescope, "bisque-fake",
+     "Bisque Paramount (fake TheSkyX, test only)", "ALPACACORE_ENABLE_BISQUE",
+     "FakeBisqueMount (simulated TheSkyX scripting server over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::bisque_mount().server.ok(); }, driver_of(cu::make_bisque_telescope)},
+#endif
 #ifdef FAKE_CONFORMU_CELESTRON
     {"celestron", "telescope", "fake_mount_server.h", alpacacore::DeviceType::Telescope, "celestron-fake",
      "Celestron NexStar mount (fake, test only)", "ALPACACORE_ENABLE_CELESTRON",

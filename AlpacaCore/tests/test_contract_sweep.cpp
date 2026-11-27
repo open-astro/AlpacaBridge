@@ -626,14 +626,32 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"zwo_telescope", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     // #2287, Bisque.
     {"bisque_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"bisque_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"bisque_telescope", kParked, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"bisque_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"bisque_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"bisque_telescope", kParked, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
     {"bisque_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"bisque_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"bisque_telescope", kParked, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
     {"bisque_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
     {"bisque_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
     {"bisque_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"bisque_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
     {"bisque_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"bisque_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"bisque_telescope", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"bisque_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"bisque_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"bisque_telescope", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     // #2287, Celestron CGX.
     {"celestron_telescope_cgx", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"celestron_telescope_cgx_tcp", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
@@ -2609,6 +2627,63 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_BISQUE
+// The fake behind a Bisque row's Hosted: the scripted TheSkyX responder (fake_bisque_mount.h) and the loopback server
+// that holds it, declared after it so the server stops first.
+struct BisqueHosted {
+    std::shared_ptr<alpacacore::test::FakeBisqueMount> mount = std::make_shared<alpacacore::test::FakeBisqueMount>();
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+// The driver over a FakeBisqueMount on loopback TCP, on `clock`. With `hold` the handshake reply waits on the connect
+// hold (connect_hold_gate.h), under the driver's 3 s reply timeout. A slew lands on its target, so the slew legs see
+// an arrival.
+Hosted bisque_telescope_hosted(bool hold, alpacacore::util::TaskClock& clock) {
+    auto fake = std::make_shared<BisqueHosted>();
+    fake->mount->land_on_target = true;
+    auto first = std::make_shared<std::atomic<bool>>(hold);
+    fake->server = std::make_shared<alpacacore::test::FakeMountServer>(
+        [first, respond = fake->mount->responder()](const std::string& chunk) {
+            if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
+            return respond(chunk);
+        });
+    REQUIRE(fake->server->ok());
+    alpacacore::vendor::bisque::ConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = fake->server->port();
+    Hosted hosted;
+    hosted.driver = alpacacore::vendor::bisque::create_bisque_telescope(0, info, clock);
+    hosted.fake = fake;
+    return hosted;
+}
+
+// Recipe of test_bisque_telescope.cpp: FakeBisqueMount's scripted default behind FakeMountServer. The first command
+// is the handshake, so its held reply holds the connect; the park lands on the first IsParked poll.
+Tier2Host tier2_host_bisque_telescope() {
+    Tier2Host h{"bisque_telescope",
+                "bisque",
+                "telescope",
+                "fake_bisque_mount.h",
+                DeviceType::Telescope,
+                "bisque_telescope",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) { return bisque_telescope_hosted(hold, alpacacore::util::default_task_clock()); };
+    h.failing = [] {
+        return host_over_held_port(SOCK_STREAM, [](int port) -> std::unique_ptr<AlpacaDriver> {
+            alpacacore::vendor::bisque::ConnectionInfo info;
+            info.host = "127.0.0.1";
+            info.tcp_port = port;
+            return alpacacore::vendor::bisque::create_bisque_telescope(0, info);
+        });
+    };
+    h.connectable_on_clock = [](alpacacore::util::TaskClock& clock) { return bisque_telescope_hosted(false, clock); };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_IOPTRON
 // Recipe of test_ioptron_telescope.cpp (HAE16 EQ, 0012) and test_ioptron_ieaf_focuser.cpp.
 Tier2Host tier2_host_ioptron_telescope() {
@@ -3577,6 +3652,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_SYNSCAN(X)
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+#define CS2_BISQUE(X) X(bisque_telescope, TEL)
+#else
+#define CS2_BISQUE(X)
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #define CS2_ONSTEP(X) X(onstep_telescope, TEL) X(onstep_focuser, NPR) X(onstep_rotator, PRB) X(onstep_switch, PRB)
 #else
@@ -3658,6 +3738,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_ZWO(X) \
     CS2_CELESTRON(X) \
     CS2_SYNSCAN(X) \
+    CS2_BISQUE(X) \
     CS2_ONSTEP(X) \
     CS2_SKYWATCHER(X) \
     CS2_IOPTRON(X) \
@@ -4282,6 +4363,26 @@ Tier3Recipe tier3_recipe_synscan_telescope() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_BISQUE
+// A TheSkyX slew that never completes (IsSlewComplete keeps reading 0), then TheSkyX stops answering with the socket
+// open (FakeBisqueMount::mute). The driver is on the recipe's clock, so its 8 s Slewing hold and 1 s status poll are
+// stepped, never waited out. Falsified by: get_slewing() answering from slewing_cached_ without check_link_locked().
+Tier3Recipe tier3_recipe_bisque_telescope() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    const auto mount = [](Hosted& hosted) -> alpacacore::test::FakeBisqueMount& {
+        return *t3_fake<BisqueHosted>(hosted).mount;
+    };
+    return t3_on_clock({[mount](Hosted& hosted) {
+                            mount(hosted).slew_polls_needed = 1000000;
+                            t3_start_slew_at_hour_angle(hosted, 1.0, 30.0);
+                        },
+                        [mount](Hosted& hosted) { mount(hosted).mute = true; },
+                        [mount](Hosted& hosted) { mount(hosted).mute = false; }, "FakeBisqueMount::mute mid-slew",
+                        [clock](bool) { return bisque_telescope_hosted(false, *clock); }},
+                       DeviceType::Telescope, clock);
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_ONSTEP
 // OnStep tracking and idle, then a goto running once :MS# is accepted; the replies are those of
 // test_onstep_link_loss.cpp. Falsified by: get_slewing() reporting the cached :GU# state when the status read times
@@ -4843,6 +4944,11 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #else
 #define CT3_SYNSCAN(X)
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+#define CT3_BISQUE(X) X(bisque_telescope, OK)
+#else
+#define CT3_BISQUE(X)
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #define CT3_ONSTEP(X) X(onstep_telescope, OK) X(onstep_focuser, OK) X(onstep_rotator, OK)
 #else
@@ -4906,6 +5012,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CONTRACT_SWEEP_TIER3_HOSTS(X) \
     CT3_CELESTRON(X) \
     CT3_SYNSCAN(X) \
+    CT3_BISQUE(X) \
     CT3_ONSTEP(X) \
     CT3_SKYWATCHER(X) \
     CT3_IOPTRON(X) \
@@ -5296,6 +5403,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
     CS2_ENABLED("synscan")
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+    CS2_ENABLED("bisque")
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
     CS2_ENABLED("onstep")

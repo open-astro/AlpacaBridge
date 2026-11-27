@@ -1184,6 +1184,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
     {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
+    {"bisque", "telescope", "fake_bisque_mount.h"},  // the TheSkyX scripting server
     {"onstep", "telescope", "fake_mount_server.h"},
     {"onstep", "focuser", "fake_mount_server.h"},  // the focuser on the controller's shared link (#2223)
     {"onstep", "rotator", "fake_mount_server.h"},  // the rotator on the controller's shared link (#2221)
