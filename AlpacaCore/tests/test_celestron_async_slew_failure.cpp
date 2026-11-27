@@ -1478,6 +1478,11 @@ TEST_CASE("Celestron MoveAxis - a cap stop that keeps failing is sent 3 times an
     step_virtual(clock, std::chrono::seconds(59));
     st->silent.store(true);  // every stop from here on goes unanswered
     step_virtual_fine(clock, std::chrono::seconds(6));
+    // Each unanswered stop waits out a real serial timeout, so on a slow host the third one and its WARN land after
+    // the last virtual step: wait for them in real time, and keep the mount silent until then.
+    for (int i = 0; i < 400 && (stop_errors.load() < 1 || st->muted_ra_stops.load() < 3); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     st->silent.store(false);
     CHECK(stop_errors.load() == 1);
     // The stop was sent again by the verified stop, 3 times in all, and not again after that.

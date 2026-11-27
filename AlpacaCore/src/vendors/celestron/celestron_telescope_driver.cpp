@@ -1707,7 +1707,8 @@ public:
                " s with no new MoveAxis";
     }
 
-    void run_move_axis_cap(int axis, util::MotionClaim claim, util::HoldWindow window, util::OperationContext& ctx) {
+    void run_move_axis_cap(int axis, const util::MotionClaim& claim, util::HoldWindow window,
+                           util::OperationContext& ctx) {
         const std::string expired = move_axis_cap_ran_text(axis) + "; the driver stopped it";
         try {
             util::run_motion_deadline(ctx, clock_, window, move_axis_cap_hooks(axis, claim, ctx), expired);

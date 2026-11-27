@@ -4748,6 +4748,9 @@ TEST_CASE("OnStep Telescope Driver - an older MoveAxis whose cap starts last lea
     older_held.release();
     older.join();
     alpacacore::vendor::onstep::set_move_axis_cap_before_start_hook_for_testing(*driver, nullptr);
+    // The re-send body and the newer cap body both wait on the clock before time moves again: start_move()'s
+    // rendezvous also counts the re-send body's wait, so the cap body may not be waiting yet.
+    REQUIRE(fake.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     for (int i = 0; i < 8; ++i) {
         fake.advance(std::chrono::seconds(7));  // 63 s from the older call: past its 60 s, short of the newer's 67 s
     }
@@ -4755,7 +4758,7 @@ TEST_CASE("OnStep Telescope Driver - an older MoveAxis whose cap starts last lea
     CHECK(fake.count(":Qw#") == 0);
     CHECK(driver->get_slewing());
     fake.advance(std::chrono::seconds(7));  // past the newer jog's own 60 s
-    CHECK(fake.count(":Qe#") >= 1);
+    CHECK(fake.logged(":Qe#", 1));  // the stop is serial I/O after the wake: wait for it in real time
     driver->set_connected(false);
 }
 
