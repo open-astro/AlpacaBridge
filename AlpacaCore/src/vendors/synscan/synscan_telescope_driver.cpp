@@ -120,8 +120,8 @@ constexpr double kRepeatMissFraction = 0.25;
 // The fraction alone repeats a limit stop in the last quarter of a long slew. The #1105 misses were RA only,
 // 2,950-3,120" (CHANGELOG.md), so the repeat also needs the second axis (Dec, or altitude for an alt/az Park) within
 // kLandingRefineLimitArcsec and the first axis (RA, or azimuth) within this cap, 1 degree. A limit stop in the last
-// quarter that lands with Dec within 600" and RA within 1 degree still gets the one repeat; a larger or two-axis
-// miss does not.
+// quarter that lands with Dec within 600" and RA within 1 degree still gets the one repeat; a landing outside either
+// bound does not.
 constexpr double kFarMissRepeatCapArcsec = 3600.0;
 // How long a GOTO may report itself in progress before the wait stops the mount and fails the slew (#2412).
 constexpr auto kSlewTimeout = std::chrono::seconds(120);
@@ -1204,7 +1204,7 @@ public:
                 };
                 hooks.fail = [&](const std::string& message) { fail_park_locked(message, ctx, lock); };
                 // The park GOTO runs no landing refinement, so a miss gets the one repeat GOTO a slew gets (#1105).
-                // Only for a mount that moved most of the way (#2763); a refused or limit-stopped GOTO fails.
+                // Only for the #1105 miss (goto_repeat_allowed_locked(), #2763); a refused or limit-stopped GOTO fails.
                 hooks.repeat_on_miss = true;
                 double landed_miss_arcsec = 0.0;
                 double landed_first_arcsec = 0.0;   // RA or azimuth, unprojected
@@ -4580,8 +4580,8 @@ private:
     // kMaxLandingRounds rounds (open-astro#880). The handset re-rolls every GOTO landing by a whole second of RA,
     // so a residual is never chased with another GOTO; only one beyond a timed move's reach gets a single re-GOTO
     // first. A landing beyond kLandingRefineLimitArcsec gets one repeat GOTO to the same target, and throws if it
-    // misses that far again (open-astro#1105); a mount that did not travel most of the way (a refused or
-    // limit-stopped GOTO, goto_repeat_allowed_locked()) throws at once with no repeat (open-astro#2763). 16-bit
+    // misses that far again (open-astro#1105); a landing that is not the #1105 miss (goto_repeat_allowed_locked(),
+    // which a refused or limit-stopped GOTO fails) throws at once with no repeat (open-astro#2763). 16-bit
     // handsets (V3) step ~19.8" in RA, so they are not refined; they get the landing gate instead
     // (check_v3_landing_locked(), #2412). `lock` is held on entry and on return. Returns false when the slew was
     // superseded, aborted or cancelled; throws when a move fails. A residual left after the last round is logged as a
@@ -4654,9 +4654,11 @@ private:
                 if (!goto_repeat_allowed_locked(
                         std::max(ra_error_arcsec, dec_error_arcsec), ra_error_arcsec, dec_error_arcsec,
                         [&](double a, double b) { return util::axis_miss_arcsec({a, b}, {ra, dec}); })) {
-                    // Refused, or stopped short by a limit: the same GOTO would be refused or stopped again.
-                    throw AlpacaException(miss + "; the GOTO was not repeated: the mount did not travel most of the " +
-                                              "way to the target (refused, or stopped by a limit)",
+                    // Not the #1105 miss (no known start, too little travel, or not its shape): it may be a refusal
+                    // or a limit stop, and the same GOTO would be refused or stopped again.
+                    throw AlpacaException(miss + "; the GOTO was not repeated: the landing is not the #1105 miss (a " +
+                                              "known start, at least 3/4 of the way covered, Dec within 600 arcsec " +
+                                              "and RA within 3600 arcsec), so it may be a refusal or a limit stop",
                                           AlpacaError::DriverException);
                 }
                 ALPACA_LOG_WARN("SynScan", miss + "; repeating the GOTO once (open-astro#1105)");
