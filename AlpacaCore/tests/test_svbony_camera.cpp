@@ -925,9 +925,7 @@ struct PulseCaseCleanup {
     std::vector<std::atomic<bool>*> done;
     ~PulseCaseCleanup() {
         static_cast<void>(clock.drain_until(
-            [&] {
-                return std::all_of(done.begin(), done.end(), [](const std::atomic<bool>* d) { return d->load(); });
-            },
+            [&] { return std::all_of(done.begin(), done.end(), [](const std::atomic<bool>* d) { return d->load(); }); },
             100ms, 5000ms));
         for (auto& t : threads) {
             if (t.joinable()) t.join();
@@ -959,7 +957,7 @@ TEST_CASE("SVBONY Camera Driver - PulseGuide returns before the pulse ends and I
     });
 
     CHECK(eventually([&] { return returned.load(); }));  // no clock advance: the pulse has not ended
-    REQUIRE(clock.wait_for_waiters(1, 2000ms));           // the pulse body is inside SVBPulseGuide
+    REQUIRE(clock.wait_for_waiters(1, 2000ms));          // the pulse body is inside SVBPulseGuide
     CHECK(camera->get_is_pulse_guiding());
     clock.advance(1999ms);
     CHECK(camera->get_is_pulse_guiding());
@@ -1055,8 +1053,10 @@ TEST_CASE("SVBONY Camera Driver - a failed pulse is raised by IsPulseGuiding unt
 
     SECTION("the next PulseGuide clears it") {
         camera->pulse_guide(0, 10);
-        CHECK(eventually([&] { return error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); }).first == 0 &&
-                                      !camera->get_is_pulse_guiding(); }));
+        CHECK(eventually([&] {
+            return error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); }).first == 0 &&
+                   !camera->get_is_pulse_guiding();
+        }));
         CHECK(sdk.call_count("pulse_guide") == 2);
     }
     SECTION("a Disconnect clears it") {
