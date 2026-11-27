@@ -22,7 +22,7 @@ ifr	rotator	fake_ioptron_ifr.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-rotat
 ioptron	switch	fake_ioptron_gpio.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-switch-fake_ioptron_gpio-Linux-arm64.txt	-
 iguider	camera	fake_iguider_v4l2.h	run	5	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_iguider_v4l2-Linux-arm64.txt	-
 astroasis	focuser	fake_astroasis_hid.h	run	6	AlpacaCore/conformu/Astroasis/Fake/Fake-focuser-fake_astroasis_hid-Linux-arm64.txt	-
-gemini	focuser	fake_gemini_focuser.h	pending	6	-	TempComp is now served from the poll (#2695); the row runs once the 6 fake ConformU runs pass on an arm64 host and the report is committed
+gemini	focuser	fake_gemini_focuser.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-focuser-fake_gemini_focuser-Linux-arm64.txt	-
 gemini	covercalibrator	fake_gemini_flatpanel.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel-Linux-arm64.txt	-
 gemini	switch	fake_gemini_pdh.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-switch-fake_gemini_pdh-Linux-arm64.txt	-
 qhy	camera	fake_qhy_sdk.h	pending	6	-	needs a guide model: FakeQHYSDK::guide() returns at once where ControlQHYCCDGuide blocks for the pulse, so IsPulseGuiding drops before the pulse duration (ConformU, all four directions)
