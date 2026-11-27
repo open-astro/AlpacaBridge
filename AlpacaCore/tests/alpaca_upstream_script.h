@@ -12,14 +12,15 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope or Focuser device for
-// the remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the
-// driver's poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers
-// the client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
-// Telescope, per Axis), keeps the upstream's Connected and AveragePeriod (a Rotator's moves, Sync and Reverse, a
-// FilterWheel's moves, a Switch's writes, and a Focuser's moves and TempComp) as a real server does, and counts calls
-// per member. A Telescope keeps its slews, park, home, MoveAxis, pulses, syncs and settings as a real mount does. An
-// unscripted member answers 0x400 (not implemented), as a real server does.
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser or
+// CoverCalibrator device for the remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient
+// answers with, so the driver's poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer
+// (fake_alpaca_server.h) covers the client over real HTTP; this one answers per member and per SensorName (or, for a
+// Switch, per Id, and for a Telescope, per Axis), keeps the upstream's Connected and AveragePeriod (a Rotator's moves,
+// Sync and Reverse, a FilterWheel's moves, a Switch's writes, a Focuser's moves and TempComp, and a CoverCalibrator's
+// cover and calibrator) as a real server does, and counts calls per member. A Telescope keeps its slews, park, home,
+// MoveAxis, pulses, syncs and settings as a real mount does. An unscripted member answers 0x400 (not implemented), as
+// a real server does.
 
 #include <alpacacore/util/http_client.h>
 
@@ -45,7 +46,16 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser };
+    enum class Kind {
+        ObservingConditions,
+        SafetyMonitor,
+        Rotator,
+        FilterWheel,
+        Switch,
+        Telescope,
+        Focuser,
+        CoverCalibrator
+    };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -68,6 +78,11 @@ public:
     // finish_pulse(). While parked a motion command, a sync and AbortSlew answer InvalidWhileParked (0x408).
     // Focuser: an absolute Focuser 4 upstream (Platform 7) named "Alpaca Simulator Focuser" at 25000 of MaxStep 50000,
     // not moving, StepSize 20, 5.0 degrees, TempComp available and off. A Move runs until finish_move() (or a Halt).
+    // CoverCalibrator: a CoverCalibrator 2 upstream (Platform 7) named "Alpaca Simulator Cover Calibrator", its cover
+    // Closed and its calibrator Off at Brightness 0 of MaxBrightness 100. OpenCover and CloseCover run until
+    // finish_cover() (or a HaltCover, which leaves the cover Unknown), CalibratorOn and CalibratorOff until
+    // finish_calibrator(), so a test sees CoverMoving and CalibratorChanging true on the upstream for as long as it
+    // needs.
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) : kind_(kind) {
         set("connecting", "false");
         if (kind == Kind::Telescope) {
@@ -139,6 +154,18 @@ public:
             set("names", R"(["Red", "Green", "Blue", "Clear"])");
             set("focusoffsets", "[100, 200, 300, 0]");
             set("position", "0");
+            return;
+        }
+        if (kind == Kind::CoverCalibrator) {
+            set("interfaceversion", "2");
+            set("name", "\"Alpaca Simulator Cover Calibrator\"");
+            set("description", "\"ASCOM Alpaca Simulator CoverCalibrator\"");
+            set("coverstate", "1");  // Closed
+            set("covermoving", "false");
+            set("calibratorstate", "1");  // Off
+            set("calibratorchanging", "false");
+            set("brightness", "0");
+            set("maxbrightness", "100");
             return;
         }
         if (kind == Kind::Rotator) {
@@ -276,6 +303,23 @@ public:
         rotator_target_.reset();
     }
 
+    // A CoverCalibrator: ends the running OpenCover or CloseCover (CoverState Open or Closed, CoverMoving false).
+    void finish_cover() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (cover_target_) replies_[{"coverstate", ""}] = {std::to_string(*cover_target_), 0, {}};
+        replies_[{"covermoving", ""}] = {"false", 0, {}};
+        cover_target_.reset();
+    }
+
+    // A CoverCalibrator: ends the running CalibratorOn or CalibratorOff (CalibratorState Ready or Off,
+    // CalibratorChanging false).
+    void finish_calibrator() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (calibrator_target_) replies_[{"calibratorstate", ""}] = {std::to_string(*calibrator_target_), 0, {}};
+        replies_[{"calibratorchanging", ""}] = {"false", 0, {}};
+        calibrator_target_.reset();
+    }
+
     // A Rotator or a Focuser: the member and the Position of the last move PUT, as sent ("" before any).
     std::string last_move() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -296,6 +340,13 @@ public:
     }
 
     static std::string number(double value) { return std::to_string(value); }
+
+    // A Telescope: while true, each RightAscension read moves RA 0.01 h on while axis 0 runs a MoveAxis, and each
+    // Declination read moves Dec 0.1 deg on while axis 1 does (false, the default: the position stays).
+    void move_positions(bool move) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        move_positions_ = move;
+    }
 
     // A Telescope: slews, Park and FindHome run until finish_motion() (or AbortSlew) while true; they land at once
     // while false (the default).
@@ -345,6 +396,11 @@ public:
             } else if (member == "connected") {
                 reply = {connected_ ? "true" : "false", 0, {}};
             } else {
+                if (telescope_ && move_positions_ && request.method == "GET") {
+                    if (member == "rightascension" && axis_rate_[0] != 0.0)
+                        set_mount_locked(mount_ra_ + 0.01, mount_dec_);
+                    if (member == "declination" && axis_rate_[1] != 0.0) set_mount_locked(mount_ra_, mount_dec_ + 0.1);
+                }
                 const auto it = replies_.find({member, key_of(params)});
                 if (it != replies_.end()) reply = it->second;
             }
@@ -412,6 +468,20 @@ private:
             // The wheel turns until finish_wheel_move(), reading -1 meanwhile (IFilterWheelV3).
             wheel_target_ = last_position_put_ = decode(field(params, "Position"));
             replies_[{"position", ""}] = {"-1", 0, {}};
+        } else if (member == "opencover" || member == "closecover") {
+            cover_target_ = member == "opencover" ? 3 : 1;  // Open, Closed
+            replies_[{"coverstate", ""}] = {"2", 0, {}};    // Moving
+            replies_[{"covermoving", ""}] = {"true", 0, {}};
+        } else if (member == "haltcover") {
+            cover_target_.reset();
+            replies_[{"coverstate", ""}] = {"4", 0, {}};  // Unknown: stopped between the two
+            replies_[{"covermoving", ""}] = {"false", 0, {}};
+        } else if (member == "calibratoron" || member == "calibratoroff") {
+            const bool on = member == "calibratoron";
+            calibrator_target_ = on ? 3 : 1;                   // Ready, Off
+            replies_[{"calibratorstate", ""}] = {"2", 0, {}};  // NotReady
+            replies_[{"calibratorchanging", ""}] = {"true", 0, {}};
+            replies_[{"brightness", ""}] = {on ? decode(field(params, "Brightness")) : "0", 0, {}};
         } else if (member == "reverse") {
             replies_[{"reverse", ""}] = {lower(field(params, "Reverse")), 0, {}};
         } else if (member == "setswitch" || member == "setswitchvalue" || member == "setasync" ||
@@ -484,7 +554,10 @@ private:
         if (member == "moveaxis") {
             if (parked) return refused_parked;
             const int axis = std::stoi(value("Axis"));
-            if (axis < 0 || axis > 1) return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            const auto can = replies_.find({"canmoveaxis", value("Axis")});
+            if (axis < 0 || axis > 2 || can == replies_.end() || can->second.value_json != "true") {
+                return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            }
             const double rate = number_of("Rate");
             if (std::abs(rate) > 4.0) return Reply{{}, 0x401, "MoveAxis rate " + value("Rate") + " is too fast"};
             axis_rate_[axis] = rate;
@@ -618,13 +691,15 @@ private:
 
     // Slewing, AtPark and SideOfPier from the running motion, the axes and the park.
     void set_motion_locked() {
-        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0;
+        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0 || axis_rate_[2] != 0.0;
         replies_[{"slewing", ""}] = {moving ? "true" : "false", 0, {}};
         replies_[{"atpark", ""}] = {at_park_ ? "true" : "false", 0, {}};
         if (replies_.find({"sideofpier", ""}) == replies_.end()) replies_[{"sideofpier", ""}] = {"0", 0, {}};
     }
 
     void set_mount_locked(double ra, double dec) {
+        mount_ra_ = ra;
+        mount_dec_ = dec;
         replies_[{"rightascension", ""}] = {number(ra), 0, {}};
         replies_[{"declination", ""}] = {number(dec), 0, {}};
     }
@@ -689,11 +764,14 @@ private:
     std::optional<double> rotator_target_;
     std::string last_move_;
     std::map<std::string, double> pending_async_;  // a Switch's running asynchronous writes, by Id
-    std::string wheel_target_;  // a FilterWheel's running move; empty while none runs
+    std::string wheel_target_;                     // a FilterWheel's running move; empty while none runs
     std::string last_position_put_;
     // A Telescope's motion, axes, park, targets and the PUTs it took.
     bool telescope_ = false;
     bool hold_motion_ = false;
+    bool move_positions_ = false;
+    double mount_ra_ = 0.0;
+    double mount_dec_ = 0.0;
     bool at_park_ = false;
     std::optional<Motion> motion_;
     std::array<double, 3> axis_rate_{0.0, 0.0, 0.0};
@@ -702,6 +780,9 @@ private:
     std::vector<std::string> puts_;
     const Kind kind_;
     std::string focuser_target_;  // a Focuser's running move; empty while none runs
+    // A CoverCalibrator's running cover and calibrator commands: the state each ends in (none while none runs).
+    std::optional<int> cover_target_;
+    std::optional<int> calibrator_target_;
 };
 
 }  // namespace alpacacore::test

@@ -90,6 +90,7 @@
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -790,6 +791,17 @@ inline ContractEntry contract_entry_remotealpaca_focuser() {
         "RemoteAlpacaFocuserDriver::move() clamps an absolute position outside 0..MaxStep to the range (ConformU "
         "requires clamping); a relative step goes to the upstream as given");
 }
+inline ContractEntry contract_entry_remotealpaca_covercalibrator() {
+    return make_entry(
+        "remotealpaca_covercalibrator", "remotealpaca", "covercalibrator", DeviceType::CoverCalibrator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteDeviceConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_covercalibrator(n, config);
+        },
+        kSrcAgents);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -1058,7 +1070,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     X(remotealpaca_observingconditions) \
     X(remotealpaca_safetymonitor)       \
     X(remotealpaca_rotator)             \
-    X(remotealpaca_filterwheel) X(remotealpaca_switch) X(remotealpaca_telescope) X(remotealpaca_focuser)
+    X(remotealpaca_filterwheel)         \
+    X(remotealpaca_switch) X(remotealpaca_telescope) X(remotealpaca_focuser) X(remotealpaca_covercalibrator)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1179,6 +1192,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "filterwheel", "fake_zwo_efw_sdk.h"},
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
+    {"zwo", "switch", "fake_zwo_sdk.h"},                // the dew heater of the fake camera: zwo_switch
+    {"zwo", "switch", "fake_zwo_asiair_gpiod.h"},       // the ASIAIR Pro over the libgpiod stub: zwo_switch_asiair
+    {"zwo", "switch", "fake_zwo_asiair_plus_ioctl.h"},  // the ASIAIR Plus RK3568: zwo_switch_asiair_plus
     {"celestron", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_celestron_cgx_mount.h"},        // direct USB backend
     {"celestron", "telescope", "fake_celestron_aux_tcp_adapter.h"},  // the CGX over the SkyPortal WiFi adapter
@@ -1204,6 +1220,8 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "switch", "fake_http_client.h"},               // the same, as a Switch
     {"remotealpaca", "telescope", "fake_http_client.h"},            // the same, as a Telescope
     {"remotealpaca", "focuser", "fake_http_client.h"},              // the same, as a Focuser
+    {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
+    {"weewx", "observingconditions", "fake_http_client.h"},         // a scripted WeeWX JSON feed
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -1213,8 +1231,12 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
     {"ioptron", "camera", "fake_playerone_sdk.h"},  // the iCAM: the Player One driver behind the iOptron factory
+    {"playerone", "switch", "fake_playerone_sdk.h"},  // the thermal switch over the camera SDK fake
     {"touptek", "camera", "fake_touptek_sdk.h"},
-    // The StellaVita backend; the thermal switch has no fake.
+    {"touptek", "switch", "fake_touptek_sdk.h"},  // the thermal switch backend: touptek_switch_thermal
+    {"touptek", "filterwheel", "fake_touptek_sdk.h"},
+    {"touptek", "focuser", "fake_touptek_sdk.h"},
+    // The StellaVita backend.
     {"touptek", "switch", "fake_touptek_powerbox_sdk.h"},
     {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},
@@ -1265,6 +1287,8 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"remotealpaca_switch", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp"},
     {"remotealpaca_telescope", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp"},
     {"remotealpaca_focuser", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_focuser_driver.cpp"},
+    {"remotealpaca_covercalibrator", "remotealpaca",
+     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_covercalibrator_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

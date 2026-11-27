@@ -1,0 +1,3 @@
+### Changed (CI)
+
+- **Fake ConformU: the Player One thermal switch row runs**, issue #2697 (2 of 9, #2078 slice 6f). `fake_conformu_server` hosts the Player One thermal switch over `FakePlayerOneSDK`, whose default camera reports a dew heater and a fan (`AlpacaCore/tests/conformu_switch_factories.h`), and the switch gets its `kFakeConnectableRoster` row and tier-2 contract-sweep host. The fake's heater and fan now keep the value written, per camera, and refuse what `POASetConfig` refuses: a value out of range, a read-only control and a control the camera does not have. The row passes ConformU 4.6.0-rc.1 with no errors, issues or timing findings, so it is `run`, with its report under `AlpacaCore/conformu/Player One/Fake/`. Fake evidence only.

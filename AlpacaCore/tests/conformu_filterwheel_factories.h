@@ -48,6 +48,12 @@
 
 #include "fake_serial_streamer.h"
 #endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
+
+#include "fake_touptek_sdk.h"
+#include "locked_touptek_sdk.h"
+#endif
 
 namespace alpacacore::test::conformu {
 
@@ -129,6 +135,31 @@ inline FakeSerialStreamer& wandererastro_sfw() {
 }
 inline std::unique_ptr<FilterWheelDriver> make_wandererastro_filterwheel(int device_number) {
     return vendor::wandererastro::create_wandererastro_filterwheel(device_number, wandererastro_sfw().slave_path());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_TOUPTEK
+// One 5-slot AFW on the fake ToupTek SDK, behind the per-call lock. The connect's home reports -1 for one read, and
+// every move reports -1 for kWheelMovingReads reads, as the AFW does while it turns.
+struct ToupTekFilterWheelHost {
+    FakeToupTekSDK fake;
+    LockedToupTekSDK sdk{fake};
+    ToupTekFilterWheelHost() {
+        FakeToupTekSDK::ToupFilterWheelInfo wheel;
+        wheel.id = "fake-afw-0";
+        wheel.name = "AFW-M";
+        wheel.model_name = "AFW-M";
+        fake.wheels.push_back(wheel);
+        fake.wheel_position_script = {-1, 0};
+        fake.wheel_moving_reads = kWheelMovingReads;
+    }
+};
+inline ToupTekFilterWheelHost& touptek_filterwheel_host() {
+    static ToupTekFilterWheelHost host;
+    return host;
+}
+inline std::unique_ptr<FilterWheelDriver> make_touptek_filterwheel(int device_number) {
+    return vendor::touptek::create_touptek_filterwheel_by_index(device_number, 0, touptek_filterwheel_host().sdk);
 }
 #endif
 
