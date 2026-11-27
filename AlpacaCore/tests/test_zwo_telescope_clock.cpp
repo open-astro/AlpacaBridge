@@ -316,7 +316,7 @@ TEST_CASE("ZWO motion owner - a pulse ending during an other-axis jog leaves tha
     REQUIRE(rig.mount.wait_for_count(":Mgn", 1, kReal));
     if (!jog_first) rig.driver->move_axis(0, 1.0);
     rig.mount.set_position(13.0, 45.0);  // the jog moved RA
-    rig.wait_for_blocked_caller();       // the drain waits out its step, besides the poll loop
+    rig.wait_for_blocked_caller(2);      // the drain waits out its step, besides the poll loop and the jog's cap body
     const int pairs = rig.mount.count(":GR");
     rig.advance(1000ms);
     REQUIRE(rig.mount.wait_for_count(":GR", pairs + 1, kReal));  // the drain's reconciliation read
