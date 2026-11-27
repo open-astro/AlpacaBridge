@@ -100,7 +100,7 @@ const OFFERED = {
     camera: ['altair', 'gphoto', 'iguider', 'ioptron', 'playerone', 'qhy', 'svbony', 'touptek', 'zwo'],
     covercalibrator: ['gemini', 'wandererastro'],
     dome: [],
-    filterwheel: ['ioptron', 'playerone', 'qhy', 'touptek', 'wandererastro', 'zwo'],
+    filterwheel: ['ioptron', 'playerone', 'qhy', 'remotealpaca', 'touptek', 'wandererastro', 'zwo'],
     focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'touptek', 'zwo'],
     observingconditions: ['remotealpaca', 'weewx'],
     rotator: ['ifr', 'onstep', 'remotealpaca', 'wandererastro', 'zwo'],

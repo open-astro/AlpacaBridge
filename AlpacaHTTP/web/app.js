@@ -3548,7 +3548,8 @@ function updateRemoteAlpacaConfigFields() {
     const sections = {
         observingconditions: document.getElementById('remotealpaca-observingconditions-fields'),
         safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields'),
-        rotator: document.getElementById('remotealpaca-rotator-fields')
+        rotator: document.getElementById('remotealpaca-rotator-fields'),
+        filterwheel: document.getElementById('remotealpaca-filterwheel-fields')
     };
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
@@ -5157,8 +5158,12 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'remotealpaca') {
         // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions), remoteAlpacaSafety* (SafetyMonitor)
-        // or remoteAlpacaRotator* (Rotator).
-        const remoteAlpacaPrefixes = { safetymonitor: 'remoteAlpacaSafety', rotator: 'remoteAlpacaRotator' };
+        // remoteAlpacaRotator* (Rotator) or remoteAlpacaFilterWheel* (FilterWheel).
+        const remoteAlpacaPrefixes = {
+            safetymonitor: 'remoteAlpacaSafety',
+            rotator: 'remoteAlpacaRotator',
+            filterwheel: 'remoteAlpacaFilterWheel'
+        };
         const prefix = remoteAlpacaPrefixes[normalizeDeviceType(deviceData.deviceType)] || 'remoteAlpaca';
         deviceData.upstreamHost = (formData.get(`${prefix}Host`) || '').trim();
         const upstreamPort = readOptionalNumber(formData, `${prefix}Port`);

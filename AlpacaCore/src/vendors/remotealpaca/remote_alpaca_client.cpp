@@ -501,6 +501,22 @@ std::vector<std::string> RemoteAlpacaClient::get_string_list(std::string_view me
                                " Value, not an array of strings");
 }
 
+std::vector<int> RemoteAlpacaClient::get_int_list(std::string_view member, const RemoteParams& params) {
+    const Reply reply = call(Verb::Get, member, params);
+    const Json& value = reply.value(prefix_);
+    std::vector<int> list;
+    if (value.kind == Json::Kind::Array) {
+        for (const Json& item : value.items) {
+            const auto parsed = whole_int(item);
+            if (!parsed) break;
+            list.push_back(*parsed);
+        }
+        if (list.size() == value.items.size()) return list;
+    }
+    throw RemoteTransportError(prefix_ + "the reply to " + reply.member + " has a " + kind_name(value.kind) +
+                               " Value, not an array of whole numbers inside int");
+}
+
 void RemoteAlpacaClient::put(std::string_view member, const RemoteParams& params) { call(Verb::Put, member, params); }
 
 }  // namespace alpacacore::vendor::remotealpaca

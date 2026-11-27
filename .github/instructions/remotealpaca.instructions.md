@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, 4 for Rotator.
+3 for SafetyMonitor and FilterWheel, 4 for Rotator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -134,13 +134,39 @@ bound.
 - A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.
 
+#### The FilterWheel proxied device (issue #1753 slice 5, #2706)
+
+The same config, self-loop check, Connect (Platform 7 is `IFilterWheelV3`; a version 1 or 2 upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. Every FilterWheel member exists in every interface version, so none maps to `NotImplemented` by version.
+
+- **Connect** reads `Names` and `FocusOffsets` once (`RemoteAlpacaClient::get_int_list` reads the offsets). Every
+  IFilterWheel has both, so an upstream error on either fails the Connect with that error unchanged, as does a wheel
+  with no slot. The slot data lives in `util::FilterWheelSlots` (the shared FilterWheel rule), with the upstream's
+  slot count published: the upstream's lineup replaces what this server held at each Connect (a delta from the
+  native wheels, whose config wins over what the wheel stores: a proxied wheel has no lineup config, the upstream's
+  is the wheel's). A names or offsets write (the AlpacaBridge PUT extension) changes this server's copy only, never
+  the upstream's, and is checked against the count while connected; a lost link keeps the count until the
+  Disconnect, which clears it.
+- **Snapshot.** The frame is `Position`, a value or the upstream's error: -1 while the upstream's wheel moves, as it
+  reports. A stale frame is served; a latched fault refuses it with `DriverException`. `Names` and `FocusOffsets`
+  keep answering while faulted and while disconnected. `DeviceState` is the filter wheel base's, its `TimeStamp` the
+  request time (the base has no `device_state_age()`).
+- **Position write.** A negative slot is `InvalidValue` before the connection check, a slot past the count
+  `InvalidValue` once connected. It is refused while the link is faulted. Its body forwards the write and writes
+  `Position` -1 through, even for the slot the last poll saw (another client may have turned the wheel since), so a
+  client reads the move at once; the next poll reports where it landed, and an upstream error on the write passes
+  through. Writes reach the upstream in caller order (the caller order above): a second write sent while the first
+  one's body runs waits for it. A refused connection is a lost link at once; another call with no reply is `DriverException`. Actions and `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
-`test_remotealpaca_rotator.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
+`test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
 `AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
 `Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
-`finish_move()` or a Halt) with the poll on `FakeTaskClock`. The contract sweep's snapshot
+`finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
+`finish_wheel_move()`) with the poll on `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
 ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row
