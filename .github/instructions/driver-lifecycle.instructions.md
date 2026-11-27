@@ -277,7 +277,7 @@ the previous round's fix**, not new bugs. Before pushing any fix:
 
 - **Sweep the symmetry.** A fix almost always has mirror sites that need the same
   change in the same commit: getter ↔ setter, `open` ↔ `close`, `connect` ↔
-  `disconnect`, POSIX ↔ Windows, and every sibling accessor that shares the
+  `disconnect`, and every sibling accessor that shares the
   invariant. Nearly every regression we shipped was "fixed one of N."
 - **MANDATORY before pushing any fix — write out the sibling set.** The bullet above
   is not advisory; a review round spent re-flagging the mirror of the fix you just

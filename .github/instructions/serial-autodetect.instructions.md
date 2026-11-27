@@ -107,8 +107,7 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   is what proves which device is on a port, so every serial driver must check its handshake reply.
 
 POSIX serial and socket code has several easy-to-get-wrong patterns that must not
-be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
-included inside the existing `#ifndef _WIN32` branches):
+be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h`:
 
 - **`util::connect_tcp()`** (`util/tcp_connect.h`) for every new outbound TCP connect in a
   wrapper (ZWO and OnStep use it; the other mount wrappers move to it in #2712), or `util::lookup_tcp_host()` + `util::connect_tcp_address()` when the address
@@ -148,11 +147,10 @@ with `SerialExclusive::Required`, so no other program can open its port to retun
 
 ### Auto-detect failure message (`util/auto_detect.h`)
 
-Serial port enumeration is POSIX-only, so the `enumerate_*_ports()` helpers return
-empty on Windows. When an auto-detect driver finds no ports, throw
+When an auto-detect driver finds no ports, throw
 `util::serial_auto_detect_failed_message("<device label>")` rather than a
-hard-coded "no device found" string, so the Windows path reports "auto-detect not
-supported on this platform" instead of implying missing hardware.
+hard-coded "no device found" string, so every auto-detect driver reports the
+same message.
 
 ### Auto-detect resolves at connect, never in a factory (`util/connection_resolver.h`)
 
