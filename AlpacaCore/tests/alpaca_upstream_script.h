@@ -12,15 +12,18 @@
 
 #pragma once
 
-// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel or Switch device for the remotealpaca
-// driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's poll runs on
-// the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the client over real
-// HTTP; this one answers per member and per SensorName (or, for a Switch, per Id), keeps the upstream's Connected and
-// AveragePeriod (a Rotator's moves, Sync and Reverse, a FilterWheel's moves and a Switch's writes) as a real server
-// does, and counts calls per member. An unscripted member answers 0x400 (not implemented), as a real server does.
+// A scripted upstream ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch or Telescope device for the
+// remotealpaca driver tests (issue #1753 slices 3 to 5): the responder a FakeHttpClient answers with, so the driver's
+// poll runs on the fake task clock with no socket. The loopback FakeAlpacaServer (fake_alpaca_server.h) covers the
+// client over real HTTP; this one answers per member and per SensorName (or, for a Switch, per Id, and for a
+// Telescope, per Axis), keeps the upstream's Connected and AveragePeriod (a Rotator's moves, Sync and Reverse, a
+// FilterWheel's moves and a Switch's writes) as a real server does, and counts calls per member. A Telescope keeps its
+// slews, park, home, MoveAxis, pulses, syncs and settings as a real mount does. An unscripted member answers 0x400 (not
+// implemented), as a real server does.
 
 #include <alpacacore/util/http_client.h>
 
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -42,7 +45,7 @@ public:
         "CloudCover",     "DewPoint", "Humidity",    "Pressure",      "RainRate", "SkyBrightness", "SkyQuality",
         "SkyTemperature", "StarFWHM", "Temperature", "WindDirection", "WindGust", "WindSpeed"};
 
-    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch };
+    enum class Kind { ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope };
 
     // ObservingConditions: an ObservingConditions 2 upstream (Platform 7) named "Alpaca Simulator Weather" with every
     // sensor: sensor i reads 10 + i, its TimeSinceLastUpdate is 1.5 s, AveragePeriod 0.
@@ -57,8 +60,61 @@ public:
     // Switch: a Switch 3 upstream (Platform 7) named "Alpaca Simulator Switch" with three switches: 0 "Power" (0 to 1,
     // on), 1 "Dew Heater" (0 to 100 in steps of 1, at 40, asynchronous) and 2 "Sensor" (0 to 10 in steps of 0.5, at
     // 2.5, read-only). An asynchronous write leaves StateChangeComplete false until finish_async() applies it.
+    // Telescope: an ITelescopeV4 upstream (Platform 7) named "Alpaca Simulator Telescope", a German equatorial mount at
+    // RA 6 h, Dec 30 deg, tracking, not parked, not home, pier east, every capability true (CanSlew and CanSlewAltAz
+    // too: the driver answers its own for those), axes 0 and 1 movable at up to 4 deg/s, axis 2 not, its targets not
+    // set (InvalidOperation). A slew, Park or FindHome lands at once unless hold_motion(true): then it runs until
+    // finish_motion() or AbortSlew. A MoveAxis runs until MoveAxis(axis, 0) or AbortSlew; a pulse until
+    // finish_pulse(). While parked a motion command, a sync and AbortSlew answer InvalidWhileParked (0x408).
     explicit AlpacaUpstreamScript(Kind kind = Kind::ObservingConditions) {
         set("connecting", "false");
+        if (kind == Kind::Telescope) {
+            telescope_ = true;
+            set("interfaceversion", "4");
+            set("name", "\"Alpaca Simulator Telescope\"");
+            set("description", "\"ASCOM Alpaca Simulator Telescope\"");
+            for (const char* can :
+                 {"canfindhome", "canpark", "canpulseguide", "cansetdeclinationrate", "cansetguiderates", "cansetpark",
+                  "cansetpierside", "cansetrightascensionrate", "cansettracking", "canslew", "canslewaltaz",
+                  "canslewaltazasync", "canslewasync", "cansync", "cansyncaltaz", "canunpark"}) {
+                set(can, "true");
+            }
+            set_for("canmoveaxis", "0", "true");
+            set_for("canmoveaxis", "1", "true");
+            set_for("canmoveaxis", "2", "false");
+            set_for("axisrates", "0", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+            set_for("axisrates", "1", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+            set_for("axisrates", "2", "[]");
+            set("alignmentmode", "2");
+            set("equatorialsystem", "1");
+            set("aperturearea", "0.0269");
+            set("aperturediameter", "0.2");
+            set("focallength", "1.2");
+            set("doesrefraction", "false");
+            set("slewsettletime", "0");
+            set("sitelatitude", "51.5");
+            set("sitelongitude", "-0.1");
+            set("siteelevation", "35");
+            set("trackingrate", "0");
+            set("trackingrates", "[0,1,2,3]");
+            set("rightascensionrate", "0");
+            set("declinationrate", "0");
+            set("guideraterightascension", "0.004178");
+            set("guideratedeclination", "0.004178");
+            set_error("targetrightascension", 0x40B, "TargetRightAscension has not been set");
+            set_error("targetdeclination", 0x40B, "TargetDeclination has not been set");
+            set("altitude", "45");
+            set("azimuth", "90");
+            set("siderealtime", "12.5");
+            set("utcdate", "\"2026-11-26T12:00:00.000Z\"");
+            set("tracking", "true");
+            set("ispulseguiding", "false");
+            set("athome", "false");
+            set("destinationsideofpier", "0");
+            set_mount_locked(6.0, 30.0);
+            set_motion_locked();
+            return;
+        }
         if (kind == Kind::FilterWheel) {
             set("interfaceversion", "3");
             set("name", "\"Alpaca Simulator Filter Wheel\"");
@@ -219,6 +275,35 @@ public:
 
     static std::string number(double value) { return std::to_string(value); }
 
+    // A Telescope: slews, Park and FindHome run until finish_motion() (or AbortSlew) while true; they land at once
+    // while false (the default).
+    void hold_motion(bool hold) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_motion_ = hold;
+    }
+
+    // A Telescope: the slew, Park or FindHome running lands (RA and Dec at the slew's target, AtPark or AtHome).
+    void finish_motion() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        land_locked();
+    }
+
+    // A Telescope: the running pulse ends.
+    void finish_pulse() { set("ispulseguiding", "false"); }
+
+    // A Telescope: whether an axis runs a MoveAxis, as the upstream has it.
+    bool axis_moving(int axis) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return axis >= 0 && axis < 3 && axis_rate_[axis] != 0.0;
+    }
+
+    // A Telescope: the PUT members in the order they came ("moveaxis <Axis> <Rate>" with the values as sent), a
+    // scripted PUT error included.
+    std::vector<std::string> puts() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return puts_;
+    }
+
     util::HttpResponse answer(const FakeHttpClient::Request& request) {
         const std::string& url = request.url;
         const std::size_t query_at = url.find('?');
@@ -258,8 +343,16 @@ private:
     };
 
     Reply put_locked(const std::string& member, const std::string& params) {
+        if (telescope_) {
+            puts_.push_back(member == "moveaxis"
+                                ? member + " " + field(params, "Axis") + " " + decode(field(params, "Rate"))
+                                : member);
+        }
         const auto scripted = put_errors_.find(member);
         if (scripted != put_errors_.end()) return scripted->second;
+        if (telescope_) {
+            if (auto reply = telescope_put_locked(member, params)) return *reply;
+        }
         if (member == "connect") {
             connected_ = true;
         } else if (member == "disconnect") {
@@ -302,10 +395,12 @@ private:
         return {{}, 0, {}};
     }
 
-    // The second key of a reply: the SensorName (lower case), or else a Switch's Id.
+    // The second key of a reply: the SensorName (lower case), or else a Switch's Id, or else a Telescope's Axis.
     static std::string key_of(const std::string& params) {
         const std::string sensor = lower(decode(field(params, "SensorName")));
-        return sensor.empty() ? field(params, "Id") : sensor;
+        if (!sensor.empty()) return sensor;
+        const std::string id = field(params, "Id");
+        return id.empty() ? lower(decode(field(params, "Axis"))) : id;
     }
 
     double value_locked(const std::string& member, const std::string& id) const {
@@ -341,6 +436,175 @@ private:
         return {{}, 0, {}};
     }
 
+    // The Telescope's PUTs; nullopt for a member a Telescope shares with the other kinds (connect, disconnect,
+    // connected).
+    std::optional<Reply> telescope_put_locked(const std::string& member, const std::string& params) {
+        const auto value = [&](const char* key) { return decode(field(params, key)); };
+        const auto number_of = [&](const char* key) { return std::stod(value(key)); };
+        const bool parked = at_park_;
+        const Reply refused_parked{{}, 0x408, "The mount is parked"};
+        if (member == "connect" || member == "disconnect" || member == "connected") return std::nullopt;
+        if (member == "abortslew") {
+            if (parked) return refused_parked;
+            motion_.reset();
+            axis_rate_ = {0.0, 0.0, 0.0};
+            set_motion_locked();
+            return Reply{};
+        }
+        if (member == "moveaxis") {
+            if (parked) return refused_parked;
+            const int axis = std::stoi(value("Axis"));
+            if (axis < 0 || axis > 1) return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            const double rate = number_of("Rate");
+            if (std::abs(rate) > 4.0) return Reply{{}, 0x401, "MoveAxis rate " + value("Rate") + " is too fast"};
+            axis_rate_[axis] = rate;
+            set_motion_locked();
+            return Reply{};
+        }
+        if (member == "pulseguide") {
+            if (parked) return refused_parked;
+            replies_[{"ispulseguiding", ""}] = {"true", 0, {}};
+            return Reply{};
+        }
+        if (member == "slewtocoordinatesasync" || member == "slewtotargetasync" || member == "slewtoaltazasync") {
+            if (parked) return refused_parked;
+            Motion motion;
+            if (member == "slewtocoordinatesasync") {
+                set_targets_locked(number_of("RightAscension"), number_of("Declination"));
+            }
+            if (member != "slewtoaltazasync") {
+                if (!target_ra_ || !target_dec_) return Reply{{}, 0x40B, "The target is not set"};
+                motion.ra = *target_ra_;
+                motion.dec = *target_dec_;
+            } else {
+                motion.altitude = number_of("Altitude");
+                motion.azimuth = number_of("Azimuth");
+            }
+            start_motion_locked(motion);
+            return Reply{};
+        }
+        if (member == "park") {
+            if (!parked) {
+                Motion motion;
+                motion.park = true;
+                start_motion_locked(motion);
+            }
+            return Reply{};
+        }
+        if (member == "unpark") {
+            at_park_ = false;
+            set_motion_locked();
+            return Reply{};
+        }
+        if (member == "findhome") {
+            if (parked) return refused_parked;
+            Motion motion;
+            motion.home = true;
+            start_motion_locked(motion);
+            return Reply{};
+        }
+        if (member == "setpark") return Reply{};
+        if (member == "synctocoordinates" || member == "synctotarget") {
+            if (parked) return refused_parked;
+            if (member == "synctocoordinates") {
+                set_targets_locked(number_of("RightAscension"), number_of("Declination"));
+            }
+            if (!target_ra_ || !target_dec_) return Reply{{}, 0x40B, "The target is not set"};
+            set_mount_locked(*target_ra_, *target_dec_);
+            return Reply{};
+        }
+        if (member == "synctoaltaz") {
+            if (parked) return refused_parked;
+            replies_[{"altitude", ""}] = {value("Altitude"), 0, {}};
+            replies_[{"azimuth", ""}] = {value("Azimuth"), 0, {}};
+            return Reply{};
+        }
+        if (member == "targetrightascension") {
+            target_ra_ = number_of("TargetRightAscension");
+            replies_[{member, ""}] = {number(*target_ra_), 0, {}};
+            return Reply{};
+        }
+        if (member == "targetdeclination") {
+            target_dec_ = number_of("TargetDeclination");
+            replies_[{member, ""}] = {number(*target_dec_), 0, {}};
+            return Reply{};
+        }
+        if (member == "utcdate") {
+            replies_[{member, ""}] = {"\"" + value("UTCDate") + "\"", 0, {}};
+            return Reply{};
+        }
+        // A setting: the upstream keeps the value as sent (its parameter is the member's own ASCOM name).
+        static const std::map<std::string, std::string> kSettings = {
+            {"tracking", "Tracking"},
+            {"trackingrate", "TrackingRate"},
+            {"rightascensionrate", "RightAscensionRate"},
+            {"declinationrate", "DeclinationRate"},
+            {"guideraterightascension", "GuideRateRightAscension"},
+            {"guideratedeclination", "GuideRateDeclination"},
+            {"sideofpier", "SideOfPier"},
+            {"sitelatitude", "SiteLatitude"},
+            {"sitelongitude", "SiteLongitude"},
+            {"siteelevation", "SiteElevation"},
+            {"doesrefraction", "DoesRefraction"},
+            {"slewsettletime", "SlewSettleTime"},
+        };
+        if (const auto it = kSettings.find(member); it != kSettings.end()) {
+            replies_[{member, ""}] = {lower(value(it->second.c_str())), 0, {}};
+            return Reply{};
+        }
+        return Reply{{}, 0x400, "Method " + member + " is not implemented"};
+    }
+
+    struct Motion {
+        std::optional<double> ra;
+        std::optional<double> dec;
+        std::optional<double> altitude;
+        std::optional<double> azimuth;
+        bool park = false;
+        bool home = false;
+    };
+
+    void start_motion_locked(const Motion& motion) {
+        motion_ = motion;
+        replies_[{"athome", ""}] = {"false", 0, {}};
+        if (!hold_motion_) {
+            land_locked();
+            return;
+        }
+        set_motion_locked();
+    }
+
+    void land_locked() {
+        if (motion_) {
+            if (motion_->ra && motion_->dec) set_mount_locked(*motion_->ra, *motion_->dec);
+            if (motion_->altitude) replies_[{"altitude", ""}] = {number(*motion_->altitude), 0, {}};
+            if (motion_->azimuth) replies_[{"azimuth", ""}] = {number(*motion_->azimuth), 0, {}};
+            if (motion_->park) at_park_ = true;
+            if (motion_->home) replies_[{"athome", ""}] = {"true", 0, {}};
+        }
+        motion_.reset();
+        set_motion_locked();
+    }
+
+    // Slewing, AtPark and SideOfPier from the running motion, the axes and the park.
+    void set_motion_locked() {
+        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0;
+        replies_[{"slewing", ""}] = {moving ? "true" : "false", 0, {}};
+        replies_[{"atpark", ""}] = {at_park_ ? "true" : "false", 0, {}};
+        if (replies_.find({"sideofpier", ""}) == replies_.end()) replies_[{"sideofpier", ""}] = {"0", 0, {}};
+    }
+
+    void set_mount_locked(double ra, double dec) {
+        replies_[{"rightascension", ""}] = {number(ra), 0, {}};
+        replies_[{"declination", ""}] = {number(dec), 0, {}};
+    }
+
+    void set_targets_locked(double ra, double dec) {
+        target_ra_ = ra;
+        target_dec_ = dec;
+        replies_[{"targetrightascension", ""}] = {number(ra), 0, {}};
+        replies_[{"targetdeclination", ""}] = {number(dec), 0, {}};
+    }
     void set_rotator_locked(double position, double mechanical) {
         position_ = position;
         mechanical_ = mechanical;
@@ -397,6 +661,15 @@ private:
     std::map<std::string, double> pending_async_;  // a Switch's running asynchronous writes, by Id
     std::string wheel_target_;  // a FilterWheel's running move; empty while none runs
     std::string last_position_put_;
+    // A Telescope's motion, axes, park, targets and the PUTs it took.
+    bool telescope_ = false;
+    bool hold_motion_ = false;
+    bool at_park_ = false;
+    std::optional<Motion> motion_;
+    std::array<double, 3> axis_rate_{0.0, 0.0, 0.0};
+    std::optional<double> target_ra_;
+    std::optional<double> target_dec_;
+    std::vector<std::string> puts_;
 };
 
 }  // namespace alpacacore::test

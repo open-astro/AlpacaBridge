@@ -574,7 +574,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel de
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel and Switch devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch and Telescope devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
