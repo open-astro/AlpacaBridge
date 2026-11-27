@@ -16,14 +16,18 @@ Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
   word, the brand list and a paste-ready README headline, all computed by
   the same functions check 15 gates with, so the /bump-release recount step
   has one command and no second copy of the row filter (#689).
-Badge (check 25's endpoint): python3 scripts/check_docs_drift.py --badge
-  -- prints the authored-line count, the endpoint JSON the badge reads and the
-  README badge line check 25 requires (#1465, #2079).
+Badge (check 25's badge): python3 scripts/check_docs_drift.py --badge
+  -- prints the authored-line count, the endpoint JSON, the static badge URL
+  its SVG is drawn from and the README badge line check 25 requires (#1465,
+  #2079, #2739).
 Badge JSON: python3 scripts/check_docs_drift.py --badge-json
   -- prints only the shields.io endpoint JSON for the authored-line badge;
   .github/workflows/authored-lines-badge.yml publishes it on every push to
   main. Exits 1 when the count is below the floor or the JSON is not a valid
   endpoint document.
+Badge SVG URL: python3 scripts/check_docs_drift.py --badge-svg-url FILE
+  -- prints the shields.io static badge URL that draws the endpoint JSON in
+  FILE; the badge workflow saves that SVG to the badges branch (#2739).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -224,11 +228,11 @@ Checks:
      defaults and the "N-minute budget" prose); the two skills agree with each
      other, and the poll budget is greater than the job timeout (a poll that
      ends first reports a healthy run as a stall).
- 25. The README "Authored code" badge is the shields.io endpoint badge that
-     reads AUTHORED_BADGE_ENDPOINT, and the authored-line count computed from
-     the git index is above its floor (issues #1465, #2079). The number is not
-     in the README: .github/workflows/authored-lines-badge.yml writes it to the
-     `badges` branch on every push to main (--badge-json), so a PR never fails
+ 25. The README "Authored code" badge shows AUTHORED_BADGE_SVG, and the
+     authored-line count computed from the git index is above its floor
+     (issues #1465, #2079, #2739). The number is not in the README:
+     .github/workflows/authored-lines-badge.yml writes the JSON and the SVG to
+     the `badges` branch on every push to main, so a PR never fails
      on lines another PR merged. A badge that still carries a static `NNNk
      lines` figure is a finding. Which tracked files count, and why the rest
      do not, is written at AUTHORED_LINES_ROOTS and
@@ -288,6 +292,7 @@ import json
 import re
 import subprocess
 import tempfile
+import urllib.parse
 import sys
 from pathlib import Path
 
@@ -3123,7 +3128,7 @@ def check_review_budget_agrees(root=ROOT):
         return ["could not read %s: %s" % (e.filename, e.strerror)]
 
 
-# --- check 25: README authored-line endpoint badge (issues #1465, #2079) ------
+# --- check 25: README authored-line badge (issues #1465, #2079, #2739) --------
 
 # What counts as authored code. Tracked files only (`git ls-files`), so a local
 # build tree or an ignored file never moves the number. Roots: the two
@@ -3144,15 +3149,17 @@ AUTHORED_LINES_ROUND = 1000
 MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
 
 # Where the count lives (#2079): .github/workflows/authored-lines-badge.yml
-# commits the endpoint JSON to the `badges` branch on every push to main, and
-# shields.io reads it from there. A branch of its own, not GitHub Pages: the
-# repository has no Pages site, and the branch holds one file that no PR can
-# write. The README line carries no number, so no PR can fall behind main.
+# commits the endpoint JSON and the badge SVG to the `badges` branch on every
+# push to main. A branch of its own, not GitHub Pages: the repository has no
+# Pages site, and no PR can write the branch. The README line carries no
+# number, so no PR can fall behind main. The README shows the SVG from that
+# branch, not img.shields.io/endpoint: GitHub's image proxy timed out (504) on
+# the endpoint badge while it loaded every static shields.io badge (#2739).
 AUTHORED_BADGE_ENDPOINT = "https://raw.githubusercontent.com/open-astro/AlpacaBridge/badges/authored-lines.json"
+AUTHORED_BADGE_SVG = "https://raw.githubusercontent.com/open-astro/AlpacaBridge/badges/authored-lines.svg"
 AUTHORED_BADGE_LABEL = "Authored code"
 AUTHORED_BADGE_COLOR = "informational"
-AUTHORED_BADGE_LINE = ("[![Authored code](https://img.shields.io/endpoint?url=%s)](docs/architecture.md#modules)"
-                       % AUTHORED_BADGE_ENDPOINT.replace(":", "%3A").replace("/", "%2F"))
+AUTHORED_BADGE_LINE = "[![Authored code](%s)](docs/architecture.md#modules)" % AUTHORED_BADGE_SVG
 # The static form #1465 shipped, named in the finding when it comes back.
 AUTHORED_STATIC_BADGE_RE = re.compile(r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-\d+k%20lines")
 # https://shields.io/badges/endpoint-badge: the keys an endpoint document may carry.
@@ -3189,6 +3196,13 @@ def authored_badge_json(count):
             "message": "%dk lines" % int(round(count / AUTHORED_LINES_ROUND)), "color": AUTHORED_BADGE_COLOR}
 
 
+def authored_badge_svg_url(doc):
+    """The shields.io static badge URL that draws the endpoint document `doc`; the workflow saves its SVG."""
+    def field(text):  # shields.io static path: a dash or underscore is doubled, the rest percent-encoded
+        return urllib.parse.quote(text.replace("-", "--").replace("_", "__"), safe="")
+    return "https://img.shields.io/badge/%s-%s-%s" % (field(doc["label"]), field(doc["message"]), field(doc["color"]))
+
+
 def _endpoint_json_findings(doc):
     """What makes `doc` not a shields.io endpoint document (schemaVersion 1). Pure, for --self-test."""
     if not isinstance(doc, dict):
@@ -3223,7 +3237,7 @@ def _authored_badge_findings(readme, count):
     if AUTHORED_STATIC_BADGE_RE.search(readme):
         return ["README.md's Authored code badge carries a static line count, which falls behind main (#2079); "
                 "replace it with: %s" % AUTHORED_BADGE_LINE]
-    return ["could not find the Authored code endpoint badge in README.md; paste: %s" % AUTHORED_BADGE_LINE]
+    return ["could not find the Authored code badge in README.md; paste: %s" % AUTHORED_BADGE_LINE]
 
 
 def check_authored_lines_badge(root=ROOT):
@@ -3233,8 +3247,9 @@ def check_authored_lines_badge(root=ROOT):
 def print_badge(root=ROOT):
     count = _authored_lines_from_index(root)
     print("authored lines: %d" % count)
-    print("endpoint JSON (published by .github/workflows/authored-lines-badge.yml): %s"
-          % json.dumps(authored_badge_json(count)))
+    doc = authored_badge_json(count)
+    print("endpoint JSON (published by .github/workflows/authored-lines-badge.yml): %s" % json.dumps(doc))
+    print("badge SVG drawn from: %s" % authored_badge_svg_url(doc))
     print("README badge line: %s" % AUTHORED_BADGE_LINE)
     return 0
 
@@ -3251,6 +3266,18 @@ def print_badge_json(root=ROOT):
             print(f, file=sys.stderr)
         return 1
     print(json.dumps(doc, sort_keys=True))
+    return 0
+
+
+def print_badge_svg_url(path):
+    """--badge-svg-url FILE: the static badge URL for an endpoint JSON file --badge-json wrote."""
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    findings = _endpoint_json_findings(doc)
+    if findings:
+        for f in findings:
+            print(f, file=sys.stderr)
+        return 1
+    print(authored_badge_svg_url(doc))
     return 0
 
 
@@ -3566,7 +3593,7 @@ CHECKS = [
     ("Decision record Adoption tables match the code", check_decision_adoption),
     ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
      check_review_budget_agrees),
-    ("README Authored code badge reads the published endpoint", check_authored_lines_badge),
+    ("README Authored code badge shows the published SVG", check_authored_lines_badge),
     ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
     ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
     ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
@@ -4889,11 +4916,16 @@ def self_test():
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
     check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
-    # check 25: README authored-line badge (issues #1465, #2079).
+    # check 25: README authored-line badge (issues #1465, #2079, #2739).
     ab_readme = "# T\n\n" + AUTHORED_BADGE_LINE + "\n"
-    check("authored badge: the endpoint badge carries no number and reads the badges branch",
-          not re.search(r"\d+k", AUTHORED_BADGE_LINE) and "img.shields.io/endpoint?url=" in AUTHORED_BADGE_LINE
-          and "%2Fbadges%2Fauthored-lines.json" in AUTHORED_BADGE_LINE)
+    check("authored badge: the badge carries no number and shows the SVG on the badges branch, not a shields.io URL",
+          not re.search(r"\d+k", AUTHORED_BADGE_LINE) and "shields.io" not in AUTHORED_BADGE_LINE
+          and "raw.githubusercontent.com/open-astro/AlpacaBridge/badges/authored-lines.svg)" in AUTHORED_BADGE_LINE)
+    endpoint = ("[![Authored code](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F"
+                "open-astro%2FAlpacaBridge%2Fbadges%2Fauthored-lines.json)](docs/architecture.md#modules)")
+    f = _authored_badge_findings("# T\n\n" + endpoint + "\n", 150000)
+    check("authored badge: the shields.io endpoint badge GitHub's image proxy times out on is a finding (#2739)",
+          len(f) == 1 and AUTHORED_BADGE_LINE in f[0])
     check("authored badge: the endpoint badge is clean whatever the count (no PR fails on main's lines)",
           all(_authored_badge_findings(ab_readme, n) == [] for n in (1000, 150000, 900000)))
     static = "[![Authored code](https://img.shields.io/badge/Authored%20code-150k%20lines-informational.svg)](x)"
@@ -4902,8 +4934,8 @@ def self_test():
           len(f) == 1 and "static line count" in f[0] and AUTHORED_BADGE_LINE in f[0])
     f = _authored_badge_findings("# T\n", 150000)
     check("authored badge: a missing badge is a finding, not a pass", len(f) == 1 and "could not find" in f[0])
-    f = _authored_badge_findings(ab_readme.replace("authored-lines.json", "other.json"), 150000)
-    check("authored badge: an endpoint badge that reads another file is not the badge",
+    f = _authored_badge_findings(ab_readme.replace("authored-lines.svg", "other.svg"), 150000)
+    check("authored badge: a badge that shows another file is not the badge",
           len(f) == 1 and "could not find" in f[0])
     f = _authored_badge_findings(ab_readme, 10)
     check("authored badge: a near-zero count is a floor finding", len(f) == 1 and "floor" in f[0])
@@ -4926,6 +4958,10 @@ def self_test():
     check("authored badge JSON: a key outside the schema is reported",
           any("`colour`" in x for x in _endpoint_json_findings(dict(doc, colour="blue"))))
     check("authored badge JSON: a list is not an endpoint document", len(_endpoint_json_findings([doc])) == 1)
+    check("authored badge SVG: the publish URL is the shields.io static badge of the endpoint document",
+          authored_badge_svg_url(doc) == "https://img.shields.io/badge/Authored%20code-302k%20lines-informational")
+    check("authored badge SVG: a dash or underscore in a field is doubled, as shields.io's static path wants",
+          authored_badge_svg_url(dict(doc, label="a-b_c")).startswith("https://img.shields.io/badge/a--b__c-"))
 
     # check 27: every workflow job sets timeout-minutes (issue #2059).
     tw = ("name: X\non:\n  push:\njobs:\n  build:  # the build\n    runs-on: x\n    timeout-minutes: 30\n"
@@ -5128,6 +5164,8 @@ if __name__ == "__main__":
         sys.exit(check_adoption_issues())
     if "--counts" in sys.argv:
         sys.exit(print_counts())
+    if "--badge-svg-url" in sys.argv:
+        sys.exit(print_badge_svg_url(sys.argv[sys.argv.index("--badge-svg-url") + 1]))
     if "--badge-json" in sys.argv:
         sys.exit(print_badge_json())
     if "--badge" in sys.argv:

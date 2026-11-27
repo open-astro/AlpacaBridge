@@ -2,11 +2,13 @@
 # push to main it counts the authored lines with
 # `scripts/check_docs_drift.py --badge-json` (the same count and path rules
 # docs-drift check 25 owns) and commits the shields.io endpoint JSON to
-# `authored-lines.json` on the `badges` branch; the README badge reads that
-# file through img.shields.io/endpoint. The README holds no number, so no PR
-# can fail docs drift on lines another PR merged.
+# `authored-lines.json` on the `badges` branch, with the badge drawn from it
+# by img.shields.io as `authored-lines.svg`. The README shows that SVG
+# straight from the branch: GitHub's image proxy timed out (504) on the
+# img.shields.io/endpoint badge it used before (#2739). The README holds no
+# number, so no PR can fail docs drift on lines another PR merged.
 #
-# The `badges` branch holds this one file and nothing else; the first run
+# The `badges` branch holds these two files and nothing else; the first run
 # creates it as an orphan branch. The commit goes through the Git data API
 # with the job's GITHUB_TOKEN: no checkout credentials are kept, and a
 # GITHUB_TOKEN commit starts no workflow. `contents: write` cannot be scoped
@@ -41,7 +43,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     permissions:
-      contents: write   # commit authored-lines.json to the badges branch
+      contents: write   # commit authored-lines.json and .svg to the badges branch
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -54,7 +56,15 @@ jobs:
           python3 scripts/check_docs_drift.py --badge-json > authored-lines.json
           cat authored-lines.json
 
-      - name: Commit the endpoint JSON to the badges branch
+      - name: Draw the badge SVG
+        run: |
+          set -euo pipefail
+          url="$(python3 scripts/check_docs_drift.py --badge-svg-url authored-lines.json)"
+          curl -fsS --retry 3 --max-time 30 "${url}" -o authored-lines.svg
+          # A shields.io error page is not a badge: keep the branch's last SVG instead.
+          grep -q '<svg' authored-lines.svg
+
+      - name: Commit the endpoint JSON and the SVG to the badges branch
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -62,17 +72,21 @@ jobs:
         run: |
           set -euo pipefail
           file=authored-lines.json
+          svg=authored-lines.svg
           parent="$(gh api "repos/${GH_REPO}/git/matching-refs/heads/badges" \
             --jq '.[] | select(.ref == "refs/heads/badges") | .object.sha')"
           if [ -n "${parent}" ]; then
             current="$(gh api "repos/${GH_REPO}/contents/${file}?ref=${parent}" --jq .content | base64 -d || true)"
-            if [ "${current}" = "$(cat "${file}")" ]; then
+            # The count alone decides, once the branch has an SVG (the first run after #2739 adds it).
+            if [ "${current}" = "$(cat "${file}")" ] \
+              && gh api "repos/${GH_REPO}/contents/${svg}?ref=${parent}" --silent 2> /dev/null; then
               echo "The badges branch already has this count."
               exit 0
             fi
           fi
-          tree="$(jq -n --arg path "${file}" --rawfile content "${file}" \
-            '{tree: [{path: $path, mode: "100644", type: "blob", content: $content}]}' \
+          tree="$(jq -n --arg path "${file}" --rawfile content "${file}" --arg svgpath "${svg}" --rawfile svg "${svg}" \
+            '{tree: [{path: $path, mode: "100644", type: "blob", content: $content},
+                     {path: $svgpath, mode: "100644", type: "blob", content: $svg}]}' \
             | gh api "repos/${GH_REPO}/git/trees" --input - --jq .sha)"
           commit="$(jq -n --arg tree "${tree}" --arg parent "${parent}" \
             --arg message "Authored-line count at ${SOURCE_SHA}" \
