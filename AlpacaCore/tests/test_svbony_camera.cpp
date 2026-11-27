@@ -1059,7 +1059,7 @@ TEST_CASE("SVBONY Camera Driver - a pulse queued when a Disconnect closes the sl
 // Decision 0006 rule 6 on SVBONY (#2735): the queued pulses go out in request order, each exactly once, and all from
 // the one drain body that sent the first. No newer PulseGuide supersedes a body that still has pulses to send, so no
 // superseded body sends a pulse (a body per pulse, each superseded by the next, sent them from four threads).
-TEST_CASE("SVBONY Camera Driver - queued pulses go out once each, in request order, from one drain body",
+TEST_CASE("SVBONY Camera Driver - queued pulses go out once each in request order from one drain body",
           "[svbony][camera][unit][fake-sdk][taskclock][issue2735]") {
     using Direction = alpacacore::vendor::svbony::SVBGuideDirection;
     alpacacore::test::FakeTaskClock clock;
@@ -1114,6 +1114,30 @@ TEST_CASE("SVBONY Camera Driver - a PulseGuide refused behind four pending pulse
     CHECK(sdk.call_count("pulse_guide") == 1);
     CHECK(clock.drain_until([&] { return !camera->get_is_pulse_guiding(); }, 1000ms, 10000ms));
     CHECK(sdk.call_count("pulse_guide") == 4);
+}
+
+// #2735: the kept failure is the newest sent pulse's. A pulse that fails with one queued behind it is followed by
+// that pulse, which succeeds, so IsPulseGuiding ends with no failure to raise.
+TEST_CASE("SVBONY Camera Driver - a queued pulse that succeeds after a failed one leaves no failure",
+          "[svbony][camera][unit][fake-sdk][issue2735]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    std::atomic<bool> queued{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "pulse_guide" || queued.exchange(true)) return;
+        camera->pulse_guide(1, 10);     // queues behind this call
+        sdk.fail_next("pulse_guide");  // and this call fails
+    };
+    camera->pulse_guide(0, 10);
+    REQUIRE(eventually([&] { return sdk.call_count("pulse_guide") == 2; }));
+    std::pair<int, std::string> raised{-1, ""};
+    CHECK(eventually([&] {
+        raised = error_of([&] { static_cast<void>(camera->get_is_pulse_guiding()); });
+        return raised.first != 0 || !camera->get_is_pulse_guiding();
+    }));
+    sdk.before_call = nullptr;
+    CHECK(raised.first == 0);
+    CHECK(camera->get_connected());
 }
 
 // #2735 with decision 0009: a pulse queued behind a pulse that lost the link sends nothing; the drain fails it with
