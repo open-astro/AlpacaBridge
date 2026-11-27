@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -51,6 +52,16 @@ using alpacacore::AlpacaDriver;
 namespace {
 
 namespace remote = alpacacore::vendor::remotealpaca;
+
+// One storm is 750 ms of wall clock. Under ASan + UBSan on arm64 a whole storm can pass without one command reaching a
+// connected driver (the nightly runs of 2026-11-24 and 2026-11-27), so a case that checks a command landed storms again
+// until `landed()` holds, at most eight times.
+void storm_until(AlpacaDriver& driver, const std::function<void(AlpacaDriver&)>& operate,
+                 const std::function<bool()>& landed) {
+    for (int storm = 0; storm < 8 && !landed(); ++storm) {
+        alpacacore::test::run_lifecycle_stress(driver, operate);
+    }
+}
 
 remote::RemoteObservingConditionsConfig stress_config() {
     remote::RemoteObservingConditionsConfig config;
@@ -306,7 +317,9 @@ TEST_CASE("Remote Alpaca observing conditions - refused-connection losses race c
     // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate(guard, d); },
+        [&upstream] { return upstream.calls("refresh") > 0; });
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
@@ -392,13 +405,16 @@ TEST_CASE("Remote Alpaca safety monitor - refused-connection losses race connect
 
     std::atomic<int> unsafe_reads{0};
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &unsafe_reads](AlpacaDriver& d) {
-        auto& sm = static_cast<alpacacore::SafetyMonitorDriver&>(d);
-        guard([&] {
-            if (!sm.get_is_safe()) unsafe_reads.fetch_add(1);
-        });
-        operate_safetymonitor(guard, d);
-    });
+    storm_until(
+        *driver,
+        [&guard, &unsafe_reads](AlpacaDriver& d) {
+            auto& sm = static_cast<alpacacore::SafetyMonitorDriver&>(d);
+            guard([&] {
+                if (!sm.get_is_safe()) unsafe_reads.fetch_add(1);
+            });
+            operate_safetymonitor(guard, d);
+        },
+        [&unsafe_reads] { return unsafe_reads.load() > 0; });
 
     storm.store(false);
     ticker.join();
@@ -426,7 +442,9 @@ TEST_CASE("Remote Alpaca rotator - concurrent connect/disconnect/operate stress"
     // Disconnect joins the command slot is refused ("try again", issue #1713).
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_rotator(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_rotator(guard, d); },
+        [&upstream] { return upstream.calls("moveabsolute") > 0; });
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
@@ -478,7 +496,9 @@ TEST_CASE("Remote Alpaca rotator - refused-connection losses race connects, disc
     // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_rotator(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_rotator(guard, d); },
+        [&upstream] { return upstream.calls("halt") > 0; });
 
     // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -609,7 +629,9 @@ TEST_CASE("Remote Alpaca switch - concurrent connect/disconnect/operate stress",
     // Disconnect joins the command slot is refused ("try again", issue #1713).
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); },
+        [&upstream] { return upstream.calls("setswitch") > 0; });
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
@@ -661,7 +683,9 @@ TEST_CASE("Remote Alpaca switch - refused-connection losses race connects, disco
     // A refused write is NotConnected (the loss is its answer); InvalidOperation as above.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); },
+        [&upstream] { return upstream.calls("setswitchvalue") > 0; });
 
     // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -690,7 +714,9 @@ TEST_CASE("Remote Alpaca telescope - concurrent connect/disconnect/operate stres
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation,
                                             alpacacore::AlpacaError::InvalidWhileParked};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); },
+        [&upstream] { return upstream.calls("abortslew") > 0; });
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
@@ -745,7 +771,9 @@ TEST_CASE("Remote Alpaca telescope - refused-connection losses race connects, di
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation,
                                             alpacacore::AlpacaError::InvalidWhileParked};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_telescope(guard, d); },
+        [&upstream] { return upstream.calls("abortslew") > 0; });
 
     // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -770,7 +798,9 @@ TEST_CASE("Remote Alpaca focuser - concurrent connect/disconnect/operate stress"
     // Disconnect joins the command slot is refused ("try again", issue #1713).
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); },
+        [&upstream] { return upstream.calls("move") > 0; });
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
@@ -822,7 +852,9 @@ TEST_CASE("Remote Alpaca focuser - refused-connection losses race connects, disc
     // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); });
+    storm_until(
+        *driver, [&guard](AlpacaDriver& d) { operate_focuser(guard, d); },
+        [&upstream] { return upstream.calls("halt") > 0; });
 
     // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
     CHECK(alpacacore::test::settle_connected(*driver, false));
