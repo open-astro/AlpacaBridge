@@ -26,6 +26,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -491,11 +493,36 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - Refresh is forwarded and m
     CHECK(rig.http.calls() == calls);
 }
 
-TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded AveragePeriod write leaves the newer one served",
+// Commands reach the upstream in caller order (UpstreamProxy's command order mutex): a second command waits for the
+// body of the first, so it never runs beside it. Real time, bounded: `quiet_for` waits out the window in which an
+// unordered second command would reach the upstream while the first body is held.
+namespace {
+bool quiet_for(const std::function<bool()>& sent) {
+    const auto window = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (!sent() && std::chrono::steady_clock::now() < window) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return !sent();
+}
+
+// PUTs of `member` the upstream has seen.
+int puts_of(const alpacacore::test::FakeHttpClient& http, const std::string& member) {
+    int n = 0;
+    for (const auto& request : http.requests()) {
+        if (request.method == "PUT" && request.url.size() >= member.size() &&
+            request.url.compare(request.url.size() - member.size(), member.size(), member) == 0) {
+            ++n;
+        }
+    }
+    return n;
+}
+}  // namespace
+
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a second AveragePeriod write waits for the first, and is served",
           "[remotealpaca][observingconditions][unit]") {
     Rig rig;
     rig.connect();
-    // The first write's body holds after its PUT, before its write-through, until the second write has returned.
+    // The first write's body holds after its PUT, before its write-through.
     alpacacore::test::Latch first_body;
     std::atomic<bool> held{false};  // only the first body holds
     remote::set_command_hook_for_testing(*rig.driver, [&] {
@@ -503,18 +530,21 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded AveragePeriod
     });
     std::thread first([&] { rig.driver->set_average_period(5.0); });
     REQUIRE(first_body.wait_entered());
-    rig.driver->set_average_period(0.0);  // supersedes the first body; the upstream now holds 0
+    std::thread second([&] { rig.driver->set_average_period(0.0); });
+    CHECK(quiet_for([&] { return puts_of(rig.http, "/averageperiod") > 1; }));
     first_body.release();
     first.join();
-    // Decision 0006 rule 6: the superseded body writes nothing, so the read matches the upstream before any poll.
+    second.join();
+    CHECK(puts_of(rig.http, "/averageperiod") == 2);
+    // The second write went out last and wrote last: the read matches the upstream before any poll.
     CHECK(rig.driver->get_average_period() == 0.0);
 }
 
-TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded Refresh sends nothing after its PUT",
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a second Refresh waits for the first body",
           "[remotealpaca][observingconditions][unit]") {
     Rig rig;
     rig.connect();
-    // The first Refresh body holds after its PUT, before it measures, until a second Refresh has returned.
+    // The first Refresh body holds after its PUT, before it measures.
     alpacacore::test::Latch first_body;
     std::atomic<bool> held{false};  // only the first body holds
     remote::set_command_hook_for_testing(*rig.driver, [&] {
@@ -522,51 +552,50 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - a superseded Refresh sends
     });
     std::thread first([&] { rig.driver->refresh(); });
     REQUIRE(first_body.wait_entered());
-    rig.driver->refresh();  // supersedes the first body and measures a frame of its own
-    const int calls = rig.http.calls();
+    std::thread second([&] { rig.driver->refresh(); });
+    CHECK(quiet_for([&] { return rig.upstream.calls("refresh") > 1; }));
     first_body.release();
     first.join();
-    // Decision 0006 rule 6: the superseded body neither measures nor publishes a frame.
-    CHECK(rig.http.calls() == calls);
+    second.join();
+    CHECK(rig.upstream.calls("refresh") == 2);
 }
 
-TEST_CASE("Remote Alpaca ObservingConditions Driver - a Refresh superseded during its measurement stops calling",
+TEST_CASE("Remote Alpaca ObservingConditions Driver - a write sent during a Refresh's measurement waits for all of it",
           "[remotealpaca][observingconditions][unit]") {
     Rig rig;
     rig.connect();
-    // At the first measurement GET after the Refresh PUT, an AveragePeriod write supersedes the Refresh body. That
-    // GET answers once the write's body has started; the write's PUT then waits for the client's call lock.
+    // The GETs of one undisturbed Refresh's measurement.
+    const auto gets_after = [](const std::vector<alpacacore::test::FakeHttpClient::Request>& requests,
+                               std::size_t from) {
+        std::size_t gets = 0;
+        for (std::size_t i = from; i < requests.size() && !(requests[i].method == "PUT" && i > from); ++i) {
+            if (requests[i].method == "GET") ++gets;
+        }
+        return gets;
+    };
+    std::size_t from = rig.http.requests().size();
+    rig.driver->refresh();
+    const std::size_t measurement = gets_after(rig.http.requests(), from);
+    REQUIRE(measurement > 1);
+    // At the first measurement GET after the next Refresh PUT, an AveragePeriod write is sent from another thread.
     std::atomic<bool> triggered{false};
     std::thread second;
     rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
-        if (request.method == "GET" && rig.upstream.calls("refresh") == 1 && !triggered.exchange(true)) {
-            const auto before = remote::command_generation_for_testing(*rig.driver);
+        if (request.method == "GET" && rig.upstream.calls("refresh") == 2 && !triggered.exchange(true)) {
             second = std::thread([&] { rig.driver->set_average_period(0.0); });
-            const auto deadline = std::chrono::steady_clock::now() + kRendezvous;
-            while (remote::command_generation_for_testing(*rig.driver) == before &&
-                   std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::yield();
-            }
         }
         return rig.upstream.answer(request);
     });
-    const std::size_t before_refresh = rig.http.requests().size();
+    from = rig.http.requests().size();
     rig.driver->refresh();
-    if (second.joinable()) second.join();
     REQUIRE(triggered.load());
-    // Decision 0006 rule 6: after the GET that saw the supersede, the only request is the write's PUT; the rest of the
-    // superseded body's measurement is never sent.
+    second.join();
     const auto requests = rig.http.requests();
-    std::size_t trigger = requests.size();
-    for (std::size_t i = before_refresh; i < requests.size(); ++i) {
-        if (requests[i].method == "GET") {
-            trigger = i;
-            break;
-        }
-    }
-    REQUIRE(trigger + 2 == requests.size());
-    CHECK(requests[trigger + 1].method == "PUT");
-    CHECK(requests[trigger + 1].url.find("averageperiod") != std::string::npos);
+    // The Refresh's PUT, its whole measurement, then the write's PUT: the write never cut the measurement short.
+    REQUIRE(requests.size() == from + 1 + measurement + 1);
+    CHECK(gets_after(requests, from) == measurement);
+    CHECK(requests.back().method == "PUT");
+    CHECK(requests.back().url.find("averageperiod") != std::string::npos);
 }
 
 TEST_CASE("Remote Alpaca ObservingConditions Driver - a reconnect rebuilds the Description, not appends to it",

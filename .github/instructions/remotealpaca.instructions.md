@@ -72,7 +72,9 @@ Config (`remotealpaca_fields.h`, the same four fields for every proxied device t
 - **Commands.** `Refresh` (forwarded, then a new frame measured and published through the module, so its
   `measured_at` is the Refresh's; it does not feed the fault latch) and an `AveragePeriod` write (forwarded, then
   written through to the frame) run as bodies in a command `util::AsyncOperation` slot; the caller waits for the body and gets
-  its error unchanged. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
+  its error unchanged. Commands of every proxied device are serialized in caller order (`UpstreamProxy`'s command order
+  mutex, held by the caller across the start and the wait), so a later command never reaches the upstream before an
+  earlier one whose body the slot superseded but did not stop. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
 - Actions and `Command*` are not forwarded (`ActionNotImplemented`, `NotImplemented`).
 
 #### The SafetyMonitor proxied device (issue #1753 slice 4)
@@ -102,12 +104,13 @@ The same config, self-loop check, Connect (Platform 7 is `IRotatorV4`; a version
 `Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
 bound.
 
-- **Connect** reads the upstream's `InterfaceVersion` again, then `CanReverse` and `StepSize` once, each a value or the
+- **Connect** reads `CanReverse` and `StepSize` once, each a value or the
   upstream's error (`StepSize` is often `NotImplemented`, served unchanged). They are static metadata: they keep
   answering while the link is faulted. `CanReverse` also answers while disconnected: the last Connect's value, true
   before any.
 - **Members by version.** An `IRotatorV1` or `V2` upstream has no `MechanicalPosition`, `MoveMechanical` or `Sync`
-  (IRotatorV3 added them): each answers `NotImplemented` naming the upstream's version, after the connection check, and
+  (IRotatorV3 added them, `UpstreamProxy::upstream_interface_version()` says which the upstream is): each answers
+  `NotImplemented` naming the upstream's version, after the connection check, and
   is never called, so an older server that answers an unknown member with HTTP 400 does not fail the poll.
 - **Snapshot.** The frame is `IsMoving`, `Position`, `MechanicalPosition`, `TargetPosition` and `Reverse`, each a value
   or the upstream's error. A stale frame is served, never refused (decision 0010 rule 6): each getter answers the last
@@ -115,17 +118,17 @@ bound.
   rotator base's, from the same getters, its `TimeStamp` the frame's age (`device_state_age()`).
 - **Moves** (`Move`, `MoveAbsolute`, `MoveMechanical`): a NaN or infinite angle is `InvalidValue` before the
   connection check; a finite one goes to the upstream as given, which judges its range (its `InvalidValue` passes
-  through). Refused while the link is faulted. The body forwards the move and writes `IsMoving` through (true when the
-  move has somewhere to go) and `TargetPosition` (the wrapped angle; `Move` adds the frame's `Position`,
-  `MoveMechanical` the frame's Sync offset, `Position` less `MechanicalPosition`). `Position` stays the measured one
-  until the next poll.
+  through). Refused while the link is faulted. The body forwards the move, writes `IsMoving` true through when the move
+  has somewhere to go (a move with nowhere to go leaves the polled value: an earlier move may still run), then reads the
+  upstream's `TargetPosition` and writes it through. A read with no usable reply leaves `TargetPosition` to the next
+  poll and does not fail the move. `Position` stays the measured one until the next poll.
 - **Sync** is forwarded (the upstream keeps the offset; this driver stores none, so decision 0018 rule 4 has nothing to
   move) and writes `Position` through. The **Reverse** write is forwarded and written through. Both are refused while
   faulted.
 - **Halt** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
-  (`NotConnected`). Its body writes `IsMoving` false through. A Halt supersedes a move body still in the slot, which
-  then writes nothing (decision 0006 rule 6).
-- The `TargetPosition` PUT (this server's extension; IRotatorV4 has it read-only) is `NotImplemented` once connected:
+  (`NotConnected`). Its body writes `IsMoving` false through. A Halt sent while a move's body runs waits for it (the
+  caller order above), so it reaches the upstream after the move.
+- The `TargetPosition` PUT (this server's extension; IRotatorV4 has it read-only) is `NotImplemented` (0x400) once connected:
   the upstream has no member to take it.
 - A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.

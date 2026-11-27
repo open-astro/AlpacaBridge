@@ -50,8 +50,8 @@ std::unique_ptr<RotatorDriver> create_remotealpaca_rotator(int device_number, co
 // (the contract sweep's stale-frame case). No effect on a driver of another type.
 void set_poll_paused_for_testing(RotatorDriver& driver, bool paused);
 
-// Runs `hook` inside each command body (the moves, Sync, Halt and the Reverse write), after its PUT and before the
-// body touches driver state, so a test can hold a body there. Set it while no command runs.
+// Runs `hook` first inside each command body (the moves, Sync, Halt and the Reverse write), before its PUT, so a test
+// can hold a body before anything reaches the upstream. Set it while no command runs.
 void set_command_hook_for_testing(RotatorDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::remotealpaca

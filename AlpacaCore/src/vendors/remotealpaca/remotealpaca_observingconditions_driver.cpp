@@ -31,7 +31,6 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -113,13 +112,6 @@ struct Frame {
 
 using Proxy = detail::UpstreamProxy<Frame>;
 
-// A double in its shortest round-trip form, for a form body.
-std::string number_text(double value) {
-    std::array<char, 64> buffer{};
-    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-    return std::string(buffer.data(), result.ptr);
-}
-
 class RemoteAlpacaObservingConditionsDriver final : public ObservingConditionsDriver,
                                                     protected alpacacore::AsyncConnectable {
 public:
@@ -200,7 +192,7 @@ public:
         proxy_.require_connected();
         if (caller_hook_) caller_hook_();
         proxy_.run_command([this, period](util::OperationContext& ctx) {
-            proxy_.client().put("averageperiod", {{"AveragePeriod", number_text(period)}});
+            proxy_.client().put("averageperiod", {{"AveragePeriod", detail::number_text(period)}});
             if (command_hook_) command_hook_();
             // Write-through (decision 0010 rule 2): the next read sees the period before the next poll. A superseded
             // body writes nothing (decision 0006 rule 6): the newer command's value stands. Nor does a body whose

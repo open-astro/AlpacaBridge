@@ -20,6 +20,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 #include <alpacacore/version.h>
@@ -205,15 +206,20 @@ TEST_CASE("Remote Alpaca Rotator Driver - MoveAbsolute is forwarded and IsMoving
     CHECK(r.get_position() == 100.0);
     rig.poll();
     CHECK(r.get_is_moving());  // the upstream still moves
+    // A MoveAbsolute to where the frame has it (Position 100) has nowhere to go: it writes no IsMoving, so the move
+    // still running keeps reading true. TargetPosition is the upstream's new one.
+    r.move_absolute(100.0);
+    CHECK(r.get_is_moving());
+    CHECK(r.get_target_position() == 100.0);
     rig.upstream.finish_move();
     rig.poll();
     CHECK_FALSE(r.get_is_moving());
-    CHECK(r.get_position() == 200.0);
-    CHECK(r.get_mechanical_position() == 190.0);
-    // A MoveAbsolute to where the frame already has it has nowhere to go.
-    r.move_absolute(200.0);
+    CHECK(r.get_position() == 100.0);
+    CHECK(r.get_mechanical_position() == 90.0);
+    // Nowhere to go with nothing running: IsMoving stays the polled false.
+    r.move_absolute(100.0);
     CHECK_FALSE(r.get_is_moving());
-    CHECK(rig.upstream.calls("moveabsolute") == 2);
+    CHECK(rig.upstream.calls("moveabsolute") == 3);
 }
 
 TEST_CASE("Remote Alpaca Rotator Driver - Move and MoveMechanical forward the angle and write the target through",
@@ -242,6 +248,40 @@ TEST_CASE("Remote Alpaca Rotator Driver - Move and MoveMechanical forward the an
     // A relative Move of 0 has nowhere to go.
     r.move(0.0);
     CHECK_FALSE(r.get_is_moving());
+}
+
+// TargetPosition is the upstream's own, read after the move's PUT. A read that gets no reply does not fail a move the
+// upstream took: TargetPosition is left to the next poll.
+TEST_CASE("Remote Alpaca Rotator Driver - TargetPosition is the upstream's, read after the move",
+          "[remotealpaca][rotator][unit]") {
+    Rig rig;
+    std::atomic<bool> target_silent{false};     // the TargetPosition read gets HTTP 500, no usable reply
+    std::atomic<bool> target_unwrapped{false};  // the upstream answers an unwrapped target, 370
+    rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (request.method == "GET" && request.url.find("/targetposition") != std::string::npos) {
+            if (target_silent.load()) return alpacacore::util::HttpResponse{500, ""};
+            if (target_unwrapped.load()) rig.upstream.set("targetposition", "370");
+        }
+        return rig.upstream.answer(request);
+    });
+    rig.connect();
+    auto& r = *rig.driver;
+    r.move_absolute(200.0);
+    CHECK(r.get_target_position() == 200.0);
+    // The driver serves what the upstream answers, not its own arithmetic (100 + 10 would be 110).
+    target_unwrapped.store(true);
+    r.move(10.0);
+    CHECK(r.get_target_position() == 370.0);
+    target_unwrapped.store(false);
+    // The read after the PUT gets no reply: the move stands, the link stays up, and the next poll brings the target.
+    target_silent.store(true);
+    CHECK(alpacacore::test::error_code_of([&] { r.move_absolute(250.0); }) == 0);
+    CHECK(rig.upstream.last_move() == "moveabsolute 250");
+    CHECK(r.get_target_position() == 370.0);
+    CHECK(r.get_link_fault().empty());
+    target_silent.store(false);
+    rig.poll();
+    CHECK(r.get_target_position() == 250.0);
 }
 
 TEST_CASE("Remote Alpaca Rotator Driver - Value range validation", "[remotealpaca][rotator][unit]") {
@@ -328,9 +368,10 @@ TEST_CASE("Remote Alpaca Rotator Driver - Halt is forwarded while the link is fa
     CHECK_FALSE(r.get_is_moving());
 }
 
-// Decision 0006 rule 6: a Halt supersedes a move whose body has not yet written IsMoving through, so the move's late
-// write-through cannot make IsMoving read true after the Halt.
-TEST_CASE("Remote Alpaca Rotator Driver - a Halt supersedes a move's write-through", "[remotealpaca][rotator][unit]") {
+// Commands reach the upstream in caller order (UpstreamProxy's command order mutex): a Halt sent while a move's body
+// is held before its PUT waits for that move, so the rotator never moves after the Halt, and IsMoving reads false.
+TEST_CASE("Remote Alpaca Rotator Driver - a Halt sent during a move reaches the upstream after the move",
+          "[remotealpaca][rotator][unit]") {
     Rig rig;
     rig.connect();
     alpacacore::test::Latch move_body;
@@ -340,13 +381,30 @@ TEST_CASE("Remote Alpaca Rotator Driver - a Halt supersedes a move's write-throu
     });
     std::thread mover([&] { rig.driver->move_absolute(200.0); });
     REQUIRE(move_body.wait_entered());
-    rig.driver->halt();
+    std::atomic<bool> halted{false};
+    std::thread halter([&] {
+        rig.driver->halt();
+        halted.store(true);
+    });
+    // Real time, bounded: the window in which an unordered Halt would reach the upstream while the move is held.
+    const auto window = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (rig.upstream.calls("halt") == 0 && std::chrono::steady_clock::now() < window) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(rig.upstream.calls("halt") == 0);
+    CHECK_FALSE(halted.load());
     move_body.release();
     mover.join();
-    CHECK(rig.upstream.calls("moveabsolute") == 1);
-    CHECK(rig.upstream.calls("halt") == 1);
+    halter.join();
+    std::vector<std::string> puts;
+    for (const auto& request : rig.http.requests()) {
+        if (request.method != "PUT") continue;
+        puts.push_back(request.url.substr(request.url.rfind('/') + 1));
+    }
+    REQUIRE(puts.size() >= 2);
+    CHECK(puts[puts.size() - 2] == "moveabsolute");
+    CHECK(puts.back() == "halt");
     CHECK_FALSE(rig.driver->get_is_moving());
-    CHECK(rig.driver->get_target_position() == 100.0);  // the superseded body wrote no target either
 }
 
 TEST_CASE("Remote Alpaca Rotator Driver - Sync and Reverse are forwarded and written through",

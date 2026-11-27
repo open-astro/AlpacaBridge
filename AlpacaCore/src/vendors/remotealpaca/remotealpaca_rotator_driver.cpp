@@ -13,8 +13,8 @@
 // The remotealpaca Rotator proxied device (decision 0023, issue #1753 slice 5, #2708) over UpstreamProxy
 // (upstream_proxy.h), which holds every rule it shares with the other proxied devices. What is the Rotator's own stays
 // here: the frame (IsMoving, Position, MechanicalPosition, TargetPosition, Reverse), what the Connect reads once
-// (CanReverse, StepSize and the upstream's InterfaceVersion), the members an IRotatorV1 or V2 upstream lacks, and the
-// commands: Move, MoveAbsolute, MoveMechanical, Sync, Halt and the Reverse write. The upstream keeps its own Sync
+// (CanReverse, StepSize), the members an IRotatorV1 or V2 upstream lacks (by the InterfaceVersion the proxy read), and
+// the commands: Move, MoveAbsolute, MoveMechanical, Sync, Halt and the Reverse write. The upstream keeps its own Sync
 // offset: this driver stores none (decision 0018 rule 4 has nothing to move here).
 
 #include <alpacacore/alpaca_errors.h>
@@ -29,9 +29,6 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/version.h>
 
-#include <array>
-#include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -49,6 +46,7 @@ namespace {
 
 using detail::Answer;
 using detail::answer_of;
+using detail::number_text;
 
 // IRotatorV3 added MechanicalPosition, MoveMechanical and Sync; an older upstream has none of them.
 constexpr int kFirstVersionWithMechanical = 3;
@@ -71,13 +69,6 @@ struct Limits {
     Answer<bool> can_reverse;
     Answer<double> step_size;
 };
-
-// A double in its shortest round-trip form, for a form body.
-std::string number_text(double value) {
-    std::array<char, 64> buffer{};
-    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-    return std::string(buffer.data(), result.ptr);
-}
 
 // InvalidValue before NotConnected (ascom-contract.instructions.md): NaN and infinity are invalid whatever the
 // rotator is. The range is the upstream's to judge: a finite angle goes to it as given, and its InvalidValue passes
@@ -197,15 +188,15 @@ public:
         validate_angle(position);
         proxy_.require_connected();
         throw AlpacaException("TargetPosition of a Remote Alpaca rotator is read-only; MoveAbsolute sets it",
-                              AlpacaError::PropertyNotImplemented);
+                              AlpacaError::NotImplemented);
     }
 
     // Forwarded; refused while the link is faulted (decision 0009 rule 1). Written through on success.
     void set_reverse(bool reverse) override {
         (void)proxy_.with_connected([](const Proxy::State& state) { return state.served().measured_at; });
         run([this, reverse](util::OperationContext& ctx) {
-            proxy_.client().put("reverse", {{"Reverse", reverse ? "True" : "False"}});
             if (command_hook_) command_hook_();
+            proxy_.client().put("reverse", {{"Reverse", reverse ? "True" : "False"}});
             write_through(ctx, [reverse](Frame& frame) { frame.reverse = {reverse, 0, {}}; });
         });
     }
@@ -215,8 +206,8 @@ public:
     void halt() override {
         proxy_.require_connected();
         run([this](util::OperationContext& ctx) {
-            proxy_.client().put("halt");
             if (command_hook_) command_hook_();
+            proxy_.client().put("halt");
             write_through(ctx, [](Frame& frame) { frame.is_moving = {false, 0, {}}; });
         });
     }
@@ -224,30 +215,25 @@ public:
     // IRotator.Move: relative to the current Position; the upstream adds it. Refused while the link is faulted.
     void move(double position) override {
         validate_angle(position);
-        const Seen seen = seen_frame();
-        std::optional<double> target;
-        if (seen.position) target = util::wrap_degrees(*seen.position + position);
-        start_move("move", position, position != 0.0, target);
+        (void)seen_frame();  // refused while the link is faulted (decision 0009 rule 1)
+        start_move("move", position, position != 0.0);
     }
 
     void move_absolute(double position) override {
         validate_angle(position);
         const Seen seen = seen_frame();
-        const double target = util::wrap_degrees(position);
-        start_move("moveabsolute", position, !seen.position || util::wrap_degrees(*seen.position) != target, target);
+        start_move("moveabsolute", position,
+                   !seen.position || util::wrap_degrees(*seen.position) != util::wrap_degrees(position));
     }
 
-    // To a raw mechanical angle; TargetPosition is that angle plus the upstream's Sync offset (Position minus
-    // MechanicalPosition, both from the frame).
+    // To a raw mechanical angle.
     void move_mechanical(double position) override {
         validate_angle(position);
         proxy_.require_connected();
         require_mechanical("MoveMechanical");
         const Seen seen = seen_frame();
-        std::optional<double> target;
-        if (seen.position && seen.mechanical) target = util::wrap_degrees(position + *seen.position - *seen.mechanical);
         start_move("movemechanical", position,
-                   !seen.mechanical || util::wrap_degrees(*seen.mechanical) != util::wrap_degrees(position), target);
+                   !seen.mechanical || util::wrap_degrees(*seen.mechanical) != util::wrap_degrees(position));
     }
 
     // The upstream keeps the offset (IRotatorV4: it persists); Position is written through as the synced angle.
@@ -257,15 +243,15 @@ public:
         require_mechanical("Sync");
         (void)seen_frame();  // refused while the link is faulted (decision 0009 rule 1)
         run([this, position](util::OperationContext& ctx) {
-            proxy_.client().put("sync", {{"Position", number_text(position)}});
             if (command_hook_) command_hook_();
+            proxy_.client().put("sync", {{"Position", number_text(position)}});
             write_through(ctx, [position](Frame& frame) { frame.position = {util::wrap_degrees(position), 0, {}}; });
         });
     }
 
     void set_poll_paused(bool paused) { proxy_.set_poll_paused(paused); }
 
-    // Set while no command runs; a command body calls it after its PUT, before it touches state.
+    // Set while no command runs; a command body calls it first, before its PUT.
     void set_command_hook(std::function<void()> hook) { command_hook_ = std::move(hook); }
 
 protected:
@@ -275,7 +261,8 @@ protected:
     }
 
 private:
-    // What a move needs from the frame, read under the state lock; refused while the link is faulted.
+    // Where the frame has the rotator, for whether a move has somewhere to go; read under the state lock and refused
+    // while the link is faulted.
     struct Seen {
         std::optional<double> position;
         std::optional<double> mechanical;
@@ -291,7 +278,7 @@ private:
     // NotImplemented for a member an IRotatorV1 or V2 upstream lacks: it is never called, so an upstream that answers
     // an unknown member with HTTP 400 does not read as a failed poll or a lost link.
     void require_mechanical(const char* member) const {
-        const int version = upstream_version_.load();
+        const int version = proxy_.upstream_interface_version();
         if (version >= kFirstVersionWithMechanical) return;
         const RemoteDeviceConfig& config = proxy_.config();
         throw AlpacaException("Upstream " + config.host + ":" + std::to_string(config.port) + " device " +
@@ -300,16 +287,24 @@ private:
                               AlpacaError::NotImplemented);
     }
 
-    // The three moves: forwarded in the command slot, IsMoving written through (true when the move has somewhere to
-    // go, so a client reads it true at once) and TargetPosition when the frame gave what it takes. Position stays the
-    // measured one until the next poll, which also drops any sample taken before the command (decision 0010 rule 4).
-    void start_move(const char* member, double position, bool moves, std::optional<double> target) {
-        run([this, member, position, moves, target](util::OperationContext& ctx) {
-            proxy_.client().put(member, {{"Position", number_text(position)}});
+    // The three moves: forwarded in the command slot. IsMoving is written through true when the move has somewhere to
+    // go, so a client reads it true at once; a move with nowhere to go leaves the polled value, since an earlier move
+    // may still run. TargetPosition is the upstream's own, read after the PUT: a failed read leaves it to the next poll
+    // and does not fail a move the upstream took. Position stays the measured one until the next poll, which also
+    // drops any sample taken before the command (decision 0010 rule 4).
+    void start_move(const char* member, double position, bool moves) {
+        run([this, member, position, moves](util::OperationContext& ctx) {
             if (command_hook_) command_hook_();
-            write_through(ctx, [moves, target](Frame& frame) {
-                frame.is_moving = {moves, 0, {}};
-                if (target) frame.target_position = {target, 0, {}};
+            RemoteAlpacaClient& client = proxy_.client();
+            client.put(member, {{"Position", number_text(position)}});
+            std::optional<Answer<double>> target;
+            try {
+                target = answer_of([&] { return client.get_double("targetposition"); });
+            } catch (const RemoteTransportError&) {  // NOLINT(bugprone-empty-catch): the next poll reads it
+            }
+            write_through(ctx, [moves, &target](Frame& frame) {
+                if (moves) frame.is_moving = {true, 0, {}};
+                if (target) frame.target_position = *target;
             });
         });
     }
@@ -336,7 +331,7 @@ private:
         Frame frame;
         frame.is_moving = answer_of([&] { return client.get_bool("ismoving"); });
         frame.position = answer_of([&] { return client.get_double("position"); });
-        if (upstream_version_.load() >= kFirstVersionWithMechanical) {
+        if (proxy_.upstream_interface_version() >= kFirstVersionWithMechanical) {
             frame.mechanical_position = answer_of([&] { return client.get_double("mechanicalposition"); });
         } else {
             frame.mechanical_position = {std::nullopt, AlpacaError::NotImplemented, "no MechanicalPosition"};
@@ -346,13 +341,11 @@ private:
         return frame;
     }
 
-    // At Connect, with no lock held, after the upstream's identity: its InterfaceVersion (which members it has, set
-    // before the first frame is sampled), CanReverse and StepSize, read once into read_limits_, and what to store under
-    // the state lock with the identity. The store captures only `this`, so the std::function holds it with no
-    // allocation.
+    // At Connect, with no lock held, after the upstream's identity: CanReverse and StepSize, read once into
+    // read_limits_, and what to store under the state lock with the identity. The store captures only `this`, so the
+    // std::function holds it with no allocation.
     std::function<void()> read_limits() {
         RemoteAlpacaClient& client = proxy_.client();
-        upstream_version_.store(client.get_int("interfaceversion"));
         read_limits_.can_reverse = answer_of([&] { return client.get_bool("canreverse"); });
         read_limits_.step_size = answer_of([&] { return client.get_double("stepsize"); });
         return [this] { limits_ = read_limits_; };
@@ -362,9 +355,6 @@ private:
 
     std::function<void()> command_hook_;  // test seam: set_command_hook_for_testing()
 
-    // The upstream's InterfaceVersion, written by the Connect before the first sample and read by the poll, the
-    // getters and the commands.
-    std::atomic<int> upstream_version_{0};
     // Under the proxy's state lock (with_connected(), with_state(), the Connect's store).
     Limits limits_;
     // The Connect's reads before the store, under transition_mutex_ (only the connect path touches it).
