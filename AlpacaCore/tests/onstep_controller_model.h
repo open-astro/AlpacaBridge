@@ -16,8 +16,6 @@
 // server (AlpacaHTTP/tests/fake_conformu_server.cpp, #2078) can host the OnStep focuser over it. The test helpers that
 // need Catch2 stay in onstep_controller.h, which includes this file.
 
-#ifndef _WIN32
-
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/switch_driver.h>
@@ -293,5 +291,3 @@ inline onstep::ConnectionInfo endpoint(int port, int response_timeout_ms = 300) 
 }
 
 }  // namespace alpacacore::test::onstep_controller
-
-#endif  // _WIN32

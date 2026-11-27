@@ -16,8 +16,6 @@
 // position pairs as fractions of a turn, and the eight-byte site and clock records. The motion is
 // FakeMountMotionModel's, not here: these functions only convert between its degrees and the wire.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/pointing.h>
 
 #include <atomic>
@@ -125,5 +123,3 @@ inline void apply_time(const FakeMountMotionModel& model, const std::string& chu
 }
 
 }  // namespace alpacacore::test::hc_wire
-
-#endif  // !_WIN32

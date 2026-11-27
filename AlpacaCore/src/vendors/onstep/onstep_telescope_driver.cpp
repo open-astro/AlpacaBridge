@@ -5315,11 +5315,7 @@ private:
         // per-firmware timezone/DST bugs like this — made :GS# match the
         // correct GMST-based value to within a second.
         std::tm utc_tm{};
-#ifdef _WIN32
-        gmtime_s(&utc_tm, &utc_time_t);
-#else
         gmtime_r(&utc_time_t, &utc_tm);  // reentrant: the re-sync body and a client's UTCDate write both land here
-#endif
         TimeInfo info;
         info.hour = utc_tm.tm_hour;
         info.minute = utc_tm.tm_min;

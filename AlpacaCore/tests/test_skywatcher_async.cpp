@@ -18,8 +18,6 @@
 // Park/FindHome tasks, pulse-guide timers, and MoveAxis stop tasks all run
 // end-to-end exactly as they do against the Wave 100i.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
@@ -6555,8 +6553,6 @@ TEST_CASE("SkyWatcher async - a reconnect inside the hold leaves Slewing false",
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
-
-#endif  // _WIN32
 
 TEST_CASE("SkyWatcher async - SiteLatitude crossing the equator inside the pulse-end restore window reverses RA",
           "[skywatcher][async]") {

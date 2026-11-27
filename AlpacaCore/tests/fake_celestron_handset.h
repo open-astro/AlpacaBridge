@@ -53,8 +53,6 @@
 // - The clock (h) always answers 12:00:00 on 1 Jan 2026, UTC; the site (w) always answers 0/0; writes change neither.
 // - J (alignment) answers aligned unless `aligned` is false, held for j_hold_ms when set.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/task_clock.h>
 
 #include <algorithm>
@@ -567,5 +565,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

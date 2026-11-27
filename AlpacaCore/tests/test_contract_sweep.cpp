@@ -60,7 +60,6 @@
 
 // Tier 2 hosts: the roster fakes, each under its vendor guard. Fakes over a pty or a loopback socket
 // are POSIX only.
-#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -210,7 +209,6 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 
 #include "fake_serial_streamer.h"
-#endif
 #endif
 
 namespace {
@@ -1282,7 +1280,6 @@ bool has_can_subject(const ContractEntry& e) {
 // the per-case expectations live here in CONTRACT_SWEEP_TIER2_HOSTS, and a non-vacuity case pins the
 // two lists to each other in both directions.
 // ---------------------------------------------------------------------------
-#ifndef _WIN32
 
 // A driver together with the fake it talks to. The fake is declared first so it is
 // destroyed after the driver.
@@ -5005,8 +5002,6 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
     CT3_GPHOTO(X)
 // clang-format on
 
-#endif  // !_WIN32
-
 }  // namespace
 
 // One TEST_CASE per (entry, case). The name carries the registry id, so a
@@ -5146,7 +5141,6 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
     INFO("filter wheel entries in this build: " << seen);
 }
 
-#ifndef _WIN32
 #define CS2_CASE(id, casename, body) \
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
@@ -5309,9 +5303,7 @@ TEST_CASE("Contract sweep tier 2 - filter wheels - slot data while connected", "
 #undef CS2_SLOTS
     INFO("tier-2 filter wheel hosts in this build: " << seen);  // ZWO, QHY CFW3, Player One, Wanderer when all on
 }
-#endif
 
-#ifndef _WIN32
 #define CT3_CASE_TAGS_OK "[contract][tier3]"
 #define CT3_CASE_TAGS_DEFECT "[contract][tier3][!shouldfail]"
 // Generated from CONTRACT_SWEEP_TIER3_HOSTS rows, like the tier-1 and tier-2 cases; each recipe names its mutation.
@@ -5350,9 +5342,7 @@ void check_tier3_hosts_have_a_recipe() {
         CHECK((r.fault != nullptr && std::string(r.fault).size() > 0));
     }
 }
-#endif
 
-#ifndef _WIN32
 // Non-vacuity guard for tier 2. The roster stays a literal three-field array (docs-drift check 13 parses
 // it), so the connect recipes live in CONTRACT_SWEEP_TIER2_HOSTS; this pins the two to each other in both
 // directions. A roster row without a host would be a fake no case ever connects to, and a host without a
@@ -5555,7 +5545,6 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         CHECK(from_roster.count(r) == from_hosts.count(r));
     }
 }
-#endif
 
 // Catalog pairs (fork #71): the built-in catalog itself says which (vendor, device type) pairs this
 // build constructs, so scripts/check_contract_sweep.py no longer parses *_catalog.cpp for them. A
@@ -5734,7 +5723,6 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 // Sky-Watcher, QHY and Astroasis also from the age of the frame.
 // The roster is kSnapshotAdopterRoster (contract_sweep.h); rule 6 of scripts/check_contract_sweep.py holds it,
 // and the hooks below, to the ADR table.
-#ifndef _WIN32
 namespace {
 
 using alpacacore::test::FakeTaskClock;
@@ -6707,4 +6695,3 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     }
 CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_CASE)
 #undef CS3_CASE
-#endif  // !_WIN32

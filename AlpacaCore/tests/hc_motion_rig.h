@@ -16,8 +16,6 @@
 // advances, and the reads a case makes of it: the cases talk to the responder directly, as
 // test_ioptron_fake_motion_mode.cpp does, so a case moves time by hand and never sleeps.
 
-#ifndef _WIN32
-
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -75,5 +73,3 @@ struct HcMotionRig {
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

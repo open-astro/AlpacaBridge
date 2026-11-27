@@ -17,8 +17,6 @@
 // endpoint is reused on the next connect. Cases live in
 // deferred_connect_cases.h; this file supplies the fake and the seam.
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <memory>
@@ -87,5 +85,3 @@ TEST_CASE("Sky-Watcher telescope auto-detect - the production factory constructs
         CHECK_FALSE(driver->get_connected());
     }
 }
-
-#endif  // _WIN32

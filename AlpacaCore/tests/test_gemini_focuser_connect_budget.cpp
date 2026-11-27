@@ -15,8 +15,6 @@
 // push Connect past the 5 s Connecting budget or park a Disconnect behind the probe. The serial timeout is
 // a real poll() on the pty, so these cases use real time.
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 
 #include <atomic>
@@ -84,5 +82,3 @@ TEST_CASE("Gemini focuser - A connect with no temperature sensor still succeeds 
     CHECK(driver->get_connected());
     CHECK(driver->get_position() == 1000);
 }
-
-#endif

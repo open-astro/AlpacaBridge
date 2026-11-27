@@ -19,8 +19,6 @@
 // back (the TeSeek HM-17 field report: after Park, the blind
 // ":ST...#" command's drain blocked forever and every telescope call hung).
 
-#ifndef _WIN32
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -197,5 +195,3 @@ TEST_CASE("OnStep serial - a blind command on a port retuned to VMIN=1 returns a
     CHECK(line_speed(fake.keepalive_fd()) == B9600);
     proto.disconnect();
 }
-
-#endif  // _WIN32

@@ -16,8 +16,6 @@
 // AZM-ALT"). The replies below are verbatim from a SynScan V4 handset
 // (04.28.00) on an EQM-35 Pro, 2026-10-02 (issue #785).
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <cmath>
@@ -74,5 +72,3 @@ TEST_CASE("SynScan precise RA/Dec and Az/Alt decode the upper 24 bits of each fi
 
     driver->set_connected(false);
 }
-
-#endif

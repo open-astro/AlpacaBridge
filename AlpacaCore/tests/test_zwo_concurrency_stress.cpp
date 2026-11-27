@@ -521,7 +521,6 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-fligh
 // telemetry).
 // The operate callback drives the exact newly-fixed paths: async GOTO and
 // pulse guiding racing disconnects.
-#ifndef _WIN32
 
 namespace {
 
@@ -718,5 +717,3 @@ TEST_CASE("ZWO mount - destruction with live pulse drains on both axes", "[zwo][
         CHECK(elapsed < std::chrono::milliseconds(1500));  // half a step: a destructor that waits one out fails
     }
 }
-
-#endif  // !_WIN32

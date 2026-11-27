@@ -42,13 +42,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-#include "sidereal_time_check.h"
-#ifndef _WIN32
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
-#endif
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 
@@ -63,7 +61,6 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number) {
     return alpacacore::vendor::onstep::create_onstep_telescope(device_number, conn);
 }
 
-#ifndef _WIN32
 // A connected driver on a fake mount that accepts every write, for the members whose answer depends on being
 // connected. The server is declared first, so it outlives the driver.
 struct ConnectedFakeMount {
@@ -89,7 +86,6 @@ struct ConnectedFakeMount {
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     }
 };
-#endif
 
 }  // namespace
 
@@ -257,7 +253,6 @@ TEST_CASE("OnStep Telescope Driver - the two target properties are independent",
     driver->set_target_declination(-30.25);
     require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
-#ifndef _WIN32
     ConnectedFakeMount mount;
     auto& connected = *mount.driver;
     // Neither written yet: both refuse.
@@ -280,10 +275,7 @@ TEST_CASE("OnStep Telescope Driver - the two target properties are independent",
     connected.set_target_declination(-30.25);
     CHECK(connected.get_target_right_ascension() == 7.25);
     CHECK(connected.get_target_declination() == -30.25);
-#endif
 }
-
-#ifndef _WIN32
 
 // ── The client-clock disagreement warning (#409) ─────────────────────────────
 
@@ -715,24 +707,20 @@ TEST_CASE("OnStep Telescope Driver - non-finite input is rejected", "[onstep][te
 
     SECTION("TargetDeclination") {
         require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
-#ifndef _WIN32
         // The rejected write must leave the target unset: readable only on a connected driver (#2075).
         ConnectedFakeMount mount;
         require_alpaca_error([&]() { mount.driver->set_target_declination(nan); },
                              alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)mount.driver->get_target_declination(); },
                              alpacacore::AlpacaError::ValueNotSet);
-#endif
     }
     SECTION("TargetRightAscension") {
         require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
-#ifndef _WIN32
         ConnectedFakeMount mount;
         require_alpaca_error([&]() { mount.driver->set_target_right_ascension(nan); },
                              alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)mount.driver->get_target_right_ascension(); },
                              alpacacore::AlpacaError::ValueNotSet);
-#endif
     }
     SECTION("SiteElevation") {
         require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
@@ -4471,9 +4459,6 @@ TEST_CASE("OnStep Telescope Driver - Connected answers while a connect is in fli
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
-#ifndef _WIN32
 // #1762 B4: members no case called while connected. These four read no mount
 // reply when called: GuideRate serves what the connect read from :GX90# (this
 // fake answers "0", which is no answer, so the informational half-sidereal rate
@@ -4571,7 +4556,6 @@ TEST_CASE("OnStep Telescope Driver - SiderealTime follows the clock to under a s
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
 }
-#endif
 
 // #2406 (motion fails closed, #2396): the bounds and stop checks the OnStep driver had none of.
 namespace {

@@ -14,7 +14,12 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cctype>
@@ -27,23 +32,10 @@
 #include <utility>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <alpacacore/util/serial_link.h>
-#include <alpacacore/util/serial_read.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
-#endif
-
 namespace alpacacore::vendor::gemini {
 
 namespace {
 constexpr int kCommandDelayMs = 50;
-#ifdef _WIN32
-constexpr int kReadCharDelayMs = 10;
-#endif
 constexpr int kMaxResponseLen = 32;
 constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
@@ -57,14 +49,12 @@ constexpr int kProbeReadTimeoutMs = 5000;  // Probe reply budget per attempt
 // port as a sibling instead of opening it.
 constexpr const char* kSerialOwner = "Gemini flat panel";
 
-#ifndef _WIN32
 // 8N1 raw at @p baud with HUPCL cleared: DTR stays high on close, so the next
 // open does not reset the MCU (see probe_port()).
 void configure_flatpanel_line(struct termios& tty, speed_t baud) {
     util::make_raw_8n1(tty, baud);
     tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
 }
-#endif
 // Cover travel is mechanical, not an instant ack -- INDI's Rev2 adapter uses
 // a long timeout for open/close specifically (vs. the short default used for
 // light/brightness/status queries). 30s matches INDI's move/calibration
@@ -195,7 +185,6 @@ bool is_flatpanel_handshake_reply(const std::string& reply) {
 // cleared before closing so DTR stays high and a subsequent connect() doesn't
 // trigger a second reset.
 static bool probe_port(const std::string& port_path) {
-#ifndef _WIN32
     // The probe's claim lasts exactly as long as `link`: a connect or another
     // scan waits for it, and a port a connected driver holds (the #1202 PDH)
     // is refused here without being opened or retuned.
@@ -245,13 +234,9 @@ static bool probe_port(const std::string& port_path) {
         ALPACA_LOG_DEBUG("Gemini", "Flat panel probe attempt " + std::to_string(attempt + 1) +
                                        " got no valid response from " + port_path);
     }
-#else
-    (void)port_path;
-#endif
     return false;
 }
 
-#ifndef _WIN32
 namespace {
 // The raw /dev/ttyUSB*//dev/ttyACM* fallback below has no by-id symlink name
 // to filter on, so without this check it would open (and DTR-reset, per
@@ -268,7 +253,6 @@ bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_flatpanel_usb_tokens());
 }
 }  // namespace
-#endif
 
 namespace {
 GeminiFlatPanelScanHooks& scan_hooks() {
@@ -296,7 +280,6 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     if (const auto& enumerate = scan_hooks().enumerate) return enumerate();
     std::vector<GeminiFlatPanelPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed, so the raw-node pass below
     // never re-opens a port the by-id pass already tried. Re-opening a port
     // is not just wasted time: these controllers (ESP32/CH340-class) reset
@@ -417,7 +400,6 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
         ALPACA_LOG_INFO("Gemini", "Found flat panel on " + candidates[i].path);
         results.push_back({candidates[i].path, candidates[i].name});
     }
-#endif
 
     return results;
 }
@@ -449,11 +431,7 @@ public:
                 std::this_thread::sleep_for(std::chrono::seconds(kHandshakeRetryDelayS));
             }
 
-#ifndef _WIN32
             tcflush(link_.fd(), TCIOFLUSH);
-#else
-            PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
-#endif
 
             try {
                 // Confirmed against real hardware: >H# replies
@@ -493,10 +471,8 @@ public:
 
         if (!success) {
             disconnect_locked();
-#ifndef _WIN32
             // A connect that never completed keeps no loss reason (only a connected link is lost).
             link_.clear_loss();
-#endif
             throw AlpacaException(
                 "Gemini flat panel handshake failed after " + std::to_string(kHandshakeRetries) + " attempts",
                 AlpacaError::NotConnected);
@@ -526,10 +502,8 @@ public:
         }
 
         connected_ = true;
-#ifndef _WIN32
         // A hangup the handshake retries absorbed is not a loss of this connection.
         link_.clear_loss();
-#endif
         ALPACA_LOG_INFO("Gemini", "Flat panel connected" + (firmware.empty() ? "" : (", firmware: " + firmware)));
         return firmware;
     }
@@ -537,9 +511,7 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
-#ifndef _WIN32
         link_.clear_loss();  // decision 0009 rule 5: a Disconnect clears the loss reason
-#endif
     }
 
     bool is_connected() const {
@@ -548,22 +520,10 @@ public:
     }
 
     // The util::SerialLink verdict (#2262): lock-free, never waits on an exchange.
-    bool link_alive() const noexcept {
-#ifndef _WIN32
-        return !link_.lost();
-#else
-        return true;
-#endif
-    }
+    bool link_alive() const noexcept { return !link_.lost(); }
 
     // The text the link kept when it was lost; the link's own leaf mutex, never held across an exchange.
-    std::string link_fault() const {
-#ifndef _WIN32
-        return link_.fault();
-#else
-        return {};
-#endif
-    }
+    std::string link_fault() const { return link_.fault(); }
 
     bool get_light_on() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -679,48 +639,6 @@ private:
     }
 
     void connect_serial() {
-#ifdef _WIN32
-        std::string port_name = "\\\\.\\" + config_.serial_port;
-        serial_handle_ =
-            CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port, AlpacaError::NotConnected);
-        }
-
-        DCB dcb = {};
-        dcb.DCBlength = sizeof(dcb);
-        if (!GetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            throw AlpacaException("Failed to get serial port state", AlpacaError::DriverException);
-        }
-
-        dcb.BaudRate = static_cast<DWORD>(config_.baud_rate);
-        dcb.ByteSize = 8;
-        dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
-        dcb.fDtrControl = DTR_CONTROL_ENABLE;
-        dcb.fRtsControl = RTS_CONTROL_ENABLE;
-        dcb.fOutxCtsFlow = FALSE;
-        dcb.fOutxDsrFlow = FALSE;
-        dcb.fOutX = FALSE;
-        dcb.fInX = FALSE;
-
-        if (!SetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
-
-        COMMTIMEOUTS timeouts = {};
-        timeouts.ReadIntervalTimeout = 100;
-        timeouts.ReadTotalTimeoutMultiplier = 10;
-        timeouts.ReadTotalTimeoutConstant = config_.serial_timeout_s * 1000;
-        timeouts.WriteTotalTimeoutConstant = config_.serial_timeout_s * 1000;
-        SetCommTimeouts(serial_handle_, &timeouts);
-
-        PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
-#else
         speed_t baud = B9600;
         switch (config_.baud_rate) {
             case 9600:
@@ -756,7 +674,6 @@ private:
         link_ = std::move(link);
 
         tcflush(link_.fd(), TCIOFLUSH);
-#endif
     }
 
     void disconnect_locked() {
@@ -764,7 +681,6 @@ private:
         close_serial();
     }
 
-#ifndef _WIN32
     // The link has judged the port gone (util::SerialLink, #2262: a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd):
     // decision 0009 rule 2 loses it at once. Release the port so a replugged panel can be reopened; the link keeps
     // its lost() latch for the driver's Connected getter and its fault text across the release. During connect()
@@ -778,73 +694,20 @@ private:
         }
         throw AlpacaException(reason, AlpacaError::NotConnected);
     }
-#endif
 
-    void close_serial() {
-#ifdef _WIN32
-        if (serial_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-        }
-#else
-        link_.close();
-#endif
-    }
+    void close_serial() { link_.close(); }
 
     void write_data(const std::string& data) {
-#ifdef _WIN32
-        std::size_t total = 0;
-        while (total < data.length()) {
-            DWORD bytes_written = 0;
-            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data.length() - total),
-                           &bytes_written, nullptr) ||
-                bytes_written == 0) {
-                throw AlpacaException("Serial write failed", AlpacaError::DriverException);
-            }
-            total += bytes_written;
-        }
-#else
         if (!link_.write_all(data)) {
             const int err = errno;
             if (link_.lost()) fail_link_locked();
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#endif
     }
 
     std::string read_response() {
         const int timeout_ms = cover_timeout_ms_ > 0 ? cover_timeout_ms_ : config_.serial_timeout_s * 1000;
         std::string response;
-#ifdef _WIN32
-        response.reserve(kMaxResponseLen);
-        char ch = 0;
-        auto start = std::chrono::steady_clock::now();
-
-        while (true) {
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > timeout_ms) {
-                throw FlatPanelReplyTimeout();
-            }
-
-            DWORD bytes_read = 0;
-            if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-                // Ignore CR/LF
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-                response += ch;
-                if (ch == '#') {
-                    break;
-                }
-                if (response.length() >= kMaxResponseLen) {
-                    throw AlpacaException("Response too long", AlpacaError::DriverException);
-                }
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(kReadCharDelayMs));
-            }
-        }
-#else
         util::ReadSpec spec;
         spec.max_len = kMaxResponseLen;
         const auto r =
@@ -865,7 +728,6 @@ private:
                 }
                 throw FlatPanelReplyTimeout();
         }
-#endif
 
         ALPACA_LOG_TRACE("Gemini", "Flat panel response: " + response);
         return response;
@@ -873,13 +735,7 @@ private:
 
     // Drop input already queued: a reply that landed after its own command's
     // read timed out would otherwise be read as the next command's reply.
-    void discard_stale_input_locked() {
-#ifdef _WIN32
-        PurgeComm(serial_handle_, PURGE_RXCLEAR);
-#else
-        tcflush(link_.fd(), TCIFLUSH);
-#endif
-    }
+    void discard_stale_input_locked() { tcflush(link_.fd(), TCIFLUSH); }
 
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Flat panel command: " + cmd);
@@ -913,12 +769,8 @@ private:
     int cover_timeout_ms_ = 0;        // test seam: a nonzero reply wait for the cover command in flight
     bool connected_ = false;
 
-#ifdef _WIN32
-    HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
-#else
     util::SerialLink
         link_;  // the claimed, open port (#1202) and the lost-link verdict (#2262); closed while disconnected
-#endif
 };
 
 // --- GeminiFlatPanelProtocolWrapper public interface forwarding ---

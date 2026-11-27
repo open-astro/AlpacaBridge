@@ -334,11 +334,7 @@ inline std::string device_state_timestamp(std::chrono::system_clock::time_point 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
 
     std::tm utc_tm{};
-#if defined(_WIN32)
-    gmtime_s(&utc_tm, &secs);
-#else
     gmtime_r(&secs, &utc_tm);
-#endif
 
     char date_buf[24];
     std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%dT%H:%M:%S", &utc_tm);

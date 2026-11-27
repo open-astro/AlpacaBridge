@@ -15,7 +15,11 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -34,13 +38,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#ifndef _WIN32
-#include <alpacacore/util/serial_link.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::gemini {
 
@@ -133,7 +130,6 @@ std::string strip_frame(const std::string& frame_in) {
     return frame;
 }
 
-#ifndef _WIN32
 // 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
 // adapter asserts DTR on open, which pulses the MCU reset line; keeping DTR
 // high across close means a subsequent reopen does not reset the hub again
@@ -261,7 +257,6 @@ bool raw_port_looks_like_pdh_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_pdh_usb_tokens());
 }
-#endif  // _WIN32
 
 }  // namespace
 
@@ -356,7 +351,6 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
     if (const auto& enumerate = scan_hooks().enumerate) return enumerate();
     std::vector<GeminiPdhPortInfo> results;
 
-#ifndef _WIN32
     // Canonical paths already queued from by-id, so the raw-node pass never
     // re-opens (and DTR-resets) a port the by-id pass already claimed.
     std::set<std::string> probed;
@@ -434,7 +428,6 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
         ALPACA_LOG_INFO("Gemini", "Found Power & Data Hubs Advanced 3 on " + candidates[i].path);
         results.push_back({candidates[i].path, candidates[i].name});
     }
-#endif
 
     return results;
 }
@@ -446,10 +439,6 @@ public:
     ~Impl() { disconnect(); }
 
     int connect(const PdhConnectionConfig& config) {
-#ifdef _WIN32
-        (void)config;
-        throw AlpacaException("Gemini power hub serial support is POSIX-only", AlpacaError::DriverException);
-#else
         std::lock_guard<std::mutex> transition(transition_mutex_);
         {
             std::lock_guard<std::mutex> lock(io_mutex_);
@@ -567,7 +556,6 @@ public:
         ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected on " + config_.serial_port + " (firmware " +
                                       format_pdh_firmware(firmware) + ")");
         return firmware;
-#endif
     }
 
     void disconnect() {
@@ -662,19 +650,13 @@ private:
 
     // Public set path: requires a completed connect().
     void send_command(const std::string& cmd) {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (!connected_) {
             throw AlpacaException("Gemini power hub not connected", AlpacaError::NotConnected);
         }
         write_locked(cmd);
-#else
-        (void)cmd;
-        throw AlpacaException("Gemini power hub serial support is POSIX-only", AlpacaError::DriverException);
-#endif
     }
 
-#ifndef _WIN32
     // Caller holds io_mutex_. A write the link judges lost (a hung-up tty, or
     // EBADF on its fd: util::SerialLink, #2262) is a lost link (decision 0009
     // point 2a): NotConnected, and once connected the loss is latched. Any
@@ -981,7 +963,6 @@ private:
     }
 
     void close_serial_locked() { link_.close(); }
-#endif
 
     // Full teardown; caller holds transition_mutex_. Marks disconnected under
     // io_mutex_ FIRST so no command can write after the join, joins the reader
@@ -1012,10 +993,8 @@ private:
             link_lost_.store(false);
         }
         connect_hangup_errno_.store(0);
-#ifndef _WIN32
         close_serial_locked();
         link_.clear_loss();  // the link's own verdict too (#2262)
-#endif
     }
 
     util::TaskClock& clock_;          // the fault stamp only (decision 0005 rule 6)
@@ -1048,9 +1027,7 @@ private:
     std::atomic<bool> reader_running_{false};
     std::thread reader_thread_;
 
-#ifndef _WIN32
     util::SerialLink link_;  // the claimed, open port (#1202); guarded by io_mutex_
-#endif
 };
 
 // --- GeminiPdhProtocolWrapper public interface forwarding ---

@@ -16,8 +16,6 @@
 // mount drove. The handset here reports the position a case sets: the start plus guide rate x the virtual time the
 // pulse ran. Each case reads RA/Dec inside the grace window, on the fake task clock.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
@@ -243,5 +241,3 @@ TEST_CASE("SynScan superseded pulse estimate - Tracking off over a pulse leaves 
     rig.driver->set_tracking(false);
     rig.check_ra(rig.start_ra_hours + rig.guide_ra_hours(200));
 }
-
-#endif

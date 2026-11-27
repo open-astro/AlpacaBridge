@@ -18,8 +18,6 @@
 // test_onstep_concurrency_stress.cpp. Replies follow OnStepX Focuser.command.cpp, Rotator.command.cpp and
 // Features.command.cpp at af1d26bf.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/error_handling.h>
 
 #include "catch2_compat.h"
@@ -135,5 +133,3 @@ inline int ge_pairs_after(const std::vector<std::string>& log, const std::string
 }
 
 }  // namespace alpacacore::test::onstep_controller
-
-#endif  // !_WIN32

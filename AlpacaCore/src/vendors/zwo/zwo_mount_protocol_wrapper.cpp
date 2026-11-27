@@ -43,7 +43,6 @@
 #include <filesystem>
 #include <functional>
 #include <iomanip>
-#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -239,7 +238,6 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 // device holds, and lists one a ZWO mount holds without opening it.
 constexpr const char* kSerialOwner = "ZWO mount";
 
-#ifndef _WIN32
 // Registry lock is a leaf: only memory operations, never DNS, socket I/O, other locks or joins.
 // Explicit pairs keep their existing sharing policy; Auto and probes require an unused endpoint.
 class NetworkEndpointClaim {
@@ -342,7 +340,6 @@ bool zwo_mount_candidate_free(const std::string& port, const std::string& name, 
 
 // 8N1 raw, no flow control.
 void configure_mount_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
-#endif
 
 // The model a probe reports, or "" when the endpoint is not a ZWO mount: any terminated, non-error :GVP# answer,
 // proven by a valid :GMA# serial (decision 0017 rule 8 refuses the wrong device; an unlisted model is not one, #2204).
@@ -355,11 +352,6 @@ std::string identify_mount(const Query& query) {
 }
 
 std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
-#ifdef _WIN32
-    (void)port_path;
-    (void)timeout_ms;
-    return "";
-#else
     // Probe claim, held for exactly this function: a connected device's port
     // is refused before it is opened, another scan's probe is waited for.
     std::string error;
@@ -395,16 +387,9 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         return trim_copy(reply.bytes.substr(0, hash));
     };
     return identify_mount(query);
-#endif
 }
 
 std::string probe_network_mount(const std::string& host, int port, int timeout_ms) {
-#ifdef _WIN32
-    (void)host;
-    (void)port;
-    (void)timeout_ms;
-    return "";
-#else
     const auto deadline = util::TcpDeadline::in(timeout_ms);
     sockaddr_in addr{};
     if (!resolve_network_endpoint(host, port, addr, deadline).empty()) return "";
@@ -461,7 +446,6 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         return trim_copy(std::move(response));
     };
     return identify_mount(query);
-#endif
 }
 
 }  // namespace
@@ -470,9 +454,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(const std::vector<ZWODeviceInfo>
     std::vector<ZWODeviceInfo> results;
     for (auto candidate : candidates) {
         if (candidate.type == ConnectionType::Serial) {
-#ifndef _WIN32
             if (!zwo_mount_candidate_free(candidate.port_path, candidate.label, results)) continue;
-#endif
             candidate.model_name = probe_serial_mount(candidate.port_path, probe_timeout_ms);
         } else if (candidate.type == ConnectionType::Network) {
             candidate.model_name = probe_network_mount(candidate.host, candidate.tcp_port, probe_timeout_ms);
@@ -488,7 +470,6 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
     // Probes own temporary links; the serial registry keeps them off connected siblings' ports.
     std::vector<ZWODeviceInfo> results;
 
-#ifndef _WIN32
     // USB: scan /dev/serial/by-id for symlinks naming ZWO (e.g.
     // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP.
     // list_serial_by_id() and canonical()'s error_code overload below skip a
@@ -537,7 +518,6 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
             }
         }
     }
-#endif
 
     // WiFi: the mount's hand-controller access point (protocol docs:
     // IP 192.168.4.1, port 4030). Reachable when this host is on the mount AP.
@@ -560,29 +540,11 @@ public:
           discovery_candidates_(std::move(discovery_candidates)),
           resolver_(std::move(resolver)),
           connected_(false),
-          connection_type_(ConnectionType::Serial)
-#ifdef _WIN32
-          ,
-          serial_handle_(INVALID_HANDLE_VALUE),
-          socket_handle_(INVALID_SOCKET)
-#else
-          ,
+          connection_type_(ConnectionType::Serial),
           serial_fd_(-1),
-          socket_fd_(-1)
-#endif
-    {
-#ifdef _WIN32
-        WSADATA wsa_data;
-        WSAStartup(MAKEWORD(2, 2), &wsa_data);
-#endif
-    }
+          socket_fd_(-1) {}
 
-    ~Impl() {
-        disconnect();
-#ifdef _WIN32
-        WSACleanup();
-#endif
-    }
+    ~Impl() { disconnect(); }
 
     bool connect(const ConnectionInfo& info) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -678,21 +640,17 @@ public:
         }
         reply_owed_ = false;
         link_lost_.store(false);
-#ifndef _WIN32
         // A connect, failed or done, starts with a clear verdict; a loss in the handshake that follows latches.
         link_.clear_loss();
-#endif
         return ok;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
-#ifndef _WIN32
         // An explicit Disconnect forgets the link's verdict (decision 0009 rule 5); try_disconnect(), the port release
         // after a loss, keeps it.
         link_.clear_loss();
-#endif
     }
 
     bool link_lost() const { return link_lost_.load(); }
@@ -882,12 +840,10 @@ private:
     // kOwedReplyQuietMs after the reply's '#', and the earlier bound still holds after the '#': a line that keeps
     // sending cannot hold the lock past it. It waits in kReadPollDelay slices and throws NotConnected as soon
     // as the link closes, before anything is written. An exchange with nothing owed pays nothing.
-    // Returns true when the owed reply arrived. POSIX only; on Windows the plain input purge in
-    // discard_pending_input() remains.
+    // Returns true when the owed reply arrived.
     bool settle_owed_reply(std::chrono::steady_clock::time_point cap) {
         if (!reply_owed_) return false;
         bool terminated = false;
-#ifndef _WIN32
         using Clock = std::chrono::steady_clock;
         const int fd = connection_type_ == ConnectionType::Serial ? serial_fd_ : socket_fd_;
         const auto deadline = std::min(owed_until_, cap);
@@ -926,9 +882,6 @@ private:
             if (std::memchr(buf, '#', static_cast<std::size_t>(count)) != nullptr) terminated = true;
             if (terminated) quiet_until = Clock::now() + std::chrono::milliseconds(kOwedReplyQuietMs);
         }
-#else
-        (void)cap;
-#endif
         reply_owed_ = false;
         if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
         if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
@@ -943,10 +896,6 @@ private:
     // `saw_hash` (optional) is set when the dropped input held a '#'.
     void discard_pending_input(bool* saw_hash = nullptr) {
         if (connection_type_ == ConnectionType::Serial) {
-#ifdef _WIN32
-            if (!PurgeComm(serial_handle_, PURGE_RXCLEAR))
-                throw AlpacaException("Failed to discard ZWO mount serial input");
-#else
             if (saw_hash != nullptr) {
                 // Look at what is queued before it is flushed (non-blocking), so a consumed reply is noticed.
                 char peek[128];
@@ -961,18 +910,9 @@ private:
                 note_transport_error();
                 throw AlpacaException("Failed to discard ZWO mount serial input");
             }
-#endif
             return;
         }
         char discarded[256];
-#ifdef _WIN32
-        u_long available = 0;
-        while (ioctlsocket(socket_handle_, FIONREAD, &available) == 0 && available > 0) {
-            if (recv(socket_handle_, discarded, static_cast<int>(std::min<u_long>(available, sizeof(discarded))), 0) <=
-                0)
-                break;
-        }
-#else
         ssize_t count;
         do {
             count = recv(socket_fd_, discarded, sizeof(discarded), MSG_DONTWAIT);
@@ -982,7 +922,6 @@ private:
         } while (count > 0 || (count < 0 && errno == EINTR));
         if (count == 0) link_lost_.store(true);
         if (count < 0) note_transport_error();
-#endif
     }
 
     // Publishes a lost transport on link_lost_ after a failed exchange. Over serial the verdict is the link's
@@ -990,7 +929,6 @@ private:
     // util::read_until(link_, ...)); this wrapper keeps no serial errno list. Over TCP the socket errnos below are a
     // loss (decision 0009 point 2a).
     void note_transport_error() {
-#ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
             if (link_.lost()) link_lost_.store(true);
             return;
@@ -998,7 +936,6 @@ private:
         if (errno == EBADF || errno == ENOTSOCK || errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
             link_lost_.store(true);
         }
-#endif
     }
 
     void disconnect_locked() {
@@ -1018,52 +955,6 @@ private:
     }
 
     bool connect_serial(const std::string& port_path, int baud_rate) {
-#ifdef _WIN32
-        std::wstring wport_path(port_path.begin(), port_path.end());
-        serial_handle_ = CreateFileW(
-            wport_path.c_str(),
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            0,
-            nullptr);
-
-        if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-
-        DCB dcb = {0};
-        dcb.DCBlength = sizeof(DCB);
-        if (!GetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-
-        dcb.BaudRate = baud_rate;
-        dcb.ByteSize = 8;
-        dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
-        dcb.fDtrControl = DTR_CONTROL_ENABLE;
-        dcb.fRtsControl = RTS_CONTROL_ENABLE;
-
-        if (!SetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-
-        COMMTIMEOUTS timeouts = {0};
-        timeouts.ReadIntervalTimeout = 50;
-        timeouts.ReadTotalTimeoutConstant = 100;
-        timeouts.ReadTotalTimeoutMultiplier = 10;
-        timeouts.WriteTotalTimeoutConstant = 100;
-        timeouts.WriteTotalTimeoutMultiplier = 10;
-        SetCommTimeouts(serial_handle_, &timeouts);
-
-        return true;
-#else
         speed_t speed = B9600;
         switch (baud_rate) {
         case 1200: speed = B1200; break;
@@ -1091,62 +982,14 @@ private:
         }
         serial_fd_ = link_.fd();
         return true;
-#endif
     }
 
     void disconnect_serial() {
-#ifdef _WIN32
-        if (serial_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-        }
-#else
         serial_fd_ = -1;
         link_.close();
-#endif
     }
 
     bool connect_network(const std::string& host, int port, bool automatic) {
-#ifdef _WIN32
-        if (port < 1 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
-            return false;
-        }
-        socket_handle_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (socket_handle_ == INVALID_SOCKET) {
-            return false;
-        }
-
-        sockaddr_in addr {};
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<u_short>(port));
-
-        addrinfo hints {};
-        std::memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo* result = nullptr;
-        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-            return false;
-        }
-
-        addr.sin_addr = (reinterpret_cast<sockaddr_in*>(result->ai_addr))->sin_addr;
-        freeaddrinfo(result);
-
-        if (::connect(socket_handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-            return false;
-        }
-
-        configure_network_timeouts();
-
-        u_long mode = 0;
-        ioctlsocket(socket_handle_, FIONBIO, &mode);
-        return true;
-#else
         const std::string endpoint = host + ":" + std::to_string(port);
         const auto fail = [&](const std::string& why) {
             last_connect_error_ = "could not connect to " + endpoint + ": " + why;
@@ -1196,22 +1039,14 @@ private:
         configure_network_timeouts();
         network_claim_ = std::move(claim);
         return true;
-#endif
     }
 
     void disconnect_network() {
-#ifdef _WIN32
-        if (socket_handle_ != INVALID_SOCKET) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-        }
-#else
         if (socket_fd_ >= 0) {
             close(socket_fd_);
             socket_fd_ = -1;
         }
         network_claim_.reset();
-#endif
     }
 
     bool write_data(const std::string& data) {
@@ -1222,67 +1057,22 @@ private:
     }
 
     bool write_serial(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > std::numeric_limits<DWORD>::max()) {
-            return false;
-        }
-        // Loop until the whole payload is written so a short WriteFile (which can
-        // return TRUE with bytes_written < requested under backpressure) can't
-        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
-        std::size_t total = 0;
-        while (total < data_size) {
-            DWORD bytes_written = 0;
-            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
-                           nullptr) ||
-                bytes_written == 0) {
-                return false;
-            }
-            total += bytes_written;
-        }
-        return true;
-#else
         return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
-#endif
     }
 
     bool write_network(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            return false;
-        }
-        // Loop over short sends so partial bytes can't corrupt the next
-        // command's framing (mirrors the POSIX send_all path below).
-        std::size_t total = 0;
-        while (total < data_size) {
-            const int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
-            if (bytes_sent <= 0) {
-                return false;
-            }
-            total += static_cast<std::size_t>(bytes_sent);
-        }
-        return true;
-#else
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
         // the server.
         return util::send_all(socket_fd_, data.c_str(), data.size(), MSG_NOSIGNAL);
-#endif
     }
 
     // One reply read for both transports: util::read_until on the serial link or
     // util::read_until_socket on the TCP fd, poll()-bounded (no pacing sleep).
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
-#ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
             return util::read_until(link_, spec, deadline);  // the link judges a LinkDead read (#2262)
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
-#else
-        (void)spec;
-        (void)deadline;
-        throw AlpacaException("ZWO mount reads are Linux-only");
-#endif
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
@@ -1371,22 +1161,12 @@ private:
     void configure_network_timeouts() {
         constexpr int kSocketTimeoutMs = 200;
         constexpr int kTcpNoDelay = 1;
-#ifdef _WIN32
-        const DWORD timeout = kSocketTimeoutMs;
-        setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
-                   reinterpret_cast<const char*>(&kTcpNoDelay), sizeof(kTcpNoDelay));
-#else
         timeval timeout {};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &kTcpNoDelay, sizeof(kTcpNoDelay));
-#endif
     }
 
 private:
@@ -1408,15 +1188,10 @@ private:
     std::condition_variable yield_cv_;
     std::chrono::steady_clock::time_point owed_until_{};
 
-#ifdef _WIN32
-    HANDLE serial_handle_;
-    SOCKET socket_handle_;
-#else
     util::SerialLink link_;
     std::unique_ptr<NetworkEndpointClaim> network_claim_;
     int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
-#endif
     std::string last_connect_error_;
 };
 

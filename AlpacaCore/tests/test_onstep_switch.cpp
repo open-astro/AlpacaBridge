@@ -34,11 +34,9 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
-#ifndef _WIN32
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "onstep_controller.h"
-#endif
 
 namespace onstep = alpacacore::vendor::onstep;
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -129,8 +127,6 @@ TEST_CASE("OnStep Switch Driver - which purposes a Switch serves", "[onstep][swi
         CHECK_FALSE(aux_switch_kind(purpose).has_value());
     }
 }
-
-#ifndef _WIN32
 
 namespace {
 
@@ -500,5 +496,3 @@ TEST_CASE("OnStep shared link - no other exchange lands between a switch write a
     telescope->set_connected(false);
     aux->set_connected(false);
 }
-
-#endif  // !_WIN32

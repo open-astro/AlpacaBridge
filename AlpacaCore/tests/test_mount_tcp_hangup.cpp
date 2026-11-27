@@ -15,7 +15,6 @@
 // the socket is released, the exchange answers NotConnected, Connected reads false and DeviceState is empty, with no
 // clock advance (the task clock is fake and never moves, so the 30 s staleness bound cannot be what ends the link).
 // A reply timeout reports reachability, not a gone connection: it stays a failed exchange for the fault latch.
-#ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -393,5 +392,3 @@ TEST_CASE("SynScan mount - a reply timeout over TCP stays a failed exchange", "[
     CHECK(wrapper.is_connected());
 }
 #endif  // ALPACACORE_ENABLE_SYNSCAN
-
-#endif  // _WIN32

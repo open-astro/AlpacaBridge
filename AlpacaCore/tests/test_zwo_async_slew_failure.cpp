@@ -16,8 +16,6 @@
 // expired. The next Slewing read must return an Alpaca error instead
 // (contract reference in test_skywatcher_async_slew_failure.cpp).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/motion_guards.h>
@@ -2441,5 +2439,3 @@ TEST_CASE("ZWO findhomeissensorsearch is false", "[zwo][telescope][findhome-sens
     CHECK(driver->action("findhomeissensorsearch", "") ==
           "{\"sensor_search\":false,\"method\":\"goto_stored_home\",\"model\":\"\"}");
 }
-
-#endif  // _WIN32

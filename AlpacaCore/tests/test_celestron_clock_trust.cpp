@@ -38,10 +38,8 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-
-#ifndef _WIN32
 #include "celestron_landing_model.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -1039,5 +1037,3 @@ TEST_CASE("Celestron host clock - a blocking SlewToCoordinates that times out ho
     CHECK(log.count(kWaitsForMotion) == 0);
     rig.driver->set_connected(false);
 }
-
-#endif  // _WIN32

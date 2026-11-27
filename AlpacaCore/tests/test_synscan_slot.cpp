@@ -16,8 +16,6 @@
 // refusal that replaced nothing restores every flag the initiator set and
 // sends no stop.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
@@ -230,5 +228,3 @@ TEST_CASE("SynScan slot - a refused start whose tracking restore lands clears th
     CHECK(rig.st->command_count('T') > tracking_before);
     CHECK(rig.driver->get_tracking());  // the restore landed: the flag clears and the mode is written through
 }
-
-#endif  // _WIN32

@@ -31,8 +31,6 @@
 // pair replaced, that construction SUCCEEDED with a dead keep-alive, so the
 // case is red without the fix.
 
-#ifndef _WIN32
-
 // Set when this translation unit is built under a sanitizer, by either gcc's
 // predefined macro or __has_feature. Used by the EMFILE case below, which
 // cannot run under a sanitizer that needs a descriptor of its own.
@@ -507,5 +505,3 @@ TEST_CASE("fake serial streamer - the first-frame hold holds every frame", "[fak
     ::close(fd);
     CHECK(received == 0);
 }
-
-#endif  // _WIN32

@@ -603,7 +603,6 @@ TEST_CASE("WandererAstro Rotator Protocol Wrapper - Connect fails at once when t
     CHECK_FALSE(wrapper.is_connected());
 }
 
-#ifndef _WIN32
 // #2203: opening a CH340 resets the MCU, so the handshake written during its boot is lost and only the retry lands.
 // Falsified by: probe_rotator_port() handshaking with a shorter window than connect()'s serial_timeout_s.
 TEST_CASE("WandererRotator auto-detect finds a rotator that is silent through its boot after open (#2203)",
@@ -634,9 +633,7 @@ TEST_CASE("WandererRotator auto-detect skips a port that never answers after onl
     std::lock_guard<std::mutex> lock(mutex);
     CHECK(received == "15000011500001");
 }
-#endif
 
-#ifndef _WIN32
 // #2204: Falsified by: wandererastro_rotator_protocol_wrapper.cpp kRotatorModelPrefix naming only the Mini.
 TEST_CASE("WandererRotator - another rotator version connects under a generic name (#2204)",
           "[wandererastro][rotator][unit]") {
@@ -692,7 +689,6 @@ TEST_CASE("WandererRotator - a handshake from another product is refused (#2204)
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // Decision 0009 (issue #1989): the rotator is request/response and silent

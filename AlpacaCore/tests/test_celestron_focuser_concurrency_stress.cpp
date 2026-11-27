@@ -13,8 +13,6 @@
 // [stress] coverage for the Celestron focus motor (issue #896), the shape of
 // the Gemini focuser cases, over fake_celestron_focuser.h.
 
-#ifndef _WIN32
-
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
@@ -162,5 +160,3 @@ TEST_CASE("Celestron focuser - racing disconnect is never dropped", "[celestron]
     auto driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake.slave_path());
     CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
 }
-
-#endif  // _WIN32

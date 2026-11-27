@@ -25,8 +25,6 @@
 // destruction. Operations racing a disconnect are EXPECTED to throw; what must
 // never happen is a crash, hang, or TSan report.
 
-#ifndef _WIN32
-
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
@@ -652,5 +650,3 @@ TEST_CASE("OnStep switch - a racing disconnect is never dropped", "[onstep][swit
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
 }
-
-#endif  // !_WIN32

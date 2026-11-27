@@ -50,8 +50,6 @@
 // - J (alignment), the motor-controller version passthrough (P ... 254) and the slow-GOTO / set-position passthroughs
 //   (P chr(4) ... 23 / 4) are not modelled: they get no reply. The driver under test does not send them.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/task_clock.h>
 
 #include <algorithm>
@@ -543,5 +541,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

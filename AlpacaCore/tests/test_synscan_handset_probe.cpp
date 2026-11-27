@@ -16,7 +16,6 @@
 // power-cycle recovers it (EQM-35 Pro rig, 2026-09). A pty stands in for the
 // handset so the three outcomes - exact echo, silence, and a non-echo reply -
 // are exercised hardware-free.
-#ifndef _WIN32
 
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
@@ -91,5 +90,3 @@ TEST_CASE("SynScan handset probe - a port a connected device holds is never open
     CHECK(alpacacore::util::port_answers_synscan_echo(handset.slave_path(), 1000));
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(handset.slave_path()));
 }
-
-#endif  // !_WIN32

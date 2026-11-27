@@ -17,8 +17,6 @@
 // read the poll's frame (#2491), covered by test_ioptron_polled_state.cpp.
 // Decision 0005: the budget is wall time spent in a getter, not a driver timeout.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/task_clock.h>
@@ -342,5 +340,3 @@ TEST_CASE("iOptron telescope - a frame sampled inside the slew hold does not end
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

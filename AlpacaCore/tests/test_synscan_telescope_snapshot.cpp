@@ -15,8 +15,6 @@
 // case advances the clock, and the fake handset answers on the wall clock after an injected latency per
 // transaction: a getter that asked the handset would pay it and show in the transaction count.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
@@ -1624,8 +1622,6 @@ TEST_CASE("SynScan Link - over TCP a hangup is a lost link at once", "[synscan][
     CHECK_FALSE(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
-
-#endif
 
 // #2412 (#2396 AB-9): motion running when the link dropped is stopped by the next Connect, with AbortSlew's stops
 // right after the echo test and before the handshake's first query, never forgotten.

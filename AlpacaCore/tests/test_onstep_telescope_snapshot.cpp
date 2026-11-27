@@ -15,8 +15,6 @@
 // advances the clock or calls poll_status_now_for_testing(), and the fake mount counts every exchange: a getter
 // that asked the mount would show in the count (and pay the injected latency).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
@@ -4203,5 +4201,3 @@ TEST_CASE("OnStep PolledState - getters answer during a slow tick, three failed 
     CHECK(error_code_of([&] { (void)rig.driver().get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
     CHECK(rig.driver().get_link_fault().find("lost") != std::string::npos);
 }
-
-#endif  // !_WIN32

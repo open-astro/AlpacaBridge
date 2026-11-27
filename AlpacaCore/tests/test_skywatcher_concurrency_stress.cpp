@@ -21,8 +21,6 @@
 // Wave 100i. Operations racing a disconnect are EXPECTED to
 // throw; what must never happen is a crash, hang, or TSan report.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -281,5 +279,3 @@ TEST_CASE("SkyWatcher telescope - racing disconnect is never dropped", "[skywatc
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
 }
-
-#endif  // !_WIN32

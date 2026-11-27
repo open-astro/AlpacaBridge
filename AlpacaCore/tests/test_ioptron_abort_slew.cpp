@@ -14,8 +14,6 @@
 // Once it returns, no :MS1# may reach the mount and the stop has been
 // sent, even when the cached status says the mount is not slewing.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
@@ -296,5 +294,3 @@ TEST_CASE("iOptron AbortSlew - a parked mount still raises InvalidWhileParked fr
     CHECK(mount.count(":ST1#") == 0);
     driver->set_connected(false);
 }
-
-#endif

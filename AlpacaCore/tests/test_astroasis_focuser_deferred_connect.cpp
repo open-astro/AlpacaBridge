@@ -17,8 +17,6 @@
 // scan's message is the connect error. The reuse and re-scan cases are
 // covered by test_connection_resolver.cpp on the shared helper.
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 
 #include <memory>
@@ -55,5 +53,3 @@ TEST_CASE("Astroasis focuser auto-detect - the production factory constructs wit
         CHECK_FALSE(driver->get_connected());
     }
 }
-
-#endif  // _WIN32
