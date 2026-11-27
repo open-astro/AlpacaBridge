@@ -111,11 +111,18 @@ constexpr double kLandingRefineLimitArcsec = 600.0;
 // open-astro#2763: the protocol has no refusal reply (`r`/`b` answer `#` however the GOTO ends) and no limit status,
 // so a refused or limit-stopped GOTO is told from the #1105 miss by how far the mount travelled: the repeat is sent
 // only when the landing miss is at most this fraction of the miss the GOTO started with (the mount covered 3/4 or
-// more of the way), against the position read before the GOTO was sent. A refusal travels nothing; a limit stop ends
-// short, and a repeat to the same target runs into the same limit. No pre-GOTO position, a stale one, or a short
-// GOTO whose miss this fraction cannot separate from the limit: no repeat. Fail closed.
+// more of the way), against the position read before the GOTO was sent, and the landing has the #1105 shape
+// (kFarMissRepeatCapArcsec). A refusal travels nothing and a limit stop ends short, so a repeat to the same target
+// would be refused or stopped again. No pre-GOTO position, a stale one, or a short GOTO whose miss this fraction
+// cannot separate from the limit: no repeat. Fail closed.
 // TODO(#2396): the HAE29C rig check; the handset's real behaviour at a limit is not captured.
 constexpr double kRepeatMissFraction = 0.25;
+// The fraction alone repeats a limit stop in the last quarter of a long slew. The #1105 misses were RA only,
+// 2,950-3,120" (CHANGELOG.md), so the repeat also needs the second axis (Dec, or altitude for an alt/az Park) within
+// kLandingRefineLimitArcsec and the first axis (RA, or azimuth) within this cap, 1 degree. A limit stop in the last
+// quarter that lands with Dec within 600" and RA within 1 degree still gets the one repeat; a larger or two-axis
+// miss does not.
+constexpr double kFarMissRepeatCapArcsec = 3600.0;
 // How long a GOTO may report itself in progress before the wait stops the mount and fails the slew (#2412).
 constexpr auto kSlewTimeout = std::chrono::seconds(120);
 // #2412 (#2396 AB-9): a MoveAxis that no new non-zero MoveAxis renews within this time is stopped by the driver, so a
@@ -1200,8 +1207,11 @@ public:
                 // Only for a mount that moved most of the way (#2763); a refused or limit-stopped GOTO fails.
                 hooks.repeat_on_miss = true;
                 double landed_miss_arcsec = 0.0;
+                double landed_first_arcsec = 0.0;   // RA or azimuth, unprojected
+                double landed_second_arcsec = 0.0;  // Dec or altitude
                 hooks.repeat_allowed = [&] {
-                    return goto_repeat_allowed_locked(landed_miss_arcsec, [&](double a, double b) {
+                    return goto_repeat_allowed_locked(landed_miss_arcsec, landed_first_arcsec, landed_second_arcsec,
+                                                      [&](double a, double b) {
                         return park_altaz ? util::angular_separation_arcsec(a, b, park_target_first, park_target_second)
                                           : util::angular_separation_arcsec(a * kHoursToDegrees, b,
                                                                             park_target_first * kHoursToDegrees,
@@ -1228,6 +1238,16 @@ public:
                         return {};
                     }
                     landed_miss_arcsec = miss_arcsec;
+                    if (park_altaz) {
+                        double az = std::fmod(std::abs(landed.az_degrees - park_target_first), 360.0);
+                        landed_first_arcsec = std::min(az, 360.0 - az) * 3600.0;
+                        landed_second_arcsec = std::abs(landed.alt_degrees - park_target_second) * 3600.0;
+                    } else {
+                        landed_first_arcsec =
+                            std::abs(util::shortest_ra_delta_hours(park_target_first, landed.ra_hours)) *
+                            kHoursToDegrees * 3600.0;
+                        landed_second_arcsec = std::abs(landed.dec_degrees - park_target_second) * 3600.0;
+                    }
                     const std::string message = "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
                                                 " arcsec from the park position (limit " +
                                                 std::to_string(static_cast<long>(kLandingRefineLimitArcsec)) +
@@ -3788,12 +3808,15 @@ private:
     }
 
     // True when the GOTO may be repeated once: the mount covered at least 1 - kRepeatMissFraction of the way, so it
-    // took the GOTO and moved (the #1105 miss) rather than refusing it or stopping at a limit. `miss_of` gives the
-    // miss in arcsec of a position (the caller's own metric) from the target; `landed_miss_arcsec` is the one just
-    // read.
+    // took the GOTO and moved rather than refusing it or stopping at a limit, and the landing has the #1105 shape:
+    // the second axis within kLandingRefineLimitArcsec and the first within kFarMissRepeatCapArcsec. `miss_of` gives
+    // the miss in arcsec of a position (the caller's own metric) from the target; `landed_miss_arcsec` and the two
+    // axis misses are the ones just read.
     template <typename MissOf>
-    bool goto_repeat_allowed_locked(double landed_miss_arcsec, MissOf&& miss_of) const {
-        if (!goto_origin_) {
+    bool goto_repeat_allowed_locked(double landed_miss_arcsec, double first_axis_arcsec, double second_axis_arcsec,
+                                    MissOf&& miss_of) const {
+        if (!goto_origin_ || second_axis_arcsec > kLandingRefineLimitArcsec ||
+            first_axis_arcsec > kFarMissRepeatCapArcsec) {
             return false;
         }
         return landed_miss_arcsec <= kRepeatMissFraction * miss_of(goto_origin_->first, goto_origin_->second);
@@ -4627,9 +4650,10 @@ private:
                 if (far_miss_repeated) {
                     throw AlpacaException(miss + " after a repeat GOTO", AlpacaError::DriverException);
                 }
-                if (!goto_repeat_allowed_locked(std::max(ra_error_arcsec, dec_error_arcsec), [&](double a, double b) {
-                        return util::axis_miss_arcsec({a, b}, {ra, dec});
-                    })) {
+                if (!goto_repeat_allowed_locked(std::max(ra_error_arcsec, dec_error_arcsec), ra_error_arcsec,
+                                                dec_error_arcsec, [&](double a, double b) {
+                                                    return util::axis_miss_arcsec({a, b}, {ra, dec});
+                                                })) {
                     // Refused, or stopped short by a limit: the same GOTO would be refused or stopped again.
                     throw AlpacaException(miss + "; the GOTO was not repeated: the mount did not travel most of the " +
                                               "way to the target (refused, or stopped by a limit)",

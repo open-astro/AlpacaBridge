@@ -1298,4 +1298,30 @@ TEST_CASE("SynScan - a park GOTO the mount never moves for, or a limit stops hal
     }
 }
 
+// #2763: a park GOTO a limit stops in the last quarter (90% of 45 degrees: 4.5 degrees short, far beyond the 1 degree
+// cap of the #1105 shape) is not repeated either.
+TEST_CASE("SynScan - a park GOTO a limit stops in the last quarter is not repeated", "[park][synscan][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    move_mount_away(clock, *driver, *st);
+    st->goto_fraction.store(0.9);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
+    CHECK(st->goto_snapshot().size() == 1);
+    CHECK(std::abs(driver->get_right_ascension() - 0.3) < 0.01);  // 3 h -> 0 h, stopped at 90%
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
