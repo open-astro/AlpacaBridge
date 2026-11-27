@@ -451,10 +451,10 @@ TEST_CASE("Celestron host clock - a re-sync waits out a MoveAxis and writes once
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the paused poll and the re-sync
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
     rig.advance(std::chrono::seconds(1));  // still moving: it checks again and waits again
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
     CHECK(rig.st->time_writes.load() == 0);
 
     rig.driver->move_axis(0, 0.0);
@@ -478,10 +478,10 @@ TEST_CASE("Celestron host clock - a re-sync waiting out a MoveAxis asks the alig
     rig.driver->on_host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
     for (int poll = 0; poll < 3; ++poll) {
-        REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the paused poll and the re-sync
+        REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
         rig.advance(std::chrono::seconds(1));                             // still moving: no wire turn
     }
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
     CHECK(rig.st->alignment_queries.load() == queries_before);
 
     rig.driver->move_axis(0, 0.0);
@@ -507,7 +507,7 @@ TEST_CASE("Celestron host clock - a MoveAxis that starts after the re-sync was d
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
 
     rig.driver->move_axis(1, 0.0);
@@ -533,7 +533,7 @@ TEST_CASE("Celestron host clock - a MoveAxis that starts just before the re-sync
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
 
     rig.driver->move_axis(1, 0.0);
@@ -838,7 +838,7 @@ TEST_CASE("Celestron host clock - a re-sync superseded after its write still pub
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));  // the mount's clock
 
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the paused poll and the second body
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, second body, MoveAxis cap
     rig.driver->move_axis(0, 0.0);
     rig.advance(std::chrono::seconds(1));
     REQUIRE(eventually([&] { return rig.finished.load() == 2; }));
@@ -859,7 +859,7 @@ TEST_CASE("Celestron host clock - a re-sync leaves the mount clock alone when a 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::minutes(15));
     REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 0);
@@ -922,7 +922,7 @@ TEST_CASE("Celestron host clock - a disconnect ends a waiting re-sync and a reco
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
     REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
-    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
 
     rig.driver->set_connected(false);  // joins the waiting body
     CHECK(rig.finished.load() == 1);
