@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan no longer repeats a GOTO the handset refused or a limit stopped**, SynScan driver, issue #2763. The one repeat GOTO for a far landing miss (#1105) is now sent only when the mount covered at least 3/4 of the way to the target, judged against the polled position read before the GOTO. A GOTO the mount never moved for, or that ended half way, fails the slew (or the Park) at once with "the GOTO was not repeated", kept for Slewing; the #1105 case (moved, landed about 49' off) still gets exactly one repeat. Covered by the `[goto-safety]` cases in `AlpacaCore/tests/test_synscan_goto_landing.cpp` and `AlpacaCore/tests/test_synscan_async_park.cpp`.

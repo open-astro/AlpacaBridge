@@ -55,6 +55,8 @@ struct FakeSynScanState {
     std::atomic<bool> no_motion{false};        // GOTO acked, mount stays put, L says idle
     std::atomic<bool> silent_position{false};  // position reads go unanswered once a GOTO was seen
     std::atomic<int> goto_count{0};
+    // A precise GOTO ends this fraction of the way from the held position to its aim: a limit stopped it (#2763).
+    std::atomic<double> goto_fraction{1.0};
     // The next N precise GOTOs end this many RA counts (of 2^32) past their aim: the ~49' miss of #1105.
     std::atomic<int> miss_gotos{0};
     static constexpr uint32_t kMissCounts = 9764864;  // 2,947"
@@ -126,7 +128,22 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                     st->gotos.push_back(chunk);
                     // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
                     if ((chunk[0] == 'r' || chunk[0] == 'b') && chunk.size() >= 18 && !st->no_motion.load()) {
+                        const std::string start = st->position;
                         st->position = chunk.substr(1, 17) + "#";
+                        if (st->goto_fraction.load() < 1.0) {
+                            const auto part = [&](std::size_t at) {
+                                const auto from = static_cast<uint32_t>(std::stoul(start.substr(at, 8), nullptr, 16));
+                                const auto aim =
+                                    static_cast<uint32_t>(std::stoul(chunk.substr(at + 1, 8), nullptr, 16));
+                                const auto travel = static_cast<int32_t>(aim - from);
+                                char out[9];
+                                std::snprintf(
+                                    out, sizeof out, "%08X",
+                                    from + static_cast<uint32_t>(std::lround(travel * st->goto_fraction.load())));
+                                return std::string(out);
+                            };
+                            st->position = part(0) + "," + part(9) + "#";
+                        }
                         if (st->miss_gotos.load() > 0) {
                             st->miss_gotos.fetch_sub(1);
                             char ra[9];
@@ -1141,6 +1158,14 @@ TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan
     driver->set_connected(false);
 }
 
+// The mount is held 3 h of RA from where SetPark stored the park position, and the status poll has read it (a stale
+// or unread origin never allows the far-miss repeat, #2763).
+void move_mount_away(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                     FakeSynScanState& st) {
+    st.set_position("20000000,00000000#");
+    REQUIRE(advance_until(clock, [&] { return std::abs(driver.get_right_ascension() - 3.0) < 0.01; }));
+}
+
 // #1105: the park GOTO runs no landing refinement, so the handset's far miss gets one repeat GOTO here.
 TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once and parks", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1153,6 +1178,7 @@ TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once
     const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
     alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
     driver->set_park();
+    move_mount_away(clock, *driver, *st);
     st->miss_gotos.store(1);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
@@ -1172,6 +1198,7 @@ TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synsc
     const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
     alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
     driver->set_park();
+    move_mount_away(clock, *driver, *st);
     st->miss_gotos.store(2);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
@@ -1234,6 +1261,41 @@ TEST_CASE("SynScan - a park whose position check cannot read the mount fails wit
     }
     CHECK(st->goto_count.load() == 1);
     driver->set_connected(false);
+}
+
+// #2763: a park GOTO the handset refused (acknowledged, the mount never moved) or that a limit stopped half way is
+// never repeated: the park fails and Slewing raises.
+TEST_CASE("SynScan - a park GOTO the mount never moves for, or a limit stops half way, is not repeated",
+          "[park][synscan][goto-safety]") {
+    for (const bool refused : {true, false}) {
+        alpacacore::test::FakeTaskClock clock;
+        auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = mk(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+        alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+        driver->set_park();
+        move_mount_away(clock, *driver, *st);
+        if (refused) {
+            st->no_motion.store(true);
+        } else {
+            st->goto_fraction.store(0.5);
+        }
+        driver->park();
+        REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+        alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                               alpacacore::AlpacaError::DriverException);
+        CHECK_FALSE(driver->get_at_park());
+        CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
+        CHECK(st->goto_snapshot().size() == 1);
+        // The position: where the mount was held, or half way from there to the park position (RA 3 h -> 0 h).
+        const double ra = driver->get_right_ascension();
+        CHECK(std::abs(ra - (refused ? 3.0 : 1.5)) < 0.01);
+        driver->set_connected(false);
+    }
 }
 
 #endif  // !_WIN32

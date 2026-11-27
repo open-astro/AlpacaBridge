@@ -106,9 +106,16 @@ constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr double kLandingToleranceArcsec = 3.0;
 // A readback this far from the target is not a landing error a fine re-GOTO corrects. The handset sometimes ends a
 // GOTO ~49' east of the aim (EQM-35 Pro, HC 06.03.00, open-astro#1105) and a repeat GOTO to the same target lands, so
-// the GOTO is repeated once unchanged; a second miss this large (a refused or limit-stopped GOTO, a mount that never
-// moved) fails the slew.
+// a GOTO that moved the mount most of the way is repeated once unchanged; a second miss this large fails the slew.
 constexpr double kLandingRefineLimitArcsec = 600.0;
+// open-astro#2763: the protocol has no refusal reply (`r`/`b` answer `#` however the GOTO ends) and no limit status,
+// so a refused or limit-stopped GOTO is told from the #1105 miss by how far the mount travelled: the repeat is sent
+// only when the landing miss is at most this fraction of the miss the GOTO started with (the mount covered 3/4 or
+// more of the way), against the position read before the GOTO was sent. A refusal travels nothing; a limit stop ends
+// short, and a repeat to the same target runs into the same limit. No pre-GOTO position, a stale one, or a short
+// GOTO whose miss this fraction cannot separate from the limit: no repeat. Fail closed.
+// TODO(#2396): the HAE29C rig check; the handset's real behaviour at a limit is not captured.
+constexpr double kRepeatMissFraction = 0.25;
 // How long a GOTO may report itself in progress before the wait stops the mount and fails the slew (#2412).
 constexpr auto kSlewTimeout = std::chrono::seconds(120);
 // #2412 (#2396 AB-9): a MoveAxis that no new non-zero MoveAxis renews within this time is stopped by the driver, so a
@@ -1190,7 +1197,17 @@ public:
                 };
                 hooks.fail = [&](const std::string& message) { fail_park_locked(message, ctx, lock); };
                 // The park GOTO runs no landing refinement, so a miss gets the one repeat GOTO a slew gets (#1105).
+                // Only for a mount that moved most of the way (#2763); a refused or limit-stopped GOTO fails.
                 hooks.repeat_on_miss = true;
+                double landed_miss_arcsec = 0.0;
+                hooks.repeat_allowed = [&] {
+                    return goto_repeat_allowed_locked(landed_miss_arcsec, [&](double a, double b) {
+                        return park_altaz ? util::angular_separation_arcsec(a, b, park_target_first, park_target_second)
+                                          : util::angular_separation_arcsec(a * kHoursToDegrees, b,
+                                                                            park_target_first * kHoursToDegrees,
+                                                                            park_target_second);
+                    });
+                };
                 hooks.verify_at_target = [&]() -> std::string {
                     const RawSample raw =
                         without_lock(lock, [this] { return sample_raw(use_precise_commands_, true); });
@@ -1210,6 +1227,7 @@ public:
                     if (miss_arcsec <= kLandingRefineLimitArcsec) {
                         return {};
                     }
+                    landed_miss_arcsec = miss_arcsec;
                     const std::string message = "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
                                                 " arcsec from the park position (limit " +
                                                 std::to_string(static_cast<long>(kLandingRefineLimitArcsec)) +
@@ -1703,6 +1721,7 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
+            record_goto_origin_locked(false);
             drop_poll_in_flight_locked();
             prev_slewing = slewing_cached_;
             prev_at_home = at_home_;
@@ -3750,6 +3769,36 @@ private:
         return {frame.value.az_degrees, frame.value.alt_degrees};
     }
 
+    // open-astro#2763: remembers where the mount points before a GOTO is sent ({RA hours, Dec degrees}, or {azimuth,
+    // altitude} for an alt/az GOTO), from the polled frame: no exchange. Unknown, stale or unreadable leaves it empty,
+    // and an empty origin never allows the far-miss repeat.
+    void record_goto_origin_locked(bool altaz) {
+        goto_origin_.reset();
+        // read(), not served(): serving a frame past the staleness bound latches the link lost, and a GOTO's start
+        // must not do that as a side effect.
+        const auto frame = polled_.read();
+        if (!frame || frame->stale) {
+            return;
+        }
+        if (altaz && frame->value.altaz_known) {
+            goto_origin_ = {frame->value.az_degrees, frame->value.alt_degrees};
+        } else if (!altaz && frame->value.equatorial_known) {
+            goto_origin_ = {frame->value.ra_hours, frame->value.dec_degrees};
+        }
+    }
+
+    // True when the GOTO may be repeated once: the mount covered at least 1 - kRepeatMissFraction of the way, so it
+    // took the GOTO and moved (the #1105 miss) rather than refusing it or stopping at a limit. `miss_of` gives the
+    // miss in arcsec of a position (the caller's own metric) from the target; `landed_miss_arcsec` is the one just
+    // read.
+    template <typename MissOf>
+    bool goto_repeat_allowed_locked(double landed_miss_arcsec, MissOf&& miss_of) const {
+        if (!goto_origin_) {
+            return false;
+        }
+        return landed_miss_arcsec <= kRepeatMissFraction * miss_of(goto_origin_->first, goto_origin_->second);
+    }
+
     // The age of the state DeviceState serves: how long ago the poll measured it, on the task clock. Takes only the
     // module's own leaf mutex.
     std::optional<std::chrono::nanoseconds> device_state_age() const override { return polled_.age(); }
@@ -4275,6 +4324,7 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
+        record_goto_origin_locked(false);
         drop_poll_in_flight_locked();
         set_slewing_locked(true);
         // open-astro#575: a fresh initiator is a clean start -- a client
@@ -4307,6 +4357,7 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t az_raw = encode_angle(azimuth, bits);
         uint32_t alt_raw = encode_angle(altitude, bits);
+        record_goto_origin_locked(true);
         drop_poll_in_flight_locked();
         set_slewing_locked(true);
         last_slew_error_.clear();
@@ -4505,10 +4556,12 @@ private:
     // kMaxLandingRounds rounds (open-astro#880). The handset re-rolls every GOTO landing by a whole second of RA,
     // so a residual is never chased with another GOTO; only one beyond a timed move's reach gets a single re-GOTO
     // first. A landing beyond kLandingRefineLimitArcsec gets one repeat GOTO to the same target, and throws if it
-    // misses that far again (open-astro#1105). 16-bit handsets (V3) step ~19.8" in RA, so they are not refined;
-    // they get the landing gate instead (check_v3_landing_locked(), #2412).
-    // `lock` is held on entry and on return. Returns false when the slew was superseded, aborted or cancelled; throws
-    // when a move fails. A residual left after the last round is logged as a WARN, not thrown (open-astro#1027).
+    // misses that far again (open-astro#1105); a mount that did not travel most of the way (a refused or
+    // limit-stopped GOTO, goto_repeat_allowed_locked()) throws at once with no repeat (open-astro#2763). 16-bit
+    // handsets (V3) step ~19.8" in RA, so they are not refined; they get the landing gate instead
+    // (check_v3_landing_locked(), #2412). `lock` is held on entry and on return. Returns false when the slew was
+    // superseded, aborted or cancelled; throws when a move fails. A residual left after the last round is logged as a
+    // WARN, not thrown (open-astro#1027).
     bool refine_goto_landing_locked(std::unique_lock<std::mutex>& lock, double ra, double dec,
                                     uint64_t owner_generation, util::OperationContext* ctx) {
         if (!use_precise_commands_) {
@@ -4573,6 +4626,14 @@ private:
                                          std::to_string(dec_error_arcsec) + " arcsec (Dec) from the target";
                 if (far_miss_repeated) {
                     throw AlpacaException(miss + " after a repeat GOTO", AlpacaError::DriverException);
+                }
+                if (!goto_repeat_allowed_locked(std::max(ra_error_arcsec, dec_error_arcsec), [&](double a, double b) {
+                        return util::axis_miss_arcsec({a, b}, {ra, dec});
+                    })) {
+                    // Refused, or stopped short by a limit: the same GOTO would be refused or stopped again.
+                    throw AlpacaException(miss + "; the GOTO was not repeated: the mount did not travel most of the " +
+                                              "way to the target (refused, or stopped by a limit)",
+                                          AlpacaError::DriverException);
                 }
                 ALPACA_LOG_WARN("SynScan", miss + "; repeating the GOTO once (open-astro#1105)");
                 // The same target, not one aimed by the residual: the miss is the handset's, not an offset to
@@ -4943,6 +5004,8 @@ private:
     // on the task's own cancellation), cleared by the next slew initiator and
     // by AbortSlew. Consulted by get_slewing() before the cached bool.
     mutable std::string last_slew_error_;
+    // Where the mount pointed when the last GOTO was sent (record_goto_origin_locked); under mutex_.
+    std::optional<std::pair<double, double>> goto_origin_;
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
