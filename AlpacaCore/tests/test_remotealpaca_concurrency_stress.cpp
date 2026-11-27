@@ -10,22 +10,24 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator and
-// FilterWheel proxied devices (issues #101, #1753, #2706, #2708). The upstream is the scripted AlpacaUpstreamScript
-// behind FakeHttpClient and the test-only LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll
-// and the command bodies run during the storm. The last case of each device races refused-connection losses against the
-// lifecycle and the reads.
+// Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator,
+// FilterWheel and Switch proxied devices (issues #101, #1753, #2706, #2708, #2709). The upstream is the scripted
+// AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient (decision 0015 rule 2), so every
+// Connect lands and the poll and the command bodies run during the storm. The last case of each device races
+// refused-connection losses against the lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/safetymonitor_driver.h>
+#include <alpacacore/switch_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
 
 #include <atomic>
 #include <chrono>
@@ -124,6 +126,36 @@ void operate_filterwheel(alpacacore::test::StressCallGuard& guard, AlpacaDriver&
     guard([&] { static_cast<void>(f.get_link_fault()); });
     guard([&] { f.set_position(1); });
     guard([&] { f.set_names({"L", "R", "G", "B"}); });
+}
+
+std::unique_ptr<alpacacore::SwitchDriver> make_switch(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_switch(0, stress_config(),
+                                              std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {},
+                                              alpacacore::util::default_task_clock());
+}
+
+// Every member the Switch serves and its writes, each in its own guard; switch 1 of the script is the asynchronous one.
+void operate_switch(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& s = static_cast<alpacacore::SwitchDriver&>(d);
+    guard([&] { static_cast<void>(s.get_max_switch()); });
+    guard([&] { static_cast<void>(s.get_switch(0)); });
+    guard([&] { static_cast<void>(s.get_switch_value(1)); });
+    guard([&] { static_cast<void>(s.get_state_change_complete(1)); });
+    guard([&] { static_cast<void>(s.get_switch_name(1)); });
+    guard([&] { static_cast<void>(s.get_switch_description(1)); });
+    guard([&] { static_cast<void>(s.get_min_switch_value(1)); });
+    guard([&] { static_cast<void>(s.get_max_switch_value(1)); });
+    guard([&] { static_cast<void>(s.get_switch_step(1)); });
+    guard([&] { static_cast<void>(s.get_can_write(1)); });
+    guard([&] { static_cast<void>(s.get_can_async(1)); });
+    guard([&] { static_cast<void>(s.get_device_state()); });
+    guard([&] { static_cast<void>(s.get_name()); });
+    guard([&] { static_cast<void>(s.get_link_fault()); });
+    guard([&] { s.set_switch(0, true); });
+    guard([&] { s.set_switch_value(1, 50.0); });
+    guard([&] { s.set_async_value(1, 60.0); });
+    guard([&] { s.set_async(1, false); });
+    guard([&] { s.set_switch_name(1, "Heater"); });
 }
 
 // Every member the driver serves, each in its own guard so one throw skips no later call.
@@ -495,6 +527,83 @@ TEST_CASE("Remote Alpaca filter wheel - refused-connection losses race connects,
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());     // the Disconnect ended any kept reason
     CHECK(upstream.last_position_put() == "1");  // writes ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca switch - concurrent connect/disconnect/operate stress", "[remotealpaca][switch][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Switch};
+    upstream.install(http);
+    auto driver = make_switch(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.calls("setswitch") > 0);  // the writes ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca switch - destruction races an in-flight connect", "[remotealpaca][switch][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Switch};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_switch(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca switch - racing disconnect is never dropped", "[remotealpaca][switch][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Switch};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_switch(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 60 is refused (a Connect makes some thirty-five), so the poll and the writes
+// lose the link at once while lifecycle threads connect and disconnect it and readers race the getters. TSan checks
+// the loss path's writes (connected_, the kept reason, the dropped frame) against the getters, the write bodies and
+// their write-throughs (the frame and the SetSwitchName write to the Connect's metadata), and set_connected().
+TEST_CASE("Remote Alpaca switch - refused-connection losses race connects, disconnects, writes and reads",
+          "[remotealpaca][switch][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Switch};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 60 == 59) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_switch(http);
+
+    // A refused write is NotConnected (the loss is its answer); InvalidOperation as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_switch(guard, d); });
+
+    // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());      // the Disconnect ended any kept reason
+    CHECK(upstream.calls("setswitchvalue") > 0);  // writes ran on a connected driver, not only NotConnected
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);

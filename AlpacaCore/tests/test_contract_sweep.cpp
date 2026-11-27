@@ -143,6 +143,7 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_rotator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_safetymonitor_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
 
 #include "alpaca_upstream_script.h"
 #include "fake_http_client.h"
@@ -2905,6 +2906,37 @@ Tier2Host tier2_host_remotealpaca_filterwheel() {
     h.failing = [make]() { return make(false, true); };
     return h;
 }
+
+// The proxied Switch over the scripted upstream, as the safety monitor host: its Connect makes some thirty calls (seven
+// per switch of three), so a 20 ms per-call hold keeps the handshake open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_switch() {
+    Tier2Host h{"remotealpaca_switch",
+                "remotealpaca",
+                "switch",
+                "fake_http_client.h",
+                DeviceType::Switch,
+                "remotealpaca_switch",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Switch);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(20));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_switch(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -3510,7 +3542,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB)
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
@@ -6159,6 +6191,30 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_filterwheel() {
              [](AlpacaDriver& d) { return snap_text(static_cast<alpacacore::FilterWheelDriver&>(d).get_position()); }}};
 }
 
+// As the observing conditions rig, over a Switch upstream (switch 0 on, switch 1 at 40); MaxSwitch is served from what
+// the Connect read.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_switch() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Switch);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_switch(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::SwitchDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_safetymonitor_getters() {
     return {{"IsSafe", [](AlpacaDriver& d) {
                  return snap_text(static_cast<alpacacore::SafetyMonitorDriver&>(d).get_is_safe());
@@ -6265,7 +6321,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif

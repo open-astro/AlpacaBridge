@@ -87,6 +87,7 @@ Symbol: `TaskClock`
 | remotealpaca safety monitor | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_safetymonitor_driver.cpp` | adopted | #1753 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`) |
 | remotealpaca rotator | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_rotator_driver.cpp` | adopted | #1753, #2708 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `DeviceState`'s `TimeStamp` is the frame's age on the task clock |
 | remotealpaca filter wheel | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp` | adopted | #1753, #2706 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`) |
+| remotealpaca switch | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp` | adopted | #1753, #2709 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`); `DeviceState`'s `TimeStamp` is the frame's age on the task clock |
 | Player One thermal switch | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted | #2088 | status cache age and its fault stamp |
 | Gemini PDH switch | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted | #1987 | fault stamp (the decision 0009 staleness bound) |
 
